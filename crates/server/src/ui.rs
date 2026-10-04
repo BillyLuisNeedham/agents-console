@@ -3,7 +3,7 @@
 //! embedded in a release build, so the one binary needs nothing installed beside it (ADR-0036).
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Where the Console's files come from.
 #[derive(Debug, Clone)]
@@ -73,6 +73,7 @@ impl Ui {
 
 #[cfg(debug_assertions)]
 fn find_dist() -> Option<PathBuf> {
+    use std::path::Path;
     let has_dist = |dir: &Path| dir.join("ui/dist/index.html").is_file();
     let from_exe = std::env::current_exe().ok().and_then(|exe| {
         exe.ancestors()

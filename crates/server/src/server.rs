@@ -825,3 +825,37 @@ impl Server {
 pub(crate) fn live_attempt_ids(snapshot: &PoolSnapshot) -> HashSet<String> {
     snapshot.live_attempts.keys().cloned().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The NOT-PORTED row on ports.test.ts:15: with neither a flag nor a pin, the server binds the first
+    // free port from the start port upward; a pinned busy port refuses, naming it.
+    #[tokio::test]
+    async fn hunts_upward_from_a_busy_start_and_refuses_a_busy_pin() {
+        let held = bind_once(0).unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let hunted = bind_pool_server(
+            PortResolution {
+                port: busy,
+                pinned: false,
+            },
+            "/nonexistent/pools.json",
+        )
+        .unwrap();
+        assert!(hunted.local_addr().unwrap().port() > busy);
+        let refused = bind_pool_server(
+            PortResolution {
+                port: busy,
+                pinned: true,
+            },
+            "/nonexistent/pools.json",
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            format!("port {busy} is already in use; free it or pass a different --port")
+        );
+    }
+}

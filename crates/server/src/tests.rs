@@ -92,13 +92,14 @@ async fn publish(engine: &Engine, snapshot: PoolSnapshot) {
 struct Rig {
     dir: tempfile::TempDir,
     server: Server,
-    engine: Engine,
+    engine_slot: Arc<Mutex<Option<Engine>>>,
     stops: Arc<AtomicUsize>,
 }
 
 struct RigOptions {
     coalesce: Duration,
     hand_off_stop: bool,
+    start: bool,
 }
 
 impl Default for RigOptions {
@@ -106,6 +107,7 @@ impl Default for RigOptions {
         RigOptions {
             coalesce: Duration::from_millis(50),
             hand_off_stop: false,
+            start: true,
         }
     }
 }
@@ -181,17 +183,22 @@ async fn rig(options: RigOptions) -> Rig {
         })),
     })
     .unwrap();
-    server.start().await.unwrap();
-    let engine = engine_slot.lock().unwrap().clone().unwrap();
+    if options.start {
+        server.start().await.unwrap();
+    }
     Rig {
         dir,
         server,
-        engine,
+        engine_slot,
         stops,
     }
 }
 
 impl Rig {
+    fn engine(&self) -> Engine {
+        self.engine_slot.lock().unwrap().clone().unwrap()
+    }
+
     fn pool(&self) -> std::path::PathBuf {
         self.dir.path().join("pool")
     }
@@ -549,7 +556,7 @@ async fn pushes_one_delta_per_coalesced_change_and_replies_after_it() {
     assert_eq!(first["rev"], 1);
     for seq in 1..=3 {
         publish(
-            &rig.engine,
+            &rig.engine(),
             snapshot(
                 seq,
                 RunPhase::Quiescent,
@@ -628,7 +635,7 @@ async fn pushes_every_emit_as_its_own_frame_with_a_zero_window() {
     socket.frame_of("snapshot").await;
     for seq in 1..=3 {
         publish(
-            &rig.engine,
+            &rig.engine(),
             snapshot(seq, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
         )
         .await;
@@ -703,7 +710,7 @@ async fn stop_replies_pushes_what_waits_and_closes_1000_stopped() {
     );
     // Done, waiting in a 60 s window: the stop's flush ahead of its reply pushes it.
     publish(
-        &rig.engine,
+        &rig.engine(),
         snapshot(1, RunPhase::Done, &[("01", TicketStatus::Done)], &[]),
     )
     .await;
@@ -753,7 +760,7 @@ async fn hands_a_stop_to_its_owner_exactly_once_and_does_not_shut_itself_down() 
     })
     .await;
     publish(
-        &rig.engine,
+        &rig.engine(),
         snapshot(1, RunPhase::Done, &[("01", TicketStatus::Done)], &[]),
     )
     .await;
@@ -786,7 +793,7 @@ async fn keeps_every_socket_at_the_last_good_revision_when_a_version_cannot_be_e
     assert_eq!(socket.frame_of("snapshot").await["rev"], 1);
     rig.server.lock().hub.encode = failing_encode;
     publish(
-        &rig.engine,
+        &rig.engine(),
         snapshot(1, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
     )
     .await;
@@ -799,7 +806,7 @@ async fn keeps_every_socket_at_the_last_good_revision_when_a_version_cannot_be_e
     rig.server.lock().hub.encode =
         |full, rev| crate::push::to_pushed(full, rev).map_err(|e| e.to_string());
     publish(
-        &rig.engine,
+        &rig.engine(),
         snapshot(2, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
     )
     .await;
@@ -834,7 +841,7 @@ async fn never_counts_a_first_snapshot_it_cannot_encode() {
     rig.server.lock().hub.encode =
         |full, rev| crate::push::to_pushed(full, rev).map_err(|e| e.to_string());
     publish(
-        &rig.engine,
+        &rig.engine(),
         snapshot(5, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
     )
     .await;
@@ -899,4 +906,125 @@ async fn serves_a_cached_diff_inside_the_ttl_and_reads_again_after_it() {
     );
     assert_eq!(fresh["lastEventAt"], "t");
     assert_eq!(fresh["running"], false);
+}
+
+// server.test.ts:3319, :4022, and ws.test.ts:1142's half before the start
+#[tokio::test]
+async fn answers_before_the_pool_starts_without_tearing_anything_down() {
+    let rig = rig(RigOptions {
+        start: false,
+        ..RigOptions::default()
+    })
+    .await;
+    assert_eq!(
+        rig.json("POST", "/api/stop", None).await,
+        (409, json!({ "error": "pool not started: nothing to stop" }))
+    );
+    assert_eq!(
+        rig.json("GET", "/api/state", None).await,
+        (200, json!({ "snapshot": null }))
+    );
+    assert_eq!(
+        rig.json("POST", "/api/conversations", Some(r#"{"title":"Talk"}"#))
+            .await,
+        (409, json!({ "reason": "pool not started" }))
+    );
+    assert_eq!(
+        rig.json("POST", "/api/conversations/end", Some(r#"{"id":"c1"}"#))
+            .await,
+        (409, json!({ "reason": "pool not started" }))
+    );
+    assert_eq!(
+        rig.json("POST", "/api/resume", Some(r#"{"ticketId":"01"}"#))
+            .await,
+        (400, json!({ "error": "pool not started" }))
+    );
+    assert_eq!(
+        rig.json(
+            "PUT",
+            "/api/reassign",
+            Some(r#"{"tickets":["02"],"fields":{}}"#)
+        )
+        .await,
+        (500, json!({ "error": "reassign: pool not started" }))
+    );
+    let (_, _, page) = rig.http("GET", "/index.html", None).await;
+    let start =
+        page.find(r#"type="application/json">"#).unwrap() + r#"type="application/json">"#.len();
+    let end = page[start..].find("</script>").unwrap() + start;
+    let boot: Value = serde_json::from_str(&page[start..end]).unwrap();
+    assert_eq!(
+        (
+            boot["protocol"].clone(),
+            boot["rev"].clone(),
+            boot["snapshot"].clone()
+        ),
+        (json!(1), json!(0), Value::Null)
+    );
+    let mut socket = rig.socket().await;
+    socket.frame_of("hello").await;
+    assert_eq!(
+        socket.frame_of("snapshot").await,
+        json!({ "type": "snapshot", "rev": 0, "logTotal": 0, "snapshot": null })
+    );
+    assert!(
+        rig.pool().join("runs/server.pid").exists(),
+        "still serving, still locked"
+    );
+}
+
+// server.test.ts:861: inside the window the route already serves the latest seq; the socket has not
+// been sent it yet.
+#[tokio::test]
+async fn serves_the_latest_emit_over_http_while_the_window_holds_the_push() {
+    let rig = rig(RigOptions {
+        coalesce: Duration::from_millis(500),
+        ..RigOptions::default()
+    })
+    .await;
+    let mut socket = rig.socket().await;
+    socket.frame_of("snapshot").await;
+    publish(
+        &rig.engine(),
+        snapshot(4, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
+    )
+    .await;
+    assert_eq!(
+        rig.json("GET", "/api/state", None).await.1["snapshot"]["seq"],
+        4
+    );
+    assert!(
+        socket.next_within(200).await.is_none(),
+        "nothing pushed inside the window"
+    );
+    assert_eq!(socket.frame_of("delta").await["delta"]["set"]["seq"], 4);
+}
+
+// server.test.ts:884: closing the sockets on stop sends what the window still holds, then closes.
+#[tokio::test]
+async fn sends_a_waiting_snapshot_before_the_sockets_close() {
+    let rig = rig(RigOptions {
+        coalesce: Duration::from_secs(60),
+        ..RigOptions::default()
+    })
+    .await;
+    let mut socket = rig.socket().await;
+    socket.frame_of("snapshot").await;
+    publish(
+        &rig.engine(),
+        snapshot(1, RunPhase::Stopped, &[("01", TicketStatus::Done)], &[]),
+    )
+    .await;
+    rig.server.shutdown(None).await;
+    let delta = socket.frame_of("delta").await;
+    assert_eq!(delta["delta"]["set"]["phase"], "stopped");
+    match socket.next_within(2_000).await {
+        Some(Message::Close(Some(frame))) => {
+            assert_eq!(
+                (u16::from(frame.code), frame.reason.as_str()),
+                (1000, "stopped")
+            )
+        }
+        other => panic!("expected the stopped close, got {other:?}"),
+    }
 }

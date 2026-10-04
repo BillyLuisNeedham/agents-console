@@ -197,7 +197,7 @@ impl HubState {
             base36(now),
             &format!("{:0>6}", base36(random.finish()))[..6]
         );
-        let hello_frame = js::to_json(&json!({
+        let hello_frame = js::stringify(&json!({
             "type": "hello",
             "protocol": PROTOCOL_VERSION,
             "epoch": epoch,
@@ -467,7 +467,7 @@ fn live_targets(snapshot: Option<&Value>) -> (IndexMap<String, String>, IndexMap
         let live = ticket.get("liveAttempt").cloned().unwrap_or(Value::Null);
         let resolver = live.get("role").and_then(Value::as_str) == Some("resolver");
         if status == "in-progress" || status == "checkpoint" || resolver {
-            candidates.insert(id.clone(), js::to_json(&json!([status, live])));
+            candidates.insert(id.clone(), js::stringify(&json!([status, live])));
         }
         let pane = text(live.get("paneId"))
             .or_else(|| text(ticket.get("heldPane").and_then(|held| held.get("paneId"))));
@@ -519,7 +519,7 @@ fn whole_live_frame(hub: &mut HubState) -> Option<String> {
 fn pushed(server: &Server, inner: &mut Inner) {
     let hub = &mut inner.hub;
     let (candidates, panes) = live_targets(hub.last_pushed.as_ref().map(|p| &p.snapshot));
-    let key = js::to_json(&json!([
+    let key = js::stringify(&json!([
         candidates
             .iter()
             .map(|(k, v)| json!([k, v]))
@@ -631,7 +631,7 @@ async fn live_check(server: &Server) {
         } else if let Some(key) = candidates.get(id) {
             hub.parked.insert(id.clone(), key.clone());
         }
-        let json = js::to_json(&value);
+        let json = js::stringify(&value);
         if hub.activity.get(id).is_some_and(|(held, _)| *held == json) {
             continue;
         }
@@ -640,7 +640,7 @@ async fn live_check(server: &Server) {
     }
     let mut peeks_frame = Map::new();
     for (id, value) in pane_ids.iter().zip(peeked) {
-        let json = js::to_json(&value);
+        let json = js::stringify(&value);
         if hub.peeks.get(id).is_some_and(|(held, _)| *held == json) {
             continue;
         }
@@ -690,7 +690,7 @@ fn grades_frame(hub: &HubState) -> String {
 fn read_grades(server: &Server, inner: &mut Inner) -> bool {
     server.refresh_meta(inner, None);
     let value = serde_json::to_value(server.pool_grades(inner)).unwrap_or_else(|_| json!({}));
-    let json = js::to_json(&value);
+    let json = js::stringify(&value);
     if json == inner.hub.grades.0 {
         return false;
     }
@@ -783,7 +783,7 @@ fn events_path(server: &Server, id: &str) -> PathBuf {
 
 fn events_json(server: &Server, inner: &mut Inner, id: &str) -> String {
     server.refresh_meta(inner, None);
-    js::to_json(&reads::card_events(reads::ticket_events(
+    js::stringify(&reads::card_events(reads::ticket_events(
         &server.0.runs_dir,
         id,
         &inner.meta,
@@ -1226,7 +1226,7 @@ fn subscribe(server: &Server, inner: &mut Inner, socket: u64, subscription: &Val
         js::to_json(&Value::from(id.as_str())),
         card.body_json,
         card.events_json,
-        js::to_json(&log.unwrap_or(Value::Null)),
+        js::stringify(&log.unwrap_or(Value::Null)),
     );
     inner.hub.send(socket, &text);
 }
@@ -1765,5 +1765,66 @@ pub(crate) fn close_sockets(server: &Server, inner: &mut Inner) {
         .collect();
     for socket in members {
         inner.hub.close_socket(socket);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ws.test.ts:533: a result the frame cannot carry is refused with 500, and the socket keeps its
+    // queue for the next reply.
+    #[test]
+    fn refuses_a_result_it_cannot_encode_and_answers_the_next() {
+        let mut hub = HubState::new(Duration::from_millis(20_000));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.sockets.insert(
+            1,
+            SocketEntry {
+                tx,
+                queued: Arc::new(AtomicUsize::new(0)),
+                terminated: Arc::new(Notify::new()),
+                visible: true,
+                cards: IndexMap::new(),
+                open: true,
+                member: true,
+            },
+        );
+        let unencodable = Answer::Ok {
+            status: 200,
+            result: Err("a circular reference".to_owned()),
+        };
+        reply(&hub, 1, 4, RequestKind::SettingsGet, &unencodable);
+        reply(
+            &hub,
+            1,
+            5,
+            RequestKind::SettingsGet,
+            &Answer::ok_value(200, json!({})),
+        );
+        let frames: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|out| match out {
+                Outgoing::Text(text) => serde_json::from_str(text.as_str()).unwrap(),
+                _ => panic!("only text"),
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                json!({ "type": "reply", "id": 4, "kind": "settings.get", "rev": 0, "ok": false,
+                    "refusal": { "reason": "could not encode the result: a circular reference", "status": 500 } }),
+                json!({ "type": "reply", "id": 5, "kind": "settings.get", "rev": 0, "ok": true, "result": {} }),
+            ]
+        );
+    }
+
+    #[test]
+    fn names_the_epoch_in_base36_with_six_random_characters() {
+        let hub = HubState::new(Duration::from_millis(20_000));
+        let (time, random) = hub.epoch.split_once('-').unwrap();
+        assert!(!time.is_empty() && time.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_eq!(random.len(), 6);
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
     }
 }

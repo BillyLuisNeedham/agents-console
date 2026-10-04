@@ -236,23 +236,18 @@ pub fn diff_snapshot(prev: &Pushed, next: &Pushed) -> Option<Value> {
     changed.then_some(Value::Object(delta))
 }
 
-/// A snapshot frame: the pushed version whole, or the null snapshot of revision 0.
+/// A snapshot frame: the pushed version whole, or the null snapshot of revision 0. Written in place, so
+/// the snapshot is serialised once and never copied.
 pub fn snapshot_frame(of: Option<&Pushed>) -> Result<String, serde_json::Error> {
-    let mut frame = Map::new();
-    frame.insert("type".into(), Value::from("snapshot"));
-    match of {
-        Some(pushed) => {
-            frame.insert("rev".into(), Value::from(pushed.rev));
-            frame.insert("logTotal".into(), Value::from(pushed.log_total));
-            frame.insert("snapshot".into(), pushed.snapshot.clone());
-        }
-        None => {
-            frame.insert("rev".into(), Value::from(0));
-            frame.insert("logTotal".into(), Value::from(0));
-            frame.insert("snapshot".into(), Value::Null);
-        }
-    }
-    serde_json::to_string(&Value::Object(frame))
+    Ok(match of {
+        Some(pushed) => format!(
+            r#"{{"type":"snapshot","rev":{},"logTotal":{},"snapshot":{}}}"#,
+            pushed.rev,
+            pushed.log_total,
+            js::stringify(&pushed.snapshot)
+        ),
+        None => r#"{"type":"snapshot","rev":0,"logTotal":0,"snapshot":null}"#.to_owned(),
+    })
 }
 
 /// A frame of the given type with its fields after it, as one JSON text.
@@ -260,13 +255,13 @@ pub fn frame(kind: &str, fields: Map<String, Value>) -> String {
     let mut frame = Map::new();
     frame.insert("type".into(), Value::from(kind));
     frame.extend(fields);
-    js::to_json(&Value::Object(frame))
+    js::stringify(&Value::Object(frame))
 }
 
 /// index.html with the boot snapshot in a JSON script element ahead of `</head>`. Every `<` in the JSON
 /// is escaped, so no ticket title or log line can close the element early.
 pub fn embed_boot(html: &str, boot: &Value) -> Result<String, serde_json::Error> {
-    let json = serde_json::to_string(boot)?.replace('<', "\\u003c");
+    let json = js::stringify(boot).replace('<', "\\u003c");
     let tag = format!(r#"<script id="{EMBED_ELEMENT_ID}" type="application/json">{json}</script>"#);
     Ok(match html.find("</head>") {
         Some(at) => format!("{}{tag}{}", &html[..at], &html[at..]),
