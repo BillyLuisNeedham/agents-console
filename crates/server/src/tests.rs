@@ -518,7 +518,7 @@ async fn serves_the_page_with_the_boot_snapshot_the_socket_repeats() {
     assert_eq!(first["rev"], boot["rev"]);
     assert_eq!(first["snapshot"], boot["snapshot"]);
     let (status, _, _) = rig.http("GET", "/missing.js", None).await;
-    assert_eq!(status, 404);
+    assert_eq!(status, 500);
 }
 
 #[tokio::test]

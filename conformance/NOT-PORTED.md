@@ -837,8 +837,9 @@ are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-p
   `serveStatic` tests the Promise `Bun.file().exists()` returns, which is always truthy, so it answers every
   path with a file that is not there and the read fails; the `not found` 404 at the end of the route table is
   never reached. The case pins the 500 alone, and that the server stays up. Intended behaviour (open question
-  5, Decided 5): 404 `not found`. Once conv-1-spawn-14's fix lands, the case pins 404 and the Rust server
-  answers 404. The traversal case beside it asks only that a path climbing out of the build answers an error
+  5, Decided 5): 404 `not found`. conv-1-spawn-14 was closed without that fix, so the Rust server answers
+  the same 500 (a plain `Internal Server Error`); when the TypeScript fix lands, the case and the Rust
+  fallback in `crates/server/src/http.rs` both move to 404. The traversal case beside it asks only that a path climbing out of the build answers an error
   and nothing of the file, so it holds either way.
 - **A body that is not JSON** (`http-bodies.test.ts`, the gap at `engine/server.ts:1958`). POST /api/resume
   and both settings PUTs answer 400 `{error: "Failed to parse JSON"}`, the message Bun's `req.json()` throws;

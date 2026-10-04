@@ -377,7 +377,10 @@ async fn fetch(State(server): State<Server>, request: Request) -> Response {
             );
             response
         }
-        None => text_response(404, "not found"),
+        // Bun answers a path no route and no file matches with its own 500 page: its `serveStatic` tests
+        // the Promise `Bun.file().exists()` returns, which is always truthy, so the read of the missing file
+        // fails. The intended 404 waits on the TypeScript fix (NOT-PORTED.md, "Unknown paths answer 500").
+        None => text_response(500, "Internal Server Error"),
     }
 }
 
