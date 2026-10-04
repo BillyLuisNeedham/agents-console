@@ -169,6 +169,11 @@ pub struct Session {
     /// settle is never left waiting for an unrelated kick (in the TypeScript only microtasks run in
     /// that window, so no answer can arrive there).
     pub queued_since_drain: bool,
+    /// An adopted or Continued attempt's finalize kicked while a drive was in flight, which does
+    /// nothing: the drive that closes starts the next, so a merge that lands while that drive decides
+    /// its closing phase is never left stalled. In the TypeScript the finalize's merge is synchronous
+    /// and lands before the drive's next await, so the window does not open there.
+    pub finalized_while_driving: bool,
     /// Fired once when the boot's drive first waits on something real (an attempt, a merge hold, the
     /// boot reconcile) or settles: start_pool returns then, as the TypeScript's start returns before
     /// any I/O but after every microtask the drive runs first.
@@ -303,6 +308,7 @@ impl Session {
             settle_waiters: Vec::new(),
             answer_waiters: HashMap::new(),
             queued_since_drain: false,
+            finalized_while_driving: false,
             first_turn: None,
             on_snapshot: None,
             machine_defaults: base.machine_defaults,

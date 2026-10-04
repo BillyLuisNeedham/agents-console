@@ -237,6 +237,15 @@ impl MergeLine {
         self.pending.insert(id.to_owned());
     }
 
+    /// The ids whose merge joined the chain and has not settled yet, in line order.
+    pub fn unsettled(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|id| self.pending.contains(*id))
+            .cloned()
+            .collect()
+    }
+
     /// The engine is handling the ticket's conflict: launching or running its resolver.
     pub fn resolving(&mut self, id: &str) {
         self.active = Some(id.to_owned());

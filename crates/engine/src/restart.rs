@@ -1253,6 +1253,9 @@ pub fn finish_adopted_finalize(session: &mut Session) {
     // The next boundary persist (or the persistence interrupt machinery) owns store failures; the
     // finalize's record must not die on one.
     let _ = crate::persist::persist(session);
+    if session.driving {
+        session.finalized_while_driving = true;
+    }
     let _ = crate::answers::kick_processing(session);
 }
 

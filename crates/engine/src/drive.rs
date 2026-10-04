@@ -482,6 +482,11 @@ type StepLink = Shared<BoxFuture<'static, Result<(), String>>>;
 struct StepMerges {
     queue: Mutex<StepLink>,
     merges: Mutex<Vec<StepMerge>>,
+    // Attempts of the step still running, and the updates of the ones that exited without joining
+    // (a crash), each with its place in the plan: the boundary join's, applied in the job the last
+    // attempt exits in.
+    running: Mutex<usize>,
+    unjoined: Mutex<Vec<(usize, PoolUpdate)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -494,6 +499,38 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // the pool log, a done attempt with a worktree joins the merge chain, and a terminal result joins state
 // at once (a checkpoint raises its interrupt here).
 fn on_ticket_exit(
+    session: &mut Session,
+    result: TicketResult,
+    index: usize,
+    step: &Arc<StepMerges>,
+) -> anyhow::Result<TicketResult> {
+    let mut result = join_at_exit(session, result, step)?;
+    if !result.joined_at_exit {
+        lock(&step.unjoined).push((index, result.update.clone()));
+        result.joined_at_exit = true;
+    }
+    // The boundary join's apply of the unjoined results, in plan order. In the TypeScript it runs in
+    // the same turn as the last attempt's `.then` (nothing but microtasks between them), so no reader
+    // ever sees the last exit's update without the crashed siblings' log lines; here that is one job.
+    let last = {
+        let mut running = lock(&step.running);
+        *running -= 1;
+        *running == 0
+    };
+    if last {
+        let mut unjoined = std::mem::take(&mut *lock(&step.unjoined));
+        if !unjoined.is_empty() {
+            unjoined.sort_by_key(|(index, _)| *index);
+            for (_, update) in unjoined {
+                session.apply(update);
+            }
+            emit_snapshot(session, RunPhase::Running);
+        }
+    }
+    Ok(result)
+}
+
+fn join_at_exit(
     session: &mut Session,
     mut result: TicketResult,
     step: &Arc<StepMerges>,
@@ -719,11 +756,11 @@ pub async fn run_super_step(engine: &Engine, plan: SuperStepPlan) -> anyhow::Res
     let step = Arc::new(StepMerges {
         queue: Mutex::new(chain.map(Ok).boxed().shared()),
         merges: Mutex::new(Vec::new()),
+        running: Mutex::new(planned.len()),
+        unjoined: Mutex::new(Vec::new()),
     });
-    let runs = planned
-        .into_iter()
-        .zip(assignments)
-        .map(|((marker, plan), assignment)| {
+    let runs = planned.into_iter().zip(assignments).enumerate().map(
+        |(index, ((marker, plan), assignment))| {
             let (env, snapshot, step) = (&env, &snapshot, Arc::clone(&step));
             async move {
                 let id = marker.id.clone();
@@ -736,10 +773,11 @@ pub async fn run_super_step(engine: &Engine, plan: SuperStepPlan) -> anyhow::Res
                     .await?;
                 let result = result?;
                 engine
-                    .call(move |s| on_ticket_exit(s, result, &step))
+                    .call(move |s| on_ticket_exit(s, result, index, &step))
                     .await?
             }
-        });
+        },
+    );
     let mut results = Vec::new();
     for result in join_all(runs).await {
         results.push(result?);
@@ -881,8 +919,12 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .collect();
             // The closing gate: every ticket finished and nothing else waiting on the human raises
             // the final Review; an approval recorded in state holds it down for good.
-            let raise =
-                pending.is_empty() && s.state.interrupts.is_empty() && !s.state.review_approved;
+            // A merge still in flight off the drive (an adopted or Continued attempt's ending) holds
+            // the gate too: in the TypeScript it lands synchronously before any drive sees its ending.
+            let raise = pending.is_empty()
+                && s.state.interrupts.is_empty()
+                && !s.state.review_approved
+                && s.merge_line.unsettled().is_empty();
             if raise {
                 let review = crate::interrupts::review_interrupt(s);
                 raise_interrupt(s, review);
@@ -898,10 +940,18 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
         .call(move |s| {
             let pending = pending_c;
             // Tickets whose Attempt runs outside the drive (issue #139) end on their own.
-            let outside: Vec<&String> = pending
+            // So does a ticket whose merge is still in flight off the drive: its ending already
+            // landed, its merge has not (see the closing gate above).
+            let merging = s.merge_line.unsettled();
+            let mut outside: Vec<&String> = pending
                 .iter()
                 .filter(|id| s.live_attempts.is_live(id))
                 .collect();
+            for id in &merging {
+                if !outside.contains(&id) {
+                    outside.push(id);
+                }
+            }
             let interrupts = !s.state.interrupts.is_empty();
             let phase = if interrupts
                 || !outside.is_empty()
@@ -970,7 +1020,12 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             // A Continued attempt's grading or spawns waiting to land kicked a drive that was still
             // in flight, which does nothing: the drive that closes starts the next. So does an answer
             // queued after the last boundary's drain.
-            if !s.continued_grades.is_empty() || spawns_await_boundary(s) || s.queued_since_drain {
+            let finalized = std::mem::take(&mut s.finalized_while_driving);
+            if !s.continued_grades.is_empty()
+                || spawns_await_boundary(s)
+                || s.queued_since_drain
+                || finalized
+            {
                 crate::answers::kick_processing(s)?;
             }
             Ok(())

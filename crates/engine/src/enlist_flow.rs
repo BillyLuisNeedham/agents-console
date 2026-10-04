@@ -868,16 +868,7 @@ fn enlisted_attempt_ended(session: &Session, ticket_id: &str, attempt: u64) -> b
 /// ready set, and any queued answers see the attempt's real ending. The kick is a no-op while a drive
 /// is in flight; its boundary machinery picks the state up instead.
 pub fn finish_adopted_finalize(session: &mut Session) {
-    let phase = if session.driving {
-        ac_protocol::RunPhase::Running
-    } else {
-        ac_protocol::RunPhase::Quiescent
-    };
-    crate::snapshot::emit_snapshot(session, phase);
-    // The next boundary persist (or the persistence interrupt machinery) owns store failures; the
-    // finalize's record must not die on one.
-    let _ = crate::persist::persist(session);
-    let _ = crate::answers::kick_processing(session);
+    crate::restart::finish_adopted_finalize(session);
 }
 
 /// `endEnlistedAttempt`: record an enlisted attempt's ending (issue #101, ticket 04). The two
