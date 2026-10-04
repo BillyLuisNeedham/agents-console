@@ -390,3 +390,62 @@ the store still refuses). What follows is the part that is not a plain passing c
   drain's own comment expects the run to go down there, which it does not on the idle path. Rust unit test:
   *answer drain: an answer whose persist fails leaves the pool state and its queued record as they were, and the
   next answer to the same Interrupt processes it.*
+
+## `attempts`: terminal-backed launch (C12)
+
+Every one of C12's 47 rows is a passing case under `conformance/cases/attempts-terminal-tabs.test.ts`,
+`attempts-terminal-wrapper.test.ts`, `attempts-terminal-prompt.test.ts`, `attempts-terminal-launch.test.ts` and
+`attempts-terminal-trust.test.ts`; a row that runs for several harnesses is one case per harness. The terminal-backed
+gaps the C11 section hands on are cases there too: the prompt that never landed after the wrapper, the
+managed-settings dialog, the trust dialog still up after its answer, the readiness bound, `pane.report_agent` and
+`pane.release_agent` at a done and at a crashed ending, and `terminal_id` on the spawned event. For these the fake herdr
+gained three options, `noRootPane` (a `tab.create` answer with no root pane), `keyFrames` (a frame a key brings up, so
+a dialog's highlight moves the moment the key lands) and `failFrom` (a method refused from its nth call on), and its
+call record gained each call's arrival time (`at`).
+
+Where a case reaches a row differently from its wording:
+
+- **`engine.test.ts:6548`, the other platform's `script(1)` form.** The case checks the form of the host it runs on:
+  util-linux's `-eqfc '<command>' <stream file>` on Linux, BSD's `-eqF <stream file> sh -c <relay> sh "$(tty)" <words>`
+  on darwin. A Linux run never checks the darwin form; the Mac run does. The platform override the row's seam asks for
+  was not added. Rust unit test: the wrapper for each platform, built from an argv holding a space and a quote, is
+  exactly that form, the darwin relay word byte for byte.
+- **`engine.test.ts:5477`, "one events.subscribe".** The row's engine test ran a harness with no descriptor, which has
+  no readiness wait. A pool's console.json can name only claude, opencode and cursor, whose readiness wait subscribes
+  too, so the case pins two subscriptions, the readiness wait's and the ending wait's, each naming pane.exited,
+  pane.closed and tab.closed, the second after the prompt's Enter. Rust unit test: a harness with no descriptor is sent
+  the wrapper and nothing typed, and its result or its pane's end decides the Attempt.
+- **`attempt-run.test.ts:1514`, "within 15 s".** The 15 s held for the engine test's shortened launch cadence. The
+  server gives `script` 10 s per tab to create the Stream file, so three botched tabs take over 30 s. That case and
+  `:1465` (one botched tab) wait at the real bound behind the slow tag (Decided 2) and pin no elapsed time.
+- **`herdr.test.ts:142`, a `tab.create` answer with no root pane.** It costs the one re-resolve and retry any refused
+  tab costs; the workspace is still there, so the retry goes to it again. Two tabs are created and the terminal_error
+  quotes the second answer. The quoted answer is compared once parsed, not byte for byte: a server that re-serialises
+  the daemon's answer may order its keys differently.
+- **"At once" and "within seconds"** (`:1287`, `:1660`, `:1696`): pinned as the crash landing less than 30 s after the
+  spawn, half the 60 s readiness bound, so a loaded machine does not fail them.
+
+Behaviour of the TypeScript server seen while writing these, worth knowing before the port copies it:
+
+- A terminal-backed Attempt's derived log opens with util-linux script's own `Script started on <date>
+  [COMMAND="..." <not executed on terminal>]` line and, when `script` has exited by the time the ending is read, closes
+  with its `Script done on ...` line, because the log derives from the whole typescript. script writes its header only
+  once the harness first prints or exits, so a silent TUI leaves the log empty and a Blocking dialog's frame is what
+  lands there. The cases pin the harness's own lines and the frame block, never script's lines.
+- `GET /api/log?ticket=<id>&stream=1` serves the Stream file ANSI-stripped, as the plain route serves the log, so the
+  raw typescript cannot be had over HTTP. Seen in the `:711` case and left unpinned: it is the `http` area's.
+- A launch botched in all three tabs never reports its pane's agent, yet releases it at the ending: `awaitAttempt`
+  releases whenever the handle names a pane (inference from the code, not pinned).
+- A `tab.create` answered without a root pane leaves its tab open, and so does the retry's: the answer names the tab,
+  but `openAttemptTab` throws without closing it, so a daemon of that kind gains two tabs nobody closes per Attempt.
+  The case pins the headless fallback, not the leftover tabs.
+
+Rust unit tests these rows imply, for what no case can show from outside:
+
+- The pane frame block keeps at most 19 of the frame's lines under its heading, blank lines at both ends trimmed
+  first; the cases' frames are all shorter.
+- The folder-trust seed writes both the worktree path and its realpath when the two differ. A conformance world's
+  paths are real (the runner hands every server a realpath TMPDIR), so no case sees two.
+- Readiness needs the ready pattern on three consecutive reads 500 ms apart, an empty read never counts, and a
+  Blocking dialog still on screen four polls after its answer ends the wait. The cases pin only that readiness is read
+  between the wrapper and the prompt, and the dialog endings' words.
