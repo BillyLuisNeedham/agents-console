@@ -559,3 +559,128 @@ async fn an_unadopted_conversation_is_retried_until_its_pane_can_be_read() {
     assert!(live, "the next listing re-adopts it");
     assert!(!rig.kinds("conv-1").contains(&TicketEventKind::Crash));
 }
+
+fn spawned_ticket(id: &str, title: &str, parent: &str) -> ac_core::pool::TicketMarker {
+    ac_core::pool::TicketMarker {
+        id: id.to_owned(),
+        file: std::path::PathBuf::from(format!("/nowhere/{id}.md")),
+        blocked_by: Vec::new(),
+        status: ac_protocol::TicketStatus::Done,
+        title: title.to_owned(),
+        spec: String::new(),
+        spawned_by: Some(parent.to_owned()),
+        enlisted_from: None,
+        spawn_assign: None,
+    }
+}
+
+// The ticket hooks queue a Notice for a parent the pool has recorded, and type it whole the moment the
+// parent reads waiting: the done text with no Brief, the checkpoint's with its Brief, the closed one with
+// its trimmed note.
+#[tokio::test]
+async fn a_spawned_tickets_endings_are_typed_into_a_waiting_parent_in_their_own_words() {
+    let rig = Rig::new().await;
+    rig.live("conv-1", true).await;
+    let done = spawned_ticket("conv-1-spawn-1", "Old idea", "conv-1");
+    rig.engine
+        .call(move |s| {
+            super::ticket_ended(s, &done, "pool/key/conv-1-spawn-1", None);
+            super::ticket_checkpointed(
+                s,
+                &spawned_ticket("conv-1-spawn-2", "Next", "conv-1"),
+                "  look here  ",
+            );
+            super::ticket_closed(
+                s,
+                &spawned_ticket("conv-1-spawn-3", "Gone", "conv-1"),
+                Some(" superseded by 3 "),
+            );
+            // A Ticket that no Conversation spawned tells nobody.
+            super::ticket_closed(s, &spawned_ticket("07-spawn-1", "Other", "07"), None);
+        })
+        .await
+        .unwrap();
+    wait_until(|| rig.screen.lock().unwrap().sent.len() == 3).await;
+    let sent = rig.screen.lock().unwrap().sent.clone();
+    assert_eq!(
+        sent[0],
+        "Ticket conv-1-spawn-1 (\"Old idea\") ended: done.\nBranch: pool/key/conv-1-spawn-1\nDiff:\n(diff unavailable)"
+    );
+    assert!(sent[1].starts_with(
+        "Ticket conv-1-spawn-2 (\"Next\") ended: checkpoint.\nBrief: look here\nBranch: pool/"
+    ));
+    assert!(sent[1].ends_with("\nDiff:\n(no changes)"));
+    assert_eq!(
+        sent[2],
+        "Ticket conv-1-spawn-3 (\"Gone\") was closed: its work was not merged.\nClose note: superseded by 3"
+    );
+    // Both sides of each telling are on the logs, delivered.
+    wait_until(|| {
+        rig.events("conv-1-spawn-3")
+            .iter()
+            .any(|e| e.kind == TicketEventKind::Notice)
+    })
+    .await;
+    let told = rig.events("conv-1-spawn-3");
+    assert_eq!(told[0].payload["delivered"], true);
+    assert_eq!(told[0].payload["to"], "conv-1");
+    assert_eq!(told[0].payload["kind"], "ticket-ended");
+    assert!(rig.events("07-spawn-1").is_empty());
+}
+
+// A Conversation's own ending tells its parent by branch, and what never delivered is dropped and logged
+// on the child's file before it goes.
+#[tokio::test]
+async fn an_ending_conversation_drops_what_it_never_delivered_and_tells_its_parent() {
+    let rig = Rig::new().await;
+    rig.live("conv-1", false).await;
+    let child = rig.live("conv-1-spawn-1", false).await;
+    // The child's record names its parent.
+    let mut rec = rig.record("conv-1-spawn-1");
+    rec.spawned_by = Some("conv-1".into());
+    rig.engine
+        .call({
+            let (child, rec) = (child.clone(), rec.clone());
+            move |s| {
+                write_conversation(&conversations_dir(s), &rec).unwrap();
+                child.with(|r| {
+                    r.notices
+                        .push(notice("conv-1-spawn-1", "conv-1-spawn-1-spawn-1", "late"));
+                    r.closing = Some(" wrapped up ".into());
+                });
+                super::notices::note_ended(
+                    s,
+                    "conv-1-spawn-1",
+                    "pool/key/b",
+                    Some(" wrapped up "),
+                    false,
+                );
+            }
+        })
+        .await
+        .unwrap();
+    let dropped = rig.events("conv-1-spawn-1-spawn-1");
+    assert_eq!(dropped[0].kind, TicketEventKind::NoticeDropped);
+    assert_eq!(
+        dropped[0].payload["reason"],
+        "parent conversation ended before delivery"
+    );
+    assert_eq!(dropped[0].payload["text"], "late");
+    // The parent reads working, so its Notice waits in the queue as the ended Conversation's own.
+    let queued = rig
+        .engine
+        .call(|s| {
+            s.conversations
+                .runtime("conv-1")
+                .unwrap()
+                .with(|r| r.notices.clone())
+        })
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].kind, NoticeKind::ConversationEnded);
+    assert_eq!(
+        queued[0].text,
+        "A Conversation you spawned was ended by the operator.\nBranch: pool/key/b\nClosing note: wrapped up"
+    );
+}

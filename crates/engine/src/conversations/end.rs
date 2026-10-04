@@ -395,6 +395,15 @@ pub async fn end(
     end_with(engine, id, closing, None, by).await
 }
 
+/// A Steward ends itself (ADR-0030): the End as the operator's, with the closing line and who asked.
+pub async fn end_conversation_by_steward(
+    engine: &Engine,
+    id: String,
+    closing: Option<String>,
+) -> Result<(), EngineError> {
+    end(engine, &id, closing, AnswerBy::Steward).await
+}
+
 /// End: only the operator does this (card End, Detail End, or closing the herdr tab: the last arrives
 /// as a pane loss and is handled by `watch_for_crash` instead, never here), a Steward ending itself
 /// excepted. The tab closes at once, before the merge is even attempted: once End is clicked the talk is

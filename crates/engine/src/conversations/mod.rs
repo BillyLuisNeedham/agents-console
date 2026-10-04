@@ -58,7 +58,7 @@ use crate::snapshot::emit_snapshot;
 pub use adopt::{
     adopt_enlisted_at_boot, adopt_started_at_boot, crash_stale_at_boot, readopt_pending,
 };
-pub use end::{answer_merge, end};
+pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
 
@@ -197,6 +197,17 @@ impl Conversations {
 
     fn runtime(&self, id: &str) -> Option<Rt> {
         self.runtimes.get(id).cloned()
+    }
+
+    /// Ids of Conversations whose start is still in flight and has no record on disk yet, so a Spawn
+    /// counter never mints one twice before its record reaches disk.
+    pub fn reserved_ids(&self) -> Vec<String> {
+        self.reserved.iter().cloned().collect()
+    }
+
+    /// Reserve an id for a start about to be fired (idempotent). The start releases it when it ends.
+    pub fn reserve(&mut self, id: &str) {
+        self.reserved.insert(id.to_owned());
     }
 }
 
@@ -523,7 +534,7 @@ pub fn live_directories(s: &Session) -> Vec<(String, String)> {
 
 /// Ids of Conversations whose start is still in flight and has no record on disk yet.
 pub fn reserved_ids(s: &Session) -> Vec<String> {
-    s.conversations.reserved.iter().cloned().collect()
+    s.conversations.reserved_ids()
 }
 
 /// The live Steward's id (ADR-0030), adopted or not yet; `None` when none is on duty.

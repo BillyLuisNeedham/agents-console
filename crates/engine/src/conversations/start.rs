@@ -335,7 +335,7 @@ fn after_launch(
         let engine = s.engine();
         let sweep = id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let _ = engine
                 .call(move |s| crate::tickets::close_attempt_tabs(s, &sweep))
                 .await;
