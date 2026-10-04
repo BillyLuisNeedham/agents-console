@@ -39,13 +39,14 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 
 ### M1 to M5
 
-- Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md.
-- Running: r-protocol (ac-protocol types, then the TypeScript generator and its tsc check), r-git (ac-io git,
-  worktrees.ts, stat-cache), r-herdr (ac-io herdr client).
-- Next once r-protocol commits its types: formats-a (pool files, events, streamlog, checkpoints, queued
-  answers, ledger, runs/ files, Conversation records) and formats-b (console.json, Pool settings, Machine
-  defaults, fleet, harness descriptors, Assignments). Briefs drafted in the session scratchpad.
-- Then the foundation: F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
+- Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md; wire shapes
+  research at docs/specs/162-rust-port-wire-shapes.md.
+- Landed: ac_io::herdr (1c8824d), ac_io::git and ac_core::stat_cache (d94eec5..b8b3947), ac-protocol types
+  (2e17992; the TypeScript generator and its tsc check still to come from r-protocol).
+- Running: r-protocol (generator), r-formats-a (pool files, events, streamlog, checkpoints, queued answers,
+  ledger, runs/ files, Conversation records, ac_core::js), r-formats-b (console.json, Pool settings, Machine
+  defaults, fleet, harness descriptors, Assignments).
+- Next: the foundation, F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
   persist, snapshot) and S-server (server CLI, lock, ports, routes, /api/ws) side by side; then the feature
   wave by area (see the design doc's module map).
 
