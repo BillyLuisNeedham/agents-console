@@ -34,11 +34,19 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | restart, Conversations and panes | C06 | wave 2 |
 | Conversation Turn state and Notices | C17 | wave 2 |
 | verify with Jev | C22 | wave 2 |
-| the failing scheduling case | | wave 2 |
+| the failing scheduling case | | fixed in 879b564: the case now waits for the settled frame (a read's reply can overtake a coalesced push) |
 
 ### M1 to M5
 
-Not started.
+- Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md.
+- Running: r-protocol (ac-protocol types, then the TypeScript generator and its tsc check), r-git (ac-io git,
+  worktrees.ts, stat-cache), r-herdr (ac-io herdr client).
+- Next once r-protocol commits its types: formats-a (pool files, events, streamlog, checkpoints, queued
+  answers, ledger, runs/ files, Conversation records) and formats-b (console.json, Pool settings, Machine
+  defaults, fleet, harness descriptors, Assignments). Briefs drafted in the session scratchpad.
+- Then the foundation: F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
+  persist, snapshot) and S-server (server CLI, lock, ports, routes, /api/ws) side by side; then the feature
+  wave by area (see the design doc's module map).
 
 ## Decisions
 
