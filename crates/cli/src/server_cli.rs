@@ -103,7 +103,9 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         args.push("--port".to_owned());
         args.push(js::string_of(port));
     }
-    let mut command = Command::new("agent-console");
+    // The Boot is this same binary's `boot`: the running executable, not whatever PATH names.
+    let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-console"));
+    let mut command = Command::new(program);
     command
         .args(&args)
         .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
