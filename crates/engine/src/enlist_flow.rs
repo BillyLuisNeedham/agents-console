@@ -32,7 +32,9 @@ use crate::actor::Engine;
 use crate::attempt_ending::{
     EXIT_CODE_PANE_GONE, EXIT_CODE_UNREADABLE, exited_phrase, read_attempt_result,
 };
-use crate::checkout_gate::{DeferredMerge, through_pool_checkout_gate};
+use crate::checkout_gate::{
+    DeferredMerge, hold_pool_checkout, release_pool_checkout, through_pool_checkout_gate,
+};
 use crate::conversations::EnlistConversationRegistration;
 use crate::enlist::{FoundPane, find_enlistable_pane};
 use crate::enlisted::{EnlistedEnding, RegisterEnlisted, register_enlisted};
@@ -1115,11 +1117,21 @@ fn chain_enlisted_merge(session: &mut Session, marker: TicketMarker, attempt: u6
                     ));
                     return Ok(None);
                 }
-                Ok(Some(merge))
+                // A conflict is handled inside the gate in the TypeScript (the resolver included), so
+                // the merge stays counted as a writer in the pool checkout until it is settled.
+                let hold = hold_pool_checkout(
+                    s,
+                    format!(
+                        "a merge of {} into the pool checkout is in flight",
+                        merge_marker.id
+                    ),
+                );
+                Ok(Some((merge, hold)))
             })
             .await;
-            if let Ok(Some(Some(conflict))) = merged {
+            if let Ok(Some(Some((conflict, hold)))) = merged {
                 let _ = handle_merge_conflict(&engine, marker, conflict, attempt).await;
+                let _ = engine.call(move |s| release_pool_checkout(s, hold)).await;
             }
             let _ = engine.call(finish_adopted_finalize).await;
         }

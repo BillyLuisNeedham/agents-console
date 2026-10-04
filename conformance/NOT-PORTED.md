@@ -1063,3 +1063,21 @@ Hidden behaviour the cases cannot show, for the Rust port:
   pass 10, and the reason reads `ticket fit: level 4.6`. No case pins it, since the API answers within the
   levels. Intended behaviour (inference): a score outside `0..levels-1` is malformed. Rust unit test: *Jev answer
   check: a Score outside its levels falls back as malformed.*
+
+## `herdr` and `enlist`: the Rust port's choices (r-panes)
+
+Where the Rust port differs from the TypeScript on purpose, or copied what looks wrong:
+
+- **A Turn read in flight when an enlisted tick stops.** In `engine/enlisted.ts` a `pane.read` already out when the
+  ending watch (or a release) stops the tick still records its text in the pane read register afterwards, so
+  a Peek can serve a viewport frozen after the entry was forgotten. The Rust port drops such a read. No case
+  can time it; the Peek would otherwise answer a pane nothing watches.
+- **A conflicted enlisted merge keeps its writer mark.** `chainEnlistedMerge` handles the conflict (the
+  resolver run included) inside the pool checkout's gate, so the merge counts as a writer there until it is
+  settled and Keep talking refuses beside it. The Rust gate runs one synchronous merge, so the port re-takes
+  the same mark inside the merge's own job and releases it when the conflict handling ends. Same words, same
+  span.
+- **The enlist teaching's paste check** reads `recent` 200 lines of the operator's pane (`type_verified`), which
+  moves their viewport; copied as the TypeScript has it (see `herdr` panes above).
+- **A refused `tab.close` outside the bulk close** writes its pool-log line and a `tab-close-failed` event with no
+  snapshot emitted; copied as is.
