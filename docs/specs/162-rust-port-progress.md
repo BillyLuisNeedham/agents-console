@@ -34,8 +34,10 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | restart, Tickets and Attempts | C05 | landed, 55 cases |
 | restart, Conversations and panes | C06 | landed (f0eef0a), 30 cases |
 | Conversation Turn state and Notices | C17 | landed, 22 cases |
-| verify with Jev | C22 | wave 2 |
+| verify with Jev | C22 | landed (2c5e693, 225ae7c), 32 cases |
 | the failing scheduling case | | fixed in 879b564: the case now waits for the settled frame (a read's reply can overtake a coalesced push) |
+
+M0 done: C22's full Bun run after the last fixture change passed 1159 of 1160 (one pending todo not run), exit 0.
 
 ### M1 to M5
 
@@ -164,6 +166,19 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - Not pinned: while a redone merge waits at the pool checkout's gate, the phase stays "running" until the
   Continued attempt ends; cases wait for "merge dropped at the last shutdown chained again" and mergeState
   "queued" instead.
+
+### verify with Jev (C22, 225ae7c)
+
+- Retry policy (the SDK's): 2 retries for 408, 429, 5xx, connection errors and timeouts; backoff 500 ms then
+  1 s minus up to 25% jitter, capped at 5 s; honours retry-after-ms or Retry-After up to 60 s; 10 s per try.
+- Error classes: 401/403 bad-key; 429 rate-limited; 400 with detail.error_type max_tokens_exceeded
+  evidence-too-large; other 400 and every 422 invalid-question; timeout timed-out; any other status (404,
+  408) unreachable "HTTP <n>". A 200 whose body is not JSON is malformed, "response is not an object".
+- Score: round(sum*10*10)/10 in f64, summing ticket_fit, claim_fidelity, log_health in that order.
+- Notice board compares with the last cause only; one recovery line after any fallback; a success before
+  any failure announces nothing. Any failed ask (the widening re-ask included) abandons the round. The
+  widening re-ask happens only when ticket_fit confidence < 0.5 and the base Evidence was trimmed.
+- Suspected gap, kept: an out-of-range Score (ticket_fit 4.6) is accepted and reads "level 4.6".
 
 ## Notes from the Rust port agents
 
