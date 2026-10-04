@@ -30,3 +30,4 @@ pub mod steward;
 pub mod steward_notes;
 pub mod streamlog;
 pub mod turn_state;
+pub mod verify_prompts;

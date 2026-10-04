@@ -200,6 +200,8 @@ pub struct Session {
     /// there.
     pub last_config_text: Option<String>,
     pub jev: Jev,
+    /// The pool-log subscription on the Jev port, released at close.
+    pub jev_unsubscribe: Option<ac_io::jev::Unsubscribe>,
     /// The headless children of this engine process (ADR-0017).
     pub children: ChildTracker,
     /// Headless orphans rehydrate found still alive from a previous engine process.
@@ -313,6 +315,7 @@ impl Session {
             merge_line: MergeLine::new(),
             last_config_text: None,
             jev: Jev::unconfigured(),
+            jev_unsubscribe: None,
             children: ChildTracker::default(),
             orphans: Vec::new(),
             conversations: Conversations::default(),

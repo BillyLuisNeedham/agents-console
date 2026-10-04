@@ -66,6 +66,9 @@ pub fn persistence_interrupt(error: &str) -> Interrupt {
 pub fn close_store(session: &mut Session) {
     session.hold_watch.stop();
     session.hold_watch_timer += 1;
+    if let Some(unsubscribe) = session.jev_unsubscribe.take() {
+        unsubscribe.unsubscribe();
+    }
     if !session.store_open {
         return;
     }

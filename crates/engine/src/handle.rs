@@ -86,12 +86,14 @@ impl Engine {
         run.conversation_poll_ms = ms(options.conversation_poll);
         run.enlist_teaching_wait_ms = ms(options.enlist_teaching_wait);
         run.pane_survey_ms = ms(options.pane_survey);
-        // STUB(verify): the configured port is the TypeSafe client (ac_io::jev); until the verify port
-        // wires it in, only whether a key was given is carried, for the boot line.
-        run.jev = options
-            .jev_api_key
-            .filter(|key| !key.is_empty())
-            .map(|_| crate::jev::Jev::configured_stub());
+        // Jev (ADR-0020): the TypeSafe client for a key, the unconfigured port without one.
+        run.jev = Some(crate::jev::Jev::new(std::sync::Arc::new(
+            ac_io::jev::create_jev(ac_io::jev::JevOptions {
+                api_key: options.jev_api_key,
+                base_url: options.jev_base_url,
+                ..ac_io::jev::JevOptions::default()
+            }),
+        )));
         // The server reads only the snapshot it was last handed (issue #157).
         run.snapshot_history = Some(1);
         crate::boot::start_pool(run)
@@ -190,6 +192,7 @@ impl Engine {
             .call(|s| {
                 crate::conversations::dispose(s);
                 s.enlisted.dispose();
+                crate::keep_talking::release_continued_attempts(s);
                 crate::pane_survey::stop_pane_survey(s);
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
@@ -231,8 +234,8 @@ impl Engine {
     /// `keepTalking` (issue #139): continue a checkpointed Attempt in its Held pane; the new Attempt's
     /// number.
     pub async fn keep_talking(&self, ticket_id: String) -> Result<u32, EngineError> {
-        let _ = ticket_id;
-        not_ported("keepTalking")
+        let attempt = crate::keep_talking::keep_talking(self, ticket_id, None).await?;
+        Ok(u32::try_from(attempt).unwrap_or(u32::MAX))
     }
 
     /// `closeFinishedTerminals` (issue #139): how many closed.
