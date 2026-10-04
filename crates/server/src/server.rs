@@ -31,7 +31,7 @@ use ac_core::machine_defaults::MachineDefaultsPaths;
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_core::pool_settings::{SettingsContext, pool_settings_path, settings_payload};
 use ac_core::pool_title::title_of;
-use ac_engine::{Engine, EngineError, PoolOptions, PoolSnapshot};
+use ac_engine::{Engine, EngineError, PoolSnapshot, RunOptions};
 use ac_io::herdr::Herdr;
 use ac_protocol::{EnrichedSnapshot, HEARTBEAT_MS, SettingsResponse, TicketGradeSummary};
 
@@ -56,9 +56,9 @@ const STREAM_DRAIN: Duration = Duration::from_millis(50);
 // How long a stop of serving is waited on before the listener's task is cut.
 const SERVE_STOP_WAIT: Duration = Duration::from_millis(100);
 
-/// How the server starts the engine: [`Engine::start_pool`], or a stand-in a test supplies.
+/// How the server starts the engine: [`ac_engine::start_pool`], or a stand-in a test supplies.
 pub type Starter =
-    Arc<dyn Fn(PoolOptions) -> BoxFuture<'static, Result<Engine, EngineError>> + Send + Sync>;
+    Arc<dyn Fn(RunOptions) -> BoxFuture<'static, Result<Engine, EngineError>> + Send + Sync>;
 
 /// What a Stop from the Console sets in motion once the route has accepted it.
 pub type StopHandOff = Arc<dyn Fn() + Send + Sync>;
@@ -100,7 +100,9 @@ pub struct PoolServerOptions {
     pub machine_defaults_paths: MachineDefaultsPaths,
     /// The environment every harness child inherits (`process.env`, read by the CLI).
     pub parent_env: Arc<Vec<(String, String)>>,
-    /// How the engine starts; [`Engine::start_pool`] when absent.
+    /// The home directory (`os.homedir()`, read by the CLI).
+    pub home: String,
+    /// How the engine starts; [`ac_engine::start_pool`] when absent.
     pub starter: Option<Starter>,
 }
 
@@ -160,6 +162,7 @@ pub(crate) struct Shared {
     pub pane_survey: Option<Duration>,
     pub machine_paths: MachineDefaultsPaths,
     pub parent_env: Arc<Vec<(String, String)>>,
+    pub home: String,
     pub ui: Ui,
     pub port: u16,
     pub heartbeat: Duration,
@@ -328,6 +331,7 @@ impl Server {
             pane_survey: options.pane_survey,
             machine_paths: options.machine_defaults_paths,
             parent_env: options.parent_env,
+            home: options.home,
             ui: options.ui.unwrap_or_else(Ui::default_for_build),
             port,
             heartbeat,
@@ -335,9 +339,16 @@ impl Server {
             check: SNAPSHOT_COALESCE,
             on_stop: options.on_stop_requested,
             on_restart: options.on_restart_requested,
-            starter: options
-                .starter
-                .unwrap_or_else(|| Arc::new(|options| Engine::start_pool(options).boxed())),
+            starter: options.starter.unwrap_or_else(|| {
+                Arc::new(|options| {
+                    async move {
+                        ac_engine::start_pool(options)
+                            .await
+                            .map_err(|error| EngineError::refused(error.to_string()))
+                    }
+                    .boxed()
+                })
+            }),
             runtime: Handle::current(),
             engine: OnceCell::new(),
             inner: Mutex::new(Inner {
@@ -436,22 +447,31 @@ impl Server {
             .0
             .engine
             .get_or_try_init(|| async move {
-                let options = PoolOptions {
-                    pool_dir: shared.pool_dir.clone(),
-                    harnesses: shared.harnesses.clone(),
-                    herdr_socket: shared.herdr_socket.clone(),
-                    herdr_workspace: shared.herdr_workspace.clone(),
-                    jev_api_key: shared.jev_api_key.clone(),
-                    jev_base_url: shared.jev_base_url.clone(),
-                    // The Steward's teaching names where its command reaches (ADR-0030).
-                    console_url: format!("http://localhost:{}", shared.port),
-                    enlist_poll: shared.enlist_poll,
-                    conversation_poll: shared.conversation_poll,
-                    enlist_teaching_wait: shared.enlist_teaching_wait,
-                    pane_survey: shared.pane_survey,
-                    parent_env: shared.parent_env.clone(),
-                    machine_defaults: shared.machine_paths.clone(),
+                let ms = |d: Option<Duration>| {
+                    d.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                 };
+                let mut options = RunOptions::new(shared.pool_dir.clone(), shared.home.clone());
+                options.harnesses = Some(shared.harnesses.clone());
+                options.parent_env = shared.parent_env.clone();
+                options.machine_defaults = Some(shared.machine_paths.clone());
+                options.herdr_socket = Some(js::path_text(&shared.herdr_socket));
+                options.herdr_workspace = shared.herdr_workspace.clone();
+                // Jev (ADR-0020): the TypeSafe client for a key, the unconfigured port without one.
+                options.jev = Some(ac_engine::jev::Jev::new(Arc::new(ac_io::jev::create_jev(
+                    ac_io::jev::JevOptions {
+                        api_key: shared.jev_api_key.clone(),
+                        base_url: shared.jev_base_url.clone(),
+                        ..ac_io::jev::JevOptions::default()
+                    },
+                ))));
+                // The Steward's teaching names where its command reaches (ADR-0030).
+                options.console_url = Some(format!("http://localhost:{}", shared.port));
+                options.enlist_poll_ms = ms(shared.enlist_poll);
+                options.conversation_poll_ms = ms(shared.conversation_poll);
+                options.enlist_teaching_wait_ms = ms(shared.enlist_teaching_wait);
+                options.pane_survey_ms = ms(shared.pane_survey);
+                // The server reads only the snapshot it was last handed (issue #157).
+                options.snapshot_history = Some(1);
                 (shared.starter)(options).await
             })
             .await

@@ -57,6 +57,8 @@ pub struct RunOptions {
     pub allow_empty_issues: bool,
     /// Jev (ADR-0020), built at the CLI boundary from the key; absent, the unconfigured port.
     pub jev: Option<Jev>,
+    /// Where Jev's TypeSafe calls go (`JEV_BASE_URL`), for the verify port's client. STUB(verify).
+    pub jev_base_url: Option<String>,
     /// The Console's URL when a server runs this engine (ADR-0030).
     pub console_url: Option<String>,
     /// How many emitted snapshots the engine keeps, newest last (issue #157); `None` keeps them all.
@@ -85,6 +87,7 @@ impl RunOptions {
             herdr_workspace: None,
             allow_empty_issues: false,
             jev: None,
+            jev_base_url: None,
             console_url: None,
             snapshot_history: None,
         }
