@@ -67,6 +67,12 @@ conversations and restart). The wave agents merge each other's commits; some car
 commit '...' into HEAD" message. Before the final message, reword those across the branch (one
 `git filter-branch --msg-filter` over the branch's own range, no other change).
 
+Landed after it: r-conversations (6b59547, with the compile reconcile against verify folded in),
+r-panes (93172dc), r-spawns (eb116b7 and its server snapshot re-check). On Rust at those heads:
+conversations 74/74, verify 94/94, interrupts 48/48, merges 63/65, herdr 82/82, enlist 39/41,
+scheduling 46/46, formats 41/41, spawns 72/72. Every failure left is r-restart's (a merge a shutdown
+dropped, re-adopting an enlisted pane at boot). Still running: r-restart.
+
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
    `--legs bun,rust,bun`.
