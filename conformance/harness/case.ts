@@ -79,18 +79,16 @@ export interface Case {
    * the server from `legs` (default 0); another server on the same pool
    * must have stopped first, since the pool lock admits one.
    */
-  start(
-    world: World,
-    options?: {
-      herdr?: HerdrProcess;
-      jev?: ServedFakeJev;
-      env?: Record<string, string | null>;
-      pool?: string;
-      leg?: number;
-    },
-  ): Promise<CaseServer>;
-  /** A socket on a server; with `hello`, the client's hello goes first. */
-  socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
+  start(world: World, options?: CaseStartOptions): Promise<CaseServer>;
+  /**
+   * A socket on a server; with `hello`, the client's hello goes first, and
+   * `headers` go on the upgrade request (an Origin, say).
+   */
+  socket(
+    server: RunningServer,
+    hello?: { visible: boolean; cards?: CardSubscription[] },
+    headers?: Record<string, string>,
+  ): Promise<SocketClient>;
   /**
    * Run `cleanup` at teardown, pass or fail, before the worlds are deleted:
    * for what a case starts that is not one of the above, a command line's
@@ -99,17 +97,35 @@ export interface Case {
   defer(cleanup: () => void | Promise<void>): void;
 }
 
+/** How `Case.start` starts a server; see there. */
+export interface CaseStartOptions {
+  herdr?: HerdrProcess;
+  jev?: ServedFakeJev;
+  /**
+   * Variables beside the world's own, HERDR_WORKSPACE_ID or a PWD say;
+   * these win. A string sets a variable, null unsets it.
+   */
+  env?: Record<string, string | null>;
+  pool?: string;
+  leg?: number;
+}
+
 export interface CaseOptions {
   /** The case's bound, start and stop included. Default 60 s, 180 s when slow. */
   timeoutMs?: number;
   /**
    * The case waits out one of the server's fixed timings for real (the
-   * inventory's Decided 2: no knobs). Its name ends ` [slow]`, so a run
-   * can leave the slow ones out with `-t '^(?!.*\[slow\]$)'`.
+   * inventory's Decided 2: no knobs), a real timer of ten seconds or more
+   * (a heartbeat, the teaching wait, the pane survey) say. Its name ends
+   * ` [slow]`, so a run can leave the slow ones out with
+   * `-t '^(?!.*\[slow\]$)'`, and it is skipped when CONFORMANCE_FAST=1 (the
+   * runner's `--fast`).
    */
   slow?: boolean;
   /** A takeover case, whose legs run the servers CONFORMANCE_LEGS names. */
   takeover?: boolean;
+  /** Why this case cannot run on this machine: it is skipped, and the reason printed. */
+  skip?: string;
 }
 
 /** The servers a case's legs run: CONFORMANCE_LEGS for a takeover, else the run's one. */
@@ -161,8 +177,8 @@ function caseContext(legs: ServerChoice[]): { t: Case; teardown(failed: boolean)
       servers.push(server);
       return server;
     },
-    async socket(server, hello) {
-      const client = await openSocket(server.url, hello);
+    async socket(server, hello, headers) {
+      const client = await openSocket(server.url, hello, headers);
       sockets.push(client);
       return client;
     },
@@ -211,7 +227,9 @@ function caseContext(legs: ServerChoice[]): { t: Case; teardown(failed: boolean)
  * Register one case. Its test name is `[<area>] <name>`, which is how the
  * runner counts it under its area. When the chosen server cannot run (the
  * Rust binary is not built), or for a takeover one of its legs' servers,
- * the case is skipped, never failed, and the runner reports why.
+ * the case is skipped, never failed, and the runner reports why. A slow
+ * case under CONFORMANCE_FAST=1, or one given a `skip` reason, is skipped
+ * too, and counted as not run.
  */
 export function conformance(
   area: Area,
@@ -221,7 +239,14 @@ export function conformance(
 ): void {
   const title = `[${area}] ${name}${options.slow ? " [slow]" : ""}`;
   const legs = caseLegs(options);
-  if (serverMissing(serverChoice()) !== null || legsMissing(legs) !== null) {
+  if (options.skip !== undefined) console.warn(`skipped ${title}: ${options.skip}`);
+  const fastSkip = options.slow === true && process.env.CONFORMANCE_FAST === "1";
+  if (
+    serverMissing(serverChoice()) !== null ||
+    legsMissing(legs) !== null ||
+    fastSkip ||
+    options.skip !== undefined
+  ) {
     test.skip(title, () => {});
     return;
   }

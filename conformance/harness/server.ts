@@ -83,11 +83,38 @@ export function legsMissing(legs: ServerChoice[]): string | null {
   return null;
 }
 
+/** The subcommands of the one binary (ADR-0036), each a script of its own under Bun. */
+export type Command = "server" | "steward" | "boot" | "fleet";
+
+const BUN_SCRIPTS: Record<Command, string> = {
+  server: "server.ts",
+  steward: "steward-cli.ts",
+  boot: "boot-cli.ts",
+  fleet: "fleet-cli.ts",
+};
+
+/**
+ * The argv that runs one of the chosen side's commands with the given
+ * arguments: `bun run engine/<script>` for Bun, `<binary> <command>` for
+ * Rust.
+ */
+export function commandArgv(choice: ServerChoice, command: Command, args: string[] = []): string[] {
+  if (choice.kind === "bun") return [process.execPath, "run", join(CHECKOUT, "engine", BUN_SCRIPTS[command]), ...args];
+  return [choice.rustBin!, command, ...args];
+}
+
+/**
+ * The argv that starts the chosen server on a pool with exactly the given
+ * further arguments: no `--port` is added, so a case can leave the port to
+ * console.json or the default hunt, or pass its own.
+ */
+export function serverArgvAsGiven(choice: ServerChoice, pool: string, args: string[] = []): string[] {
+  return commandArgv(choice, "server", ["--pool", pool, ...args]);
+}
+
 /** The argv that starts the chosen server on a pool and a port. */
 export function serverArgv(choice: ServerChoice, pool: string, port: number): string[] {
-  const where = ["--pool", pool, "--port", String(port)];
-  if (choice.kind === "bun") return [process.execPath, "run", join(CHECKOUT, "engine", "server.ts"), ...where];
-  return [choice.rustBin!, "server", ...where];
+  return serverArgvAsGiven(choice, pool, ["--port", String(port)]);
 }
 
 /** The port in a boot line, `pool server on http://localhost:<port> (<pool>)`. */
@@ -110,7 +137,8 @@ export function freePort(): Promise<number> {
   });
 }
 
-async function portTaken(port: number): Promise<boolean> {
+/** Whether something on this machine listens on `port` now. */
+export async function portTaken(port: number): Promise<boolean> {
   return new Promise((done) => {
     const probe = createServer();
     probe.once("error", () => done(true));
@@ -135,6 +163,8 @@ export interface RunningServer {
   logPath: string;
   /** Whether the process has exited. */
   exited(): boolean;
+  /** The exit code once the process has exited on its own; null while it runs. */
+  exitCode(): number | null;
   /** The server log from this start on. */
   log(): string;
   /**
@@ -172,6 +202,28 @@ async function stateAnswers(url: string): Promise<boolean> {
     // short gap before the socket accepts is ordinary.
     return false;
   }
+}
+
+/**
+ * The orderly stop both kinds of server process share: SIGTERM unless it
+ * has exited already, then exit 0 within `ms` and the pool lock released.
+ * One still alive at the bound is killed before the throw; `context` is what
+ * a failure shows of its output.
+ */
+async function stopInOrder(
+  proc: { kill(signal: NodeJS.Signals): void; readonly exitCode: number | null },
+  exited: Promise<number>,
+  stop: { kind: ServerKind; ms: number; lockPath: string; context: () => string },
+): Promise<void> {
+  if (proc.exitCode === null) proc.kill("SIGTERM");
+  const code = await Promise.race([exited, Bun.sleep(stop.ms).then(() => null)]);
+  if (code === null) {
+    proc.kill("SIGKILL");
+    await exited;
+    throw new Error(`the ${stop.kind} server was still running ${stop.ms} ms after SIGTERM:\n${stop.context()}`);
+  }
+  if (code !== 0) throw new Error(`the ${stop.kind} server exited ${code} after SIGTERM, not 0:\n${stop.context()}`);
+  if (existsSync(stop.lockPath)) throw new Error(`the ${stop.kind} server stopped without releasing ${stop.lockPath}`);
 }
 
 async function startOnce(options: StartOptions, choice: ServerChoice, port: number): Promise<RunningServer | { busy: true }> {
@@ -238,22 +290,10 @@ async function startOnce(options: StartOptions, choice: ServerChoice, port: numb
     pid: proc.pid,
     logPath,
     exited,
+    exitCode: () => exitCode,
     log,
-    async stop(ms = 15_000) {
-      if (!exited()) proc.kill("SIGTERM");
-      const stopped = await Promise.race([proc.exited.then(() => true), Bun.sleep(ms).then(() => false)]);
-      if (!stopped) {
-        proc.kill("SIGKILL");
-        await proc.exited;
-        throw new Error(`the ${choice.kind} server was still running ${ms} ms after SIGTERM:\n${tail(log())}`);
-      }
-      if (exitCode !== 0) {
-        throw new Error(`the ${choice.kind} server exited ${exitCode} after SIGTERM, not 0:\n${tail(log())}`);
-      }
-      if (existsSync(lockPath)) {
-        throw new Error(`the ${choice.kind} server stopped without releasing ${lockPath}`);
-      }
-    },
+    stop: (ms = 15_000) =>
+      stopInOrder(proc, proc.exited, { kind: choice.kind, ms, lockPath, context: () => tail(log()) }),
     async kill() {
       if (!exited()) proc.kill("SIGKILL");
       await proc.exited;
@@ -275,4 +315,121 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     if (!("busy" in started)) return started;
   }
   throw new Error("three free ports in a row were taken before the server could bind one");
+}
+
+export interface LaunchOptions {
+  pool: string;
+  env: Record<string, string>;
+  choice?: ServerChoice;
+  /** Everything after `--pool <dir>`, `--port` included when the case wants one. */
+  args?: string[];
+}
+
+/**
+ * A server process a case launches by hand, for the server's own lifecycle:
+ * a launch that must fail (a held lock, a busy pin), one on a port it picks
+ * itself, two at once. Its streams are kept apart in memory, since the
+ * contract says which one a refusal or a farewell line goes to; nothing is
+ * waited for until the case asks.
+ */
+export interface LaunchedServer {
+  kind: ServerKind;
+  pid: number;
+  /** Standard output so far. */
+  stdout(): string;
+  /** Standard error so far. */
+  stderr(): string;
+  /** The exit code once the process has exited; null while it runs. */
+  exitCode(): number | null;
+  /** Resolves with the exit code. */
+  exited: Promise<number>;
+  /**
+   * Wait for the boot line on stdout and for `/api/state` to answer on the
+   * port it names, and hand back that port. Throws when the process exits
+   * first or `ms` passes.
+   */
+  booted(ms?: number): Promise<number>;
+  /** SIGTERM, then require exit 0 within `ms` and `runs/server.pid` gone. */
+  stop(ms?: number): Promise<void>;
+  /**
+   * Wait for a launch that must fail to exit, and hand back its exit code
+   * and both streams; one still running after `ms` is killed and throws.
+   */
+  refused(ms?: number): Promise<{ code: number; stdout: string; stderr: string }>;
+  /** SIGKILL with no checks. */
+  kill(): Promise<void>;
+}
+
+export function launchServer(options: LaunchOptions): LaunchedServer {
+  const choice = options.choice ?? serverChoice();
+  const missing = serverMissing(choice);
+  if (missing) throw new Error(missing);
+  const proc = Bun.spawn(serverArgvAsGiven(choice, options.pool, options.args), {
+    cwd: CHECKOUT,
+    env: options.env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let out = "";
+  let err = "";
+  const drain = async (stream: ReadableStream<Uint8Array>, add: (text: string) => void): Promise<void> => {
+    const decoder = new TextDecoder();
+    for await (const chunk of stream) add(decoder.decode(chunk, { stream: true }));
+  };
+  const drained = Promise.all([
+    drain(proc.stdout, (text) => (out += text)),
+    drain(proc.stderr, (text) => (err += text)),
+  ]);
+  let code: number | null = null;
+  // The streams are read to their end before the exit counts, so a case that
+  // saw the exit also sees the last line the process wrote.
+  const exited = proc.exited.then(async (exit) => {
+    await drained;
+    code = exit;
+    return exit;
+  });
+  const both = (): string => tail(`${out}\n${err}`);
+  const lockPath = join(options.pool, "runs", "server.pid");
+  return {
+    kind: choice.kind,
+    pid: proc.pid,
+    stdout: () => out,
+    stderr: () => err,
+    exitCode: () => code,
+    exited,
+    async booted(ms = 15_000) {
+      const deadline = Date.now() + ms;
+      let port: number | null = null;
+      while (port === null) {
+        port = bootLinePort(out);
+        if (port !== null) break;
+        if (code !== null) throw new Error(`the ${choice.kind} server exited ${code} before its boot line:\n${both()}`);
+        if (Date.now() >= deadline) throw new Error(`the ${choice.kind} server printed no boot line in time:\n${both()}`);
+        await Bun.sleep(POLL_MS);
+      }
+      const url = `http://localhost:${port}`;
+      while (!(await stateAnswers(url))) {
+        if (code !== null || Date.now() >= deadline) {
+          throw new Error(`the ${choice.kind} server never answered /api/state on ${port}:\n${both()}`);
+        }
+        await Bun.sleep(POLL_MS);
+      }
+      return port;
+    },
+    stop: (ms = 15_000) => stopInOrder(proc, exited, { kind: choice.kind, ms, lockPath, context: both }),
+    async refused(ms = 20_000) {
+      const exit = await Promise.race([exited, Bun.sleep(ms).then(() => null)]);
+      if (exit === null) {
+        proc.kill("SIGKILL");
+        await exited;
+        throw new Error(`the ${choice.kind} server was still running ${ms} ms after a launch it should have refused:\n${both()}`);
+      }
+      return { code: exit, stdout: out, stderr: err };
+    },
+    async kill() {
+      if (code === null) proc.kill("SIGKILL");
+      await exited;
+    },
+  };
 }

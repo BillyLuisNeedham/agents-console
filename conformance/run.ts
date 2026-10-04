@@ -2,15 +2,17 @@
  * The conformance suite's runner (ADR-0036):
  *
  *   bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...]
- *                       [<bun test arguments>]
+ *                       [--fast] [<bun test arguments>]
  *
  * Runs every test under conformance/ against the chosen server, Bun's
  * (`bun run engine/server.ts`) or Rust's (`<binary> server`, by default
  * target/release/agent-console), and prints the pass share per contract
  * area. `--legs bun,rust,bun` names the server each leg of a takeover case
  * runs, in order (CONFORMANCE_LEGS does the same); by default every leg
- * runs the chosen server. Anything after the options goes to `bun test` as
- * it is: a file filter, or `-t <pattern>` for a name.
+ * runs the chosen server. `--fast` skips the slow cases, those that wait
+ * out a real timer of ten seconds or more, and counts them as not run.
+ * Anything after the options goes to `bun test` as it is: a file filter,
+ * or `-t <pattern>` for a name.
  *
  * Exit codes: 0 when every case that ran passed; 1 when one failed or
  * `bun test` itself did; 2 when the chosen server, or a leg's, cannot run
@@ -25,13 +27,14 @@ import { countByArea, formatReport, parseJunit } from "./report.ts";
 import { legsMissing, serverChoice, serverLegs, serverMissing } from "./harness/server.ts";
 
 const USAGE =
-  "usage: bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...] [<bun test arguments>]";
+  "usage: bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...] [--fast] [<bun test arguments>]";
 
 const args = process.argv.slice(2);
 const passthrough: string[] = [];
 let server: string | undefined;
 let rustBin: string | undefined;
 let legs: string | undefined;
+let fast = false;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
   if (arg === "--server") server = args[++i];
@@ -40,6 +43,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg.startsWith("--rust-bin=")) rustBin = arg.slice("--rust-bin=".length);
   else if (arg === "--legs") legs = args[++i];
   else if (arg.startsWith("--legs=")) legs = arg.slice("--legs=".length);
+  else if (arg === "--fast") fast = true;
   else if (arg === "--help" || arg === "-h") {
     console.log(USAGE);
     process.exit(0);
@@ -54,6 +58,8 @@ const env: Record<string, string | undefined> = { ...process.env, CONFORMANCE_SE
 if (rustBin !== undefined) env.CONFORMANCE_RUST_BIN = rustBin;
 else delete env.CONFORMANCE_RUST_BIN;
 if (legs !== undefined) env.CONFORMANCE_LEGS = legs;
+if (fast) env.CONFORMANCE_FAST = "1";
+else delete env.CONFORMANCE_FAST;
 const choice = serverChoice(env);
 let legChoices;
 try {
