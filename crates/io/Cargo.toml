@@ -22,6 +22,11 @@ libc.workspace = true
 nix.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
+# The fake herdr daemon (`herdr::fake`), shared with the crates above under the test-support feature.
+tempfile = { workspace = true, optional = true }
+
+[features]
+test-support = ["dep:tempfile"]
 
 [features]
 # The Jev port fake (`ac_io::jev::fake`), for the engine's own tests.

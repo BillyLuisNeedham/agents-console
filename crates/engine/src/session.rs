@@ -5,6 +5,8 @@
 //! Session; the skeleton carries only what the actor and the handle need to compile.
 
 use crate::actor::{Engine, SnapshotPublisher};
+use crate::children::ChildTracker;
+use crate::live_attempts::LiveAttempts;
 use crate::pane_reads::PaneReadRegister;
 
 /// One pool's run.
@@ -16,4 +18,8 @@ pub struct Session {
     pub publisher: SnapshotPublisher,
     /// The pane read register (pane-reads.ts).
     pub pane_reads: PaneReadRegister,
+    /// The headless children of this engine process (ADR-0017).
+    pub children: ChildTracker,
+    /// The Live attempts registry: every Attempt between its launch and its ending.
+    pub live_attempts: LiveAttempts,
 }

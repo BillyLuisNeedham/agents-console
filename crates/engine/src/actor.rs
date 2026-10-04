@@ -129,6 +129,8 @@ mod tests {
                 engine: None,
                 publisher,
                 pane_reads: PaneReadRegister::default(),
+                children: Default::default(),
+                live_attempts: Default::default(),
             },
             snapshots,
         )

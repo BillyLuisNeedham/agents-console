@@ -28,13 +28,13 @@ use super::Herdr;
 
 /// One call the fake received.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct Recorded {
+pub struct Recorded {
     pub method: String,
     pub params: Value,
 }
 
 /// An answer a test scripts for one call, in place of the fake's own.
-pub(super) enum Reply {
+pub enum Reply {
     /// This line and a newline, then the fake hangs up.
     Line(String),
     /// These bytes exactly, then the fake hangs up.
@@ -48,10 +48,10 @@ pub(super) enum Reply {
 }
 
 /// Picks a scripted answer for a call by its method and params, or `None` for the fake's own.
-pub(super) type Script = Arc<dyn Fn(&str, &Value) -> Option<Reply> + Send + Sync>;
+pub type Script = Arc<dyn Fn(&str, &Value) -> Option<Reply> + Send + Sync>;
 
 #[derive(Default)]
-pub(super) struct Options {
+pub struct Options {
     /// Panes the daemon already holds (live agents the pool must never touch), as `pane.list` lists them.
     pub foreign_panes: Vec<Value>,
     /// When set, `pane.list` answers exactly these, ignoring created tabs.
@@ -100,7 +100,7 @@ enum Action {
     Close,
 }
 
-pub(super) struct FakeHerdr {
+pub struct FakeHerdr {
     socket_path: PathBuf,
     state: Arc<Mutex<State>>,
     accept: JoinHandle<()>,
@@ -241,7 +241,7 @@ impl FakeHerdr {
 
 /// Wait for something the fake daemon has seen, so a test drives the daemon's side only once the client
 /// has actually got there.
-pub(super) async fn until(what: &str, held: impl Fn() -> bool) {
+pub async fn until(what: &str, held: impl Fn() -> bool) {
     for _ in 0..500 {
         if held() {
             return;

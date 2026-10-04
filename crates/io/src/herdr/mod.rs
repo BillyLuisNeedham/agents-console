@@ -30,8 +30,8 @@
 mod pane_end;
 mod rpc;
 
-#[cfg(test)]
-mod fake;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
 #[cfg(test)]
 mod tests;
 
