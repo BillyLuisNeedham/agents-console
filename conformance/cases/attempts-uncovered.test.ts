@@ -13,12 +13,10 @@ import { anyIsoTime, expectJsonlEqual } from "../harness/equal.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
 import { batchPromptArg, ticketPrompt } from "../harness/prompts.ts";
 
-// Gap: engine/attempt-run.ts:514-531. A terminal-backed launch that falls
-// back to headless takes the batch argv, so the effort the TUI's argv would
-// have dropped reaches opencode after all. The spawned event's
-// effort_applied should say so, but the TypeScript server records false when
-// the tab could not be opened (NOT-PORTED.md), so this case leaves that one
-// fact unpinned until the reference server is fixed.
+// Gap: engine/attempt-run.ts recordSpawned. A terminal-backed launch that
+// falls back to headless takes the batch argv, so the effort the TUI's argv
+// would have dropped reaches opencode after all, and the spawned event's
+// effort_applied says so even when the fallback came from the tab open.
 conformance("attempts", "a headless fallback on opencode carries the effort the TUI would drop", async (t) => {
   const world = t.world({
     tickets: [{ file: "01-first.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->", body: "# First\n\nDo it." }],
@@ -67,7 +65,7 @@ conformance("attempts", "a headless fallback on opencode carries the effort the 
         pane_id: null,
         tab_id: null,
         terminal_error: expect.stringContaining("tab.create failed"),
-        effort_applied: expect.any(Boolean),
+        effort_applied: true,
       },
     },
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 0, status: "done", logTail: [], outcomeExists: true } },

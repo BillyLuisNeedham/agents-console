@@ -38,16 +38,6 @@ Every row of ticket C16 (the lifecycle rows) is a case in
 Every one of C11's 68 rows is a passing case under `conformance/cases/attempts-argv.test.ts`,
 `attempts-prompt.test.ts` and `attempts-launch.test.ts`. What is left:
 
-- **TypeScript divergence: `effort_applied` on a tab-open fallback.** Gap entry (engine/attempt-run.ts:514-531),
-  case "a headless fallback on opencode carries the effort the TUI would drop" in `attempts-uncovered.test.ts`.
-  A terminal-backed opencode Ticket with effort `minimal` whose fake herdr refuses `tab.create` falls back to
-  headless, and its argv carries `--variant minimal`, yet the spawned event records `effort_applied: false`.
-  The cause: `recordSpawned` decides the mode from its `terminalError` argument, and the tab-open fallback,
-  `headless(opened)`, passes its error on `terminal.error` instead, so the run counts as interactive. The
-  wrapper-send fallback passes `terminalError` and is right. The case pins every other fact and accepts any
-  boolean for `effort_applied`. Intended: `true`, since the batch argv carried the effort. Once the reference
-  server is fixed, the case pins `true`. Rust unit test: the spawned payload's mode is batch for every
-  headless fallback, whichever way the fallback learned of the failure.
 - **Gaps left to the other `attempts` tickets.** The area's "no test covers yet" entries on terminal-backed
   launch (prompt never landed after the wrapper, the managed-settings and workspace trust dialogs, the readiness
   bound, `pane.report_agent` and `pane.release_agent`, `terminal_id` on the spawned event) are C12's scope, and
