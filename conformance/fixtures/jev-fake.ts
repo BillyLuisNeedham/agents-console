@@ -57,6 +57,13 @@ export interface FakeJevOptions {
   answersFor?: (state: unknown) => Record<string, ScriptedAnswer>;
   /** Serve this HTTP status instead of answers, for the first `times` requests (every request when unset). */
   fail?: { status: number; body?: unknown; times?: number };
+  /**
+   * Serve this HTTP status instead of answers for one request, from the
+   * Evidence it carries as `state`; undefined lets the request through to
+   * `fail` and the answers. How a case fails one Attempt's ask, or one
+   * Ticket's, and answers the rest, whatever order the asks arrive in.
+   */
+  failFor?: (state: unknown) => { status: number; body?: unknown } | undefined;
   /** Serve a 200 whose body is not JSON. */
   garbage?: boolean;
   /** Hold every response this long; with the SDK timeout shorter, the request times out. */
@@ -104,6 +111,9 @@ export function serveFakeJev(options: ServedFakeJevOptions = {}): ServedFakeJev 
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    // Bun cuts a connection idle for 10 s by default, the client's own
+    // timeout too: a `delayMs` past it must be the client's to time out.
+    idleTimeout: 0,
     async fetch(request) {
       const body = await request.text();
       if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/systemone") {
@@ -152,6 +162,8 @@ function fakeJevHandler(options: FakeJevOptions): {
 
       if (options.delayMs !== undefined) await hold(options.delayMs, signal);
       if (options.disconnect) return "disconnect";
+      const failure = options.failFor?.(body.state);
+      if (failure) return json(failure.status, failure.body ?? { error: `status ${failure.status}` });
       if (options.fail && (options.fail.times === undefined || failuresServed < options.fail.times)) {
         failuresServed += 1;
         return json(options.fail.status, options.fail.body ?? { error: `status ${options.fail.status}` });
