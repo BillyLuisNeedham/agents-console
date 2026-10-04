@@ -329,3 +329,64 @@ that will not parse, seen from every route), is `config-settings-unreadable.test
   PUT /api/settings/pool answers 400 for the same body: a malformed request reads back as the server's
   failure. Intended behaviour (inference): 400, as for every other request the route refuses.
 - A Reassign naming one Ticket twice applies it once (`applied` lists it once).
+
+## `interrupts`: Interrupts and answers (C08)
+
+Every one of C08's 42 rows is a passing case under `conformance/cases/interrupts-answers.test.ts`,
+`interrupts-queued.test.ts`, `interrupts-close.test.ts`, `interrupts-persistence.test.ts` and
+`interrupts-keep-talking.test.ts`. So are the area's ten gaps, two of them pinned to what the server answers
+rather than to the gap's wording, and one behaviour no gap lists (an answer to the PERSISTENCE Interrupt while
+the store still refuses). What follows is the part that is not a plain passing case.
+
+### Pinned short
+
+- **A refused checkpoint write's retry** (`engine.test.ts:7033`). The row's seam, a store that fails exactly
+  one write, does not exist. The case makes the store refuse from outside instead: it holds an exclusive SQLite
+  lock on `console.db` from the test process, lets 01 finish, and lets go once the server answers a request sent
+  after 01's `exited` event is on disk. On the Bun server 01's exit and the boundary write run in one stretch of
+  the event loop, so that request is answered only in the backoff after the first write, which the lock refused:
+  in the runs measured, the first checkpoint row landed about 50 ms after the release. What a case cannot show
+  from outside is that a write failed at all: a server that answers HTTP while its boundary write is still to
+  come passes it without retrying anything. The case pins what it can: no persistence Interrupt, 02 launched
+  after 01, and the first row holding `{01: done, 02: ready}`. Rust unit tests: *persist retry: a boundary
+  checkpoint write that fails once is retried after the backoff, the next Ticket is scheduled and no persistence
+  Interrupt is raised; a run to done makes seven write attempts, the failed one and six rows*, and *persistence
+  Interrupt: with a store that always fails, the boundary write and the closing write each make four attempts,
+  eight in all, and the store is never closed.*
+- **Two Keep talking refusals are never given** (gap entries `engine/engine.ts:4682` and `:4685`). keepTalking
+  checks the hold again after its fresh pane listing, and by then that listing's own handler (`surveyListed`,
+  called before `paneSurvey.refresh()` resolves) has already let the hold go. So a pane that is gone, or whose
+  TUI has exited, always gets `keep talking: ticket 01 has no terminal left to continue in`, never `... lost its
+  terminal: pane <id> is gone` or `... lost its agent: the TUI in pane <id> has exited`. The cases in
+  `interrupts-keep-talking.test.ts` pin today's answer: 409, `heldPane` null, the checkpoint Interrupt kept.
+  Intended behaviour (inference): the refusal says why. Rust unit test: *keep talking: over a Held pane the fresh
+  listing no longer has, answer 409 `keep talking: ticket <id> lost its terminal: pane <pane> is gone`; over one
+  whose TUI's exit-code file landed after the attempt began, answer `keep talking: ticket <id> lost its agent:
+  the TUI in pane <pane> has exited`; each lets the hold go.*
+- **A Continued attempt's crash body is pinned at its head and foot only** (`keep-talking.test.ts:198`, `:208`,
+  `:226`). The log-tail lines between come from the pane's Stream file, where util-linux `script` writes its own
+  start and done lines as the TUI exits and BSD `script -q` writes none. So the cases pin the reason, the log
+  path and the outcome-file line, check only that `logTail` is an array on the events, and do not pin the
+  Continued attempt's `stream_offset` to a number (the log case checks what it means instead: above 0, and
+  attempt 2's log holds only the line printed after Keep talking began). Rust unit test: *continued attempt
+  ending: a crash body reads `crash: <reason>\n<log path>\n\n`, then the derived log's last lines and a blank
+  line when there are any, then `outcome file: <path> (missing)\n`.*
+
+### Pinned as the TypeScript server does it today, each worth a look before the port copies it
+
+- **A Brief landed between two sections takes the blank lines above it** (the case for `engine.test.ts:7253`).
+  Landing a checkpoint's Brief strips the old `## Brief` section and the blank lines above it
+  (`stripBriefSections` in `engine/engine.ts`), blank lines meant to go with an engine-written `---` separator,
+  even when there is no separator. So `# 01\n\n## Brief\n\n...\n\n## Notes` becomes `# 01\n## Notes`, and the
+  case pins those bytes. Intended behaviour (inference): the blank lines go only with a `---` an engine append
+  wrote.
+- **An answer to the PERSISTENCE Interrupt while the store still refuses** (`engine/engine.ts:5587-5592`, a case
+  in `interrupts-persistence.test.ts`). The answer is accepted first, so its `answered` event and its queued
+  record are written; its processing then fails to persist, and POST /api/resume answers 400
+  `{"error": "database is locked"}`. Inside, the processing has already cleared the Interrupt from state and
+  logged it answered, but nothing is emitted and no drive starts, so /api/state still serves the Interrupt; the
+  next answer, once the store is healthy, is acknowledged as a retry of the pending record and the run carries
+  on. The case pins the 400, the Interrupt still served, the one event and record, and the run carrying on. The
+  drain's own comment expects the run to go down there, which it does not on the idle path. Rust unit test:
+  *answer drain: an answer whose persist fails leaves the pool state and its queued record as they were, and the
+  next answer to the same Interrupt processes it.*
