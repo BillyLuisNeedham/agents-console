@@ -710,15 +710,21 @@ conformance("conversations", "a harness that dies before its TUI crashes the Con
 
   expect(view.status).toBe("crashed");
   expect(recordStatus(world, "conv-1")).toBe("crashed");
-  const events = readEvents(world.pool, "conv-1");
-  expect(kinds(events)).toEqual(["spawned", "crash"]);
+  // The tab's close races this read: its `tab-closed` event lands once herdr answers the close, so the
+  // log is read once that has happened.
+  await herdr.waitForCall((call) => call.method === "tab.close", { ms: 3_000 });
+  const events = await until(
+    () => readEvents(world.pool, "conv-1"),
+    (read) => kinds(read).length >= 3,
+    { what: "conv-1's tab-closed event" },
+  );
+  expect(kinds(events)).toEqual(["spawned", "crash", "tab-closed"]);
   expect(typeof events[0]!.payload.pane_id).toBe("string");
   expect(events[0]!.payload.commitSha).toMatch(/^[0-9a-f]{40}$/);
   expect(events[1]!.payload).toEqual({ code: 1, reason: "harness exited 1" });
   expect(branches(world)).toEqual(["main"]);
   expect(existsSync(worktreeOf(world, events[0]!.payload.branch as string))).toBe(false);
 
-  await herdr.waitForCall((call) => call.method === "tab.close", { ms: 3_000 });
   await Bun.sleep(300);
   expect(callsOf(herdr, "pane.send_input")).toHaveLength(1);
   expect(callsOf(herdr, "pane.close")).toEqual([]);
