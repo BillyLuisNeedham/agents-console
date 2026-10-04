@@ -362,6 +362,7 @@ take.
 1. Jev: (a). The CLI boundary in `server.ts` reads a Jev base URL beside `TYPESAFE_API_KEY` and passes it in explicitly, and the Rust server does the same. A ticket makes this change to the reference server, and C22 waits on it.
 2. Timings: (a). Real waits behind a slow tag, and no knobs. Revisit if the suite gets too slow to run for each ticket.
 3. Client code in `protocol.ts`: as recommended. A ticket moves the client half out of `engine/` now, so the generated file only has to carry types and constants.
+   Done (conv-1-spawn-26): every function `protocol.ts` held is now `ui/src/protocol.ts`, and `protocol.test.ts` moved with it to `ui/src/protocol.test.ts`, where each case sits two lines below the line the rows here cite.
 4. Prompts, teaching Turns and Notices are pinned byte for byte. The tickets for those areas add a whole-text comparison.
 5. Suspected bugs: a ticket fixes them in the TypeScript server, so conformance pins the intended behaviour and still passes on Bun.
 6. A server that has not started its pool: no flag. These become Rust unit tests, and the two rows go to `NOT-PORTED.md`.

@@ -30,11 +30,6 @@ import {
   HTTP_TWINS,
   LIVE_CHECK_MS,
   PROTOCOL_VERSION,
-  decodeClientMessage,
-  diffSnapshot,
-  embedBoot,
-  encodeMessage,
-  toPushed,
   type CardSubscription,
   type ClientMessage,
   type EmbeddedBoot,
@@ -47,6 +42,13 @@ import {
   type RequestResult,
   type ServerMessage,
 } from "./protocol.ts";
+import {
+  decodeClientMessage,
+  diffSnapshot,
+  embedBoot,
+  encodeMessage,
+  toPushed,
+} from "../ui/src/protocol.ts";
 import type {
   EnrichedSnapshot,
   LogAttemptInfo,

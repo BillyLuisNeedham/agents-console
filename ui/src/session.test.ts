@@ -2,10 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
-  diffSnapshot,
-  encodeMessage,
   PROTOCOL_VERSION,
-  toPushed,
   type CardSubscription,
   type LogFollow,
   type LogFollowResult,
@@ -14,6 +11,7 @@ import {
   type ServerMessage,
   type SocketLike,
 } from "../../engine/protocol.ts";
+import { diffSnapshot, encodeMessage, toPushed } from "./protocol";
 import { createConsole } from "./console";
 import { ConsoleSession, type ConsoleSessionOptions } from "./session";
 import { RequestRefused } from "./socket";
