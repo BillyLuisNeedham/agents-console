@@ -338,7 +338,7 @@ pub fn raise_checkpoint(
         &marker.id,
         &event_now(attempt, TicketEventKind::Checkpoint, Map::new()),
     )?;
-    session.conversations.ticket_checkpointed(marker, &body);
+    crate::conversations::ticket_checkpointed(session, marker, &body);
     crate::held::hold_checkpoint_pane(session, marker, attempt);
     Ok(())
 }

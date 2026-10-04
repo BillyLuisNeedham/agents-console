@@ -115,7 +115,7 @@ fn combined_spawn_counters(session: &Session) -> anyhow::Result<HashMap<String, 
     for rec in recorded {
         raise_counter(&mut counters, &rec.id);
     }
-    for reserved in session.conversations.reserved_ids() {
+    for reserved in crate::conversations::reserved_ids(session) {
         raise_counter(&mut counters, &reserved);
     }
     Ok(counters)
@@ -581,7 +581,7 @@ fn land_spawn(
     proposal: &SpawnProposal,
 ) -> anyhow::Result<bool> {
     if proposal.kind == Some(SpawnKind::Conversation) {
-        session.conversations.reserve(id);
+        crate::conversations::reserve(session, id);
         let engine = session.engine();
         let request = StartConversationRequest {
             title: js::trim(&proposal.title).to_owned(),

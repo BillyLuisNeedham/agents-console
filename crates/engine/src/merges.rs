@@ -577,9 +577,7 @@ fn record_answer_merge(
     }
     let range =
         (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(session)));
-    session
-        .conversations
-        .ticket_ended(marker, &worktree.branch, range);
+    crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
     Ok(())
 }
 

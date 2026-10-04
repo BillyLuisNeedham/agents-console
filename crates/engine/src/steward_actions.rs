@@ -72,7 +72,7 @@ pub fn note_answered(session: &mut Session, ticket_id: &str, by: AnswerBy) {
         session.steward_used.shift_remove(ticket_id);
     }
     let _ = session.steward_notes.clear(ticket_id);
-    session.conversations.steward_forget(ticket_id);
+    crate::conversations::steward_forget(session, ticket_id);
 }
 
 /// steward.ts `stewardBudgetUsed`: the Steward's answers since the operator last answered, counted
@@ -226,7 +226,7 @@ fn steward_refusal(why: impl AsRef<str>) -> EngineError {
 /// It attributes the action and enforces the budget; the Console's API has no authentication, so it is
 /// no security boundary (ADR-0030).
 pub fn check_steward(session: &Session, conversation: &str) -> Result<(), EngineError> {
-    let Some(on_duty) = session.conversations.steward_id() else {
+    let Some(on_duty) = crate::conversations::steward_id(session) else {
         return Err(steward_refusal("no Steward is on duty"));
     };
     if on_duty != conversation {
@@ -637,5 +637,176 @@ pub async fn steward_end(
 ) -> Result<(), EngineError> {
     let c = conversation.clone();
     engine.call(move |s| check_steward(s, &c)).await??;
-    crate::conversations::end_conversation_by_steward(engine, conversation, closing).await
+    crate::conversations::end(engine, &conversation, closing, AnswerBy::Steward).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn event(kind: TicketEventKind, payload: Value) -> Arc<TicketEvent> {
+        let Value::Object(payload) = payload else {
+            unreachable!("a payload is an object");
+        };
+        Arc::new(TicketEvent {
+            at: "2026-10-01T00:00:00.000Z".to_owned(),
+            attempt: 1,
+            kind,
+            payload,
+        })
+    }
+
+    fn answered(payload: Value) -> Arc<TicketEvent> {
+        event(TicketEventKind::Answered, payload)
+    }
+
+    // steward.test.ts: the Steward budget, read off the Ticket log
+    #[test]
+    fn counts_the_stewards_answers_and_keep_talks_since_the_operator_last_answered() {
+        assert_eq!(steward_budget_used(&[]), 0);
+        assert_eq!(
+            steward_budget_used(&[
+                answered(json!({ "kind": "checkpoint", "by": "steward" })),
+                answered(json!({ "kind": "checkpoint" })),
+                answered(json!({ "kind": "checkpoint", "by": "steward" })),
+                event(TicketEventKind::StewardNote, json!({ "by": "steward" })),
+                answered(
+                    json!({ "kind": "checkpoint", "action": "keep-talking", "by": "steward" })
+                ),
+            ]),
+            2
+        );
+        // The operator's answer resets it.
+        assert_eq!(
+            steward_budget_used(&[
+                answered(json!({ "kind": "crash", "by": "steward" })),
+                answered(json!({ "kind": "crash" })),
+            ]),
+            0
+        );
+    }
+
+    #[test]
+    fn an_answer_by_the_steward_carries_who_and_the_trimmed_note_and_a_resume_has_no_action() {
+        let payload = steward_answer_payload("conv-1", ResumeAction::Resume, Some("  go on \n"));
+        assert_eq!(
+            Value::Object(payload),
+            json!({ "by": "steward", "conversation": "conv-1", "note": "go on" })
+        );
+        let payload = steward_answer_payload("conv-1", ResumeAction::Approve, Some("  "));
+        assert_eq!(
+            Value::Object(payload),
+            json!({ "by": "steward", "conversation": "conv-1", "action": "approve" })
+        );
+    }
+
+    #[test]
+    fn types_a_coaching_message_as_the_stewards() {
+        assert_eq!(
+            steward_message_turn("  try the smaller fix \n"),
+            "From the pool's Steward:\n\ntry the smaller fix"
+        );
+    }
+
+    // conformance/NOT-PORTED.md (C18): the two Steward refusals no black-box case reaches.
+    async fn steward_on_duty_over_a_settled_pool() -> (crate::testkit::Pool, Engine) {
+        use ac_core::conversation_record::{ConversationRecord, write_conversation};
+        use ac_protocol::{ConversationRole, ConversationStatus};
+
+        let pool = crate::testkit::Pool::git(&[("01", &[])]);
+        let engine = pool.start().await;
+        crate::testkit::settled(&engine).await;
+        let dir = pool.file("conversations");
+        write_conversation(
+            &dir,
+            &ConversationRecord {
+                id: "conv-1".into(),
+                file: dir.join("conv-1.md"),
+                title: "Steward".into(),
+                opening: String::new(),
+                status: ConversationStatus::Live,
+                spawned_by: None,
+                harness: "claude".into(),
+                model: "m".into(),
+                effort: None,
+                drivers: String::new(),
+                enlisted: None,
+                role: Some(ConversationRole::Steward),
+            },
+        )
+        .unwrap();
+        (pool, engine)
+    }
+
+    fn pending(ticket_id: &str, kind: InterruptKind) -> Interrupt {
+        Interrupt {
+            ticket_id: ticket_id.into(),
+            kind,
+            body: "b".into(),
+            candidates: None,
+            steward_note: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_a_steward_answer_whose_ticket_id_is_a_known_conversation() {
+        use ac_core::conversation_record::{ConversationRecord, write_conversation};
+        use ac_protocol::ConversationStatus;
+
+        let (pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let dir = pool.file("conversations");
+        write_conversation(
+            &dir,
+            &ConversationRecord {
+                id: "conv-2".into(),
+                file: dir.join("conv-2.md"),
+                title: "Talk".into(),
+                opening: String::new(),
+                status: ConversationStatus::Live,
+                spawned_by: None,
+                harness: "claude".into(),
+                model: "m".into(),
+                effort: None,
+                drivers: String::new(),
+                enlisted: None,
+                role: None,
+            },
+        )
+        .unwrap();
+        let refusal = engine
+            .call(|s| {
+                s.state
+                    .interrupts
+                    .push(pending("conv-2", InterruptKind::MergeConflict));
+                steward_answer(s, "conv-1", "conv-2", StewardAnswerAction::Resume, None)
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refusal.message(),
+            "steward: conv-2 is a Conversation: the Steward stewards Tickets, never talks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_a_steward_resume_on_a_merge_approval_interrupt() {
+        let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let refusal = engine
+            .call(|s| {
+                s.state
+                    .interrupts
+                    .push(pending("01", InterruptKind::MergeApproval));
+                steward_answer(s, "conv-1", "01", StewardAnswerAction::Resume, None)
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refusal.message(),
+            "steward: ticket 01's merge-approval takes approve or reject"
+        );
+    }
 }

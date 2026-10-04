@@ -61,6 +61,17 @@ six gaps are cases there too. One gap is left in part:
     which `notices.test.ts` does build, but only to reach the Notice. Rust unit test: a Steward resume on a
     merge-approval Interrupt is refused with `steward: ticket <id>'s merge-approval takes approve or reject`.
 
+Both are Rust unit tests in `crates/engine/src/steward_actions.rs`:
+`refuses_a_steward_answer_whose_ticket_id_is_a_known_conversation` and
+`refuses_a_steward_resume_on_a_merge_approval_interrupt`. The TypeScript's refusal of an `adopt` word inside
+`stewardAnswer` (`engine.ts:9937`) has no Rust twin: the Steward's answer action has no `adopt` variant, so the
+route's own 400 is the only place it is refused, as the cases pin.
+
+The Steward's command, as its teaching names it, is this binary's `steward` subcommand: `<current_exe> steward
+--pool <pool-dir> [--url <console-url>] --as <conversation>` where the TypeScript named `<bun> <repo>/engine/steward-cli.ts
+--pool ...` (ADR-0036: one binary). `ac_core::steward::steward_command` builds it, quoting each word as the
+TypeScript's did.
+
 Where the cases reach a row differently from its wording:
 
 - `steward.test.ts:148` (what the Steward is told about) is five cases, one per exclusion, plus the Review one in

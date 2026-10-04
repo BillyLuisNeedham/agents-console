@@ -80,7 +80,7 @@ pub fn other_agent_in_pool_checkout(session: &Session, except_id: &str) -> Optio
             return Some(format!("{id} is working now"));
         }
     }
-    for (id, cwd) in session.conversations.live_directories() {
+    for (id, cwd) in crate::conversations::live_directories(session) {
         if id != except_id && in_pool_checkout(session, &cwd) {
             return Some(format!("{id} is working now"));
         }

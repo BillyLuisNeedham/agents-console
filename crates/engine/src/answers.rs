@@ -322,9 +322,12 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         InterruptKind::MergeConflict | InterruptKind::MergeApproval
     ) && session.conversations.is_live(&record.ticket_id)
     {
-        return session
-            .conversations
-            .answer_merge(&record.ticket_id, &pending, record.approve);
+        return crate::conversations::answer_merge(
+            session,
+            &record.ticket_id,
+            &pending,
+            record.approve,
+        );
     }
     let Some(marker) = session.marker(&record.ticket_id).cloned() else {
         anyhow::bail!(
@@ -359,7 +362,7 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         crate::restart::abandon_adoption(session, &record.ticket_id);
     }
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
-    session.held.remove(&record.ticket_id);
+    session.held.shift_remove(&record.ticket_id);
     if marker.status != TicketStatus::Done {
         write_marker_status(&marker.file, TicketStatus::Ready)?;
         if let Some(m) = session.marker_mut(&marker.id) {
@@ -420,7 +423,7 @@ pub fn close_ticket(
     if session.adopted.contains_key(&marker.id) {
         crate::restart::abandon_adoption(session, &marker.id);
     }
-    session.held.remove(&marker.id);
+    session.held.shift_remove(&marker.id);
     let enlisted = was_enlisted(session, &marker.id);
     let work = if enlisted {
         "enlisted, so its branch, directory and pane were left as found".to_owned()
@@ -450,9 +453,7 @@ pub fn close_ticket(
         let id = marker.id.clone();
         tokio::spawn(async move { crate::terminals::close_ticket_tabs(&engine, &id).await });
     }
-    session
-        .conversations
-        .ticket_closed(marker, record.note.as_deref());
+    crate::conversations::ticket_closed(session, marker, record.note.as_deref());
     let cascaded = close_engine_tickets(session, &marker.id)?;
     let mut closed = vec![marker.id.clone()];
     closed.extend(cascaded.iter().cloned());
