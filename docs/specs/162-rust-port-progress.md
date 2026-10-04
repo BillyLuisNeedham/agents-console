@@ -281,3 +281,35 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
 - `js_compat.rs` is a private copy of the JavaScript helpers, to fold into `ac_core::js` with herdr's
   `js.rs` and git's `node.rs`.
+
+### ac-server and the `server` subcommand (r-s-server)
+
+- Modules: `ports` (ports.ts), `lock` (the pool lock), `server` (createPoolServer: state, start, bind with
+  the hunt, fleet registration, the enriched snapshot, caches, the orderly stop), `enrich`, `reassign`
+  (reassign.ts, here since only the server uses it), `reads` (log ranges, events, body, grades, activity),
+  `routes` (each route's body as an `Answer`, shared by HTTP and the socket), `http` (axum dispatch in
+  server.ts's order, the Steward's routes), `hub` (ws.ts), `push` (the server half of ui/src/protocol.ts),
+  `ui` (ui/dist from disk in debug, rust-embed in release). `crates/cli/src/server_cli.rs` is the CLI.
+- The engine is started through `Engine::start_pool(PoolOptions)` (added to handle.rs, not ported): it must
+  resolve once the first snapshot is on the watch, or with the first load's message. The server reads
+  snapshots only from `Engine::snapshot()`; a changed `Arc` is what "pendingRaw" was.
+- One `std::sync::Mutex<Inner>` holds the server's and the hub's state, taken for synchronous stretches
+  only, as the event loop ran them. Frames go into each socket's unbounded queue under that lock, so their
+  order is the TypeScript's; a writer task per socket drains it. Never lock it while holding it (std's
+  mutex is not reentrant).
+- ac_core::events gained `read_event_values`: the event lines verbatim (extra keys, a missing `at`), from
+  the same cache, which the routes and cards serve.
+- New workspace dependencies: `notify` (ws.ts's fs.watch of runs/ and issues/) and `tokio-tungstenite`
+  (dev only, the tests' socket client; the version axum already pulls in).
+- The Restart hand-off runs `agent-console boot --pool <as given> --yes --relaunch [--port N]` by name on
+  PATH (the boot recorder expects that), detached (setsid), output appended to runs/boot.log.
+- Kept from the TypeScript as it is: `utf8End` cuts a log range that ends exactly on a complete
+  multi-byte character before that character's last byte (`"abé"` decodes as `"ab\u{FFFD}"`, and the next
+  read starts mid-character). Looks like a bug; nothing pins it.
+- Deviations: an unmatched path answers 404 `not found` (Bun answers 500 for the missing file it tries to
+  serve); a throw that escapes a route answers 500 `Something went wrong!` as text; an Adopt attempt outside
+  0..2^32 reaches the engine as 4294967295; no WebSocket idle timeout or server pings (the heartbeat frames
+  keep traffic up); a frame over 64 KiB ends the socket as tungstenite does.
+- Unreachable in Rust, so tested only through a seam: a pushed version that "no longer encodes" (ws.ts
+  :685; values are immutable once pushed) and an unencodable request result (an `Answer` whose result
+  failed to serialize).
