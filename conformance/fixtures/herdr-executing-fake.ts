@@ -20,7 +20,13 @@
  * next typed inputs after the wrapper (a lost paste) so the engine's echo
  * verification has a failure to retry on. After the wrapper boots, the pane
  * has an input area: paste appends, clear keys empty it, Enter submits it
- * (`submitted` records each submit). `hideInputs` conceals that many pastes
+ * (`submitted` records each submit). Each submit is also written where the
+ * wrapper's processes can read it: the pane's command runs with
+ * FAKE_HERDR_PANE_INPUT naming a file that holds everything submitted to
+ * the pane so far, each submit followed by a newline, replaced whole on
+ * every submit so a reader never sees half of one. That is how a stub
+ * harness learns the prompt a real TUI would have read from its terminal.
+ * `hideInputs` conceals that many pastes
  * from pane.read so a false-negative echo is testable: the text still
  * occupies the input. `wrapWidth` renders the input area the way a real TUI
  * draws it: a bordered box narrower than the pane, every input line
@@ -55,7 +61,7 @@
  * operator-opened agent (issue #101's picker subject) directly.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -225,6 +231,8 @@ export async function startExecutingFakeHerdr(
   // read what the engine renamed an enlisted pane's tab to (issue #101).
   const tabLabels = new Map<string, string>();
   let minted = 0;
+  // Panes whose wrapper has run, numbering their input files.
+  let booted = 0;
   const panes = new Map<
     string,
     {
@@ -244,6 +252,9 @@ export async function startExecutingFakeHerdr(
       /** herdr's never-reused terminal id (0.8.2 reports one per pane). */
       terminalId?: string | null;
       proc?: ReturnType<typeof Bun.spawn>;
+      /** FAKE_HERDR_PANE_INPUT, once the wrapper runs, and what it holds. */
+      inputFile?: string;
+      typed?: string;
     }
   >();
   const subscribers: Socket[] = [];
@@ -517,6 +528,11 @@ export async function startExecutingFakeHerdr(
             if (msg.params.keys.includes("enter")) {
               if (pane.booted) {
                 submitted.push(pane.inputArea);
+                if (pane.inputFile !== undefined) {
+                  pane.typed = `${pane.typed ?? ""}${pane.inputArea}\n`;
+                  writeFileSync(`${pane.inputFile}.new`, pane.typed);
+                  renameSync(`${pane.inputFile}.new`, pane.inputFile);
+                }
                 pane.inputArea = "";
                 pane.hideEcho = false;
                 respond({});
@@ -525,8 +541,10 @@ export async function startExecutingFakeHerdr(
               const command = pane.buffer;
               pane.buffer = "";
               pane.booted = true;
+              pane.inputFile = join(dir, `input-${++booted}`);
               const proc = Bun.spawn(["bash", "-c", command], {
                 cwd: pane.cwd,
+                env: { ...process.env, FAKE_HERDR_PANE_INPUT: pane.inputFile },
                 stdin: "ignore",
                 stdout: "ignore",
                 stderr: "ignore",
