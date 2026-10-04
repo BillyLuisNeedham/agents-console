@@ -439,7 +439,7 @@ struct UnwindState {
 /// is best-effort so one failure cannot block the rest of the unwind. The found branch and directory
 /// are never touched.
 fn unwind_enlist(session: &mut Session, id: &str, state: UnwindState) {
-    session.enlisted.release(id);
+    crate::enlisted::release(session, id);
     crate::live_attempts::clear(session, id, 1);
     session.markers.retain(|marker| marker.id != id);
     session.state.tickets.shift_remove(id);

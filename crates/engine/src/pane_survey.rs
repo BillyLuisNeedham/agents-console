@@ -103,8 +103,13 @@ pub fn listed_as_recorded(
 /// waits.
 pub type Listing = Shared<BoxFuture<'static, bool>>;
 
+/// One listing from the daemon; `None` when it could not be had (daemon down, malformed answer), which
+/// leaves the last one standing.
+pub type Lister = Arc<dyn Fn() -> BoxFuture<'static, Option<Vec<ListedPane>>> + Send + Sync>;
+
 /// The survey's state, held by the session.
 pub struct PaneSurvey {
+    lister: Lister,
     last: Option<Arc<PaneListing>>,
     in_flight: Option<(u64, Listing)>,
     /// The listing queued behind the one in flight, shared by every caller that arrives while it runs.
@@ -123,8 +128,9 @@ impl std::fmt::Debug for PaneSurvey {
 }
 
 impl PaneSurvey {
-    fn new() -> Self {
+    fn new(lister: Lister) -> Self {
         PaneSurvey {
+            lister,
             last: None,
             in_flight: None,
             queued: None,
@@ -141,7 +147,17 @@ impl PaneSurvey {
 
 /// `createPaneSurvey`: start the survey and its cadence. Only a terminal-backed pool has panes to list.
 pub fn create_pane_survey(session: &mut Session, interval_ms: Option<u64>) {
-    session.pane_survey = Some(PaneSurvey::new());
+    let herdr = Herdr::new(&session.herdr_socket);
+    let lister: Lister = Arc::new(move || {
+        let herdr = herdr.clone();
+        async move { herdr.list_panes().await.ok() }.boxed()
+    });
+    create_pane_survey_over(session, interval_ms, lister);
+}
+
+/// The survey over any lister: what [`create_pane_survey`] does with the daemon's.
+pub fn create_pane_survey_over(session: &mut Session, interval_ms: Option<u64>, lister: Lister) {
+    session.pane_survey = Some(PaneSurvey::new(lister));
     let engine = session.engine();
     let every = Duration::from_millis(interval_ms.unwrap_or(PANE_SURVEY_MS).max(1));
     tokio::spawn(async move {
@@ -233,20 +249,21 @@ fn start(session: &mut Session) -> Listing {
     );
     session.enlisted_terminals = crate::terminals::enlisted_terminals_of(session);
     let engine = session.engine();
-    let herdr = Herdr::new(&session.herdr_socket);
     let survey = session
         .pane_survey
         .as_mut()
         .expect("a listing starts only in a pool with a survey");
     survey.seq += 1;
     let id = survey.seq;
+    // The listing begins now: what the daemon is asked is decided at this call, not at a later poll.
+    let listed = (survey.lister)();
     let listing: Listing = async move {
-        let listed = herdr.list_panes().await;
+        let listed = listed.await;
         engine
             .call(move |s| {
                 let landed = match listed {
-                    Ok(listed) => land(s, listed),
-                    Err(_) => false,
+                    Some(listed) => land(s, listed),
+                    None => false,
                 };
                 // The listing is over: a later caller starts its own.
                 if let Some(survey) = s.pane_survey.as_mut()
@@ -299,6 +316,10 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::watch;
 
     fn pane(id: &str, tab: Option<&str>, workspace: Option<&str>, cwd: Option<&str>) -> ListedPane {
         ListedPane {
@@ -389,5 +410,148 @@ mod tests {
         let mut empty = recorded("p1", Some("t9"), None);
         empty.terminal_id = Some(String::new());
         assert!(listed_as_recorded(&l, &empty, None));
+    }
+
+    // The survey over a scripted lister, on an engine with nothing else in it.
+    async fn survey_engine(interval_ms: Option<u64>, lister: Lister) -> Engine {
+        let (publisher, snapshots) = watch::channel(None);
+        let engine = Engine::spawn(
+            crate::testkit::bare_session(publisher),
+            snapshots,
+            |s, engine| s.engine = Some(engine),
+        );
+        engine
+            .call(move |s| create_pane_survey_over(s, interval_ms, lister))
+            .await
+            .unwrap();
+        engine
+    }
+
+    fn latest_panes(listing: Option<Arc<PaneListing>>) -> Vec<String> {
+        let mut ids: Vec<String> = listing
+            .map(|l| l.panes.keys().cloned().collect())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    async fn latest(engine: &Engine) -> Option<Arc<PaneListing>> {
+        engine
+            .call(|s| s.pane_survey.as_ref().and_then(PaneSurvey::latest))
+            .await
+            .unwrap()
+    }
+
+    fn listed(id: &str, tab: &str) -> ListedPane {
+        pane(id, Some(tab), None, None)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn serves_the_last_listing_and_hands_every_one_to_the_engine() {
+        let panes: Arc<Mutex<Vec<ListedPane>>> = Arc::new(Mutex::new(vec![listed("p1", "t1")]));
+        let source = Arc::clone(&panes);
+        let engine = survey_engine(
+            None,
+            Arc::new(move || {
+                let panes = source.lock().unwrap().clone();
+                async move { Some(panes) }.boxed()
+            }),
+        )
+        .await;
+        assert!(latest(&engine).await.is_none());
+        assert!(engine.refresh_pane_survey().await);
+        let first = latest(&engine).await.unwrap();
+        assert_eq!(latest_panes(Some(first.clone())), ["p1"]);
+        assert_eq!(first.tabs.iter().collect::<Vec<_>>(), ["t1"]);
+        panes.lock().unwrap().clear();
+        assert!(engine.refresh_pane_survey().await);
+        assert!(latest(&engine).await.unwrap().panes.is_empty());
+        engine.call(stop_pane_survey).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_the_last_good_listing_when_the_daemon_cannot_answer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let engine = survey_engine(
+            None,
+            Arc::new(move || {
+                let call = counted.fetch_add(1, Ordering::SeqCst);
+                async move { (call == 0).then(|| vec![listed("p1", "t1")]) }.boxed()
+            }),
+        )
+        .await;
+        assert!(engine.refresh_pane_survey().await);
+        assert!(!engine.refresh_pane_survey().await);
+        assert_eq!(latest_panes(latest(&engine).await), ["p1"]);
+        engine.call(stop_pane_survey).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queues_one_listing_behind_the_one_in_flight_for_every_caller_and_lists_on_its_cadence()
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let engine = survey_engine(
+            Some(30),
+            Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Some(Vec::new())
+                }
+                .boxed()
+            }),
+        )
+        .await;
+        let (a, b, c) = tokio::join!(
+            engine.refresh_pane_survey(),
+            engine.refresh_pane_survey(),
+            engine.refresh_pane_survey()
+        );
+        assert!(a && b && c);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(calls.load(Ordering::SeqCst) > 2);
+        engine.call(stop_pane_survey).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let stopped = calls.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), stopped);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn answers_a_refresh_made_during_a_listing_with_one_that_began_after_it() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let panes: Arc<Mutex<Vec<ListedPane>>> = Arc::new(Mutex::new(vec![listed("p1", "t1")]));
+        let source = Arc::clone(&panes);
+        let engine = survey_engine(
+            None,
+            Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                // What the daemon holds is read as the listing begins, and answered 20 ms later.
+                let snapshot = source.lock().unwrap().clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Some(snapshot)
+                }
+                .boxed()
+            }),
+        )
+        .await;
+        let first = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.refresh_pane_survey().await }
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // The pane closes while the first listing is out: a caller that asks now must not be answered
+        // by the listing that began before.
+        panes.lock().unwrap().clear();
+        let (a, b) = tokio::join!(engine.refresh_pane_survey(), engine.refresh_pane_survey());
+        assert!(first.await.unwrap() && a && b);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(latest(&engine).await.unwrap().panes.is_empty());
+        engine.call(stop_pane_survey).await.unwrap();
     }
 }

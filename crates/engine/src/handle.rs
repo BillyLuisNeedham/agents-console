@@ -188,7 +188,7 @@ impl Engine {
         let _ = self
             .call(|s| {
                 s.conversations.dispose();
-                s.enlisted.dispose();
+                crate::enlisted::dispose(s);
                 crate::pane_survey::stop_pane_survey(s);
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
