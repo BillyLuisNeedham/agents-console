@@ -41,14 +41,36 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 
 - Workspace skeleton (6 crates) at 05614ca; design at docs/specs/162-rust-port-design.md; wire shapes
   research at docs/specs/162-rust-port-wire-shapes.md.
-- Landed: ac_io::herdr (1c8824d), ac_io::git and ac_core::stat_cache (d94eec5..b8b3947), ac-protocol types
-  (2e17992; the TypeScript generator and its tsc check still to come from r-protocol).
-- Running: r-protocol (generator), r-formats-a (pool files, events, streamlog, checkpoints, queued answers,
-  ledger, runs/ files, Conversation records, ac_core::js), r-formats-b (console.json, Pool settings, Machine
-  defaults, fleet, harness descriptors, Assignments).
-- Next: the foundation, F1-engine (Session, actor, start, drive, headless attempts, the success-path merge,
-  persist, snapshot) and S-server (server CLI, lock, ports, routes, /api/ws) side by side; then the feature
-  wave by area (see the design doc's module map).
+- Landed: ac_io::herdr, ac_io::git, ac-protocol (types, TypeScript generator and its tsc check), ac-core
+  formats (pool files, events, streamlog, checkpoints, queued answers, spawn proposals and ledger,
+  Conversation records, steward notes, config, Pool settings, Machine defaults, fleet, harness table,
+  Assignments, `ac_core::js`), the engine's actor and handle API (93f6920). Whole workspace green at b9b1919.
+
+## Right now (for a resumed or compacted context)
+
+Running subagents, each in a detached worktree at `~/.herdr/worktrees/agent-console/rust-port-<name>`,
+briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
+- r-f1-engine: engine core (session, boot, drive, persist, interrupts, answers, config reload, tickets,
+  merges success path, outcome). Started from 5e6b558.
+- r-s-server: ac-server and the `server` subcommand (server.ts, ws.ts, ports.ts). Started from 5e6b558.
+- r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
+  Started from 78e6eea.
+- m0-c02 (protocol/http cases), m0-c22 (verify with Jev), m0-c06 (restart, Conversations and panes).
+
+How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
+its worktree merged the branch itself), resolve NOT-PORTED.md conflicts by keeping both sides
+(scratchpad `bin/union-conflicts.py`), run `bun run typecheck` and `cargo test --workspace`, record its
+notes below under "Notes from the Rust port agents" or "Hidden behaviour", tick its row, and `git worktree
+remove` it. Agents' long reports are cut off in the notification: ask them with SendMessage for the rest.
+
+Next, in order:
+1. When r-f1-engine, r-s-server and r-f1-attempts have all landed: merge, build, and tell each to merge
+   the branch head and run its conformance areas against `--rust-bin target/debug/agent-console`.
+2. When M0's last three land: run the whole Bun suite once (`bun run conformance --server bun`, about
+   30 min) to finish M0 green; fix racy cases the way 879b564, 8d674c7, b09c4ae and 8956893 did.
+3. M3 feature wave by area (merges resolver and approval, verify and Jev, spawns, conversations,
+   steward, enlist and held panes, restart, config reload and Reassign), then the CLI (boot, steward,
+   fleet), then M5 (bench gates, render-survival, two real pools, the flip). At most four agents.
 
 ## Decisions
 
