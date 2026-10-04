@@ -10,6 +10,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "hex",
+ "indexmap",
+ "libc",
  "regex",
  "rusqlite",
  "serde",
