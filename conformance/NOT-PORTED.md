@@ -1102,8 +1102,9 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
   as soon as `merged` shows). On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after
   `merged` in a world with a fake herdr: the close is a round trip over a fresh socket that waits behind the
   synchronous merges of the same burst. In Rust the close runs on its own task, and its event follows `merged` by
-  a few milliseconds. Nothing about the Ticket differs, only when the event is written. The cases pass on Rust
-  only where the read is slower than the close.
+  a few milliseconds. Nothing about the Ticket differs, only when the event is written. The three cases that read
+  there now wait for the `tab-closed` event and expect it last, so they pin the same events on both servers
+  without racing the close.
 - **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
   resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
   merge's resolver names a different writer.

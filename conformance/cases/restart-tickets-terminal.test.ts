@@ -217,7 +217,10 @@ restartCase("a re-adopted Attempt whose TUI wrote a done Outcome while no server
 
   for (const [i, id] of ["01", "02"].entries()) {
     expect(cardOf(review, id)).toMatchObject({ status: "done", mergeState: null, liveAttempt: null });
-    expect(eventLine(world, id)).toEqual(["1 scheduled", "1 spawned", "1 exited", "1 merged"]);
+    // The merged attempt's tab closes after the merge; on Bun its event lands 200 to 400 ms later, so
+    // the case waits for it rather than reading in that gap (NOT-PORTED.md, restart).
+    await until(() => eventLine(world, id), (lines) => lines.includes("1 tab-closed"), { what: `${id}'s tab-closed` });
+    expect(eventLine(world, id)).toEqual(["1 scheduled", "1 spawned", "1 exited", "1 merged", "1 tab-closed"]);
     expect(eventsOf(world, id, "exited")[0]!.payload).toMatchObject({ code: 0, status: "done", outcomeExists: true });
     expect(review.state.outcomes[id]).toEqual({ status: "done", summary: `summary-${id}`, commitSha: null });
     expect(callsOf(herdr, "pane.report_agent", from).map((call) => call.params.pane_id)).toContain(panes[i]);

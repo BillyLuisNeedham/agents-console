@@ -132,7 +132,13 @@ function eventLines(world: World, id: string): string[] {
 }
 
 /** The events of a done Ticket whose merge a stop dropped at the gate, once redone and landed. */
-const DEFERRED_TWICE = ["1 scheduled", "1 spawned", "1 exited", "1 merge-deferred", "1 merge-deferred", "1 merged"];
+const DEFERRED_TWICE = ["1 scheduled", "1 spawned", "1 exited", "1 merge-deferred", "1 merge-deferred", "1 merged", "1 tab-closed"];
+
+/** A Ticket's event lines once its merged attempt's tab-closed has landed: on Bun it follows the merge by 200 to
+ * 400 ms, so a read straight after `merged` races it (NOT-PORTED.md, restart). */
+async function eventLinesAfterTabClose(world: World, id: string): Promise<string[]> {
+  return until(() => eventLines(world, id), (lines) => lines.includes("1 tab-closed"), { what: `${id}'s tab-closed` });
+}
 
 /** Commit one file in a worktree. */
 function commitIn(worktree: string, file: string): void {
@@ -314,7 +320,7 @@ restartCase(
     writeOutcome(world, "01.outcome.json", { status: "done", summary: "talked", commitSha: null });
     await until(() => existsSync(join(world.repo, "held.txt")), Boolean, { what: "the redone merge", ms: 30_000 });
     await until(() => eventsOf(world, "02", "merged").length, (n) => n === 1, { what: "02's merged record", ms: 30_000 });
-    expect(eventLines(world, "02")).toEqual(DEFERRED_TWICE);
+    expect(await eventLinesAfterTabClose(world, "02")).toEqual(DEFERRED_TWICE);
     await settle(second, "both done and the Review raised", quiescentWith("REVIEW:review"));
   },
   { timeoutMs: 120_000 },
@@ -373,7 +379,7 @@ restartCase(
     });
     expect(existsSync(join(world.repo, "side.txt"))).toBe(true);
     // Deferred once at the gate before the stop and once more by the redo.
-    expect(eventLines(world, "conv-1-spawn-1")).toEqual(DEFERRED_TWICE);
+    expect(await eventLinesAfterTabClose(world, "conv-1-spawn-1")).toEqual(DEFERRED_TWICE);
   },
   { timeoutMs: 120_000 },
 );
