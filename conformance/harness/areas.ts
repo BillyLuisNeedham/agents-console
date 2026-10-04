@@ -16,6 +16,7 @@ export const AREAS = {
   spawns: "Spawns: proposals in Outcomes, adoption at the boundary, Pending and Held spawns, caps, the spawn routes",
   verify: "verify and Jev: the fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head",
   merges: "pool worktrees and branches, merges, the Merge hold and Merge queue, the resolver, Ticket file reconcile",
+  cli: "the boot, fleet and steward command lines: what they print, write, exit with and launch",
 } as const;
 
 export type Area = keyof typeof AREAS;

@@ -63,6 +63,12 @@ export interface Case {
   ): Promise<CaseServer>;
   /** A socket on a server; with `hello`, the client's hello goes first. */
   socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
+  /**
+   * Run `cleanup` at teardown, pass or fail, before the worlds are deleted:
+   * for what a case starts that is not one of the above, a command line's
+   * detached server say (harness/cli.ts).
+   */
+  defer(cleanup: () => void | Promise<void>): void;
 }
 
 export interface CaseOptions {
@@ -83,6 +89,7 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
   const jevs: ServedFakeJev[] = [];
   const servers: CaseServer[] = [];
   const sockets: SocketClient[] = [];
+  const deferred: (() => void | Promise<void>)[] = [];
   const t: Case = {
     kind: choice.kind,
     world(spec) {
@@ -118,6 +125,9 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
       sockets.push(client);
       return client;
     },
+    defer(cleanup) {
+      deferred.push(cleanup);
+    },
   };
   return {
     t,
@@ -137,6 +147,13 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
       }
       for (const fake of herdrs) await fake.stop();
       for (const fake of jevs) await fake.stop();
+      for (const cleanup of deferred.reverse()) {
+        try {
+          await cleanup();
+        } catch (err) {
+          problems.push(err instanceof Error ? err.message : String(err));
+        }
+      }
       for (const world of worlds) {
         if (process.env.CONFORMANCE_KEEP === "1") {
           console.error(`kept the world at ${world.root}`);
