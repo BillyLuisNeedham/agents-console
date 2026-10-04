@@ -29,6 +29,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "indexmap",
  "libc",
  "nix",
  "regex",
@@ -37,6 +38,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
