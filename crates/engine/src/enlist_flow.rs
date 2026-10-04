@@ -815,7 +815,7 @@ impl Engine {
 /// ordinary pool assignment for its id, with verify stripped (an enlisted id never fans out,
 /// `planSuperStep` says so too). Used where a pane-gone checkpoint hands the ticket back to the
 /// ordinary engine-launched path.
-fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result<Assignment> {
+pub fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result<Assignment> {
     let mut resolved =
         resolve_ticket_assignment(marker, &session.state.config, &session.harnesses)?;
     resolved.verify = None;
@@ -824,7 +824,7 @@ fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result
 
 /// `createdBranchNote`: the re-run of a created-branch enlist (spec story 11) needs the branch free: a
 /// Brief that offers the re-run says so up front.
-fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
+pub fn created_branch_note(session: &Session, ticket_id: &str, branch: &str) -> String {
     match session.enlisted_work.get(ticket_id) {
         Some(work)
             if work.branch == branch && branch == branch_for(&session.cwd, ticket_id, None) =>
@@ -1070,7 +1070,7 @@ pub fn end_enlisted_attempt(
                 ac_protocol::SpawnKind::Ticket,
             );
         }
-        chain_enlisted_merge(session, marker, attempt, branch);
+        chain_enlisted_merge(session, &marker, attempt, &branch);
         return Ok(());
     }
     finish_adopted_finalize(session);
@@ -1081,7 +1081,13 @@ pub fn end_enlisted_attempt(
 /// chain so its git work never runs concurrently with the drive's merges (ADR-0014's adopted-finalize
 /// reasoning). On success the found directory and branch are left alone, unlike an ordinary ticket's
 /// merge; on a conflict the existing merge-conflict machinery takes over in the found checkout.
-fn chain_enlisted_merge(session: &mut Session, marker: TicketMarker, attempt: u64, branch: String) {
+pub fn chain_enlisted_merge(
+    session: &mut Session,
+    marker: &TicketMarker,
+    attempt: u64,
+    branch: &str,
+) {
+    let (marker, branch) = (marker.clone(), branch.to_owned());
     session.merge_line.taken(&marker.id);
     // The found branch is merged in place; a merge a shutdown drops at the pool checkout's gate names
     // the found directory, for the next boot.
