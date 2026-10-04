@@ -456,14 +456,14 @@ impl Server {
                 options.machine_defaults = Some(shared.machine_paths.clone());
                 options.herdr_socket = Some(js::path_text(&shared.herdr_socket));
                 options.herdr_workspace = shared.herdr_workspace.clone();
-                // STUB(verify): the verify port wires the TypeSafe client; until then only whether
-                // a key was given rides, for the boot line.
-                options.jev = shared
-                    .jev_api_key
-                    .clone()
-                    .filter(|key| !key.is_empty())
-                    .map(|_| ac_engine::jev::Jev::configured_stub());
-                options.jev_base_url = shared.jev_base_url.clone();
+                // Jev (ADR-0020): the TypeSafe client for a key, the unconfigured port without one.
+                options.jev = Some(ac_engine::jev::Jev::new(Arc::new(ac_io::jev::create_jev(
+                    ac_io::jev::JevOptions {
+                        api_key: shared.jev_api_key.clone(),
+                        base_url: shared.jev_base_url.clone(),
+                        ..ac_io::jev::JevOptions::default()
+                    },
+                ))));
                 // The Steward's teaching names where its command reaches (ADR-0030).
                 options.console_url = Some(format!("http://localhost:{}", shared.port));
                 options.enlist_poll_ms = ms(shared.enlist_poll);

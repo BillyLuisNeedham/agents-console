@@ -70,6 +70,22 @@ impl Conversations {
         None
     }
 
+    /// Every pane and tab a Conversation recorded live names, runtime or not: no close, and no
+    /// enlist, may take one while its record is live. STUB(conversations).
+    pub fn live_terminals(
+        &self,
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        (Default::default(), Default::default())
+    }
+
+    /// The ids a Conversation about to be recorded may not take. STUB(conversations).
+    pub fn reserved_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Every live Conversation's id and working directory.
     pub fn live_directories(&self) -> Vec<(String, String)> {
         Vec::new()
@@ -84,4 +100,37 @@ pub async fn adopt_enlisted_at_boot(engine: &Engine) {
 /// A started Conversation's pane, re-adopted at boot while its TUI runs (issue #140).
 pub async fn adopt_started_at_boot(engine: &Engine) {
     let _ = engine;
+}
+
+/// `readoptPending`: a Conversation a boot could not settle is tried again now (issue #140).
+/// STUB(conversations): nothing is pending.
+pub async fn readopt_pending(engine: &Engine) -> Result<(), String> {
+    let _ = engine;
+    Ok(())
+}
+
+/// A live pane the operator enlists as a Conversation (issue #101): the found facts the engine
+/// records. STUB(conversations).
+#[derive(Debug, Clone)]
+pub struct EnlistConversationRegistration {
+    pub id: String,
+    pub pane_id: String,
+    pub tab_id: Option<String>,
+    pub harness: String,
+    pub title: String,
+    pub opening: Option<String>,
+    pub directory: String,
+    pub branch: String,
+    pub session_id: Option<String>,
+    pub steward: bool,
+}
+
+/// `conversations.enlist`: claim the found pane and register its runtime. STUB(conversations): the
+/// claim is refused.
+pub async fn enlist(
+    engine: &Engine,
+    registration: EnlistConversationRegistration,
+) -> Result<(), String> {
+    let _ = (engine, registration);
+    Err("not ported yet".to_owned())
 }

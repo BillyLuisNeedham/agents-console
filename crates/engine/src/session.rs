@@ -29,13 +29,14 @@ use crate::children::ChildTracker;
 use crate::conversations::Conversations;
 use crate::enlisted::EnlistedAttempts;
 use crate::error::EngineError;
-use crate::held::{HeldPane, PaneSurvey};
+use crate::held::HeldPane;
 use crate::jev::Jev;
 use crate::keep_talking::{ContinuedAttempt, ContinuedGrade};
 use crate::live_attempts::LiveAttempts;
 use crate::options::SnapshotHook;
 use crate::pane_reads::PaneReadRegister;
 use crate::pane_session::LaunchCadence;
+use crate::pane_survey::PaneSurvey;
 use crate::pool_workspace::PoolWorkspaceState;
 use crate::restart::HeadlessOrphan;
 use crate::snapshot::PoolSnapshot;
@@ -199,6 +200,8 @@ pub struct Session {
     /// there.
     pub last_config_text: Option<String>,
     pub jev: Jev,
+    /// The pool-log subscription on the Jev port, released at close.
+    pub jev_unsubscribe: Option<ac_io::jev::Unsubscribe>,
     /// The headless children of this engine process (ADR-0017).
     pub children: ChildTracker,
     /// Headless orphans rehydrate found still alive from a previous engine process.
@@ -225,7 +228,7 @@ pub struct Session {
     pub pane_survey_ms: Option<u64>,
     pub console_url: Option<String>,
     /// Held panes (issue #139): the pane of every ticket's checkpointed Terminal-backed attempt.
-    pub held: HashMap<String, HeldPane>,
+    pub held: IndexMap<String, HeldPane>,
     /// The Continued attempts in flight (issue #139).
     pub continued: HashMap<String, ContinuedAttempt>,
     /// Continued attempts on a verify ticket that ended done and wait to be graded as lone attempts.
@@ -312,6 +315,7 @@ impl Session {
             merge_line: MergeLine::new(),
             last_config_text: None,
             jev: Jev::unconfigured(),
+            jev_unsubscribe: None,
             children: ChildTracker::default(),
             orphans: Vec::new(),
             conversations: Conversations::default(),
@@ -331,7 +335,7 @@ impl Session {
             conversation_poll_ms: None,
             pane_survey_ms: None,
             console_url: None,
-            held: HashMap::new(),
+            held: IndexMap::new(),
             continued: HashMap::new(),
             continued_grades: Vec::new(),
             pool_checkout_writers: IndexMap::new(),
