@@ -273,6 +273,9 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   `spawn_blocking` or at boot. The server adds its own prefix ("fleet registry: fleet registry: lock").
 - `spawn_env` and `engine_env_set` take the parent environment as an argument; only the CLI reads it.
 - Test overrides of the harness table go in as `Harness::Custom(Arc<dyn Fn>)`.
+- A hand-written null in an assign field counts as set, as in the TypeScript: `harness: null` resolves to
+  "" with source "pinned". Reassign checks harnesses with `require_known_harness("reassign: harness", ...)`;
+  the Conversation start layers a Steward's entry as inherited via `AssignmentLayer::from(&steward_assign_of(config)?)`.
 - Deviations (edges, nothing pins them): a hand-written non-string Assignment field (`model: 5`) becomes
   the string "5" (TypeScript keeps the number); a verify past u64 saturates; a non-string effort is
   coerced (TypeScript throws a TypeError); JSON parse errors read "JSON Parse error: <serde message>".
