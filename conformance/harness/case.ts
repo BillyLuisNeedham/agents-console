@@ -45,14 +45,35 @@ export interface Case {
    * to that fake; without, its HERDR_SOCKET_PATH names a socket nobody
    * listens on, so the pool runs headless.
    */
-  start(world: World, options?: { herdr?: HerdrProcess }): Promise<CaseServer>;
-  /** A socket on a server; with `hello`, the client's hello goes first. */
-  socket(server: RunningServer, hello?: { visible: boolean; cards?: CardSubscription[] }): Promise<SocketClient>;
+  start(world: World, options?: CaseStartOptions): Promise<CaseServer>;
+  /**
+   * A socket on a server; with `hello`, the client's hello goes first, and
+   * `headers` go on the upgrade request (an Origin, say).
+   */
+  socket(
+    server: RunningServer,
+    hello?: { visible: boolean; cards?: CardSubscription[] },
+    headers?: Record<string, string>,
+  ): Promise<SocketClient>;
+}
+
+export interface CaseStartOptions {
+  herdr?: HerdrProcess;
+  /** Variables beside the world's own, HERDR_WORKSPACE_ID say; these win. */
+  env?: Record<string, string>;
 }
 
 export interface CaseOptions {
   /** The case's bound, start and stop included. Default 60 s. */
   timeoutMs?: number;
+  /**
+   * The case waits out a real timer of ten seconds or more (a heartbeat,
+   * the teaching wait, the pane survey): it runs, but is skipped when
+   * CONFORMANCE_FAST=1 (the runner's `--fast`).
+   */
+  slow?: boolean;
+  /** Why this case cannot run on this machine: it is skipped, and the reason printed. */
+  skip?: string;
 }
 
 function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
@@ -75,13 +96,14 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
     },
     async start(world, options = {}) {
       const socket = options.herdr?.socketPath ?? `${world.root}/no-herdr.sock`;
-      const running = await startServer({ pool: world.pool, env: world.env(socket), choice });
+      const env = { ...world.env(socket), ...options.env };
+      const running = await startServer({ pool: world.pool, env, choice });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);
       return server;
     },
-    async socket(server, hello) {
-      const client = await openSocket(server.url, hello);
+    async socket(server, hello, headers) {
+      const client = await openSocket(server.url, hello, headers);
       sockets.push(client);
       return client;
     },
@@ -119,7 +141,8 @@ function caseContext(): { t: Case; teardown(failed: boolean): Promise<void> } {
  * Register one case. Its test name is `[<area>] <name>`, which is how the
  * runner counts it under its area. When the chosen server cannot run (the
  * Rust binary is not built), the case is skipped, never failed, and the
- * runner reports why.
+ * runner reports why. A slow case under CONFORMANCE_FAST=1, or one given a
+ * `skip` reason, is skipped too, and counted as not run.
  */
 export function conformance(
   area: Area,
@@ -128,7 +151,9 @@ export function conformance(
   options: CaseOptions = {},
 ): void {
   const title = `[${area}] ${name}`;
-  if (serverMissing(serverChoice()) !== null) {
+  if (options.skip !== undefined) console.warn(`skipped ${title}: ${options.skip}`);
+  const fastSkip = options.slow === true && process.env.CONFORMANCE_FAST === "1";
+  if (serverMissing(serverChoice()) !== null || fastSkip || options.skip !== undefined) {
     test.skip(title, () => {});
     return;
   }

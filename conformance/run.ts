@@ -1,13 +1,15 @@
 /**
  * The conformance suite's runner (ADR-0036):
  *
- *   bun run conformance --server bun|rust [--rust-bin <path>] [<bun test arguments>]
+ *   bun run conformance --server bun|rust [--rust-bin <path>] [--fast] [<bun test arguments>]
  *
  * Runs every test under conformance/ against the chosen server, Bun's
  * (`bun run engine/server.ts`) or Rust's (`<binary> server`, by default
  * target/release/agent-console), and prints the pass share per contract
- * area. Anything after the options goes to `bun test` as it is: a file
- * filter, or `-t <pattern>` for a name.
+ * area. `--fast` skips the slow cases, those that wait out a real timer of
+ * ten seconds or more, and counts them as not run. Anything after the
+ * options goes to `bun test` as it is: a file filter, or `-t <pattern>` for
+ * a name.
  *
  * Exit codes: 0 when every case that ran passed; 1 when one failed or
  * `bun test` itself did; 2 when the chosen server cannot run at all (the
@@ -21,18 +23,20 @@ import { join } from "node:path";
 import { countByArea, formatReport, parseJunit } from "./report.ts";
 import { serverChoice, serverMissing } from "./harness/server.ts";
 
-const USAGE = "usage: bun run conformance --server bun|rust [--rust-bin <path>] [<bun test arguments>]";
+const USAGE = "usage: bun run conformance --server bun|rust [--rust-bin <path>] [--fast] [<bun test arguments>]";
 
 const args = process.argv.slice(2);
 const passthrough: string[] = [];
 let server: string | undefined;
 let rustBin: string | undefined;
+let fast = false;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
   if (arg === "--server") server = args[++i];
   else if (arg.startsWith("--server=")) server = arg.slice("--server=".length);
   else if (arg === "--rust-bin") rustBin = args[++i];
   else if (arg.startsWith("--rust-bin=")) rustBin = arg.slice("--rust-bin=".length);
+  else if (arg === "--fast") fast = true;
   else if (arg === "--help" || arg === "-h") {
     console.log(USAGE);
     process.exit(0);
@@ -46,6 +50,8 @@ if (server !== "bun" && server !== "rust") {
 const env: Record<string, string | undefined> = { ...process.env, CONFORMANCE_SERVER: server };
 if (rustBin !== undefined) env.CONFORMANCE_RUST_BIN = rustBin;
 else delete env.CONFORMANCE_RUST_BIN;
+if (fast) env.CONFORMANCE_FAST = "1";
+else delete env.CONFORMANCE_FAST;
 const choice = serverChoice(env);
 const missing = serverMissing(choice);
 const title =

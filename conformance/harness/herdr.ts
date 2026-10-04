@@ -11,6 +11,22 @@ import type { ExecutingFakeHerdrOptions } from "../fixtures/herdr-executing-fake
 
 const PROCESS = join(import.meta.dir, "..", "fixtures", "herdr-process.ts");
 
+// What a harness's pane shows, for the fake to render: the patterns the
+// server reads a pane's readiness and Turn state by are the descriptors' in
+// engine/spawn.ts (defaultHarnessDescriptors).
+
+/** claude up and waiting: its readyPattern `Claude Code v` (any version) and its idle `❯`. */
+export const CLAUDE_READY = "Claude Code v2.1\n❯ ";
+
+/** opencode up and waiting: its readyPattern `Ask anything` and its idle footer. */
+export const OPENCODE_READY = "opencode\nAsk anything\nctrl+p commands";
+
+/** opencode mid-Turn: neither its readyPattern nor its idlePattern shows. */
+export const OPENCODE_WORKING = "opencode\nworking on it";
+
+/** opencode at rest after a Turn: its idlePattern `ctrl+p commands`. */
+export const OPENCODE_WAITING = "opencode\nctrl+p commands";
+
 /** One call the server made on the herdr socket. */
 export interface HerdrCall {
   method: string;
@@ -28,6 +44,14 @@ export interface HerdrProcess {
    * `setPaneContent`, `endPane`, `workspaceIds` and the rest.
    */
   control<T = unknown>(name: string, ...args: unknown[]): Promise<T>;
+  /**
+   * Wait until `calls` holds every call the fake has received so far. The
+   * fake records a call before it answers it, and both reach the harness on
+   * one ordered pipe, so after a control's round trip every call the server
+   * already had its answer to is in `calls`. A reply from the server can
+   * otherwise beat the record of the herdr call it made on a loaded machine.
+   */
+  settle(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -90,7 +114,7 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
   }
 
   let nextId = 0;
-  return {
+  const herdr: HerdrProcess = {
     socketPath,
     calls,
     waitForCall(match, options = {}) {
@@ -119,6 +143,9 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
         proc.stdin.flush();
       });
     },
+    async settle() {
+      await herdr.control("workspaceIds");
+    },
     async stop() {
       try {
         proc.stdin.end();
@@ -132,4 +159,5 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
       }
     },
   };
+  return herdr;
 }

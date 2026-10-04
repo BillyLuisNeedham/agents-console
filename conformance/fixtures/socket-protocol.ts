@@ -28,6 +28,15 @@ export const PROTOCOL_VERSION = 1;
 /** How many of the pool log's last lines a pushed snapshot carries. */
 export const POOL_LOG_WINDOW = 500;
 
+/** The heartbeat interval a server announces in its hello by default (HEARTBEAT_MS in engine/protocol.ts). */
+export const HEARTBEAT_MS = 20_000;
+
+/** How often the server checks activity and peeks for its visible sockets (LIVE_CHECK_MS in engine/protocol.ts). */
+export const LIVE_CHECK_MS = 2_000;
+
+/** How the server closes every socket on an orderly stop (CLOSE_STOPPED in engine/protocol.ts). */
+export const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
+
 /**
  * Every request kind the socket takes. Typed against the protocol's own
  * RequestKind, so a kind protocol.ts gains and this list lacks fails the
