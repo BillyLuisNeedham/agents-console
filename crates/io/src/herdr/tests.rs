@@ -290,6 +290,22 @@ async fn rpc_times_out_after_ten_seconds_on_a_daemon_that_never_answers() {
     until("the client hang up", || fake.open_connections() == 0).await;
 }
 
+/// Bind a unix socket and drop its listener, leaving the file behind with nobody listening. Another test
+/// of this binary may fork a child while the listener's descriptor is open, and that child keeps the
+/// socket listening until it execs, so wait until the kernel really refuses connections before returning.
+fn leave_a_stale_socket(path: &std::path::Path) {
+    drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+    assert!(path.exists());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(path).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped listener still accepts connections"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[tokio::test]
 async fn rpc_fails_with_buns_connect_text_when_no_daemon_listens() {
     let dir = tempfile::tempdir().unwrap();
@@ -300,8 +316,7 @@ async fn rpc_fails_with_buns_connect_text_when_no_daemon_listens() {
     );
     // A socket file nobody listens on any more (the kernel's ECONNREFUSED) reads the same under Bun.
     let stale = dir.path().join("stale.sock");
-    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
-    assert!(stale.exists());
+    leave_a_stale_socket(&stale);
     assert_eq!(
         error_text(Herdr::new(&stale).rpc("pane.focus", json!({})).await),
         format!("connect ENOENT {}", stale.display())

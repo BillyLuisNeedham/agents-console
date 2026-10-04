@@ -214,6 +214,9 @@ pub fn wait_for_boot(log_path: &str, server: &mut StartedServer, timeout_ms: u64
             return BootVerdict::Up { port };
         }
         if server.exited() {
+            // The child may have written its last lines between the read above and the exit being seen,
+            // so the tail comes from a read made after the exit.
+            let log = js::read_text(log_path).unwrap_or_default();
             return BootVerdict::Exited {
                 tail: tail_of(&log, 8),
             };
