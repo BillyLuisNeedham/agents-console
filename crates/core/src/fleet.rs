@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 
 use crate::config::ConfigError;
-use crate::js_compat;
+use crate::js;
 
 /// The line the fleet list prints when no Console is live.
 pub const NO_LIVE_CONSOLES: &str = "no live consoles";
@@ -62,12 +62,12 @@ impl FleetEntry {
 
     /// The port as JavaScript prints it, for the lines and messages that name it.
     pub fn port_text(&self) -> String {
-        js_compat::number_string(self.port)
+        js::number_string(self.port)
     }
 
     /// The pid as JavaScript prints it.
     pub fn pid_text(&self) -> String {
-        js_compat::number_string(self.pid)
+        js::number_string(self.pid)
     }
 
     // An entry of the right shape: poolDir and startedAt strings, port and pid numbers.
@@ -76,8 +76,8 @@ impl FleetEntry {
             return None;
         };
         let pool_dir = raw.get("poolDir")?.as_str()?.to_owned();
-        let port = js_compat::number_of(raw.get("port")?)?;
-        let pid = js_compat::number_of(raw.get("pid")?)?;
+        let port = js::number_of(raw.get("port")?)?;
+        let pid = js::number_of(raw.get("pid")?)?;
         let started_at = raw.get("startedAt")?.as_str()?.to_owned();
         Some(FleetEntry {
             pool_dir,
@@ -91,16 +91,16 @@ impl FleetEntry {
 
 /// The registry's machine-wide location under a home directory, outside any repo.
 pub fn default_registry_path(home: &str) -> String {
-    js_compat::path_join(&[home, ".agent-graphs", "pools.json"])
+    js::path_join(&[home, ".agent-graphs", "pools.json"])
 }
 
 // The raw registry: every entry of the right shape. A missing or corrupt file, or one that is not an
 // array, reads as empty.
 fn read_registry(registry_path: &str) -> Vec<FleetEntry> {
-    let Ok(text) = js_compat::read_text(registry_path) else {
+    let Ok(text) = js::read_text(registry_path) else {
         return Vec::new();
     };
-    match js_compat::parse(&text) {
+    match js::parse(&text) {
         Ok(Value::Array(items)) => items.into_iter().filter_map(FleetEntry::of).collect(),
         _ => Vec::new(),
     }
@@ -125,7 +125,7 @@ pub fn pid_is_live(pid: f64) -> bool {
 pub fn read_fleet_entries(registry_path: &str) -> Vec<FleetEntry> {
     read_registry(registry_path)
         .into_iter()
-        .filter(|entry| pid_is_live(entry.pid) && js_compat::exists(&entry.pool_dir))
+        .filter(|entry| pid_is_live(entry.pid) && js::exists(&entry.pool_dir))
         .collect()
 }
 
@@ -166,8 +166,8 @@ pub fn list_fleet(registry_path: &str) -> Vec<String> {
 
 // The pid named in a lock file, or None when it is empty or unreadable.
 fn read_lock_pid(lock_path: &str) -> Option<f64> {
-    let text = js_compat::read_text(lock_path).ok()?;
-    let pid = js_compat::number_from_text(js_compat::trim(&text));
+    let text = js::read_text(lock_path).ok()?;
+    let pid = js::number_from_text(js::trim(&text));
     (pid.is_finite() && pid.fract() == 0.0 && pid > 0.0).then_some(pid)
 }
 
@@ -189,7 +189,7 @@ pub fn upsert_fleet_entry(registry_path: &str, entry: &FleetEntry) -> Result<(),
         .map(|dir| dir.to_string_lossy().into_owned())
         .filter(|dir| !dir.is_empty())
         .unwrap_or_else(|| ".".to_owned());
-    js_compat::mkdir_all(&dir).map_err(ConfigError)?;
+    js::mkdir_all(&dir).map_err(ConfigError::from)?;
     let deadline = Instant::now() + FLEET_LOCK_TIMEOUT;
     loop {
         match OpenOptions::new()
@@ -200,21 +200,27 @@ pub fn upsert_fleet_entry(registry_path: &str, entry: &FleetEntry) -> Result<(),
             Ok(mut lock) => {
                 let claimed = lock
                     .write_all(format!("{}\n", std::process::id()).as_bytes())
-                    .map_err(|err| ConfigError(js_compat::fs_error(&err, "write", &lock_path)));
+                    .map_err(|err| {
+                        ConfigError(js::FsError::new(&err, "write", &lock_path).to_string())
+                    });
                 drop(lock);
                 let written = claimed.and_then(|()| write_registry(registry_path, entry));
                 let _ = std::fs::remove_file(&lock_path);
                 return written;
             }
             Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
-            Err(err) => return Err(ConfigError(js_compat::fs_error(&err, "open", &lock_path))),
+            Err(err) => {
+                return Err(ConfigError(
+                    js::FsError::new(&err, "open", &lock_path).to_string(),
+                ));
+            }
         }
         match read_lock_pid(&lock_path) {
             Some(holder) if pid_is_live(holder) => {
                 if Instant::now() > deadline {
                     return Err(ConfigError(format!(
                         "fleet registry: lock {lock_path} is held by live pid {}",
-                        js_compat::number_string(holder)
+                        js::number_string(holder)
                     )));
                 }
                 std::thread::sleep(FLEET_LOCK_POLL);
@@ -246,8 +252,8 @@ fn write_registry(registry_path: &str, entry: &FleetEntry) -> Result<(), ConfigE
         .collect();
     entries.push(entry.to_value());
     let temp_path = format!("{registry_path}.tmp");
-    let text = js_compat::stringify_pretty(&Value::Array(entries));
-    js_compat::write_via_rename(registry_path, &temp_path, &text).map_err(ConfigError)
+    let text = js::stringify_pretty(&Value::Array(entries));
+    js::write_through_rename(registry_path, &temp_path, &text).map_err(ConfigError::from)
 }
 
 #[cfg(test)]

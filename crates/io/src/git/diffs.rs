@@ -7,14 +7,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::node::{js_number, js_trim, node_join, path_text};
 use super::runner::{git, git_async};
+use ac_core::js;
 
 /// The diff summary of `range` in `cwd` (`git diff --stat`), or `(no changes)` when it says nothing or
 /// fails: the Diff line of the Notice a parent gets when a Ticket it spawned ends (notices.ts).
 pub fn diff_stat_summary(cwd: impl AsRef<Path>, range: &str) -> String {
     let probe = git(cwd, ["diff", "--stat", range]);
-    let out = if probe.ok { js_trim(&probe.out) } else { "" };
+    let out = if probe.ok { js::trim(&probe.out) } else { "" };
     if out.is_empty() {
         "(no changes)".to_string()
     } else {
@@ -106,7 +106,7 @@ pub async fn activity_diff(cwd: impl AsRef<Path>) -> Option<ActivityDiff> {
         }
     };
     for line in numstat.out.split('\n') {
-        if js_trim(line).is_empty() {
+        if js::trim(line).is_empty() {
             continue;
         }
         let mut fields = line.split('\t');
@@ -118,7 +118,7 @@ pub async fn activity_diff(cwd: impl AsRef<Path>) -> Option<ActivityDiff> {
         }
         record(path, numstat_count(added), numstat_count(removed));
     }
-    let root = path_text(cwd);
+    let root = js::path_text(cwd);
     let mut untracked = 0;
     for line in status.out.split('\n') {
         let Some(listed) = line.strip_prefix("?? ") else {
@@ -129,7 +129,7 @@ pub async fn activity_diff(cwd: impl AsRef<Path>) -> Option<ActivityDiff> {
         }
         untracked += 1;
         let path = unquoted(listed).to_string();
-        let full = node_join(&[&root, &path]);
+        let full = js::path_join(&[&root, &path]);
         let Ok(info) = tokio::fs::metadata(&full).await else {
             continue;
         };
@@ -161,7 +161,7 @@ fn numstat_count(field: &str) -> u64 {
     if field == "-" {
         return 0;
     }
-    let n = js_number(field);
+    let n = js::number_from_text(field);
     if n.is_nan() { 0 } else { n as u64 }
 }
 

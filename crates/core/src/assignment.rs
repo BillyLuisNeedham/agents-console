@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::config::{ConfigError, PoolConfig};
 use crate::harness::Harnesses;
-use crate::js_compat;
+use crate::js;
 
 /// The drivers an Assignment runs when no layer names any.
 pub const DEFAULT_DRIVERS: &str = "implement";
@@ -54,7 +54,7 @@ impl LayerField {
         match value {
             None => LayerField::Absent,
             Some(Value::Null) => LayerField::Null,
-            Some(value) => LayerField::Text(js_compat::string_of(value)),
+            Some(value) => LayerField::Text(js::string_of(value)),
         }
     }
 
@@ -268,7 +268,7 @@ pub fn resolve_assignment(params: ResolveAssignmentParams<'_>) -> Result<Assignm
     let harness = resolved(|layer| &layer.harness).unwrap_or("").to_owned();
     let model = resolved(|layer| &layer.model).unwrap_or("").to_owned();
     let effort = resolved(|layer| &layer.effort)
-        .map(js_compat::trim)
+        .map(js::trim)
         .filter(|effort| !effort.is_empty())
         .map(str::to_owned);
     // A null stops the chain and reads as nothing: an empty harness or model, the default drivers.
@@ -296,13 +296,13 @@ pub fn resolve_assignment(params: ResolveAssignmentParams<'_>) -> Result<Assignm
         && let Some(raw) = params.request.and_then(|request| request.verify.as_ref())
         && !raw.is_null()
     {
-        let count = js_compat::number_of(raw).filter(|_| js_compat::is_integer(raw));
+        let count = js::number_of(raw).filter(|_| js::is_integer(raw));
         match count {
             Some(count) if count >= 1.0 => verify = Some(count as u64),
             _ => {
                 return Err(ConfigError(format!(
                     "{subject} has invalid verify {} (must be an integer >= 1)",
-                    js_compat::stringify(raw)
+                    js::stringify(raw)
                 )));
             }
         }
@@ -391,7 +391,7 @@ pub fn parse_grader_id(id: &str) -> Option<(&str, u64)> {
     {
         return None;
     }
-    Some((build, js_compat::number_from_text(digits) as u64))
+    Some((build, js::number_from_text(digits) as u64))
 }
 
 /// The head-to-head ticket's id: exactly one per build ticket.
@@ -476,9 +476,7 @@ pub fn defaults_layer(config: &PoolConfig) -> AssignmentLayer {
 pub fn assign_request(config: &PoolConfig, id: &str) -> AssignmentRequest {
     AssignmentRequest::of_entry(config.get("assign").and_then(|assign| match assign {
         Value::Object(entries) => entries.get(id),
-        Value::Array(items) => {
-            js_compat::array_index(id).and_then(|index| items.get(index as usize))
-        }
+        Value::Array(items) => js::array_index(id).and_then(|index| items.get(index as usize)),
         _ => None,
     }))
 }

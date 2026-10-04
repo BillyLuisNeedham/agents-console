@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use super::{HerdrError, js};
+use ac_core::js;
+
+use super::HerdrError;
 
 /// How long a call waits on the daemon before giving up on it: every RPC's watchdog, counted from the
 /// call's start, connect included.
@@ -86,7 +88,7 @@ fn settle(method: &str, line: &str) -> Result<Option<Value>, HerdrError> {
         Ok(Value::Object(answer)) => match answer.get("error") {
             Some(error) => Err(HerdrError::new(format!(
                 "{method} failed: {}",
-                js::detail(error)
+                js::json_or_string(error)
             ))),
             None => Ok(answer.get("result").cloned()),
         },

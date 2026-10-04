@@ -117,7 +117,6 @@
 mod boot;
 mod diffs;
 mod merge;
-mod node;
 mod repo;
 mod runner;
 mod worktrees;

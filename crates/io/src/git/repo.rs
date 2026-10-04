@@ -4,8 +4,8 @@
 
 use std::path::Path;
 
-use super::node::{canonical_dir, js_number, js_trim, path_text};
 use super::runner::{git, run_git};
+use ac_core::js;
 
 /// Whether `git rev-parse --verify <name>` resolves the name (worktrees.ts's refExists): a branch, a
 /// tag, a full ref, `HEAD`, a commit.
@@ -74,7 +74,7 @@ pub fn is_ancestor(repo_root: impl AsRef<Path>, branch: &str, target: &str) -> b
 pub fn has_commits_beyond(cwd: impl AsRef<Path>, target: &str, branch: &str) -> bool {
     let range = format!("{target}..{branch}");
     let probe = git(cwd, ["rev-list", "--count", &range]);
-    probe.ok && js_number(&probe.out) > 0.0
+    probe.ok && js::number_from_text(&probe.out) > 0.0
 }
 
 /// A file as committed at a revision (`git show <rev>:<path>`), whole and untrimmed, or `None` when git
@@ -90,12 +90,12 @@ pub fn repo_root_of(pool_dir: impl AsRef<Path>) -> String {
     let pool_dir = pool_dir.as_ref();
     let probe = run_git(Some(pool_dir), ["rev-parse", "--show-toplevel"]);
     if probe.ok() {
-        let root = js_trim(&probe.stdout_text()).to_string();
+        let root = js::trim(&probe.stdout_text()).to_string();
         if !root.is_empty() {
-            return canonical_dir(&root);
+            return js::canonical_dir(&root);
         }
     }
-    canonical_dir(&path_text(pool_dir))
+    js::canonical_dir(&js::path_text(pool_dir))
 }
 
 #[cfg(test)]
@@ -201,6 +201,6 @@ mod tests {
         let plain = Repo::bare_dir();
         assert_eq!(repo_root_of(plain.root()), plain.root_text());
         let missing = plain.path("missing");
-        assert_eq!(repo_root_of(&missing), path_text(&missing));
+        assert_eq!(repo_root_of(&missing), js::path_text(&missing));
     }
 }

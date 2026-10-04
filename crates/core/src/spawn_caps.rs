@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use crate::config::{ConfigError, PoolConfig};
-use crate::js_compat;
+use crate::js;
 
 /// The caps in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub fn spawn_caps_of(config: &PoolConfig) -> SpawnCaps {
         config
             .get("spawnCaps")
             .and_then(|caps| caps.get(name))
-            .and_then(js_compat::number_of)
+            .and_then(js::number_of)
             .map(|cap| cap as u64)
     };
     SpawnCaps {
@@ -60,7 +60,7 @@ pub fn check_spawn_caps(raw: Option<&Value>) -> Result<(), ConfigError> {
 
 /// A Spawn cap: a whole number, 0 (hold everything) or more.
 pub fn is_spawn_cap(value: &Value) -> bool {
-    js_compat::is_integer(value) && js_compat::number_of(value).is_some_and(|cap| cap >= 0.0)
+    js::is_integer(value) && js::number_of(value).is_some_and(|cap| cap >= 0.0)
 }
 
 #[cfg(test)]

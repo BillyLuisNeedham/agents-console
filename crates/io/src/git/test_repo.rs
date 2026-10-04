@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
 
-use super::node::path_text;
 use super::runner::{GitProbe, git};
+use ac_core::js;
 
 pub(crate) struct Repo {
     _dir: TempDir,
@@ -39,7 +39,7 @@ impl Repo {
     }
 
     pub(crate) fn root_text(&self) -> String {
-        path_text(&self.root)
+        js::path_text(&self.root)
     }
 
     pub(crate) fn path(&self, rel: &str) -> PathBuf {
@@ -81,7 +81,7 @@ impl Repo {
     pub(crate) fn second_checkout(&self) -> Repo {
         let base = Repo::bare_dir();
         let root = base.root.join("checkout");
-        let root_text = path_text(&root);
+        let root_text = js::path_text(&root);
         let add = self.git(["worktree", "add", &root_text, "-b", "companion", "HEAD"]);
         assert!(add.ok, "worktree add failed: {}", add.err);
         Repo {

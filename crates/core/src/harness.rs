@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::config::ConfigError;
-use crate::js_compat;
+use crate::js;
 
 /// Everything an argv builder reads about one Attempt's launch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -392,7 +392,7 @@ impl Harnesses {
     /// `Object.keys(harnesses).sort()`: what the Settings pane offers.
     pub fn sorted_names(&self) -> Vec<String> {
         let mut names = self.names();
-        js_compat::sort_strings(&mut names);
+        js::sort_strings(&mut names);
         names
     }
 

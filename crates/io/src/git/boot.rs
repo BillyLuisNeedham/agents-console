@@ -4,15 +4,15 @@
 
 use std::path::Path;
 
-use super::node::{js_number, js_trim, node_join, path_text};
 use super::runner::{git_line, run_git_quiet};
+use ac_core::js;
 
 /// A checkout's own git dir, where its HEAD lives (a linked worktree's `.git` is a file), or
 /// `<top>/.git` when git cannot say: boot-pool.ts's gitDirOf.
 pub fn absolute_git_dir(top: impl AsRef<Path>) -> String {
     let top = top.as_ref();
     git_line(top, ["rev-parse", "--absolute-git-dir"])
-        .unwrap_or_else(|| node_join(&[&path_text(top), ".git"]))
+        .unwrap_or_else(|| js::path_join(&[&js::path_text(top), ".git"]))
 }
 
 /// The last twenty commit subjects in `repo_dir`, blank ones left out, or none when it is not a
@@ -28,7 +28,7 @@ pub fn recent_subjects(repo_dir: impl AsRef<Path>) -> Vec<String> {
     }
     log.stdout_text()
         .split('\n')
-        .filter(|line| !js_trim(line).is_empty())
+        .filter(|line| !js::trim(line).is_empty())
         .map(str::to_string)
         .collect()
 }
@@ -44,7 +44,7 @@ pub fn ui_source_commit_ms(engine_dir: impl AsRef<Path>) -> Option<f64> {
     if !log.ok() {
         return None;
     }
-    let seconds = js_number(js_trim(&log.stdout_text()));
+    let seconds = js::number_from_text(js::trim(&log.stdout_text()));
     (seconds.is_finite() && seconds > 0.0).then_some(seconds * 1000.0)
 }
 

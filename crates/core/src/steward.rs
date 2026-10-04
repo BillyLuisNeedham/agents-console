@@ -7,7 +7,7 @@ use ac_protocol::StewardAssign;
 use serde_json::Value;
 
 use crate::config::{ConfigError, PoolConfig};
-use crate::js_compat;
+use crate::js;
 
 /// The Steward budget unless the pool sets one.
 pub const DEFAULT_STEWARD_BUDGET: u64 = 5;
@@ -22,7 +22,7 @@ pub fn steward_may_close_of(config: &PoolConfig) -> bool {
 /// The Steward budget in force under a config: 5 unless the pool says otherwise.
 pub fn steward_budget_of(config: &PoolConfig) -> u64 {
     steward_field(config, "budget")
-        .and_then(js_compat::number_of)
+        .and_then(js::number_of)
         .map_or(DEFAULT_STEWARD_BUDGET, |budget| budget as u64)
 }
 
@@ -45,7 +45,7 @@ fn steward_field<'a>(config: &'a PoolConfig, name: &str) -> Option<&'a Value> {
 
 /// A Steward budget: a whole number, 1 or more.
 pub fn is_steward_budget(value: &Value) -> bool {
-    js_compat::is_integer(value) && js_compat::number_of(value).is_some_and(|budget| budget >= 1.0)
+    js::is_integer(value) && js::number_of(value).is_some_and(|budget| budget >= 1.0)
 }
 
 /// A console.json `steward` value, checked for shape: absent, or an object whose budget, where

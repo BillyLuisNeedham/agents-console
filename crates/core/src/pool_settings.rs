@@ -16,7 +16,7 @@ use ac_protocol::{
 use serde_json::{Map, Value};
 
 use crate::config::{ConfigError, PoolConfig, config_path, read_config};
-use crate::js_compat;
+use crate::js;
 use crate::machine_defaults::{
     MachineDefaultsPaths, read_machine_defaults, read_machine_defaults_file,
 };
@@ -105,10 +105,10 @@ pub fn write_pool_settings(
 /// it. Every writer of console.json in the server goes through here: the Settings pane and Reassign.
 pub fn write_config_atomically(pool_dir: &str, config: &PoolConfig) -> Result<(), ConfigError> {
     let path = pool_settings_path(pool_dir);
-    js_compat::mkdir_all(pool_dir).map_err(ConfigError)?;
+    js::mkdir_all(pool_dir).map_err(ConfigError::from)?;
     let tmp = format!("{path}.tmp-{}", std::process::id());
     let text = format!("{}\n", config.to_pretty_json());
-    js_compat::write_via_rename(&path, &tmp, &text).map_err(ConfigError)
+    js::write_through_rename(&path, &tmp, &text).map_err(ConfigError::from)
 }
 
 // One key's value, validated: None means remove the key. Empty is always a removal, whatever the key's
@@ -160,7 +160,7 @@ fn string_fields(
                 )));
             }
         };
-        let trimmed = js_compat::trim(entry);
+        let trimmed = js::trim(entry);
         if !trimmed.is_empty() {
             out.insert((*field).to_owned(), Value::String(trimmed.to_owned()));
         }
@@ -176,13 +176,11 @@ fn non_empty(out: Map<String, Value>) -> Option<Value> {
 fn text_number(value: &Value) -> Option<Value> {
     match value {
         Value::String(text) => {
-            let trimmed = js_compat::trim(text);
+            let trimmed = js::trim(text);
             if trimmed.is_empty() {
                 None
             } else if is_digits(trimmed) {
-                Some(js_compat::number_value(js_compat::number_from_text(
-                    trimmed,
-                )))
+                Some(js::number_value(js::number_from_text(trimmed)))
             } else {
                 Some(value.clone())
             }
@@ -284,7 +282,7 @@ fn normalise_prose(key: &str, value: &Value) -> Result<Option<Value>, ConfigErro
     let Value::String(text) = value else {
         return Err(refused(format!("pool settings: {key} must be a string")));
     };
-    let trimmed = js_compat::trim(text);
+    let trimmed = js::trim(text);
     Ok((!trimmed.is_empty()).then(|| Value::String(trimmed.to_owned())))
 }
 
@@ -304,7 +302,7 @@ fn normalise_defaults(value: &Value, harnesses: &[String]) -> Result<Option<Valu
 // "none" is the opt-out and is kept verbatim.
 fn normalise_resolver(value: &Value, harnesses: &[String]) -> Result<Option<Value>, ConfigError> {
     if let Value::String(text) = value {
-        let trimmed = js_compat::trim(text);
+        let trimmed = js::trim(text);
         if trimmed.is_empty() {
             return Ok(None);
         }
@@ -332,7 +330,7 @@ fn normalise_resolver(value: &Value, harnesses: &[String]) -> Result<Option<Valu
 fn normalise_port(value: &Value) -> Result<Option<Value>, ConfigError> {
     match value {
         Value::String(text) => {
-            let trimmed = js_compat::trim(text);
+            let trimmed = js::trim(text);
             if trimmed.is_empty() {
                 return Ok(None);
             }
@@ -341,9 +339,9 @@ fn normalise_port(value: &Value) -> Result<Option<Value>, ConfigError> {
                     "pool settings: port must be an integer 1-65535, got {text}"
                 )));
             }
-            checked_port(js_compat::number_from_text(trimmed)).map(Some)
+            checked_port(js::number_from_text(trimmed)).map(Some)
         }
-        Value::Number(_) => checked_port(js_compat::number_of(value).unwrap_or(f64::NAN)).map(Some),
+        Value::Number(_) => checked_port(js::number_of(value).unwrap_or(f64::NAN)).map(Some),
         _ => Err(refused(
             "pool settings: port must be an integer 1-65535".into(),
         )),
@@ -354,7 +352,7 @@ fn checked_port(port: f64) -> Result<Value, ConfigError> {
     if !port.is_finite() || port.fract() != 0.0 || !(1.0..=65535.0).contains(&port) {
         return Err(refused(format!(
             "pool settings: port must be an integer 1-65535, got {}",
-            js_compat::number_string(port)
+            js::number_string(port)
         )));
     }
     Ok(Value::from(port as u64))
@@ -373,7 +371,7 @@ fn normalise_choice(
         Some(word) if legal.contains(&word) => Ok(Some(value.clone())),
         _ => Err(refused(format!(
             "pool settings: {key} must be {expected} (got {})",
-            js_compat::stringify(value)
+            js::stringify(value)
         ))),
     }
 }
@@ -391,7 +389,7 @@ pub fn require_known_harness(
         return Ok(());
     }
     let mut known = harnesses.to_vec();
-    js_compat::sort_strings(&mut known);
+    js::sort_strings(&mut known);
     Err(refused(format!(
         "{subject} names unknown harness '{harness}'. Known: {}",
         known.join(", ")
@@ -426,7 +424,7 @@ pub fn settings_payload(
     let relaunch = relaunch_port(context.pool_dir, bound_port);
     let stale = stale_boot_only_keys(&pool.config, context.boot_config, bound_port, &relaunch);
     let mut harnesses = context.harnesses.to_vec();
-    js_compat::sort_strings(&mut harnesses);
+    js::sort_strings(&mut harnesses);
     Ok(SettingsResponse {
         pool: PoolSettingsView {
             path: pool.path,
@@ -461,12 +459,9 @@ pub fn stale_boot_only_keys(
     let mut stale = Vec::new();
     for key in BOOT_ONLY_KEYS {
         let differs = match key {
-            "port" => js_compat::number_of(relaunch) != Some(bound_port as f64),
+            "port" => js::number_of(relaunch) != Some(bound_port as f64),
             "terminal" => strict_or_null(config.get(key)) != strict_or_null(boot_config.get(key)),
-            _ => {
-                config.get(key).map(js_compat::stringify)
-                    != boot_config.get(key).map(js_compat::stringify)
-            }
+            _ => config.get(key).map(js::stringify) != boot_config.get(key).map(js::stringify),
         };
         if differs {
             stale.push(key.to_owned());
@@ -492,7 +487,7 @@ fn strict_or_null(value: Option<&Value>) -> Option<Result<&str, ()>> {
 pub fn relaunch_port(pool_dir: &str, bound_port: u64) -> Value {
     match read_pool_settings(pool_dir) {
         Ok(settings) => match settings.config.port() {
-            Some(pin) if js_compat::number_of(pin) != Some(0.0) => pin.clone(),
+            Some(pin) if js::number_of(pin) != Some(0.0) => pin.clone(),
             _ => Value::from(bound_port),
         },
         Err(_) => Value::from(bound_port),
@@ -530,7 +525,7 @@ mod tests {
             if let Some(config) = config {
                 std::fs::write(
                     dir.path().join("console.json"),
-                    format!("{}\n", js_compat::stringify_pretty(&config)),
+                    format!("{}\n", js::stringify_pretty(&config)),
                 )
                 .unwrap();
             }
@@ -599,7 +594,7 @@ mod tests {
         // The exact bytes: the file's own order, the new key last, two-space indent and a newline.
         assert_eq!(
             std::fs::read_to_string(pool.dir.path().join("console.json")).unwrap(),
-            format!("{}\n", js_compat::stringify_pretty(&expected))
+            format!("{}\n", js::stringify_pretty(&expected))
         );
     }
 

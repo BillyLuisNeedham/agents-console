@@ -16,7 +16,7 @@ use ac_protocol::{MachineDefaults, TerminalKind};
 use serde_json::{Map, Value};
 
 use crate::config::ConfigError;
-use crate::js_compat;
+use crate::js;
 
 /// The fields the file may hold.
 pub const MACHINE_DEFAULTS_KEYS: [&str; 6] = [
@@ -28,7 +28,7 @@ const STRING_KEYS: [&str; 5] = ["harness", "model", "effort", "drivers", "engine
 
 /// Where the file lives under a home directory.
 pub fn default_machine_defaults_path(home: &str) -> String {
-    js_compat::path_join(&[home, ".agent-graphs", "defaults.json"])
+    js::path_join(&[home, ".agent-graphs", "defaults.json"])
 }
 
 /// The JSON file of record and the two legacy files behind it.
@@ -46,8 +46,8 @@ pub struct MachineDefaultsPaths {
 pub fn default_machine_defaults_paths(home: &str) -> MachineDefaultsPaths {
     MachineDefaultsPaths {
         file: default_machine_defaults_path(home),
-        issue_runner: js_compat::path_join(&[home, ".issue-runner"]),
-        console_runner: js_compat::path_join(&[home, ".console-runner"]),
+        issue_runner: js::path_join(&[home, ".issue-runner"]),
+        console_runner: js::path_join(&[home, ".console-runner"]),
     }
 }
 
@@ -73,13 +73,13 @@ pub fn read_machine_defaults(paths: &MachineDefaultsPaths) -> MachineDefaults {
 
 /// Only the JSON file's own fields, no legacy fallback; empty when absent or malformed.
 pub fn read_machine_defaults_file(file: &str) -> MachineDefaults {
-    if !js_compat::exists(file) {
+    if !js::exists(file) {
         return no_defaults();
     }
-    let Ok(text) = js_compat::read_text(file) else {
+    let Ok(text) = js::read_text(file) else {
         return no_defaults();
     };
-    match js_compat::parse(&text) {
+    match js::parse(&text) {
         Ok(parsed) => sanitize_machine_defaults(&parsed),
         Err(_) => no_defaults(),
     }
@@ -98,13 +98,13 @@ pub fn write_machine_defaults(
         .map(|dir| dir.to_string_lossy().into_owned())
         .filter(|dir| !dir.is_empty())
         .unwrap_or_else(|| ".".to_owned());
-    js_compat::mkdir_all(&dir).map_err(ConfigError)?;
+    js::mkdir_all(&dir).map_err(ConfigError::from)?;
     let tmp = format!("{file}.tmp-{}", std::process::id());
     let text = format!(
         "{}\n",
-        js_compat::stringify_pretty(&machine_defaults_value(&clean))
+        js::stringify_pretty(&machine_defaults_value(&clean))
     );
-    js_compat::write_via_rename(file, &tmp, &text).map_err(ConfigError)?;
+    js::write_through_rename(file, &tmp, &text).map_err(ConfigError::from)?;
     Ok(clean)
 }
 
@@ -124,7 +124,7 @@ pub fn validate_machine_defaults(input: &Value) -> Result<MachineDefaults, Confi
                 )));
             }
         };
-        let trimmed = js_compat::trim(value);
+        let trimmed = js::trim(value);
         if !trimmed.is_empty() {
             *string_field(&mut out, key) = Some(trimmed.to_owned());
         }
@@ -138,7 +138,7 @@ pub fn validate_machine_defaults(input: &Value) -> Result<MachineDefaults, Confi
         Some(other) => {
             return Err(ConfigError(format!(
                 r#"machine defaults: terminal must be "herdr" (got {})"#,
-                js_compat::stringify(other)
+                js::stringify(other)
             )));
         }
     }
@@ -153,7 +153,7 @@ fn sanitize_machine_defaults(parsed: &Value) -> MachineDefaults {
     };
     for key in STRING_KEYS {
         if let Some(value) = raw.get(key).and_then(Value::as_str) {
-            let trimmed = js_compat::trim(value);
+            let trimmed = js::trim(value);
             if !trimmed.is_empty() {
                 *string_field(&mut out, key) = Some(trimmed.to_owned());
             }
@@ -210,17 +210,17 @@ fn machine_defaults_value(defaults: &MachineDefaults) -> Value {
 // `key=value` lines, each side trimmed; a later line wins. Missing or unreadable is empty.
 fn read_key_value_file(path: &str) -> HashMap<String, String> {
     let mut fields = HashMap::new();
-    if !js_compat::exists(path) {
+    if !js::exists(path) {
         return fields;
     }
-    let Ok(text) = js_compat::read_text(path) else {
+    let Ok(text) = js::read_text(path) else {
         return fields;
     };
     for line in text.split('\n') {
         if let Some(eq) = line.find('=').filter(|eq| *eq > 0) {
             fields.insert(
-                js_compat::trim(&line[..eq]).to_owned(),
-                js_compat::trim(&line[eq + 1..]).to_owned(),
+                js::trim(&line[..eq]).to_owned(),
+                js::trim(&line[eq + 1..]).to_owned(),
             );
         }
     }

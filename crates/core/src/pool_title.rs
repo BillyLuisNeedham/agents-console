@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use crate::config::{PoolConfig, config_path};
-use crate::js_compat;
+use crate::js;
 
 /// The longest title kept, in characters; a longer one is cut, not refused.
 pub const TITLE_MAX: usize = 80;
@@ -20,7 +20,7 @@ pub fn normalise_title(value: &str) -> Option<String> {
     let mut line = String::with_capacity(value.len());
     let mut in_space = false;
     for c in value.chars() {
-        if js_compat::is_whitespace(c) {
+        if js::is_whitespace(c) {
             if !in_space {
                 line.push(' ');
             }
@@ -32,7 +32,7 @@ pub fn normalise_title(value: &str) -> Option<String> {
     }
     let line: String = line.chars().filter(|c| !c.is_control()).collect();
     let cut: String = line.chars().take(TITLE_MAX).collect();
-    let cut = js_compat::trim(&cut);
+    let cut = js::trim(&cut);
     (!cut.is_empty()).then(|| cut.to_owned())
 }
 
@@ -50,11 +50,11 @@ fn title_in(raw: Option<&Value>) -> Option<String> {
 /// when it reads the Pool it is actually starting, not a reason to refuse to list the others.
 pub fn read_pool_title(pool_dir: &str) -> Option<String> {
     let file = config_path(pool_dir);
-    if !js_compat::exists(&file) {
+    if !js::exists(&file) {
         return None;
     }
-    let text = js_compat::read_text(&file).ok()?;
-    match js_compat::parse(&text).ok()? {
+    let text = js::read_text(&file).ok()?;
+    match js::parse(&text).ok()? {
         Value::Object(map) => title_in(map.get("title")),
         _ => None,
     }
@@ -65,7 +65,7 @@ pub fn read_pool_title(pool_dir: &str) -> Option<String> {
 pub fn pool_workspace_label(title: Option<&str>, pool_dir: &str) -> String {
     match title {
         Some(title) => title.to_owned(),
-        None => js_compat::basename(pool_dir).to_owned(),
+        None => js::basename(pool_dir).to_owned(),
     }
 }
 

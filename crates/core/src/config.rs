@@ -43,7 +43,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::harness::Harnesses;
-use crate::js_compat;
+use crate::js;
 use crate::spawn_caps::check_spawn_caps;
 use crate::steward::check_steward_config;
 
@@ -69,6 +69,18 @@ pub struct ConfigError(pub String);
 impl ConfigError {
     pub fn new(message: impl Into<String>) -> Self {
         ConfigError(message.into())
+    }
+}
+
+impl From<js::FsError> for ConfigError {
+    fn from(err: js::FsError) -> Self {
+        ConfigError(err.to_string())
+    }
+}
+
+impl From<js::JsonParseError> for ConfigError {
+    fn from(err: js::JsonParseError) -> Self {
+        ConfigError(err.to_string())
     }
 }
 
@@ -166,13 +178,13 @@ impl PoolConfig {
     /// `JSON.stringify(config, null, 2)`: the file's text as the TypeScript writes it, without the
     /// trailing newline its writers add.
     pub fn to_pretty_json(&self) -> String {
-        js_compat::stringify_pretty(&self.to_value())
+        js::stringify_pretty(&self.to_value())
     }
 }
 
 impl Serialize for PoolConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        js_compat::JsOrdered(&self.to_value()).serialize(serializer)
+        js::JsOrdered(&self.to_value()).serialize(serializer)
     }
 }
 
@@ -196,14 +208,14 @@ pub fn read_config_text(pool_dir: &str) -> Result<Option<String>, ConfigError> {
 
 /// Where a pool keeps its config, spelled as Node's `path.join` spells it.
 pub fn config_path(pool_dir: &str) -> String {
-    js_compat::path_join(&[pool_dir, CONSOLE_JSON])
+    js::path_join(&[pool_dir, CONSOLE_JSON])
 }
 
 fn read_optional(path: &str) -> Result<Option<String>, ConfigError> {
-    if !js_compat::exists(path) {
+    if !js::exists(path) {
         return Ok(None);
     }
-    js_compat::read_text(path).map(Some).map_err(ConfigError)
+    js::read_text(path).map(Some).map_err(ConfigError::from)
 }
 
 /// The same parse, over text the caller already has. The Console reads the file itself to key a cache
@@ -237,7 +249,7 @@ pub fn parse_config(raw: Option<&str>, pool_dir: &str) -> Result<PoolConfig, Con
 
 // JSON.parse, then the one shape rule both parsers share: the file is an object.
 fn parse_object(raw: &str, pool_dir: &str) -> Result<Map<String, Value>, ConfigError> {
-    match js_compat::parse(raw).map_err(ConfigError)? {
+    match js::parse(raw).map_err(ConfigError::from)? {
         Value::Object(map) => Ok(map),
         _ => Err(ConfigError(format!(
             "pool config: {} must be a JSON object",
@@ -301,9 +313,7 @@ pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig 
 pub fn changed_slice_keys(previous: &PoolConfig, next: &PoolConfig) -> Vec<&'static str> {
     CONFIG_SLICE_KEYS
         .into_iter()
-        .filter(|key| {
-            previous.get(key).map(js_compat::stringify) != next.get(key).map(js_compat::stringify)
-        })
+        .filter(|key| previous.get(key).map(js::stringify) != next.get(key).map(js::stringify))
         .collect()
 }
 
@@ -318,7 +328,7 @@ pub fn check_steward_harness(
         .and_then(|steward| steward.get("assign"))
         .and_then(|assign| assign.get("harness"))
         .and_then(Value::as_str)
-        .map(js_compat::trim)
+        .map(js::trim)
     else {
         return Ok(());
     };

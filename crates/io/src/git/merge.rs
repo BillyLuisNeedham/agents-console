@@ -11,10 +11,10 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use super::node::{fs_error, js_trim, node_join, node_relative, path_text, rename_error};
 use super::repo::{current_branch, ref_exists, show_toplevel};
 use super::runner::{GitOutput, GitProbe, git, run_git};
 use super::worktrees::{WorktreeInfo, close_merge_checkout, err_or_out, open_merge_checkout};
+use ac_core::js;
 
 /// Why a merge did not land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ struct UntrackedInTheWay {
 // The checkout's top level: `git status` and `git diff --name-only` name paths relative to it whatever
 // directory the pool runs in.
 fn toplevel_of(repo_root: &Path) -> String {
-    show_toplevel(repo_root).unwrap_or_else(|| path_text(repo_root))
+    show_toplevel(repo_root).unwrap_or_else(|| js::path_text(repo_root))
 }
 
 // Untracked files in the checkout that merging `branch` would write: the intersection of the
@@ -103,7 +103,7 @@ fn untracked_in_the_way(repo_root: &Path, branch: &str) -> UntrackedInTheWay {
         }
         let ours = git(
             repo_root,
-            ["hash-object", "--", &node_join(&[&toplevel, path])],
+            ["hash-object", "--", &js::path_join(&[&toplevel, path])],
         );
         if ours.ok && ours.out == theirs.out {
             way.identical.push(path.to_string());
@@ -121,7 +121,7 @@ fn refused_paths(stderr: &str) -> Vec<String> {
     stderr
         .split('\n')
         .filter(|line| line.starts_with('\t'))
-        .map(|line| js_trim(line).to_string())
+        .map(|line| js::trim(line).to_string())
         .filter(|line| !line.is_empty())
         .collect()
 }
@@ -166,7 +166,7 @@ pub fn merge_branch(repo_root: impl AsRef<Path>, branch: &str) -> Result<MergeRe
     }
     let toplevel = toplevel_of(root);
     for path in &way.identical {
-        remove_file_forced(&node_join(&[&toplevel, path]))?;
+        remove_file_forced(&js::path_join(&[&toplevel, path]))?;
     }
     let cleared = way.identical;
     let cleared_note = if cleared.is_empty() {
@@ -277,7 +277,7 @@ pub fn with_merge_checkout<T>(
     merge_target: Option<&str>,
     body: impl FnOnce(&str) -> Result<T>,
 ) -> Result<T> {
-    let root = path_text(repo_root.as_ref());
+    let root = js::path_text(repo_root.as_ref());
     let target = match merge_target {
         Some(target) if current_branch(&root) != target => target,
         _ => return body(&root),
@@ -308,11 +308,11 @@ pub fn merge_in_place(
 ) -> Result<MergedTicketFile> {
     let aside = format!("{ticket_file}.pool-aside");
     fs::rename(ticket_file, &aside)
-        .map_err(|err| anyhow!(rename_error(&err, ticket_file, &aside)))?;
+        .map_err(|err| anyhow!(js::FsError::rename(&err, ticket_file, &aside)))?;
     let result = merge_branch(pool_checkout, branch)?;
     if !result.ok || !Path::new(ticket_file).exists() {
         fs::rename(&aside, ticket_file)
-            .map_err(|err| anyhow!(rename_error(&err, &aside, ticket_file)))?;
+            .map_err(|err| anyhow!(js::FsError::rename(&err, &aside, ticket_file)))?;
         return Ok(MergedTicketFile {
             result,
             theirs: None,
@@ -336,8 +336,8 @@ pub fn merge_in_checkout(
     ticket_file: &str,
     branch: &str,
 ) -> Result<MergedTicketFile> {
-    let rel = node_relative(&path_text(pool_checkout.as_ref()), ticket_file);
-    let copy = node_join(&[checkout, &rel]);
+    let rel = js::path_relative(&js::path_text(pool_checkout.as_ref()), ticket_file);
+    let copy = js::path_join(&[checkout, &rel]);
     let before = if Path::new(&copy).exists() {
         Some(read_text(&copy)?)
     } else {
@@ -360,7 +360,7 @@ pub fn merge_in_checkout(
 fn read_text(path: &str) -> Result<String> {
     let bytes = fs::read(path).map_err(|err| match err.raw_os_error() {
         Some(libc::EISDIR) => anyhow!("EISDIR: illegal operation on a directory, read"),
-        _ => anyhow!(fs_error(&err, "open", path)),
+        _ => anyhow!(js::FsError::new(&err, "open", path)),
     })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -374,7 +374,7 @@ fn remove_file_forced(path: &str) -> Result<()> {
             Some(libc::EISDIR | libc::ENOTDIR) => Err(anyhow!(
                 "EFAULT: bad address in system call argument, rm '{path}'"
             )),
-            _ => Err(anyhow!(fs_error(&err, "rm", path))),
+            _ => Err(anyhow!(js::FsError::new(&err, "rm", path))),
         },
         Ok(()) => Ok(()),
     }
