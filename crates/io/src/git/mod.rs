@@ -21,7 +21,7 @@
 //! | worktrees.ts:107 `gitCommonDir` | `rev-parse --path-format=absolute --git-common-dir` | [`git_common_dir`] |
 //! | worktrees.ts:124 `gitDirOf` | `rev-parse --absolute-git-dir` | `worktrees::git_dir_of` (private) |
 //! | worktrees.ts:144 `refStamp` | none (reads HEAD, stats ref files) | [`ref_stamp`] |
-//! | worktrees.ts:187 `poolKeyFor` | none | [`pool_key_for`] |
+//! | worktrees.ts:187 `poolKeyFor` | none | [`pool_key_for`], [`try_pool_key_for`] where its throw matters |
 //! | worktrees.ts:198 `worktreePathFor` | none | [`worktree_path_for`] |
 //! | worktrees.ts:218 `isPoolWorktree` | none | [`is_pool_worktree`] |
 //! | worktrees.ts:222 `branchExists` | `rev-parse --verify pool/<key>/<id>[.attempt-N]` | [`branch_exists`] |
@@ -73,7 +73,7 @@
 //! | engine.ts:6534 `rejectMerge` | `merge --abort` in the worktree | [`merge_abort`] |
 //! | engine.ts:7228, 7232 `attemptDiff` | `merge-base HEAD <branch>`, `diff <base>..<branch>` | [`branch_diff`] |
 //! | engine.ts:7253, 7258 `attemptDiffParts` | the same, with `-U0` on the base budget | [`branch_diff`] |
-//! | engine.ts:10279, 10280 `applyEnlistBranchRule` | `rev-parse --show-toplevel` in the pane's directory and the pool's (stdout even on failure) | [`show_toplevel`] |
+//! | engine.ts:10279, 10280 `applyEnlistBranchRule` | `rev-parse --show-toplevel` in the pane's directory and the pool's, `.out` read even on failure | [`show_toplevel`] (see below) |
 //! | engine.ts:10692, 10693 `removeEnlistedBranch` | `checkout <found>`, `branch -D <pool branch>` | [`restore_found_branch`] |
 //! | engine.ts:11969 `repoRootOf` | `rev-parse --show-toplevel` in the pool dir, stderr ignored | [`repo_root_of`] |
 //!
@@ -105,6 +105,11 @@
 //! | `removeWorktree` | conversations.ts:1490, 1830; engine.ts:11644 | [`remove_worktree`] |
 //! | `worktreePathFor` | conversations.ts:1128; engine.ts:791, 1924, 2673, 4234, 4434, 5814, 8036, 8487, 8562 | [`worktree_path_for`] |
 //!
+//! engine.ts:10279-10281 reads `.out` of `rev-parse --show-toplevel` even when it fails, which is the
+//! empty string: git prints nothing on stdout then (exit 128, inside `.git` too). [`show_toplevel`] gives
+//! `None` there instead, so the capture test `paneTop !== "" && paneTop === cwdTop` ports as
+//! `pane_top.is_some() && pane_top == cwd_top`: two `None`s must not count as captured.
+//!
 //! Where a TypeScript call reads its probe in a way no function here names (`.out` of a failed run,
 //! say), the runner's [`GitProbe`] carries exactly what the TypeScript saw. A git that cannot be started
 //! at all reads as a failed run carrying the reason, where Bun's spawn would have thrown.
@@ -135,5 +140,6 @@ pub use worktrees::{
     WorktreeInfo, attempt_branches, branch_checked_out_at, branch_exists, branch_for,
     checkout_new_branch, close_merge_checkout, discard_worktree, git_common_dir, is_pool_worktree,
     merge_checkout_path_for, open_merge_checkout, pool_key_for, prepare_worktree, ref_stamp,
-    remove_stale_merge_checkout, remove_worktree, restore_found_branch, worktree_path_for,
+    remove_stale_merge_checkout, remove_worktree, restore_found_branch, try_pool_key_for,
+    worktree_path_for,
 };

@@ -163,10 +163,15 @@ pub(crate) fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// `realpathSync`: the empty path is the working directory, as Bun resolves it.
+pub(crate) fn realpath(path: &str) -> io::Result<std::path::PathBuf> {
+    std::fs::canonicalize(if path.is_empty() { "." } else { path })
+}
+
 /// `realpathSync`, or the path as given when there is nothing on disk to resolve (canonicalDir in
 /// engine.ts, canonical in enlist.ts).
 pub(crate) fn canonical_dir(dir: &str) -> String {
-    match std::fs::canonicalize(dir) {
+    match realpath(dir) {
         Ok(real) => path_text(&real),
         Err(_) => dir.to_string(),
     }

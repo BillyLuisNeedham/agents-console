@@ -355,19 +355,28 @@ pub fn merge_in_checkout(
     Ok(MergedTicketFile { result, theirs })
 }
 
-// `readFileSync(path, "utf8")`.
+// `readFileSync(path, "utf8")`, failing with Bun's texts: a directory is the read's EISDIR, which names
+// no path.
 fn read_text(path: &str) -> Result<String> {
-    let bytes = fs::read(path).map_err(|err| anyhow!(fs_error(&err, "open", path)))?;
+    let bytes = fs::read(path).map_err(|err| match err.raw_os_error() {
+        Some(libc::EISDIR) => anyhow!("EISDIR: illegal operation on a directory, read"),
+        _ => anyhow!(fs_error(&err, "open", path)),
+    })?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-// `rmSync(path, { force: true })`: a file, or nothing when there is nothing there.
+// `rmSync(path, { force: true })`: a file, or nothing when there is nothing there. Bun reports a
+// directory, or a path through a file, as EFAULT.
 fn remove_file_forced(path: &str) -> Result<()> {
     match fs::remove_file(path) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => {
-            Err(anyhow!(fs_error(&err, "rm", path)))
-        }
-        _ => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => match err.raw_os_error() {
+            Some(libc::EISDIR | libc::ENOTDIR) => Err(anyhow!(
+                "EFAULT: bad address in system call argument, rm '{path}'"
+            )),
+            _ => Err(anyhow!(fs_error(&err, "rm", path))),
+        },
+        Ok(()) => Ok(()),
     }
 }
 
@@ -504,6 +513,12 @@ mod tests {
                 detail: "branch pool/k/01 is gone".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn names_a_failure_as_the_typescript_reason() {
+        assert_eq!(MergeFailure::Conflict.as_str(), "conflict");
+        assert_eq!(MergeFailure::Blocked.as_str(), "blocked");
     }
 
     #[test]
@@ -683,6 +698,32 @@ mod tests {
             err.to_string(),
             format!("ENOENT: no such file or directory, rename '{file}' -> '{file}.pool-aside'")
         );
+    }
+
+    #[test]
+    fn spells_the_file_failures_as_bun_does() {
+        let dir = Repo::bare_dir();
+        let root = dir.root_text();
+        assert_eq!(
+            read_text(&root).unwrap_err().to_string(),
+            "EISDIR: illegal operation on a directory, read"
+        );
+        let missing = format!("{root}/missing");
+        assert_eq!(
+            read_text(&missing).unwrap_err().to_string(),
+            format!("ENOENT: no such file or directory, open '{missing}'")
+        );
+        assert_eq!(
+            remove_file_forced(&root).unwrap_err().to_string(),
+            format!("EFAULT: bad address in system call argument, rm '{root}'")
+        );
+        dir.write("file", "x");
+        let through = format!("{root}/file/inner");
+        assert_eq!(
+            remove_file_forced(&through).unwrap_err().to_string(),
+            format!("EFAULT: bad address in system call argument, rm '{through}'")
+        );
+        remove_file_forced(&missing).unwrap();
     }
 
     #[test]

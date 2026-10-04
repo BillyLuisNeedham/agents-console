@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::node::{fs_error, js_number, js_trim, node_join, path_text};
+use super::node::{fs_error, js_number, js_trim, node_join, path_text, realpath};
 use super::repo::ref_exists;
 use super::runner::{GitProbe, git};
 
@@ -51,9 +51,10 @@ fn cached(
     if let Some(hit) = lock(cache).get(key) {
         return hit.clone();
     }
+    // Computed outside the lock, since it runs git; should two callers race on a first use, the first
+    // value stored is the one every caller gets, as in the TypeScript's one thread.
     let value = compute();
-    lock(cache).insert(key.to_string(), value.clone());
-    value
+    lock(cache).entry(key.to_string()).or_insert(value).clone()
 }
 
 /// The repository's common git dir, absolute, or `<repo_root>/.git` when git cannot say.
@@ -151,20 +152,24 @@ fn head_branch(head: &str) -> Option<String> {
 ///
 /// Where the TypeScript's `realpathSync` would throw (nothing on disk at `repo_root`), the key is taken
 /// from the path as given and not remembered, so naming stays total; a running pool's checkout always
-/// exists.
+/// exists. The functions that change disk ([`prepare_worktree`], [`open_merge_checkout`],
+/// [`remove_stale_merge_checkout`]) go through [`try_pool_key_for`] instead and fail there, as the
+/// TypeScript does, before any side effect.
 pub fn pool_key_for(repo_root: impl AsRef<Path>) -> String {
     let root = path_text(repo_root.as_ref());
+    try_pool_key_for(&root).unwrap_or_else(|_| key_of(&root))
+}
+
+/// The pool key, failing as `realpathSync` throws when there is nothing on disk at `repo_root`:
+/// `ENOENT: no such file or directory, lstat '<repo_root>'`.
+pub fn try_pool_key_for(repo_root: impl AsRef<Path>) -> Result<String> {
+    let root = path_text(repo_root.as_ref());
     if let Some(hit) = lock(&POOL_KEYS).get(&root) {
-        return hit.clone();
+        return Ok(hit.clone());
     }
-    match fs::canonicalize(&root) {
-        Ok(real) => {
-            let key = key_of(&path_text(&real));
-            lock(&POOL_KEYS).insert(root, key.clone());
-            key
-        }
-        Err(_) => key_of(&root),
-    }
+    let real = realpath(&root).map_err(|err| anyhow!(fs_error(&err, "lstat", &root)))?;
+    let key = key_of(&path_text(&real));
+    Ok(lock(&POOL_KEYS).entry(root).or_insert(key).clone())
 }
 
 fn key_of(real_path: &str) -> String {
@@ -285,6 +290,7 @@ pub fn prepare_worktree(
     base: &str,
 ) -> Result<WorktreeInfo> {
     let root = repo_root.as_ref();
+    try_pool_key_for(root)?;
     let branch = branch_for(root, ticket_id, attempt);
     let path = worktree_path_for(root, ticket_id, attempt);
     git(root, ["worktree", "prune"]);
@@ -335,6 +341,7 @@ pub fn merge_checkout_path_for(repo_root: impl AsRef<Path>) -> String {
 /// called at boot and before every open. Fails only when its directory cannot be removed.
 pub fn remove_stale_merge_checkout(repo_root: impl AsRef<Path>) -> Result<()> {
     let root = repo_root.as_ref();
+    try_pool_key_for(root)?;
     let path = merge_checkout_path_for(root);
     git(root, ["worktree", "prune"]);
     if registered_worktrees(root)
@@ -349,6 +356,7 @@ pub fn remove_stale_merge_checkout(repo_root: impl AsRef<Path>) -> Result<()> {
 /// Open the merge checkout on `branch` (the merge target) and return its path.
 pub fn open_merge_checkout(repo_root: impl AsRef<Path>, branch: &str) -> Result<String> {
     let root = repo_root.as_ref();
+    try_pool_key_for(root)?;
     let path = merge_checkout_path_for(root);
     remove_stale_merge_checkout(root)?;
     make_parent_dir(&path)?;
@@ -600,6 +608,34 @@ mod tests {
         assert_eq!(pool_key_for(a.root()), expected);
         assert_eq!(pool_key_for(&link), expected);
         assert_eq!(pool_key_for(format!("{}/", a.root_text())), expected);
+    }
+
+    #[test]
+    fn a_missing_root_fails_the_disk_changes_before_any_side_effect() {
+        let plain = Repo::bare_dir();
+        let root = plain.path("gone");
+        let root_text = path_text(&root);
+        let missing = format!("ENOENT: no such file or directory, lstat '{root_text}'");
+        assert_eq!(try_pool_key_for(&root).unwrap_err().to_string(), missing);
+        assert_eq!(
+            prepare_worktree(&root, "01", None, "HEAD")
+                .unwrap_err()
+                .to_string(),
+            missing
+        );
+        assert_eq!(
+            open_merge_checkout(&root, "main").unwrap_err().to_string(),
+            missing
+        );
+        assert_eq!(
+            remove_stale_merge_checkout(&root).unwrap_err().to_string(),
+            missing
+        );
+        assert!(!root.exists());
+        // Naming stays total, and nothing wrong is remembered for the root once it exists.
+        assert_eq!(pool_key_for(&root), key_of(&root_text));
+        fs::create_dir(&root).unwrap();
+        assert_eq!(try_pool_key_for(&root).unwrap(), key_of(&root_text));
     }
 
     #[test]

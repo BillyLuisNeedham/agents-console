@@ -15,9 +15,10 @@
 //! milliseconds.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How long a file must have been quiet before its stamp is trusted.
@@ -72,10 +73,11 @@ pub fn stamp_of(meta: &Metadata, now_ms: i64) -> Option<String> {
 /// A read behind a per-path cache keyed on the file's stamp. The stamp is taken before the read, so a
 /// write racing the read leaves the entry under a stamp the next call no longer matches. A read that
 /// fails is not cached: the next call reads again and fails again, the way the bare read would. Every
-/// caller gets its own clone of what was read.
+/// caller gets its own clone of what was read. Entries are keyed by the path exactly as spelled, so
+/// `dir/x.md` and `dir/./x.md` are two entries, as they are two keys of the TypeScript's map.
 #[derive(Debug)]
 pub struct StampCache<T> {
-    entries: HashMap<PathBuf, Entry<T>>,
+    entries: HashMap<OsString, Entry<T>>,
 }
 
 #[derive(Debug)]
@@ -105,7 +107,7 @@ impl<T: Clone> StampCache<T> {
     ) -> Result<T, E> {
         let path = path.as_ref();
         let stamp = file_stamp(path);
-        if let (Some(stamp), Some(hit)) = (&stamp, self.entries.get(path))
+        if let (Some(stamp), Some(hit)) = (&stamp, self.entries.get(path.as_os_str()))
             && hit.stamp == *stamp
         {
             return Ok(hit.value.clone());
@@ -114,7 +116,7 @@ impl<T: Clone> StampCache<T> {
         match stamp {
             Some(stamp) if stamp != ABSENT => {
                 self.entries.insert(
-                    path.to_path_buf(),
+                    path.as_os_str().to_owned(),
                     Entry {
                         stamp,
                         value: value.clone(),
@@ -122,7 +124,7 @@ impl<T: Clone> StampCache<T> {
                 );
             }
             _ => {
-                self.entries.remove(path);
+                self.entries.remove(path.as_os_str());
             }
         }
         Ok(value)
@@ -134,6 +136,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::fs::{self, File, FileTimes};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn temp_file(text: &str) -> (tempfile::TempDir, PathBuf) {
@@ -235,9 +238,24 @@ mod tests {
             cache.read(&path, |_| Ok::<_, String>(absent.clone())),
             Ok(vec![])
         );
-        assert!(!cache.entries.contains_key(&path));
+        assert!(!cache.entries.contains_key(path.as_os_str()));
         assert_eq!(cache.read(&path, |p| words(&reads, p)).ok(), None);
         assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn keeps_each_spelling_of_a_path_as_its_own_entry() {
+        let (dir, path) = temp_file("one two");
+        quiet(&path);
+        let reads = Cell::new(0);
+        let mut cache = StampCache::new();
+        let dotted = dir.path().join(".").join("file.md");
+        cache.read(&path, |p| words(&reads, p)).unwrap();
+        cache.read(&dotted, |p| words(&reads, p)).unwrap();
+        cache.read(&path, |p| words(&reads, p)).unwrap();
+        cache.read(&dotted, |p| words(&reads, p)).unwrap();
+        assert_eq!(reads.get(), 2);
+        assert_eq!(cache.entries.len(), 2);
     }
 
     #[test]
