@@ -135,7 +135,9 @@ too. One gap is left:
   a started pool, console.json rewritten to `{ not json`; GET /api/settings answers 500 `{error}`, the pool
   PUT answers 400 and leaves the broken bytes, PUT /api/reassign answers 500, GET /api/panes and `panes.list`
   answer a clean 500 refusal, and the snapshot keeps the last good `poolTitle`. The Reassign half of it
-  (every ticket refused while the config will not parse) is C20's `reassign.test.ts:382` row.
+  (every ticket refused while the config will not parse) is C20's `reassign.test.ts:382` row. C20 has
+  since taken the gap as `cases/config-settings-unreadable.test.ts`, pinning GET /api/panes's status only;
+  its section at the end says what else it pins short.
 
 ## `herdr`: the Pool workspace, tabs and the RPC client (C14)
 
@@ -249,3 +251,81 @@ Behaviour of the Bun server, reproduced while writing these cases, that no engin
 
 * `GET /api/panes` on a `terminal: "herdr"` pool with no herdr daemon answers 502 and then the process dies of an uncaught `connect ENOENT` (from the herdr RPC under the agent listing). The socket's `panes.list` answers the same 502 and the server lives. The `engine/ws.test.ts:470` case asks only the socket.
 * `GET /api/panes` with an unreadable `console.json` answers Bun's HTML 500 page rather than a JSON refusal. The same case asks `panes.list` before it breaks `console.json`.
+
+## C20: Reassign and settings (`config`)
+
+Ticket C20's 70 rows are `machine-defaults.test.ts`, `pool-settings.test.ts`, `pool-title.test.ts` and
+`reassign.test.ts`. Sixty-eight are passing cases in `cases/config-reassign-views.test.ts`,
+`config-reassign-conversations.test.ts`, `config-reassign-writes.test.ts`, `config-settings-pool.test.ts`,
+`config-settings-machine.test.ts`, `config-settings-title.test.ts` and `config-settings-unreadable.test.ts`;
+the other two are pinned by C00's cases already. The last gap of the area, the one C19 left (a console.json
+that will not parse, seen from every route), is `config-settings-unreadable.test.ts`.
+
+### Pinned by a C00 case already
+
+- `reassign.test.ts:254` (refuses a done ticket): `cases/reassign-routes.test.ts`'s case for
+  `engine/reassign-routes.test.ts:90` pins a Ticket run to done as refused with reason `done`.
+- `reassign.test.ts:706` (skips a ticket that went in flight since the listing, and applies the rest): the
+  case for `engine/reassign-routes.test.ts:332` is the same write with the two ids swapped.
+
+### Pinned as the Bun server does it, worth a look before the port copies it
+
+- **An enlisted Ticket's sources** (`reassign.test.ts:264`). The engine test expects harness `default`, model
+  and effort `unset` and drivers `default`. The server serves `unset` for all four, drivers included, though
+  drivers otherwise always resolves to something: `reassignViews` seeds every enlisted Ticket frozen from
+  the engine's own record (`frozenSeed` with `enlisted: true` in `engine/reassign.ts`), and a seeded id gets
+  no sources, so it falls to `NO_SOURCES`. The engine test hands it no engine records, so it takes a path
+  the server never does. The case pins all four `unset`. Intended behaviour (inference): the harness names
+  the layer the file supplies it from and drivers reads `default`, while the card keeps the engine's record.
+  Rust unit test: *reassign views: an enlisted ticket at rest reads harness from its layer (default with only
+  pool defaults), model and effort unset and drivers default, and its card shows the engine's record.*
+- **PUT /api/settings/machine with an unreadable console.json** (`config-settings-unreadable.test.ts`). The
+  save writes `~/.agent-graphs/defaults.json`, then fails to read the pool half of its answer and refuses with
+  400 and the parse error, so the operator is told the request was refused when it landed; GET /api/settings
+  answers the same failure with 500. The case pins the 400 and the written file. Intended behaviour
+  (inference): a 500, as GET /api/settings answers, the write kept and said so.
+- **GET /api/panes with an unreadable console.json** answers 500 with Bun's own HTML error page (also under
+  "TypeScript divergences found while porting" above). The case pins the 500 alone; its socket twin,
+  `panes.list`, refuses with status 500 and a reason, which the case pins. Intended behaviour: the JSON
+  refusal its twin gives.
+
+### Where the cases reach a row differently from its wording
+
+- **A Ticket "waiting" to be offered** (`reassign.test.ts:100` and most rows of a Ticket offered for Reassign):
+  it waits on a Ticket at its checkpoint, which the pool never schedules, instead of behind a held stub,
+  so nothing runs out the stub's ten-second wait on a loaded machine. A held stub (`world.stubs.hold`)
+  stands in only where a row needs an Attempt in flight (`:246`, `:291`, `:382`, `:720`).
+- **"Then GET /api/state" after a hand edit** (`:100`, `:246`, `:291`, `:318`, `:334`, `:347`, `:371`). The Bun
+  server builds the snapshot GET /api/state serves at an engine emit, a Reassign or a settings save, and a
+  pool at rest emits nothing, so a hand edit to console.json or a Ticket file is not on GET /api/state until
+  one of those (seen: the old card still served 3 s after an edit). The cases ask for a fresh snapshot with a
+  Reassign naming only a Ticket that cannot take a write (done, or in flight), which writes nothing and
+  answers with a snapshot built afresh, then read GET /api/state. Each first waits for the pool to rest, so
+  the engine's own first reload has run before the edit. `:382` cannot ask that way (the Reassign route cannot
+  read the file either) and reads the snapshot the run publishes when its held Attempt ends. Nothing pins
+  how stale GET /api/state may be.
+- **Enlisted Tickets** (`:264`, `:280`, `:318`, `:670`, `:687`) are written as the engine writes one
+  (`enlisted-from=<pane>` in the marker), at their checkpoint, on a terminal-backed pool with the fake
+  herdr, rather than enlisted over POST /api/enlist: a Ticket enlisted live is an Attempt in flight and so
+  refused for Reassign, while these rows are about one the engine holds no Attempt for.
+- **`machine-defaults.test.ts:47`, "creates the directory"**: the server registers itself in
+  `~/.agent-graphs/pools.json` at boot, so the directory is there before any save. The case removes it once
+  the server is up, and the save makes it again.
+- **`pool-settings.test.ts:84`** sends `selection: null` for the engine test's `undefined`, which JSON cannot
+  carry: a key sent as undefined is a key not sent, which a save leaves alone.
+- **`pool-settings.test.ts:263`**, its last claim (no harness table means no check): the server always has
+  its harness table. Dropped: an option of the writer that only an in-process caller can leave empty.
+- **`pool-settings.test.ts:313`, "writes through a rename"**: from outside, only that no `console.json.*`
+  file is left beside console.json after a save. Rust unit test: *pool settings: a save writes console.json
+  to a temporary file and renames it over the old one, so a reader never sees half a file.*
+
+### Observed while writing these, not pinned
+
+- The formats section's observation that `reassign.sources.effort` reads `unset` for a `spawn-assign` effort
+  does not reproduce here: hand-written or adopted at a boundary, a spawned Ticket that has not run reads
+  `requested`, which the `reassign.test.ts:154` case now pins beside its own row.
+- PUT /api/reassign answers a body that is not an object (a string, an array, null) with 500
+  `reassign: body must be an object`, and one that is not JSON with 500 `Failed to parse JSON`, where
+  PUT /api/settings/pool answers 400 for the same body: a malformed request reads back as the server's
+  failure. Intended behaviour (inference): 400, as for every other request the route refuses.
+- A Reassign naming one Ticket twice applies it once (`applied` lists it once).
