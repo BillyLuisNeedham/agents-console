@@ -227,7 +227,7 @@ pub async fn adopt_started_at_boot(engine: &Engine) {
     .await;
 }
 
-enum Next {
+pub(super) enum Next {
     Skip,
     FinishEnd,
     Done,
@@ -235,13 +235,13 @@ enum Next {
         Rt,
         Option<&'static HarnessDescriptor>,
         Launch,
-        ConversationRecord,
+        Box<ConversationRecord>,
     ),
 }
 
 // The decision for one started record, in one stretch: skip it, hand it to its End, crash it, or build
 // the runtime to adopt.
-fn decide_started(
+pub(super) fn decide_started(
     s: &mut Session,
     id: &str,
     listing: &PaneListing,
@@ -300,7 +300,7 @@ fn decide_started(
     }
     let descriptor = harness_descriptor(&js::trim(&rec.harness).to_lowercase());
     let rt = started_runtime(s, &rec, launch.tab_id.clone());
-    Next::Adopt(rt, descriptor, launch, rec)
+    Next::Adopt(rt, descriptor, launch, Box::new(rec))
 }
 
 // A started Conversation found dead at boot: crashed as before, branch kept, plus what a crash while the
@@ -387,7 +387,7 @@ async fn adopt_started_pass(engine: &Engine) {
             Next::Skip | Next::Done => {}
             Next::FinishEnd => finish_end_at_boot(engine, &id, Some(listing.clone())).await,
             Next::Adopt(rt, descriptor, launch, rec) => {
-                adopt_started(engine, rt, descriptor, launch, rec).await;
+                adopt_started(engine, rt, descriptor, launch, *rec).await;
             }
         }
     }
@@ -493,7 +493,7 @@ enum NextEnlisted {
     Skip,
     FinishEnd,
     Done,
-    Adopt(Rt, &'static HarnessDescriptor, ConversationRecord),
+    Adopt(Rt, &'static HarnessDescriptor, Box<ConversationRecord>),
 }
 
 fn decide_enlisted(s: &mut Session, id: &str, listed: &HashSet<String>) -> NextEnlisted {
@@ -544,7 +544,7 @@ fn decide_enlisted(s: &mut Session, id: &str, listed: &HashSet<String>) -> NextE
             role: rec.role,
         },
     );
-    NextEnlisted::Adopt(rt, descriptor, rec)
+    NextEnlisted::Adopt(rt, descriptor, Box::new(rec))
 }
 
 async fn adopt_enlisted_pass(engine: &Engine) {
@@ -589,7 +589,7 @@ async fn adopt_enlisted_pass(engine: &Engine) {
             NextEnlisted::Skip | NextEnlisted::Done => {}
             NextEnlisted::FinishEnd => finish_end_at_boot(engine, &id, None).await,
             NextEnlisted::Adopt(rt, descriptor, rec) => {
-                adopt_enlisted(engine, rt, descriptor, rec).await;
+                adopt_enlisted(engine, rt, descriptor, *rec).await;
             }
         }
     }

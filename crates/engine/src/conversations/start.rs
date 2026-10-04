@@ -329,7 +329,17 @@ fn after_launch(
         // got further, so the identity goes with the ending, as at every other ending.
         release_agent(s, handle.pane_id.as_deref(), &p.assignment.harness);
         crate::live_attempts::clear(s, &id, 1);
-        crate::tickets::close_attempt_tabs(s, &id);
+        // The sweep's closes complete after the start has answered: the TypeScript's single thread
+        // wrote the response before it read herdr's replies, so a caller never saw the `tab-closed`
+        // events of a start that crashed before they were its own to read.
+        let engine = s.engine();
+        let sweep = id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = engine
+                .call(move |s| crate::tickets::close_attempt_tabs(s, &sweep))
+                .await;
+        });
         super::notices::note_ended(s, &id, &p.worktree.branch, None, true);
         git::discard_worktree(&s.cwd, &p.worktree);
         // This launch never touches the drive loop, so nothing else would ever tell the snapshot stream
