@@ -1303,50 +1303,41 @@ mod peers {
     use crate::session::{EnlistedWork, Session};
 
     /// A Continued attempt's facts read back from its `spawned` event (`continuedWork`).
-    /// PEER(held): the Held pane port's `ContinuedWork`.
-    #[derive(Debug, Clone)]
-    pub struct ContinuedWork;
+    pub use crate::held::ContinuedWork;
 
-    /// `continuedWork`. PEER(held): none.
+    /// `continuedWork`.
     pub fn continued_work(
         session: &Session,
         ticket_id: &str,
         attempt: u64,
     ) -> Option<ContinuedWork> {
-        let _ = (session, ticket_id, attempt);
-        None
+        crate::held::continued_work(session, ticket_id, attempt)
     }
 
-    /// `paneAssignment`. PEER(held).
+    /// `paneAssignment`.
     pub fn pane_assignment(session: &Session, ticket_id: &str, work: &ContinuedWork) -> Assignment {
-        let _ = work;
-        session
-            .assignments
-            .get(ticket_id)
-            .cloned()
-            .unwrap_or_default()
+        crate::held::pane_assignment(session, ticket_id, &work.pane)
     }
 
-    /// `restoreAssignment`. PEER(held).
+    /// `restoreAssignment`.
     pub fn restore_assignment(session: &mut Session, marker: &TicketMarker) {
-        let _ = (session, marker);
+        crate::held::restore_assignment(session, marker);
     }
 
     /// `readoptContinued`: re-register a Continued attempt's runtime for a live pane.
-    /// PEER(keep_talking).
     pub fn readopt_continued(
         session: &mut Session,
         marker: &TicketMarker,
         attempt: u64,
         work: ContinuedWork,
     ) {
-        let _ = (session, marker, attempt, work);
+        crate::keep_talking::readopt_continued(session, marker, attempt, work);
     }
 
     /// `session.continued.get(id)`'s runtime released and the entry deleted, as `abandonAdoption`
-    /// does; whether there was one. PEER(keep_talking).
+    /// does; whether there was one.
     pub fn release_continued(session: &mut Session, ticket_id: &str) -> bool {
-        session.continued.remove(ticket_id).is_some()
+        crate::keep_talking::release_continued(session, ticket_id)
     }
 
     /// How an enlisted attempt ended (enlisted.ts `EnlistedEnding`). PEER(enlisted).
