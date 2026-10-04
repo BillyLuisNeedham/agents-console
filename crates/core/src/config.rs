@@ -2,16 +2,44 @@
 //! keys the engine retired, the Config reload's slice of it, and the canonical spelling of the pool
 //! directory it is read from.
 //!
-//! The parsed config is the file's own JSON object, unknown keys and all, exactly as the TypeScript
-//! holds it after `JSON.parse`: the parse checks only `selection`, `terminal`, `spawnCaps` and
-//! `steward`, and every other key is read where it is used, as leniently as the TypeScript reads it.
-//! `ac_protocol::PoolConfig` is the same file's declared shape for the wire; this is the file.
+//! The engine's live config (`PoolConfig`) is arbitrary JSON, held exactly as the TypeScript holds it,
+//! never the typed `ac_protocol::PoolConfig` (that is the file's declared shape, for the TypeScript
+//! generator):
+//!
+//! - At boot it is console.json parsed in file order, with `roster` and `agents` deleted, or `{}` when
+//!   the file is absent or empty. The parse checks only `selection`, `terminal`, `spawnCaps` and
+//!   `steward`; unknown keys and unchecked values (a null, a string port) pass through.
+//! - After a Config reload it is `{ ...previous, defaults, assign, resolver, spawnCaps, steward }`
+//!   (`reload_candidate`): existing keys keep their place, new ones go last, and a slice key the file
+//!   no longer has stays in its place as JavaScript's `undefined`, which no serialization writes.
+//! - The snapshot's `state.config` sends it verbatim: `PoolConfig` serializes as that object, its keys
+//!   in JavaScript's order and its numbers as JavaScript prints them.
+//!
+//! Each field is read where it is used, as leniently as the TypeScript reads it:
+//!
+//! | Accessor | The TypeScript's read |
+//! | --- | --- |
+//! | `get(key)` | `config[key]`, the value as the file has it; `None` for absent or undefined |
+//! | `selection_mode()` | `config.selection === "human" ? "human" : "auto"` |
+//! | `terminal()` | `config.terminal === "herdr"` (the only backing) |
+//! | `terminal_text()` | `config.terminal` where it is a string, for `poolHarnessMode` |
+//! | `port()` | `config.port`, raw: ports.ts and the Restart judge it |
+//! | `resolver()` | `config.resolver`, raw: a harness name, "none", or `{ harness, model, effort }` |
+//! | `assignment::defaults_layer` | `config.defaults`, its four fields as `firstSet` reads them |
+//! | `assignment::assign_request` | `config.assign?.[id]`, the layer plus a raw `verify` |
+//! | `spawn_caps::spawn_caps_of` | `config.spawnCaps?.perAttempt ?? 5`, `?.perRun ?? 20` |
+//! | `steward::steward_budget_of` | `config.steward?.budget ?? 5` |
+//! | `steward::steward_may_close_of` | `config.steward?.mayClose === true` |
+//! | `steward::steward_assign_of` | `config.steward?.assign` |
+//! | `pool_title::title_of` | `config.title` where it is a string, normalised |
 //!
 //! `repoRootOf` runs git, so it lives with the git edge: `ac_io::git::repo_root_of`.
 
 use std::fmt;
 
 use ac_protocol::{SelectionMode, TerminalKind};
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::harness::Harnesses;
@@ -44,46 +72,70 @@ impl ConfigError {
     }
 }
 
-/// One pool's console.json as parsed: the file's own object with the retired keys left out, every
-/// other key in the order the file has it. An absent or empty file is the empty config.
+/// One pool's live config: the JSON object the TypeScript holds, in its key order. A key whose value
+/// is `None` is present as JavaScript's `undefined` (a reload's slice key the file no longer has): it
+/// keeps its place, reads as absent, and is never written.
 #[derive(Clone, Default, PartialEq)]
-pub struct PoolConfig(Map<String, Value>);
+pub struct PoolConfig(IndexMap<String, Option<Value>>);
 
 impl fmt::Debug for PoolConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.to_map().fmt(f)
     }
 }
 
 impl PoolConfig {
     /// A config held as given, unchecked: what a caller builds by hand (a test, a candidate).
     pub fn from_map(map: Map<String, Value>) -> Self {
-        PoolConfig(map)
+        PoolConfig(
+            map.into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+        )
     }
 
-    /// The config's object, in the file's order.
-    pub fn as_map(&self) -> &Map<String, Value> {
-        &self.0
-    }
-
-    pub fn into_map(self) -> Map<String, Value> {
+    /// The defined keys and their values, in the object's order.
+    pub fn entries(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.0
+            .iter()
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key, value)))
     }
 
-    /// The config as a JSON value, as the TypeScript hands the parsed object on (the Settings pane's
-    /// `pool.config`).
+    /// The config's defined keys as a JSON object, in the object's order.
+    pub fn to_map(&self) -> Map<String, Value> {
+        self.entries()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    /// The config as a JSON value, as the TypeScript hands the object on (the Settings pane's
+    /// `pool.config`, the snapshot's `state.config`).
     pub fn to_value(&self) -> Value {
-        Value::Object(self.0.clone())
+        Value::Object(self.to_map())
     }
 
-    /// One top-level key's value as the file has it: `config[key]`.
+    /// `config[key]`: the value as the file has it, `None` when absent or undefined.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.0.get(key)
+        self.0.get(key)?.as_ref()
     }
 
-    /// The merge resolver's entry: a harness name, "none", or `{ harness, model, effort }`, unchecked.
-    pub fn resolver(&self) -> Option<&Value> {
-        self.get("resolver")
+    /// The pool's selection mode: auto unless the config says human (`selectionMode`).
+    pub fn selection_mode(&self) -> SelectionMode {
+        if self.get("selection").and_then(Value::as_str) == Some("human") {
+            SelectionMode::Human
+        } else {
+            SelectionMode::Auto
+        }
+    }
+
+    /// The terminal backing: herdr when `config.terminal === "herdr"`, else headless.
+    pub fn terminal(&self) -> Option<TerminalKind> {
+        (self.terminal_text() == Some("herdr")).then_some(TerminalKind::Herdr)
+    }
+
+    /// `config.terminal` where it is a string, as `poolHarnessMode` takes it.
+    pub fn terminal_text(&self) -> Option<&str> {
+        self.get("terminal").and_then(Value::as_str)
     }
 
     /// The pinned port as written, unchecked (ports.ts judges it).
@@ -91,39 +143,42 @@ impl PoolConfig {
         self.get("port")
     }
 
-    /// Who picks the winner of a verify fan-out, when the file says (the parse refuses anything else).
-    pub fn selection(&self) -> Option<SelectionMode> {
-        match self.get("selection")?.as_str()? {
-            "auto" => Some(SelectionMode::Auto),
-            "human" => Some(SelectionMode::Human),
-            _ => None,
-        }
-    }
-
-    /// The terminal backing, when the file names one (the parse refuses anything but "herdr").
-    pub fn terminal(&self) -> Option<TerminalKind> {
-        (self.get("terminal")?.as_str()? == "herdr").then_some(TerminalKind::Herdr)
-    }
-
-    /// `config.terminal` as JavaScript reads it: absent, or the string the file holds.
-    pub fn terminal_text(&self) -> Option<&str> {
-        self.get("terminal").and_then(Value::as_str)
+    /// The merge resolver's entry, unchecked: a harness name, "none", or `{ harness, model, effort }`.
+    pub fn resolver(&self) -> Option<&Value> {
+        self.get("resolver")
     }
 
     /// `config[key] = value`: an existing key keeps its place, a new one goes last.
     pub fn set(&mut self, key: &str, value: Value) {
-        self.0.insert(key.to_owned(), value);
+        self.0.insert(key.to_owned(), Some(value));
+    }
+
+    /// `config[key] = undefined`: the key keeps (or takes, last) its place and reads as absent.
+    pub fn set_undefined(&mut self, key: &str) {
+        self.0.insert(key.to_owned(), None);
     }
 
     /// `delete config[key]`, keeping every other key in its place.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
-        self.0.shift_remove(key)
+        self.0.shift_remove(key).flatten()
     }
 
     /// `JSON.stringify(config, null, 2)`: the file's text as the TypeScript writes it, without the
     /// trailing newline its writers add.
     pub fn to_pretty_json(&self) -> String {
-        js_compat::stringify_pretty(&Value::Object(self.0.clone()))
+        js_compat::stringify_pretty(&self.to_value())
+    }
+}
+
+impl Serialize for PoolConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        js_compat::JsOrdered(&self.to_value()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PoolConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Map::<String, Value>::deserialize(deserializer).map(PoolConfig::from_map)
     }
 }
 
@@ -177,7 +232,7 @@ pub fn parse_config(raw: Option<&str>, pool_dir: &str) -> Result<PoolConfig, Con
     for key in RETIRED_CONFIG_KEYS {
         parsed.shift_remove(key);
     }
-    Ok(PoolConfig(parsed))
+    Ok(PoolConfig::from_map(parsed))
 }
 
 // JSON.parse, then the one shape rule both parsers share: the file is an object.
@@ -220,8 +275,9 @@ pub fn parse_config_slice(raw: &str, pool_dir: &str) -> Result<ConfigSlice, Conf
     })
 }
 
-/// The config a reload would commit: the running config with the slice's five keys taken from the
-/// file, every other key exactly as it was at boot.
+/// The config a reload would commit, `{ ...config, defaults, assign, resolver, spawnCaps, steward }`:
+/// the slice's five keys taken from the file (one the file lacks set to undefined, keeping its place),
+/// every other key exactly as it was at boot.
 pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig {
     let mut candidate = config.clone();
     for (key, value) in [
@@ -233,9 +289,7 @@ pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig 
     ] {
         match value {
             Some(value) => candidate.set(key, value.clone()),
-            None => {
-                candidate.remove(key);
-            }
+            None => candidate.set_undefined(key),
         }
     }
     candidate
@@ -321,7 +375,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.as_map().keys().collect::<Vec<_>>(),
+            config.entries().map(|(key, _)| key).collect::<Vec<_>>(),
             ["port", "mystery", "defaults"]
         );
         assert_eq!(config.port(), Some(&json!(8787)));
@@ -358,7 +412,7 @@ mod tests {
             );
         }
         let config = parse(json!({ "selection": "human", "terminal": "herdr" })).unwrap();
-        assert_eq!(config.selection(), Some(SelectionMode::Human));
+        assert_eq!(config.selection_mode(), SelectionMode::Human);
         assert_eq!(config.terminal(), Some(TerminalKind::Herdr));
     }
 
@@ -439,6 +493,54 @@ mod tests {
         // The same object with its keys in another order is a change, as JSON.stringify sees it.
         let reordered = parse(json!({ "port": 8787, "defaults": { "model": "m", "harness": "claude" }, "selection": "human" })).unwrap();
         assert_eq!(changed_slice_keys(&running, &reordered), ["defaults"]);
+    }
+
+    #[test]
+    fn keeps_a_slice_key_the_file_dropped_in_its_place_as_undefined() {
+        let boot = parse(json!({ "defaults": { "harness": "claude" }, "port": 8787 })).unwrap();
+        let dropped = reload_candidate(
+            &boot,
+            &parse_config_slice(r#"{"assign":{}}"#, "/pool").unwrap(),
+        );
+        assert_eq!(dropped.get("defaults"), None);
+        assert_eq!(dropped.to_value(), json!({ "port": 8787, "assign": {} }));
+        assert_eq!(
+            dropped.to_pretty_json(),
+            "{\n  \"port\": 8787,\n  \"assign\": {}\n}"
+        );
+        assert_eq!(changed_slice_keys(&boot, &dropped), ["defaults", "assign"]);
+        // Back again, it takes its old place rather than going last.
+        let back = reload_candidate(
+            &dropped,
+            &parse_config_slice(r#"{"defaults":{"model":"m"},"assign":{}}"#, "/pool").unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            r#"{"defaults":{"model":"m"},"port":8787,"assign":{}}"#
+        );
+    }
+
+    #[test]
+    fn reads_selection_and_terminal_as_the_typescript_does_and_passes_the_rest_through_raw() {
+        let config = PoolConfig::from_map(
+            json!({ "selection": "Human", "terminal": "tmux", "port": "8790", "resolver": null, "x": [1] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(config.selection_mode(), SelectionMode::Auto);
+        assert_eq!(config.terminal(), None);
+        assert_eq!(config.terminal_text(), Some("tmux"));
+        assert_eq!(config.port(), Some(&json!("8790")));
+        assert_eq!(config.resolver(), Some(&Value::Null));
+        assert_eq!(config.get("x"), Some(&json!([1])));
+        assert_eq!(PoolConfig::default().selection_mode(), SelectionMode::Auto);
+        assert_eq!(
+            serde_json::from_str::<PoolConfig>(r#"{"a":1,"b":null}"#)
+                .unwrap()
+                .to_value(),
+            json!({ "a": 1, "b": null })
+        );
     }
 
     #[test]

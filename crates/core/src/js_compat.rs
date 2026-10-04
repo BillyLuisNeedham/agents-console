@@ -9,6 +9,8 @@
 use std::cmp::Ordering;
 use std::io;
 
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 
 /// `JSON.parse(text)`. The message is the parser's own words and no case pins them; it opens as
@@ -88,6 +90,36 @@ fn newline(out: &mut String, indent: Option<usize>, depth: usize) {
 // escapes, other control characters as lowercase `\u00xx`, and everything else as itself.
 fn write_string(out: &mut String, text: &str) {
     out.push_str(&serde_json::to_string(text).unwrap_or_default());
+}
+
+/// A JSON value serialized as JavaScript's `JSON.stringify` would write it, through any serde
+/// serializer: every object's keys in JavaScript's order, every whole number without a fraction.
+pub(crate) struct JsOrdered<'a>(pub(crate) &'a Value);
+
+impl Serialize for JsOrdered<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Number(number) => match number.as_f64() {
+                Some(value) if value.is_finite() => number_value(value).serialize(serializer),
+                _ => serializer.serialize_unit(),
+            },
+            Value::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&JsOrdered(item))?;
+                }
+                seq.end()
+            }
+            Value::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, item) in object_entries(fields) {
+                    map.serialize_entry(key, &JsOrdered(item))?;
+                }
+                map.end()
+            }
+            other => other.serialize(serializer),
+        }
+    }
 }
 
 /// An object's entries in JavaScript's own order: the keys that are array indices first, ascending,
@@ -444,6 +476,15 @@ mod tests {
         assert_eq!(stringify_pretty(&json!({})), "{}");
         assert_eq!(stringify_pretty(&json!([])), "[]");
         assert_eq!(stringify(&json!("a\"b\u{1b}\n")), r#""a\"b\u001b\n""#);
+    }
+
+    #[test]
+    fn serializes_through_serde_as_json_stringify_writes() {
+        let value = parse(r#"{"b":1.0,"2":[{"z":0.5,"1":-0.0}],"a":1e21}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&JsOrdered(&value)).unwrap(),
+            r#"{"2":[{"1":0,"z":0.5}],"b":1,"a":1e+21}"#
+        );
     }
 
     #[test]
