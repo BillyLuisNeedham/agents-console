@@ -50,36 +50,31 @@ M0 done: C22's full Bun run after the last fixture change passed 1159 of 1160 (o
 
 ## Right now (for a resumed or compacted context)
 
-Running subagents, each in a detached worktree at `~/.herdr/worktrees/agent-console/rust-port-<name>`,
-briefed from the session scratchpad (`brief-<name>.md`, `brief-r-<name>.md`):
-- r-f1-engine: engine core (session, boot, drive, persist, interrupts, answers, config reload, tickets,
-  merges success path, outcome). Started from 5e6b558.
-- r-s-server: ac-server and the `server` subcommand (server.ts, ws.ts, ports.ts). Started from 5e6b558.
-- r-f1-attempts: attempt_run, attempt_ending, pane_session, children, live_attempts, claude_trust.
-  Started from 78e6eea.
-- m0-c22 (verify with Jev).
-- Landed on the branch: r-cli (9c0a162..512e90f; cli 22/71 against Rust, the rest wait on `server`), r-jev
-  (bbdd5ea, 4b94f5c), r-f1-attempts (26c6a3c). Flaky under load: cli `reports_an_exit_before_the_boot_line_with_the_logs_tail`,
-  ac-io `rpc_fails_with_buns_connect_text_when_no_daemon_listens`.
-- r-f1-engine finished (435a4df..d56cc96 in its worktree, not landed): it must merge the branch head, drop
-  its attempt STUBs for 26c6a3c's real modules, then run conformance. r-s-server stopped at the session
-  limit with uncommitted work in rust-port-s-server.
-- Model: from here, Sonnet subagents for well-specified work, Opus for the engine core and integration.
+M0 is done. On the branch: every Rust port except the engine core and server (CLI, Jev, attempts, herdr,
+git, protocol, formats), the bench's `--server rust` (3f4916f) and the flaky-test fixes (d49414a).
 
-How work lands: when an agent reports, cherry-pick its commits onto the branch (or `git merge --no-ff` when
-its worktree merged the branch itself), resolve NOT-PORTED.md conflicts by keeping both sides
-(scratchpad `bin/union-conflicts.py`), run `bun run typecheck` and `cargo test --workspace`, record its
-notes below under "Notes from the Rust port agents" or "Hidden behaviour", tick its row, and `git worktree
-remove` it. Agents' long reports are cut off in the notification: ask them with SendMessage for the rest.
+Running:
+- r-f1-engine (Opus) in rust-port-f1-engine: merging the branch head f4e2839 and the server port ce034ed
+  (r-s-server's commits rewritten without attribution trailers), wiring `agent-console server` to
+  `start_pool(RunOptions)`, making unmatched paths answer 500 as Bun does, then running conformance against
+  `target/debug/agent-console`: scheduling, interrupts, merges, formats, disk, http, socket, server. It
+  reports when scheduling and interrupts are green. Land its merge commit with `git merge --no-ff` and
+  check no Co-Authored-By or Claude-Session trailer arrived (`git log --format=%B`).
 
 Next, in order:
-1. When r-f1-engine, r-s-server and r-f1-attempts have all landed: merge, build, and tell each to merge
-   the branch head and run its conformance areas against `--rust-bin target/debug/agent-console`.
-2. When M0's last three land: run the whole Bun suite once (`bun run conformance --server bun`, about
-   30 min) to finish M0 green; fix racy cases the way 879b564, 8d674c7, b09c4ae and 8956893 did.
-3. M3 feature wave by area (merges resolver and approval, verify and Jev, spawns, conversations,
-   steward, enlist and held panes, restart, config reload and Reassign), then the CLI (boot, steward,
-   fleet), then M5 (bench gates, render-survival, two real pools, the flip). At most four agents.
+1. When r-f1-engine lands: start the feature wave on Sonnet from the new head, one detached worktree each
+   (scratchpad `bin/mkwt.sh <name>`), briefs ready in the scratchpad: brief-r-verify.md, brief-r-spawns.md,
+   brief-r-conversations.md, brief-r-panes.md, brief-r-restart.md. Opus only for integration and the
+   engine core. Every brief forbids attribution trailers; check anyway at landing.
+2. Land each, run its areas against Rust, then the whole suite `--server rust`, then takeover with
+   `--legs bun,rust,bun`.
+3. M5: bench gates (`bun run scripts/bench-lag.ts --e2e --server rust --rust-bin target/release/agent-console`
+   against `--server bun`), render-survival (`bun ui/harness/run.ts`), two real throwaway pools, the flip
+   (shim builds and execs the binary, delete the TS engine, generated protocol.ts and wire.ts replace the
+   hand files), merge main, outcome JSON, final message.
+
+Known ADR-0036 changes so far: Boot no longer builds the UI (the shim rebuilds the binary); the Steward's
+command line names the binary's `steward` subcommand; Jev's runtime header says rust.
 
 ## Decisions
 
