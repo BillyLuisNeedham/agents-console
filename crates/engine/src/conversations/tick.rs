@@ -186,15 +186,20 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     if validation.proposals.is_empty() {
         return;
     }
-    let pending = match crate::spawns::take_spawn_proposals(
+    let before = s.spawn_proposals.pending().len();
+    // A take that fails (the proposals file would not write) throws in the TypeScript, ending this
+    // step of the tick: nothing was taken, so nothing is pending to land.
+    if crate::spawns::take_spawn_proposals(
         s,
         parent_id,
         validation.proposals,
         SpawnKind::Conversation,
-    ) {
-        Ok((pending, _held)) => !pending.is_empty(),
-        Err(_) => return,
-    };
+    )
+    .is_err()
+    {
+        return;
+    }
+    let pending = s.spawn_proposals.pending().len() > before;
     // Idle: land what is pending (write the files / start the child Conversations) and kick a drive at
     // once, since nothing else will reach the boundary that does this. In flight: leave it pending: the
     // driving super-step's own adoption at its next boundary picks it up, and landing here too would

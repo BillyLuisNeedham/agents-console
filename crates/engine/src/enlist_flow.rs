@@ -1068,7 +1068,7 @@ pub fn end_enlisted_attempt(
                 ticket_id,
                 spawn.clone(),
                 ac_protocol::SpawnKind::Ticket,
-            );
+            )?;
         }
         chain_enlisted_merge(session, &marker, attempt, &branch);
         return Ok(());

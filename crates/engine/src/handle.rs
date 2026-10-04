@@ -1,10 +1,6 @@
 //! The pool's handle (engine.ts `PoolRun` and `StewardActions`) as methods on [`Engine`]: everything
 //! the server asks of a running pool. Each method is one job on the actor (or a flow that sends jobs),
 //! and refuses with the TypeScript's message as an [`EngineError`].
-//!
-//! Ported: accept, answer, settled, shutdown, close, reload_config, pane_read, the Spawn actions and
-//! the Steward's. The rest refuse with "not ported yet" until their feature's port replaces the body,
-//! keeping the signature.
 
 use std::time::Duration;
 
@@ -19,12 +15,6 @@ use crate::actor::Engine;
 use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
-
-// Kept while other feature ports still land on calls to it.
-#[allow(dead_code)]
-fn not_ported<T>(what: &str) -> Result<T, EngineError> {
-    Err(EngineError::refused(format!("{what}: not ported yet")))
-}
 
 // What an answer waits on once accepted: the next settle at once (a retry of an answer already
 // processed), or its processing first.

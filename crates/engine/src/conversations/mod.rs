@@ -537,6 +537,12 @@ pub fn reserved_ids(s: &Session) -> Vec<String> {
     s.conversations.reserved_ids()
 }
 
+/// Reserve an id for a start about to be fired (idempotent): Spawn adoption reserves the id it mints
+/// in its own job, so a second adoption before the start's own job runs cannot mint it again.
+pub fn reserve(s: &mut Session, id: &str) {
+    s.conversations.reserved.insert(id.to_owned());
+}
+
 /// The live Steward's id (ADR-0030), adopted or not yet; `None` when none is on duty.
 pub fn steward_id(s: &Session) -> Option<String> {
     load(s)
