@@ -37,6 +37,11 @@ type Control = (fake: ExecutingFakeHerdr, args: unknown[]) => unknown;
 const CONTROLS: Record<string, Control> = {
   setPaneContent: (fake, [paneId, text]) => fake.setPaneContent(String(paneId), String(text)),
   endPane: (fake, [paneId]) => fake.endPane(String(paneId)),
+  closeTab: (fake, [tabId]) => fake.closeTab(String(tabId)),
+  relistPane: (fake, [paneId, listing]) =>
+    fake.relistPane(String(paneId), (listing ?? {}) as Parameters<ExecutingFakeHerdr["relistPane"]>[1]),
+  answerWith: (fake, [method, reply]) =>
+    fake.answerWith(String(method), (reply ?? null) as Parameters<ExecutingFakeHerdr["answerWith"]>[1]),
   dropPaneInput: (fake, [paneId, count]) => fake.dropPaneInput(String(paneId), Number(count)),
   injectPane: (fake, [paneId, options]) =>
     fake.injectPane(String(paneId), options as Parameters<ExecutingFakeHerdr["injectPane"]>[1]),

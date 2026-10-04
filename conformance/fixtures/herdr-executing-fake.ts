@@ -63,6 +63,13 @@
  * and acknowledged, and bind or drop the pane's agent the way herdr does, so
  * `agent.list` serves the engine-reported agents; `seedAgent` adds an
  * operator-opened agent (issue #101's picker subject) directly.
+ *
+ * The operator's own hand on the daemon, and answers the fake would never
+ * give of itself (issue #139's pane survey): `closeTab` closes a tab the way
+ * the operator does from herdr, `relistPane` changes how `pane.list` reports
+ * a pane (another tab, workspace, directory or terminal id, or a field left
+ * out), and `answerWith` answers every call of a method with a body given
+ * whole, a malformed result or an error such as `tab_not_found`.
  */
 
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -172,6 +179,21 @@ export interface FakeHerdrAgentSeed {
   sessionId?: string;
 }
 
+/**
+ * How `pane.list` reports a pane, field by field, in place of what the fake
+ * holds for it: a value is listed instead, null leaves the field out of the
+ * listing, and a field not named keeps the fake's own.
+ */
+export interface FakeHerdrListing {
+  tabId?: string | null;
+  workspaceId?: string | null;
+  cwd?: string | null;
+  terminalId?: string | null;
+}
+
+/** A reply body given whole: what `answerWith` sends beside the call's id. */
+export type FakeHerdrReply = { result: unknown } | { error: unknown };
+
 /** One entry in the fake's `agent.list`, in the shape the engine parses. */
 interface FakeAgentRecord {
   paneId: string;
@@ -216,6 +238,19 @@ export interface ExecutingFakeHerdr {
    *  for a seeded one nobody has labelled. */
   workspaceLabel: (workspaceId: string) => string | null;
   endPane: (paneId: string) => void;
+  /**
+   * The operator closes a tab from herdr itself: its panes leave the listing
+   * and their processes go, and one `tab_closed` is pushed, exactly as a
+   * `tab.close` does, but no request is made or recorded.
+   */
+  closeTab: (tabId: string) => void;
+  /** Report a pane differently in `pane.list` from now on; fields merge with any earlier relisting. */
+  relistPane: (paneId: string, listing: FakeHerdrListing) => void;
+  /**
+   * Answer every later call of `method` with `reply` instead of the fake's
+   * own answer, acting on none of them; null gives the method back its own.
+   */
+  answerWith: (method: string, reply: FakeHerdrReply | null) => void;
   setPaneContent: (paneId: string, text: string) => void;
   dropPaneInput: (paneId: string, count: number) => void;
   /** The tab's current label, from `tab.create` or a later `tab.rename`. */
@@ -244,6 +279,8 @@ export async function startExecutingFakeHerdr(
   let connectionCount = 0;
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
+  // Method -> the body every call of it is answered with, given whole.
+  const answers = new Map<string, FakeHerdrReply>();
   const workspaces = new Set(options?.workspaces ?? []);
   // Each workspace's label, so `workspace.rename` has somewhere to land and
   // a test can read what the engine relabelled the Pool workspace to.
@@ -295,6 +332,8 @@ export async function startExecutingFakeHerdr(
       createdAt: number;
       /** herdr's never-reused terminal id (0.8.2 reports one per pane). */
       terminalId?: string | null;
+      /** How `pane.list` reports the pane where `relistPane` changed it. */
+      listed?: FakeHerdrListing;
       proc?: ReturnType<typeof Bun.spawn>;
       /** FAKE_HERDR_PANE_INPUT, once the wrapper runs, and what it holds. */
       inputFile?: string;
@@ -316,6 +355,34 @@ export async function startExecutingFakeHerdr(
     }
     agents.delete(paneId);
     broadcast(event, { pane_id: paneId, workspace_id: "w1" });
+  };
+  // A closed tab takes its panes silently (verified herdr 0.8.2, issue #61):
+  // they leave the listing, and the closer then pushes one `tab_closed`,
+  // with no `pane_closed` for any of them. The same whoever closes it.
+  const closeTabPanes = (tabId: string): void => {
+    for (const [paneId, pane] of panes.entries()) {
+      if (pane.tabId !== tabId) continue;
+      pane.alive = false;
+      pane.proc?.kill();
+      agents.delete(paneId);
+    }
+  };
+  // A pane as `pane.list` reports it: what the fake holds, less or replaced
+  // by whatever `relistPane` said.
+  const listingOf = (pane: {
+    tabId: string;
+    workspaceId: string | null;
+    cwd: string;
+    terminalId?: string | null;
+    listed?: FakeHerdrListing;
+  }): Required<FakeHerdrListing> => {
+    const listed = pane.listed ?? {};
+    return {
+      tabId: listed.tabId !== undefined ? listed.tabId : pane.tabId,
+      workspaceId: listed.workspaceId !== undefined ? listed.workspaceId : pane.workspaceId,
+      cwd: listed.cwd !== undefined ? listed.cwd : pane.cwd,
+      terminalId: listed.terminalId !== undefined ? listed.terminalId : (pane.terminalId ?? null),
+    };
   };
   // herdr pushes every event to every subscriber; the engine filters. A
   // subscriber whose wait already settled has closed its end, so prune
@@ -364,6 +431,12 @@ export async function startExecutingFakeHerdr(
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
+      const given = answers.get(msg.method);
+      if (given !== undefined) {
+        // The body the rig handed in, as it stands: nothing is acted on.
+        socket.end(JSON.stringify({ id: msg.id, ...given }) + "\n");
+        return;
+      }
       const blips = failNext.get(msg.method) ?? 0;
       if (blips > 0) {
         // A transient refusal: this call fails, the next one works.
@@ -533,14 +606,15 @@ export async function startExecutingFakeHerdr(
         respond({
           panes: [...panes.entries()]
             .filter(([, pane]) => pane.alive)
-            .filter(([, pane]) => scope === null || pane.workspaceId === scope)
-            .map(([paneId, pane]) => ({
-              tab_id: pane.tabId,
+            .map(([paneId, pane]) => [paneId, listingOf(pane)] as const)
+            .filter(([, listed]) => scope === null || listed.workspaceId === scope)
+            .map(([paneId, listed]) => ({
+              ...(listed.tabId !== null ? { tab_id: listed.tabId } : {}),
               pane_id: paneId,
-              ...(pane.workspaceId !== null ? { workspace_id: pane.workspaceId } : {}),
+              ...(listed.workspaceId !== null ? { workspace_id: listed.workspaceId } : {}),
               // herdr 0.8.2 reports these on every pane too (issue #139).
-              cwd: pane.cwd,
-              ...(pane.terminalId ? { terminal_id: pane.terminalId } : {}),
+              ...(listed.cwd !== null ? { cwd: listed.cwd } : {}),
+              ...(listed.terminalId ? { terminal_id: listed.terminalId } : {}),
             })),
         });
       } else if (msg.method === "pane.read") {
@@ -653,16 +727,8 @@ export async function startExecutingFakeHerdr(
         respond({ type: "ok" });
         firePaneEnd(paneId, "pane_closed");
       } else if (msg.method === "tab.close") {
-        // A closed tab takes its panes silently (verified herdr 0.8.2,
-        // issue #61): they leave the listing and one `tab_closed` goes out,
-        // with no `pane_closed` for any of them.
         const tabId = String(msg.params.tab_id ?? "");
-        for (const [paneId, pane] of panes.entries()) {
-          if (pane.tabId !== tabId) continue;
-          pane.alive = false;
-          pane.proc?.kill();
-          agents.delete(paneId);
-        }
+        closeTabPanes(tabId);
         respond({ type: "ok" });
         broadcast("tab_closed", { tab_id: tabId, workspace_id: "w1" });
       } else {
@@ -764,6 +830,20 @@ export async function startExecutingFakeHerdr(
       });
     },
     endPane: (paneId) => firePaneEnd(paneId, "pane_exited"),
+    closeTab: (tabId) => {
+      closeTabPanes(tabId);
+      broadcast("tab_closed", { tab_id: tabId, workspace_id: "w1" });
+    },
+    relistPane: (paneId, listing) => {
+      const pane = panes.get(paneId);
+      if (!pane) return;
+      const named = Object.entries(listing).filter(([, value]) => value !== undefined);
+      pane.listed = { ...pane.listed, ...Object.fromEntries(named) };
+    },
+    answerWith: (method, reply) => {
+      if (reply === null) answers.delete(method);
+      else answers.set(method, reply);
+    },
     removeWorkspace: (workspaceId) => {
       workspaces.delete(workspaceId);
       workspaceLabels.delete(workspaceId);
