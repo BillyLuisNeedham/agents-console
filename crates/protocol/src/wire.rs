@@ -5,11 +5,9 @@
 //! server assembles (the enriched snapshot, the per-ticket reads, the terminal peek).
 
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::json::{True, Unchecked};
-use crate::ts::{Ts, TsType};
 
 // ---------------------------------------------------------------------------
 // Ticket events (events.ts)
@@ -407,17 +405,13 @@ wire_enum! {
     }
 }
 
-/// The tickets a Spawn blocks: named ids, or "all" for every ticket not yet started.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SpawnBlocks {
-    Ids(Vec<String>),
-    All(AllTickets),
-}
-
-impl Ts for SpawnBlocks {
-    fn ts() -> TsType {
-        TsType::Union(vec![<Vec<String>>::ts(), AllTickets::ts()])
+wire_union! {
+    @inline
+    /// The tickets a Spawn blocks: named ids, or "all" for every ticket not yet started.
+    #[serde(untagged)]
+    pub enum SpawnBlocks {
+        Ids(Vec<String>),
+        All(AllTickets),
     }
 }
 
@@ -542,17 +536,13 @@ wire_struct! {
     }
 }
 
-/// The merge resolver's console.json entry: a harness name (or "none"), or a whole Assignment.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ResolverConfig {
-    Harness(String),
-    Assignment(ResolverAssignment),
-}
-
-impl Ts for ResolverConfig {
-    fn ts() -> TsType {
-        TsType::Union(vec![String::ts(), ResolverAssignment::ts()])
+wire_union! {
+    @inline
+    /// The merge resolver's console.json entry: a harness name (or "none"), or a whole Assignment.
+    #[serde(untagged)]
+    pub enum ResolverConfig {
+        Harness(String),
+        Assignment(ResolverAssignment),
     }
 }
 
@@ -850,40 +840,19 @@ wire_struct! {
     }
 }
 
-/// The enlist request body (issue #101): `becomes` is fixed at enlist time and
-/// chooses the arm: a Ticket, a Conversation, or a Conversation as the Steward
-/// (ADR-0030). The engine re-judges the pane at submit rather than trusting a
-/// picker read that may be stale. The branch is never on the wire: the engine
-/// resolves the found directory's branch with git and applies the branch rule
-/// itself.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EnlistRequest {
-    Ticket(EnlistTicketRequest),
-    Conversation(EnlistConversationWireRequest),
-    Steward(EnlistStewardWireRequest),
-}
-
-impl Ts for EnlistRequest {
-    fn ts() -> TsType {
-        TsType::Name("EnlistRequest")
-    }
-}
-
-impl crate::ts::TsDecl for EnlistRequest {
-    fn decl() -> crate::ts::Decl {
-        crate::ts::Decl {
-            name: "EnlistRequest".to_string(),
-            docs: Vec::new(),
-            body: crate::ts::DeclBody::Alias {
-                generics: Vec::new(),
-                ty: TsType::Union(vec![
-                    EnlistTicketRequest::ts(),
-                    EnlistConversationWireRequest::ts(),
-                    EnlistStewardWireRequest::ts(),
-                ]),
-            },
-        }
+wire_union! {
+    /// The enlist request body (issue #101), declared once here so the server
+    /// route and the Console type-import the same shape. `becomes` is fixed at
+    /// enlist time, and one of the arms is chosen from it: a Ticket, a
+    /// Conversation, or a Conversation as the Steward (ADR-0030). The engine
+    /// re-judges the pane at submit rather than trusting a picker read that may
+    /// be stale. The branch is never on the wire: the engine resolves the found
+    /// directory's branch with git and applies the branch rule itself.
+    #[serde(untagged)]
+    pub enum EnlistRequest {
+        Ticket(EnlistTicketRequest),
+        Conversation(EnlistConversationWireRequest),
+        Steward(EnlistStewardWireRequest),
     }
 }
 
@@ -951,30 +920,12 @@ wire_struct! {
     }
 }
 
-/// The enlist answer: the minted id, a 201 on success.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EnlistResponse {
-    Ticket(EnlistedTicket),
-    Conversation(EnlistedConversation),
-}
-
-impl Ts for EnlistResponse {
-    fn ts() -> TsType {
-        TsType::Name("EnlistResponse")
-    }
-}
-
-impl crate::ts::TsDecl for EnlistResponse {
-    fn decl() -> crate::ts::Decl {
-        crate::ts::Decl {
-            name: "EnlistResponse".to_string(),
-            docs: vec![" The enlist answer: the minted id, a 201 on success."],
-            body: crate::ts::DeclBody::Alias {
-                generics: Vec::new(),
-                ty: TsType::Union(vec![EnlistedTicket::ts(), EnlistedConversation::ts()]),
-            },
-        }
+wire_union! {
+    /// The enlist answer: the minted id, a 201 on success.
+    #[serde(untagged)]
+    pub enum EnlistResponse {
+        Ticket(EnlistedTicket),
+        Conversation(EnlistedConversation),
     }
 }
 
@@ -1045,7 +996,9 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// The budget as the snapshot carries it: the Pool's, and what the Steward has used per Ticket (only Tickets it has answered since the operator last did).
+    /// The budget as the snapshot carries it: the Pool's, and what the Steward
+    /// has used per Ticket (only Tickets it has answered since the operator
+    /// last did).
     pub struct StewardBudgetView {
         pub budget: u64,
         pub used: IndexMap<String, u64>,
