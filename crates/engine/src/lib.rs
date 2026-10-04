@@ -13,11 +13,16 @@
 //!   file reconcile, mergeTicket, resume, the resolver and its approval), checkout_gate. In ac-core:
 //!   merge_hold (derivation, memo, watch bookkeeping, Merge line), outcome (Outcome and Spawn
 //!   validation), prompt (the Ticket and resolver prompts).
+//! - Herdr panes (r-panes): pane_survey (the cached listing and its cadence), held (Held panes,
+//!   untouchable panes, the Finished terminals count), terminals (opened tabs, the idle-tab rule, the
+//!   bulk close), pool_workspace (boot resolution, re-resolve, relabel), enlisted (the runtime of an
+//!   enlisted pane), enlist and enlist_flow (the picker's listing, `POST /api/enlist`, an enlisted
+//!   attempt's ending).
 //! - STUB modules, each owned by another port: attempt_run, attempt_ending, live_attempts, children,
-//!   pane_session (the attempt launch port); conversations; enlisted; held, terminals,
-//!   pool_workspace (herdr panes); keep_talking; restart (orphans, adoption); spawns (taking and
-//!   adopting proposals; the ledger refresh is ported); steward_actions (the actions; the answer and
-//!   snapshot helpers are ported); verify (grading, Selection; the acceptance checks are ported); jev.
+//!   pane_session (the attempt launch port); conversations; keep_talking; restart (orphans,
+//!   adoption); spawns (taking and adopting proposals; the ledger refresh is ported);
+//!   steward_actions (the actions; the answer and snapshot helpers are ported); verify (grading,
+//!   Selection; the acceptance checks are ported); jev.
 //! - Next: the conformance runs once the server and the attempt launch land.
 
 pub mod actor;
