@@ -12,7 +12,8 @@
  *   READY <socket path>          once, when the socket listens
  *   REQUEST <json>               each call the daemon receives, in order:
  *                                {"method": ..., "params": {...},
- *                                "connection": <n>}
+ *                                "connection": <n>, "at": <ms>}, `at`
+ *                                being when it arrived (Date.now())
  *   REPLY <id> <json>            the answer to a control line:
  *                                {"ok": true, "value": ...} or
  *                                {"ok": false, "error": "..."}
@@ -86,7 +87,7 @@ const options = (raw ? JSON.parse(raw) : {}) as Omit<ExecutingFakeHerdrOptions, 
 const fake: ExecutingFakeHerdr = await startExecutingFakeHerdr({
   ...options,
   onRequest: (method, params, connection) => {
-    emit(`REQUEST ${JSON.stringify({ method, params, connection })}`);
+    emit(`REQUEST ${JSON.stringify({ method, params, connection, at: Date.now() })}`);
     const armed = removals.findIndex((removal) => removal.method === method);
     if (armed >= 0) fake.removeWorkspace(removals.splice(armed, 1)[0]!.workspaceId);
   },

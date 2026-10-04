@@ -46,7 +46,11 @@
  * boot reconciliation must handle: a pane with no process behind it, and
  * its later end. A method named in `fail` (seeded by the option, mutable on
  * the handle) answers with a herdr-style error body, the shape of a daemon
- * refusing the call, so a refusal can be switched on mid-run.
+ * refusing the call, so a refusal can be switched on mid-run; one named in
+ * `failFrom` is refused from its nth call on, so a refusal can land at an
+ * exact call. `keyFrames` changes what a pane shows as a key lands (a TUI
+ * dialog answered), and `noRootPane` answers `tab.create` without its root
+ * pane, as a daemon before herdr protocol 20 did.
  *
  * Workspaces are modelled too (issue #94): `workspaces` seeds the ones the
  * daemon already holds (a pool's remembered or launch workspace),
@@ -116,6 +120,28 @@ export interface ExecutingFakeHerdrOptions {
    * and acted on, as it arrives; only its reply is late.
    */
   delays?: Record<string, number>;
+  /**
+   * A daemon before herdr protocol 20: `tab.create` opens the tab and its
+   * pane as usual but answers with the tab alone, no `root_pane`, so the
+   * caller never learns which pane it got.
+   */
+  noRootPane?: boolean;
+  /**
+   * What a booted pane shows once it is sent a key, by key name: a TUI
+   * moving on as the key lands, the way claude's workspace trust dialog
+   * moves its highlight on `down` and goes away on `enter` (issue #127).
+   * The frame becomes the pane's rendered text as the call is taken, before
+   * it is answered, so the next read sees it however soon that read comes.
+   * The wrapper's own Enter lands before the pane boots and changes nothing.
+   */
+  keyFrames?: Record<string, string>;
+  /**
+   * Methods answered as usual for their first n - 1 calls and refused from
+   * call n on, by method name: a daemon that takes the wrapper and then
+   * stops taking input, at an exact call rather than at a moment a test
+   * would have to race.
+   */
+  failFrom?: Record<string, number>;
 }
 
 // What a pane shows before its wrapper runs: the shell's prompt. Non-empty,
@@ -210,6 +236,11 @@ export async function startExecutingFakeHerdr(
   const fail = new Set(options?.fail ?? []);
   const delays = new Map(Object.entries(options?.delays ?? {}));
   const hang = new Set(options?.hang ?? []);
+  const noRootPane = options?.noRootPane === true;
+  const keyFrames = new Map(Object.entries(options?.keyFrames ?? {}));
+  const failFrom = new Map(Object.entries(options?.failFrom ?? {}));
+  // Method -> how many calls of it the daemon has taken, for `failFrom`.
+  const callCounts = new Map<string, number>();
   let connectionCount = 0;
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
@@ -316,6 +347,8 @@ export async function startExecutingFakeHerdr(
         params: Record<string, unknown>;
       };
       requests.push({ method: msg.method, params: msg.params });
+      const nth = (callCounts.get(msg.method) ?? 0) + 1;
+      callCounts.set(msg.method, nth);
       options?.onRequest?.(msg.method, msg.params, connection);
       // A wedged daemon: the request is taken and nothing ever comes back.
       if (hang.has(msg.method)) return;
@@ -344,7 +377,8 @@ export async function startExecutingFakeHerdr(
         );
         return;
       }
-      if (fail.has(msg.method)) {
+      const failingFrom = failFrom.get(msg.method);
+      if (fail.has(msg.method) || (failingFrom !== undefined && nth >= failingFrom)) {
         socket.end(
           JSON.stringify({
             id: msg.id,
@@ -390,16 +424,21 @@ export async function startExecutingFakeHerdr(
           terminalId: `term-${minted}`,
         });
         swallowRemaining -= 1;
-        respond({
-          type: "tab_created",
-          tab: { tab_id: tabId, ...(workspaceId !== null ? { workspace_id: workspaceId } : {}) },
-          root_pane: {
-            pane_id: paneId,
-            tab_id: tabId,
-            ...(workspaceId !== null ? { workspace_id: workspaceId } : {}),
-            terminal_id: `term-${minted}`,
-          },
-        });
+        const tab = { tab_id: tabId, ...(workspaceId !== null ? { workspace_id: workspaceId } : {}) };
+        respond(
+          noRootPane
+            ? { type: "tab_created", tab }
+            : {
+                type: "tab_created",
+                tab,
+                root_pane: {
+                  pane_id: paneId,
+                  tab_id: tabId,
+                  ...(workspaceId !== null ? { workspace_id: workspaceId } : {}),
+                  terminal_id: `term-${minted}`,
+                },
+              },
+        );
       } else if (msg.method === "workspace.get") {
         const workspaceId = String(msg.params.workspace_id ?? "");
         if (workspaces.has(workspaceId)) {
@@ -532,6 +571,12 @@ export async function startExecutingFakeHerdr(
           return;
         }
         if (pane) {
+          if (pane.booted && Array.isArray(msg.params.keys)) {
+            for (const key of msg.params.keys) {
+              const frame = keyFrames.get(String(key));
+              if (frame !== undefined) pane.rendered = frame;
+            }
+          }
           if (typeof msg.params.text === "string") {
             if (!pane.booted) {
               pane.buffer += msg.params.text;

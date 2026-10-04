@@ -33,6 +33,8 @@ export interface HerdrCall {
   params: Record<string, unknown>;
   /** The connection it arrived on, numbered from 1 in arrival order. */
   connection: number;
+  /** When the fake took it, in milliseconds since the epoch on this machine's clock. */
+  at: number;
 }
 
 export interface HerdrProcess {
