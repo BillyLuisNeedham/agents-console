@@ -8,7 +8,7 @@
  * conformance case may observe (ADR-0036).
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stubStep, type StubBehaviour } from "../fixtures/pool-fixture.ts";
 
@@ -22,6 +22,17 @@ const SCRIPT = join(import.meta.dir, "..", "fixtures", "stub-harness.sh");
 export interface ConformanceStubBehaviour extends StubBehaviour {
   /** Standard output, per launch when an array (the last repeats). */
   stdout?: string | string[];
+  /**
+   * Bash the launch sources in its own directory, per launch when an array
+   * (the last repeats): what a case needs a harness to do that no field
+   * here says, like the commits a resolver makes.
+   */
+  run?: string | string[];
+  /**
+   * Seconds each launch keeps running before it exits, as a TUI holds its
+   * pane: a terminal-backed launch whose stub exits at once ends its pane.
+   */
+  hold?: number;
 }
 
 /** One launch the server made, as the stub recorded it. */
@@ -48,7 +59,7 @@ export interface Stubs {
   bin: string;
   /** CONFORMANCE_STUBS: the scripts and the record of launches. */
   dir: string;
-  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`). */
+  /** Script every launch of `key` (a Ticket id, `01.attempt-2`, `01-grader-1`), replacing any script it had. */
   script(key: string, behaviour: ConformanceStubBehaviour): void;
   /** Every launch so far, in launch order. */
   calls(): StubCall[];
@@ -103,8 +114,11 @@ export function installStubs(root: string): Stubs {
         behaviour.statuses?.length ?? 1,
         behaviour.exitCodes?.length ?? 1,
         Array.isArray(behaviour.stdout) ? behaviour.stdout.length : 1,
+        Array.isArray(behaviour.run) ? behaviour.run.length : 1,
       );
       const scriptDir = join(dir, "scripts", key);
+      // A key scripted again is scripted afresh: no step of the old script stays.
+      rmSync(scriptDir, { recursive: true, force: true });
       mkdirSync(scriptDir, { recursive: true });
       writeFileSync(join(scriptDir, "steps"), `${steps}\n`);
       if (behaviour.waitFor) writeFileSync(join(scriptDir, "wait"), behaviour.waitFor);
@@ -119,6 +133,11 @@ export function installStubs(root: string): Stubs {
           ? behaviour.stdout[Math.min(k - 1, behaviour.stdout.length - 1)]
           : behaviour.stdout;
         if (stdout !== undefined) writeFileSync(join(scriptDir, `${k}.stdout`), stdout);
+        const run = Array.isArray(behaviour.run)
+          ? behaviour.run[Math.min(k - 1, behaviour.run.length - 1)]
+          : behaviour.run;
+        if (run !== undefined) writeFileSync(join(scriptDir, `${k}.run`), run);
+        if (behaviour.hold !== undefined) writeFileSync(join(scriptDir, `${k}.hold`), `${behaviour.hold}\n`);
       }
     },
     calls() {

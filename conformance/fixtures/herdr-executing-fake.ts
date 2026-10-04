@@ -97,6 +97,12 @@ export interface ExecutingFakeHerdrOptions {
    * prompt appears: a fresh tab is not ready the instant it is created.
    */
   shellPromptDelayMs?: number;
+  /**
+   * Milliseconds the daemon waits before replying to each call of a method,
+   * by method name: a daemon slow to open a tab, say. The call is recorded,
+   * and acted on, as it arrives; only its reply is late.
+   */
+  delays?: Record<string, number>;
 }
 
 // What a pane shows before its wrapper runs: the shell's prompt. Non-empty,
@@ -147,6 +153,8 @@ export interface ExecutingFakeHerdr {
   fail: Set<string>;
   /** Refuse the next `times` calls of this method, then answer normally again: a daemon blip, not a daemon that is down. */
   failNextCall: (method: string, times?: number) => void;
+  /** Reply to every later call of this method `ms` late; 0 replies at once again. */
+  delay: (method: string, ms: number) => void;
   close: () => Promise<void>;
   /** A pane with no process behind it; `options` sets what the listing
    *  reports for it (its tab, directory and terminal id). */
@@ -183,6 +191,7 @@ export async function startExecutingFakeHerdr(
   let swallowRemaining = options?.swallowWrapper ?? 0;
   const shellPromptDelayMs = options?.shellPromptDelayMs ?? 0;
   const fail = new Set(options?.fail ?? []);
+  const delays = new Map(Object.entries(options?.delays ?? {}));
   // Method -> how many more calls of it are refused before it works again.
   const failNext = new Map<string, number>();
   const workspaces = new Set(options?.workspaces ?? []);
@@ -278,6 +287,15 @@ export async function startExecutingFakeHerdr(
       };
       requests.push({ method: msg.method, params: msg.params });
       options?.onRequest?.(msg.method, msg.params);
+      const delay = delays.get(msg.method) ?? 0;
+      if (delay > 0) {
+        // Every reply below ends the connection, so holding the end holds it.
+        const end = socket.end.bind(socket);
+        socket.end = ((...args: Parameters<typeof end>) => {
+          setTimeout(() => end(...args), delay);
+          return socket;
+        }) as typeof socket.end;
+      }
       const respond = (result: unknown): void => {
         socket.end(JSON.stringify({ id: msg.id, result }) + "\n");
       };
@@ -581,6 +599,10 @@ export async function startExecutingFakeHerdr(
     fail,
     failNextCall: (method, times = 1) => {
       failNext.set(method, (failNext.get(method) ?? 0) + times);
+    },
+    delay: (method, ms) => {
+      if (ms > 0) delays.set(method, ms);
+      else delays.delete(method);
     },
     close: () =>
       new Promise<void>((resolve) => {

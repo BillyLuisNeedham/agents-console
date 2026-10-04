@@ -1,12 +1,37 @@
-# Not ported to conformance
+# Not ported
 
-The visible behaviour the conformance suite does not pin as a case, each with why and what stands in for it
-(ADR-0036). Rows are the inventory's (`docs/research/rust-port/test-inventory.md`), named by the engine test they
-came from. A row listed here is either not expressible from outside a server process yet, or the TypeScript
-server diverges from the intended behaviour, in which case the case pins what it can and the entry says what is
-left loose.
+What the conformance suite leaves out (ADR-0036): an inventory row
+(`docs/research/rust-port/test-inventory.md`) no case can express from outside
+a server, or one waiting on a seam, each with the reason and the Rust unit
+test it implies; and the places where a case pins less than the TypeScript
+server does, or works around what it does, because that looks like a bug.
+One section per contract area.
 
-Each conformance ticket adds a section for its own scope.
+## `conversations`
+
+Every row of ticket C16 (the lifecycle rows) is a case in
+`cases/conversations-lifecycle.test.ts`. Left out or worked around:
+
+- **A conflicted End's Interrupt is not published** (`conversations.test.ts:602`).
+  `raiseInterrupt` in `engine/engine.ts` changes the state without emitting a
+  snapshot, and a Conversation's End runs off the drive loop, so the
+  merge-approval it raises once the resolver resolves stays out of
+  `/api/state` and the socket until something else publishes: 28 s passed
+  with it unseen in a run of the case. The case starts a second Conversation
+  to carry it, then answers it. Intended behaviour: the snapshot carries the
+  Interrupt the moment it is raised, as the Conversation's start and End
+  snapshots already do. The Rust server should publish it; the Bun server
+  needs the fix Decided 5 gives suspected bugs before the case can drop the
+  carrier.
+- **A refused empty pool leaves its lock** (`conversations.test.ts:727`,
+  `pool.test.ts:206`). The server exits 1 and names the Seeded Pool opt-in, as
+  the case pins, but `runs/server.pid` is left behind: the lock is taken
+  before the pool loads. The case does not pin the lock either way.
+  Intended behaviour (inference): a start refused at pool load releases the
+  lock it took, as an orderly stop does.
+- **A Notice dropped for an ended parent** (the gap at
+  `engine/conversations.ts:2386-2390`) is Notice delivery, ticket C17's
+  scope, and is left to it.
 
 ## `steward`: the Steward (C18)
 

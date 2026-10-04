@@ -10,6 +10,7 @@ export const AREAS = {
   socket: "the WebSocket at /api/ws: hello, snapshot, delta, card, live and reply frames",
   disk: "the files in the pool directory: Ticket markers, events JSONL, console.json, console.db",
   steward: "the Steward: its console.json entry, what it is told, its answers and their limits, its notes, routes and teaching",
+  conversations: "Conversations: storage, start and launch, ending, spawn.json adoption, the teaching Turn, Seeded Pools",
 } as const;
 
 export type Area = keyof typeof AREAS;

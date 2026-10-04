@@ -19,6 +19,12 @@
 #                                it writes into the Ticket's marker itself
 #   scripts/<key>/<k>.stdout     launch k's standard output
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
+#   scripts/<key>/<k>.run        bash the case wrote, sourced in the launch's
+#                                directory after the stdout and marker steps
+#                                and before the outcome one
+#   scripts/<key>/<k>.hold       seconds launch k keeps running before it
+#                                exits, as a TUI does; it gives up early once
+#                                the world is deleted
 #   calls/<key>.<n>/             launch n of the key: seq, argv, cwd, env,
 #                                issue and outcome
 # A key with no scripts writes a done outcome and exits 0, the same step
@@ -108,7 +114,20 @@ if [ -f "$script/$k.marker" ] && [ -n "$issue" ]; then
   awk -v s="$(cat "$script/$k.marker")" 'NR==1{sub(/status=[a-z-]*/, "status=" s)} {print}' "$issue" > "$issue.new"
   mv "$issue.new" "$issue"
 fi
+if [ -f "$script/$k.run" ]; then
+  # shellcheck disable=SC1090
+  . "$script/$k.run"
+fi
 if [ -f "$script/$k.outcome" ] && [ -n "$outcome" ]; then
   cat "$script/$k.outcome" > "$outcome"
+fi
+if [ -f "$script/$k.hold" ]; then
+  # SECONDS is bash's own clock. The teardown deletes the world, stubs
+  # directory included, and a held launch the fake herdr's close left
+  # running (the pane's bash dies, `script` and this do not) ends with it.
+  hold_until=$(( SECONDS + $(cat "$script/$k.hold") ))
+  while [ "$SECONDS" -lt "$hold_until" ] && [ -d "$stubs" ]; do
+    sleep 0.1
+  done
 fi
 exit "$(cat "$script/$k.exit")"
