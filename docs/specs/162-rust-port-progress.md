@@ -11,8 +11,9 @@ CONTEXT.md.
   by a helper that runs `git worktree add --detach` and `bun install` at the root and in `ui/`. They commit
   there on a detached HEAD; the commits are cherry-picked or merged onto the branch, so no branch is
   created. Each worktree is removed once its work has landed.
-- At most about five subagents at once: the box has 12 cores, and earlier runs of about 25 parallel
-  agents hit the account's usage limit.
+- At most four subagents at once, and none of them spawns helpers of its own. On 2026-10-04 eight
+  agents, several with helper agents, used up the account's usage window in about 1 h 45 min (reset at
+  14:50 BST); every agent paused mid-work and was woken with SendMessage after the reset.
 
 ## Status
 
