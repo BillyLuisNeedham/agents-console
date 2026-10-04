@@ -459,9 +459,10 @@ conformance("config", "unknown assign keys are ignored, beside a verify or witho
   expect(plain.stubs.calls().map((call) => call.key)).toEqual(["01"]);
 
   const server = await t.start(withVerify);
+  // The two attempts launch side by side, so wait for each rather than read one after the other.
   await untilLaunched(withVerify, "01.attempt-2");
   expect(ticketOf(await snapshotOf(server), "01").reassign.verify).toBe(2);
-  expect(launchesOf(withVerify, "01.attempt-1")).toHaveLength(1);
+  expect(await untilLaunched(withVerify, "01.attempt-1")).toHaveLength(1);
 });
 
 conformance("config", "a selection other than auto or human stops the pool at load", async (t) => {
