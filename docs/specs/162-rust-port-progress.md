@@ -26,7 +26,7 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 | --- | --- | --- |
 | interrupts | C08 | landed (588d76d..63102a3), 48 cases |
 | attempts, terminal launch | C12 | landed (1f8a9b2..e54c5bc), 66 cases |
-| attempts, endings and logs | C13 | wave 1, subagent m0-c13 |
+| attempts, endings and logs | C13 | landed (1e39261), 30 cases |
 | herdr panes | C15 | landed (eecd384..1bee44e), 42 cases |
 | config, Reassign and settings | C20 | landed (7e67446), 68 cases |
 | protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
@@ -213,3 +213,28 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
   row; the next boot runs from the state lines alone (pinned).
 - children.test.ts:76 is a Rust unit test: a child registered after shutdown began gets TERM sent to its
   process group as it arrives.
+
+### attempts, endings and logs (C13, 1e39261)
+
+- The fake herdr gained `closePane`, `delistPane`, `hangUpSubscribers`, `listedPanes`,
+  `endPaneOn(method, paneId, nth)` and `HerdrProcess.kill()` (C15's `closeTab` serves both tickets).
+- A pane leaving herdr's listing is noticed only by the ending's 30 s liveness sweep, which lists every
+  workspace's panes (`pane.list {}`); a refused listing is skipped, a dropped or hung-up subscription is
+  not an ending, and the wait is never re-subscribed or clock-bounded. A pane gone from the listing gets
+  a 10 s grace (the exit-code file polled at 250 ms) before pane gone (-2).
+- A pane that ends with no exit-code file is exit code unreadable (-1) about 2 s later: readExitCode
+  retries 10 times at 200 ms.
+- The Bun server subscribes to pane ends twice per launch: once for readiness (let go before the paste),
+  once for the ending; on the ending subscription's ack it lists panes once (catches a pane already gone).
+- The wrapper's send removes a stale exit-code file and Stream file first (pane-session.ts:314).
+- A terminal-backed log is cut at the Attempt's end: the tailer drains once at the ending, so output after
+  the Outcome (and script's "Script done on" footer) never reaches runs/<id>.log or the logTail.
+- An Outcome valid when the pane ends wins: the ending re-reads the result before calling it a crash.
+- In stream mode stderr goes through the same stream-json deriver as stdout (not pinned); raw-mode logs
+  (opencode) are written chunk by chunk with no line splitting (pinned).
+- Rust unit tests: an exit-code file landing inside the grace window ends with the file's code, never pane
+  gone; the stream and transcript line buffers reassemble a line, a UTF-8 character and an escape
+  sequence split across two chunks, exactly once.
+- Known race in tests reading "notice delivered" events: the fake records the submitted Turn before the
+  engine appends the event (steward.test.ts engine tests; conformance steward/notices "a Steward enlisted
+  beside a checkpoint is told it once ...").
