@@ -23,13 +23,13 @@ Baseline at c429645: 57 case files; one failing case against Bun,
 
 | Area | Inventory ticket | State |
 | --- | --- | --- |
-| interrupts | C08 | wave 1, subagent m0-c08 |
+| interrupts | C08 | landed (588d76d..63102a3), 48 cases |
 | attempts, terminal launch | C12 | wave 1, subagent m0-c12 |
 | attempts, endings and logs | C13 | wave 1, subagent m0-c13 |
 | herdr panes | C15 | wave 1, subagent m0-c15 |
-| config, Reassign and settings | C20 | wave 1, subagent m0-c20 |
-| protocol and http outside route files | C02 | wave 2 |
-| server lifecycle | C03 | wave 2 |
+| config, Reassign and settings | C20 | landed (7e67446), 68 cases |
+| protocol and http outside route files | C02 | wave 2, subagent m0-c02 |
+| server lifecycle | C03 | wave 2, subagent m0-c03 |
 | restart, Tickets and Attempts | C05 | wave 2 |
 | restart, Conversations and panes | C06 | wave 2 |
 | Conversation Turn state and Notices | C17 | wave 2 |
@@ -71,6 +71,24 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - NOT-PORTED.md's formats note that a spawn-assign effort makes reassign.sources.effort read unset does not
   reproduce at 7e67446: a spawned Ticket that has not run reads `requested` (the case for
   reassign.test.ts:154 pins requested).
+
+### interrupts (C08)
+
+- The persist backoff is 50, 100 and 200 ms (4 attempts). Persists in the answer drain and in Keep talking
+  get no retry: a drain failure leaves memory changed with no emit; a Keep talking failure is swallowed and
+  the claim stands. Answering PERSISTENCE while console.db is still locked answers 400
+  `{"error":"database is locked"}`, records the answer (answered event plus an unprocessed queued record),
+  and clears the Interrupt in memory with no emit and no drive (pinned).
+- A Continued attempt's ending check runs every 2 s: the Outcome first, then the exit-code file, then
+  herdr's pane listing; a failed listing says nothing about the pane.
+- acceptAnswer's checks run in this order: attempt and adopt; the retry lookup when nothing is pending; the
+  close kinds; close on a non-Ticket ("answer: <id> is not a Ticket in this pool; only a Ticket can be
+  closed"); approve/reject for the review gate and merge-approvals; the duplicate ack; a different answer
+  already queued (409); a reject naming no ticket; selection naming. The server's own approve/reject guard
+  reads the Interrupt kind from the snapshot it last served.
+- A Close is drained even while a Continued attempt holds the pool checkout.
+- Keep talking's "lost its terminal" and "lost its agent" refusals are dead code in the TypeScript (pinned
+  as "has no terminal left to continue in").
 
 ## Notes from the Rust port agents
 
