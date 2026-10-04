@@ -23,7 +23,13 @@ nix.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 
+[features]
+# The Jev port fake (`ac_io::jev::fake`), for the engine's own tests.
+fake = []
+
 [dev-dependencies]
 tempfile.workspace = true
+# The fake TypeSafe endpoint the Jev client's tests talk to.
+axum.workspace = true
 # Paused time, so the RPC watchdog's 10 s passes without being waited out.
 tokio = { workspace = true, features = ["test-util"] }
