@@ -14,8 +14,8 @@ use serde_json::{Map, Value};
 use ac_core::harness::Harnesses;
 use ac_core::machine_defaults::MachineDefaultsPaths;
 use ac_protocol::{
-    ConversationView, EnlistRequest, EnlistResponse, ResumeAction, RunPhase,
-    StartConversationRequest, StewardAnswerAction, StewardStateResponse,
+    ConversationView, ResumeAction, RunPhase, StartConversationRequest, StewardAnswerAction,
+    StewardStateResponse,
 };
 
 use crate::actor::Engine;
@@ -191,6 +191,7 @@ impl Engine {
             .call(|s| {
                 s.conversations.dispose();
                 s.enlisted.dispose();
+                crate::pane_survey::stop_pane_survey(s);
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
                 crate::snapshot::emit_snapshot(s, RunPhase::Stopped);
@@ -222,23 +223,12 @@ impl Engine {
         not_ported("endConversation")
     }
 
-    /// `enlist` (issue #101): a live herdr pane as a Ticket, a Conversation or the Steward.
-    pub async fn enlist(&self, request: EnlistRequest) -> Result<EnlistResponse, EngineError> {
-        let _ = request;
-        not_ported("enlist")
-    }
-
     /// `paneRead` (issue #122): the last recorded read of a pane a loop watches.
     pub async fn pane_read(&self, pane_id: String) -> Option<PaneRead> {
         self.call(move |session| session.pane_reads.latest(&pane_id))
             .await
             .ok()
             .flatten()
-    }
-
-    /// `retitle` (issue #100): relabel a Pool workspace the Console created. Never fails.
-    pub async fn retitle(&self, title: Option<String>) {
-        let _ = title;
     }
 
     /// `keepTalking` (issue #139): continue a checkpointed Attempt in its Held pane; the new Attempt's
@@ -250,7 +240,7 @@ impl Engine {
 
     /// `closeFinishedTerminals` (issue #139): how many closed.
     pub async fn close_finished_terminals(&self) -> Result<u64, EngineError> {
-        not_ported("closeFinishedTerminals")
+        crate::terminals::close_finished_terminals(self).await
     }
 
     /// `reloadConfig` (issue #149): an idle pool runs the boundary's Config reload now and emits.

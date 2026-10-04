@@ -35,6 +35,7 @@ pub mod drive;
 #[cfg(test)]
 mod e2e_tests;
 pub mod enlist;
+pub mod enlist_flow;
 pub mod enlisted;
 pub mod error;
 pub mod handle;
@@ -47,6 +48,7 @@ pub mod merges;
 pub mod options;
 pub mod pane_reads;
 pub mod pane_session;
+pub mod pane_survey;
 pub mod persist;
 pub mod pool_workspace;
 pub mod restart;

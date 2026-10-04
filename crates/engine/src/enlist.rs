@@ -8,8 +8,8 @@
 //! checkout both qualify), and no live attempt or Conversation already holds its pane id. Ineligible
 //! panes are returned with the reason, never dropped.
 //!
-//! Ported so far: the listing the server's `GET /api/panes` answers with, and the eligibility it shares
-//! with `findEnlistablePane`, which the enlist flow's port adds beside it.
+//! The listing the server's `GET /api/panes` answers with, and the eligibility it shares with
+//! `findEnlistablePane`; the flow that enlists is [`crate::enlist_flow`].
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -86,6 +86,57 @@ pub async fn list_enlist_panes(
         })
         .collect();
     Ok(PanesResponse { panes })
+}
+
+/// One live pane resolved and judged for enlist: the found facts the engine records, with eligibility
+/// already decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundPane {
+    pub pane_id: String,
+    pub tab_id: Option<String>,
+    pub harness: String,
+    pub session_id: Option<String>,
+    pub title: String,
+    pub directory: String,
+    pub branch: String,
+}
+
+/// `findEnlistablePane`: resolve one pane the operator picked and judge it again at submit time (issue
+/// #101): herdr's list is read afresh because the picker's answer is ephemeral. An absent pane, one
+/// already held by a live attempt or Conversation, one outside the pool's repository, one with no known
+/// harness, and one whose directory has no branch are all a reason (the inner `Err`), never a thrown
+/// error: the route turns the reason into its 409. A daemon that cannot list is the outer `Err`.
+pub async fn find_enlistable_pane(
+    herdr: &Herdr,
+    pool_dir: &Path,
+    pane_id: &str,
+    registered_panes: &HashSet<String>,
+) -> Result<Result<FoundPane, String>, HerdrError> {
+    let agents = herdr.list_agents().await?;
+    let Some(agent) = agents.into_iter().find(|agent| agent.pane_id == pane_id) else {
+        return Ok(Err(format!("pane {pane_id} is gone")));
+    };
+    let common = pool_common_dir(pool_dir);
+    if let Err(reason) = eligibility_of(&agent, &common, registered_panes) {
+        return Ok(Err(reason.to_owned()));
+    }
+    let (Some(directory), Some(harness)) = (agent.directory.clone(), agent.harness.clone()) else {
+        return Ok(Err(NOT_A_CHECKOUT.to_owned()));
+    };
+    let Some(branch) = branch_at(&directory) else {
+        return Ok(Err(
+            "the pane's directory has no branch checked out".to_owned()
+        ));
+    };
+    Ok(Ok(FoundPane {
+        pane_id: agent.pane_id,
+        tab_id: agent.tab_id,
+        harness,
+        session_id: agent.session_id,
+        title: agent.title,
+        directory,
+        branch,
+    }))
 }
 
 #[cfg(test)]

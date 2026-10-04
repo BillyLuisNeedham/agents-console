@@ -43,7 +43,9 @@ pub fn attempt_env_of(session: &Session, config: Option<&PoolConfig>) -> Attempt
         harnesses: session.harnesses.clone(),
         herdr_socket: session.herdr_socket.clone(),
         parent_env: Arc::clone(&session.parent_env),
-        pool_workspace: Arc::new(crate::attempt_run::NoPoolWorkspace),
+        pool_workspace: Arc::new(crate::pool_workspace::EnginePoolWorkspace::new(
+            session.engine(),
+        )),
         host: Arc::new(session.engine()),
         terminal_backed: config.terminal() == Some(TerminalKind::Herdr),
         launch_cadence: session.launch_cadence,
