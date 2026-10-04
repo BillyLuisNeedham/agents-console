@@ -514,7 +514,17 @@ impl Server {
                 .as_ref()
                 .is_some_and(|from| Arc::ptr_eq(from, &raw));
             if !fresh || inner.dirty {
-                self.refresh_meta(inner, Some(&raw));
+                // The read of the pool's files waits for an engine job in flight, and the job may
+                // publish a newer snapshot: pair the files with the snapshot published once they
+                // were read, never with the one taken before the wait.
+                let mut raw = raw;
+                loop {
+                    self.refresh_meta(inner, Some(&raw));
+                    match self.last_raw() {
+                        Some(now) if !Arc::ptr_eq(&now, &raw) => raw = now,
+                        _ => break,
+                    }
+                }
                 let rows = self.reassign_rows(inner, &raw);
                 let title = self.title_now(inner);
                 inner.latest = Some(Arc::new(enrich(
