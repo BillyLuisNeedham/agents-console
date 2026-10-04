@@ -117,3 +117,23 @@ reads its area's entries here as well as in conformance/NOT-PORTED.md.
 - The RPC watchdog is a fixed 10 s; tests that need it to fire use `#[tokio::test(start_paused = true)]`.
 - Connect failures read `connect ENOENT <path>` for every cause, as Bun 1.3.14 reports them; a label cut
   that would split a surrogate pair drops the character; a `null` entry in `agent.list` is skipped.
+
+### ac_io::git and ac_core::stat_cache (r-git, d94eec5..b8b3947)
+
+- worktrees.ts split into `git/worktrees.rs` (keys, naming, worktree lifecycle, merge checkout, ref stamp)
+  and `git/merge.rs` (merge_branch and helpers); `runner.rs` (`git`/`git_async` give trimmed
+  `GitProbe {ok, out, err}`; `run_git`/`run_git_async` give raw `GitOutput`), `repo.rs`, `diffs.rs`
+  (`activity_diff`, `branch_diff`, `diff_stat_summary`), `boot.rs` (Boot's git reads). `git/mod.rs` opens
+  with tables of every TypeScript git call site and the Rust function serving it.
+- Ported from engine.ts already: mergeInPlace, mergeInCheckout, withMergeCheckout (`with_merge_checkout`,
+  body gets the cwd as `&str`), removeEnlistedBranch (`restore_found_branch`), repoRootOf, the git half of
+  attemptDiff. Left for M3: the merge-hold probe and memo, the Ticket-file reconcile (its git parts are
+  `merge_base`, `show_file`, `merge_file`). Left for M4: the activity diff's 1.5 s TTL cache.
+- `pool_key_for` is total (hashes the given path when realpath fails); the functions that change disk use
+  `try_pool_key_for`, which fails first with Bun's lstat ENOENT text, as the TypeScript does.
+- `node.rs` holds crate-private JS/Node helpers (trim, Number, path join and relative, realpath, Bun's fs
+  error texts): candidates for `ac_core::js` together with herdr's `js.rs`.
+- engine.ts:10279-10281's enlist capture ports as `pane_top.is_some() && pane_top == cwd_top`.
+- `merge_file`: an exit code above 127 is git's error, `None` is killed by a signal.
+- This box's git config enables rerere (autoupdate): a conflict's stderr starts "Recorded preimage", which
+  becomes `MergeResult.detail`; tests must not assume the CONFLICT lines come first.
