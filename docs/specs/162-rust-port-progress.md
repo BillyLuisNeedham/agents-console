@@ -83,11 +83,23 @@ Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flake
 default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
 rust,bun,rust, 86/86 each.
 
-M5 running: r-bench2 (Opus, rust-port-bench from ce20218) gets the Rust bench to its gate table and
-compares it with Bun's on a quiet box (Bun's first run here failed 3 gates; the Rust run timed out at the
-pool's working state). r-flip (Opus, rust-port-flip from ce20218) does the generated protocol files under
-protocol/ and the shim now, and deletes the TypeScript engine only when told (after the bench). Briefs:
-brief-r-bench2.md, brief-r-flip.md in the scratchpad.
+M5 running (state at 4fea052):
+- r-flip (Opus, rust-port-flip): items 1 and 2 landed as merge 4fea052 (c537445 the generated
+  protocol/wire.ts and protocol/protocol.ts with a byte-equality Rust test; ffe572b the shim that builds a
+  stale UI and release binary and execs `boot`). Item 3 (delete engine/, Bun legs refused in conformance and
+  bench, package.json, bunfig preload, README, delete the checkpoints.rs round-trip test, keep the boundary
+  engine/ guard, leave prototype/ spikes) is HELD: send r-flip the go plus the commit to merge once r-bench2
+  has its Bun numbers.
+- r-bench2 (Opus, rust-port-bench from ce20218): Rust bench timed out at "the pool to reach its working
+  state"; Bun's first run failed 3 of 9 gates on this box (Cold data network 18.9 ms, Open in herdr 12.4 ms,
+  38 frames over budget). It is debugging the Rust run and re-measuring both on a quieter box. Box noise:
+  185 orphaned TS engine-test stubs (/tmp/pool-*/tui.sh, agent.sh, from engine/server.test.ts sentinel loops)
+  that the permission system would not let an agent kill; Billy was given the command; they go away for good
+  with engine/ at the flip.
+- Then: render-survival (`cd ui && bun harness/run.ts`), two real throwaway pools through the shim (memory
+  e2e-real-herdr-pool-on-this-box), merge main, reword default merge messages (filter-branch msg-filter),
+  delete docs/specs before the PR is the operator's, ticket notes, outcome JSON (checkpoint for the Mac
+  sign-off), final message with deviations and bench numbers.
 
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
