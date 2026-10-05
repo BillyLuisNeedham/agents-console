@@ -1005,7 +1005,7 @@ describe("stop control (issue #97)", () => {
     expect(model.phaseLabel).toBe("stopped");
     expect(model.stop.offered).toBe(false);
     expect(model.stop.stoppedFromHere).toBe(true);
-    expect(model.stop.relaunch).toBe("bun run engine/server.ts --pool /repos/demo/.pool");
+    expect(model.stop.relaunch).toBe("agent-console /repos/demo/.pool");
   });
 
   it("leaves 'from this page' off a tab that did not ask for the stop", () => {

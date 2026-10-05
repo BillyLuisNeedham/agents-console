@@ -136,14 +136,14 @@ describe("the pool's name in the header (issue #100)", () => {
         phase: "stopped",
         phaseLabel: "stopped",
         connected: false,
-        stop: stop({ relaunch: "bun run engine/server.ts --pool /tmp/pool" }),
+        stop: stop({ relaunch: "agent-console /tmp/pool" }),
       }),
     );
     commit();
     const notice = root.querySelector(".canvas-stopped-text")?.textContent ?? "";
     expect(notice).toStartWith("The server for Jev as the grader has stopped.");
     expect(root.querySelector(".canvas-stopped-command")?.textContent).toBe(
-      "bun run engine/server.ts --pool /tmp/pool",
+      "agent-console /tmp/pool",
     );
   });
 });

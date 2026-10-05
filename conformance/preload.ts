@@ -1,9 +1,10 @@
-// Loaded before every conformance file (bunfig.toml beside it). The servers
+// Loaded before every conformance file (bunfig.toml beside it), and before
+// every test the root's `bun test` runs (the root bunfig.toml). The servers
 // and fakes a case starts get an environment built from nothing
-// (harness/world.ts), so this only fences the suite's own process, the way
-// engine/test-preload.ts fences the engine suites: anything it ever runs
-// with the inherited environment reaches a scratch claude config and no
-// herdr daemon, and never sees the two variables the server's CLI reads.
+// (harness/world.ts), so this only fences the test process itself: anything
+// it ever runs with the inherited environment reaches a scratch claude
+// config and no herdr daemon, and never sees the two variables the server's
+// CLI reads.
 
 import { tmpdir } from "node:os";
 import { join } from "node:path";

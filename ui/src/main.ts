@@ -1,5 +1,5 @@
 /**
- * Console: the pool rendered as node cards on a canvas. One Bun server per
+ * Console: the pool rendered as node cards on a canvas. One server per
  * pool serves the built SPA with the first snapshot embedded in it, and one
  * WebSocket over which it pushes every change and answers every request
  * (issue #161, ADR-0032). The UI renders from that snapshot only; ticket

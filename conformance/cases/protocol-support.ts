@@ -7,7 +7,6 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { EmbeddedBoot, SnapshotDelta } from "../../protocol/protocol.ts";
 import type { ConversationView, EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
@@ -15,7 +14,6 @@ import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { HerdrProcess } from "../harness/herdr.ts";
 import { until } from "../harness/pool-files.ts";
-import { CHECKOUT } from "../harness/server.ts";
 import type { World } from "../harness/world.ts";
 import { snapshotOf, untilSnapshot } from "./config-support.ts";
 
@@ -101,20 +99,6 @@ export async function restoreLongLog(t: Case, world: World, count: number): Prom
   return lines;
 }
 
-/**
- * The Bun server serves the UI from the checkout's ui/dist, and the Rust
- * binary embeds it (ADR-0036); either way a case that reads the page needs a
- * built UI, so a Bun run without one builds it first, as Boot does.
- */
-export function ensureBuiltUi(t: Case): void {
-  if (t.kind !== "bun" || existsSync(join(CHECKOUT, "ui", "dist", "index.html"))) return;
-  const build = Bun.spawnSync([process.execPath, "run", "build"], {
-    cwd: join(CHECKOUT, "ui"),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) throw new Error(`the UI build failed:\n${build.stderr.toString()}`);
-}
 
 /** The served page, and the console-boot element's text as the page carries it. */
 export interface ServedPage {

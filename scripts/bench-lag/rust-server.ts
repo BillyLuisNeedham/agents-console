@@ -1,13 +1,10 @@
 /**
- * The Rust half of the lag bench's server choice (issue #162, ADR-0036 M5):
- * everything `--server rust` does differently from the Bun pool server that
- * serve.ts builds.
+ * The lag bench's pool server (issue #162, ADR-0036 M5): the shipped Rust
+ * binary, `<bin> server --pool <dir> --port <n>`, which the bench meets the
+ * way an operator or the conformance suite does. The Bun pool server the
+ * bench once built in-process was removed at the flip, so `--server bun` is
+ * refused.
  *
- * The Bun server is built in-process by serve.ts with stub harness commands,
- * a scratch registry and a ping file in its dist directory, and answers the
- * parent's IPC for its event-loop lag and sync spawns. The Rust server is the
- * shipped binary, `<bin> server --pool <dir> --port <n>`, so the bench meets
- * it the way an operator or the conformance suite does:
  *
  * - its harnesses are real binary names. The bench pool's `bench` harness
  *   becomes `claude`, `opencode` and `agent` wrappers first on PATH (of the
@@ -16,31 +13,33 @@
  *   conformance/fixtures/stub-harness.sh does, and hands it to the pool's own
  *   harness script in the mode the Ticket plays (pool.ts). A launch whose
  *   prompt names no outcome file is a Conversation's (the bench starts its
- *   Conversations on `claude` here, where the Bun server's run on its `convo`
- *   stub): it holds its pane open until the release file appears. The fake
+ *   Conversations on `claude`): it holds its pane open until the release
+ *   file appears. The fake
  *   herdr renders claude's ready frame in every new pane (herdr.ts), so the
  *   terminal-backed launch's readiness wait passes and the prompt is typed;
  * - its herdr is the HERDR_SOCKET_PATH of the environment, its machine files
  *   come from HOME, and its UI is the binary's own (embedded in a release
- *   build, read from ui/dist in a debug one). It has no ping.txt, so the
- *   static ping probe reads the stylesheet the served page names, on both
- *   servers (pingPathOf);
+ *   build, read from ui/dist in a debug one). The static ping probe reads
+ *   the stylesheet the served page names (pingPathOf);
  * - it has no IPC. The parent's "begin", "report" and "timeline" asks are
- *   answered from the process table: RSS and CPU of the server's pid. What
- *   reads Bun internals (event-loop lag, sync spawns, the server timeline)
- *   has no Rust counterpart, and is reported as null, printed "n/a (rust)".
- *   No gate reads either (gates.ts).
+ *   answered from the process table: RSS and CPU of the server's pid. The
+ *   measures only the Bun server could give (event-loop lag, sync spawns,
+ *   the server timeline) are reported as null, printed "n/a (rust)". No gate
+ *   reads them (gates.ts).
  */
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
-export type ServerKind = "bun" | "rust";
+export type ServerKind = "rust";
 
-/** `bun` or `rust`, or null for anything else. */
+/** What `--server bun` answers now. */
+export const BUN_REMOVED = "the Bun server was removed at the flip (ADR-0036): only rust runs";
+
+/** `rust`, or null for anything else. */
 export function parseServerKind(value: string): ServerKind | null {
-  return value === "bun" || value === "rust" ? value : null;
+  return value === "rust" ? value : null;
 }
 
 /** Where the Rust binary is when `--rust-bin` is not given: the checkout's release build. */
@@ -48,7 +47,7 @@ export function defaultRustBin(repo: string): string {
   return join(repo, "target", "release", "agent-console");
 }
 
-/** What `--server rust` prints in place of a measure that only Bun has. */
+/** What the bench prints in place of a measure only the Bun server had. */
 export const NOT_RUST = "n/a (rust)";
 
 // --- the harness the pool's Tickets run -----------------------------------------
@@ -222,10 +221,8 @@ export function bootLinePort(log: string): number | null {
 
 /**
  * A static asset of the served page to time the server with: the first
- * stylesheet it links, else the first script. Both servers serve the same
- * built UI (the Rust binary's own, the Bun server's from the checkout's
- * build), so the probe reads the same file on either. Null when the page
- * names neither.
+ * stylesheet it links, else the first script. Null when the page names
+ * neither.
  */
 export function pingPathOf(html: string): string | null {
   const css = /<link[^>]*\bhref="([^"]+\.css)"/.exec(html) ?? /<link[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"/.exec(html);
@@ -235,7 +232,7 @@ export function pingPathOf(html: string): string | null {
   return new URL(found, "http://localhost/").pathname;
 }
 
-/** The handle bench-lag.ts drives a server through, Bun's (IPC) or Rust's (the process table). */
+/** The handle bench-lag.ts drives the server through, its asks answered from the process table. */
 export interface ServerHandle {
   proc: Bun.Subprocess;
   ready: string;

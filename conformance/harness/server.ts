@@ -1,16 +1,18 @@
 /**
- * The server under test as a separate process, Bun's or Rust's (ADR-0036),
- * started and stopped the way Boot does it: both streams appended to the
- * pool's `runs/server.log`, ready once that log carries this start's boot
- * line and `/api/state` answers, stopped with SIGTERM.
+ * The server under test as a separate process (ADR-0036), started and
+ * stopped the way Boot does it: both streams appended to the pool's
+ * `runs/server.log`, ready once that log carries this start's boot line and
+ * `/api/state` answers, stopped with SIGTERM.
  *
- * Which server runs is the runner's choice (conformance/run.ts), passed in
- * the environment so every case reads it the same way:
+ * The server is the Rust binary. The Bun server was removed at the flip, so
+ * `bun` is refused wherever a server is named. The runner
+ * (conformance/run.ts) passes its choice in the environment so every case
+ * reads it the same way:
  *
- *   CONFORMANCE_SERVER     bun (the default) or rust
+ *   CONFORMANCE_SERVER     rust (the default)
  *   CONFORMANCE_RUST_BIN   the Rust binary; default target/release/agent-console
  *   CONFORMANCE_LEGS       the servers a takeover case's legs run, in order,
- *                          comma-separated (bun,rust,bun); default three legs
+ *                          comma-separated (rust,rust,rust); default three legs
  *                          of CONFORMANCE_SERVER's
  */
 
@@ -18,22 +20,23 @@ import { existsSync, mkdirSync, openSync, closeSync, readFileSync, statSync } fr
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
-/** This checkout, where `engine/server.ts` and `target/` live. */
+/** This checkout, where `target/` lives. */
 export const CHECKOUT = resolve(import.meta.dir, "..", "..");
 
-export type ServerKind = "bun" | "rust";
+export type ServerKind = "rust";
 
 export interface ServerChoice {
   kind: ServerKind;
-  /** The Rust binary, whether or not it exists; null for Bun. */
-  rustBin: string | null;
+  /** The Rust binary, whether or not it exists. */
+  rustBin: string;
 }
 
+/** What naming the Bun server answers now. */
+export const BUN_REMOVED = "the Bun server was removed at the flip (ADR-0036): only rust runs";
+
 function choiceOf(kind: string, variable: string, env: Record<string, string | undefined>): ServerChoice {
-  if (kind !== "bun" && kind !== "rust") {
-    throw new Error(`${variable} must name bun or rust, not ${kind}`);
-  }
-  if (kind === "bun") return { kind, rustBin: null };
+  if (kind === "bun") throw new Error(`${variable}: ${BUN_REMOVED}`);
+  if (kind !== "rust") throw new Error(`${variable} must name rust, not ${kind}`);
   return {
     kind,
     rustBin: resolve(CHECKOUT, env.CONFORMANCE_RUST_BIN ?? join("target", "release", "agent-console")),
@@ -42,11 +45,11 @@ function choiceOf(kind: string, variable: string, env: Record<string, string | u
 
 /** The server the runner chose, from the environment. */
 export function serverChoice(env: Record<string, string | undefined> = process.env): ServerChoice {
-  return choiceOf(env.CONFORMANCE_SERVER ?? "bun", "CONFORMANCE_SERVER", env);
+  return choiceOf(env.CONFORMANCE_SERVER ?? "rust", "CONFORMANCE_SERVER", env);
 }
 
 /** How many legs a takeover case runs when CONFORMANCE_LEGS is not set:
- *  enough for Bun, then Rust, then Bun again. */
+ *  a pool handed over twice. */
 export const DEFAULT_LEG_COUNT = 3;
 
 /**
@@ -68,7 +71,7 @@ export function serverLegs(env: Record<string, string | undefined> = process.env
 
 /** Why the chosen server cannot run at all, or null when it can. */
 export function serverMissing(choice: ServerChoice): string | null {
-  if (choice.kind === "rust" && !existsSync(choice.rustBin!)) {
+  if (!existsSync(choice.rustBin)) {
     return `the Rust server binary is not built: no file at ${choice.rustBin}`;
   }
   return null;
@@ -83,24 +86,12 @@ export function legsMissing(legs: ServerChoice[]): string | null {
   return null;
 }
 
-/** The subcommands of the one binary (ADR-0036), each a script of its own under Bun. */
+/** The subcommands of the one binary (ADR-0036). */
 export type Command = "server" | "steward" | "boot" | "fleet";
 
-const BUN_SCRIPTS: Record<Command, string> = {
-  server: "server.ts",
-  steward: "steward-cli.ts",
-  boot: "boot-cli.ts",
-  fleet: "fleet-cli.ts",
-};
-
-/**
- * The argv that runs one of the chosen side's commands with the given
- * arguments: `bun run engine/<script>` for Bun, `<binary> <command>` for
- * Rust.
- */
+/** The argv that runs one of the binary's commands with the given arguments: `<binary> <command>`. */
 export function commandArgv(choice: ServerChoice, command: Command, args: string[] = []): string[] {
-  if (choice.kind === "bun") return [process.execPath, "run", join(CHECKOUT, "engine", BUN_SCRIPTS[command]), ...args];
-  return [choice.rustBin!, command, ...args];
+  return [choice.rustBin, command, ...args];
 }
 
 /**

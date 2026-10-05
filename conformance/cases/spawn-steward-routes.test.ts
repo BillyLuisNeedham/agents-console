@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { HeldSpawnView, PendingSpawnView } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson, readEvents, until } from "../harness/pool-files.ts";
-import { CHECKOUT, serverChoice } from "../harness/server.ts";
+import { serverChoice } from "../harness/server.ts";
 import type { World } from "../harness/world.ts";
 
 const BODY = "A body long enough to stand as a ticket.";
@@ -326,12 +326,7 @@ interface Run {
 /** The steward command as its own process, in the world's environment, so
  *  it finds the server through the fleet registry under the world's HOME. */
 async function steward(world: World, args: string[]): Promise<Run> {
-  const choice = serverChoice();
-  const argv =
-    choice.kind === "bun"
-      ? [process.execPath, "run", join(CHECKOUT, "engine", "steward-cli.ts"), ...args]
-      : [choice.rustBin!, "steward", ...args];
-  const proc = Bun.spawn(argv, {
+  const proc = Bun.spawn([serverChoice().rustBin, "steward", ...args], {
     cwd: world.repo,
     env: world.env(join(world.root, "no-herdr.sock")),
     stdin: "ignore",

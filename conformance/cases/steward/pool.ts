@@ -18,7 +18,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileS
 import { basename, join } from "node:path";
 import type { EnrichedSnapshot as PoolSnapshot, Interrupt, PoolConfig } from "../../../protocol/wire.ts";
 import type { Case, CaseServer } from "../../harness/case.ts";
-import { CHECKOUT, serverChoice } from "../../harness/server.ts";
+import { serverChoice } from "../../harness/server.ts";
 import type { HerdrCall, HerdrProcess } from "../../harness/herdr.ts";
 import { until } from "../../harness/pool-files.ts";
 import type { TicketSeed, World, WorldSpec } from "../../harness/world.ts";
@@ -241,13 +241,9 @@ export async function untilNotices(herdr: HerdrProcess, count: number, ms = 30_0
 }
 
 /**
- * The Steward's command as its teaching names it, up to `--pool`: the Bun
- * server's is this Bun running engine/steward-cli.ts from this checkout.
- * The Rust server's is its own binary's `steward` subcommand (ADR-0036's
- * one binary), an inference until that port lands.
+ * The Steward's command as its teaching names it, up to `--pool`: the
+ * server's own binary's `steward` subcommand (ADR-0036's one binary).
  */
 export function stewardCommandPrefix(): string {
-  const choice = serverChoice();
-  if (choice.kind === "rust") return `${choice.rustBin} steward`;
-  return `${process.execPath} ${join(CHECKOUT, "engine", "steward-cli.ts")}`;
+  return `${serverChoice().rustBin} steward`;
 }

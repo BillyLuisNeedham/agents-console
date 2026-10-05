@@ -5,10 +5,9 @@
  * herdr calls a title save makes, and what a Restart leaves behind: the
  * farewell on the socket, the exit, and the Boot hand-off.
  *
- * The Boot hand-off is observed through a recording stand-in: the Bun server
- * starts Boot as `bun run engine/boot-cli.ts ...` by name from PATH, so a
- * case that restarts puts a recorder named `bun` (and `agent-console`) first
- * on the server's PATH. The recorder notes its argv and prints one line,
+ * The Boot hand-off is observed through a recording stand-in: the server
+ * starts Boot as `agent-console boot ...` by name from PATH, so a case that
+ * restarts puts a recorder named `agent-console` first on the server's PATH. The recorder notes its argv and prints one line,
  * which lands in the pool's runs/boot.log, and starts nothing.
  */
 
@@ -92,10 +91,8 @@ function bootRecorder(world: World): BootRecorder {
     'printf \'%s\\0\' "$@" > "$f.tmp"\n' +
     'mv "$f.tmp" "$f.argv"\n' +
     'echo "boot recorder: $*"\n';
-  for (const name of ["bun", "agent-console"]) {
-    writeFileSync(join(bin, name), script);
-    chmodSync(join(bin, name), 0o755);
-  }
+  writeFileSync(join(bin, "agent-console"), script);
+  chmodSync(join(bin, "agent-console"), 0o755);
   return {
     env: { PATH: `${bin}:${world.env("").PATH}` },
     calls() {

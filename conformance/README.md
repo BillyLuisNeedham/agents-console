@@ -1,26 +1,28 @@
 # Conformance
 
-The server's black-box suite (ADR-0036). Each case starts a real server process, Bun's or Rust's, and
-checks it only through HTTP, the socket at `/api/ws`, the files in the pool directory, the calls on the
-herdr socket and the harness processes it starts.
+The server's black-box suite (ADR-0036). Each case starts a real server process, the Rust binary's
+`server` subcommand, and checks it only through HTTP, the socket at `/api/ws`, the files in the pool
+directory, the calls on the herdr socket and the harness processes it starts.
 
 ```
-bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...] [<bun test arguments>]
+bun run conformance [--server rust] [--rust-bin <path>] [--legs <kind>,<kind>,...] [<bun test arguments>]
 ```
+
+The binary defaults to `target/release/agent-console` (`cargo build --release`). The Bun server was
+removed at the flip, so `--server bun`, or a `bun` leg, is refused with one line.
 
 ## Takeover cases and legs
 
-A takeover case runs one pool across several server processes in turn, as a Restart does, and as a pool
-does when it moves from Bun to Rust at the flip or back to Bun on a git revert. Each server is one leg.
+A takeover case runs one pool across several server processes in turn, as a Restart does. Each server is
+one leg.
 Leg 1 runs the pool to the case's stop point and stops with SIGTERM. Each middle leg boots on what the
 last one left, checks the stop point still holds, and stops again. The last leg boots and runs the pool to
 the end.
 
 Each leg runs the server `--legs` names in its place, or `CONFORMANCE_LEGS` when the flag is absent.
-`--legs bun,rust,bun` runs Bun, then Rust, then Bun again. Without either, a case runs three legs of the
-`--server` choice. A case needs at least two legs. If a leg names the Rust server and its binary is not
-built, every takeover case is reported as not run and the runner exits 2, as it does when `--server rust`
-has no binary.
+`--legs rust,rust` runs two legs. Without either, a case runs three legs of the `--server` choice. A case
+needs at least two legs. If the binary is not built, every takeover case is reported as not run and the
+runner exits 2, as every other case is.
 
 Each case runs its scenario twice, in two worlds built from the same spec. The first run is
 uninterrupted, on the `--server` choice. The second is taken over, leg by leg. After each takeover the

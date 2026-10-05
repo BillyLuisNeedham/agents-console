@@ -7,9 +7,8 @@
  *
  * A case that starts more than one server on its pool is a takeover case
  * (`restartCase`): each server after the first runs the next leg
- * CONFORMANCE_LEGS names (`startLeg`), so with `--legs bun,rust` the server
- * that boots on what the first one left is the Rust one, as at the flip.
- * Without legs every server is the run's own. A case that seeds the pool on
+ * CONFORMANCE_LEGS names (`startLeg`). Without legs every server is the
+ * run's own. A case that seeds the pool on
  * disk and starts one server is a plain case: what it boots on is files, not
  * another server's run.
  */

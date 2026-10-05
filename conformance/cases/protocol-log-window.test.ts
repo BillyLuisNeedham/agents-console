@@ -24,7 +24,6 @@ import {
   CLAUDE,
   REVIEW,
   deltasFrom,
-  ensureBuiltUi,
   interruptFor,
   restoreLongLog,
   servedPage,
@@ -83,7 +82,6 @@ conformance(
   "protocol",
   "trimPoolLog › trims the pushed snapshot's log and leaves the full one alone",
   async (t) => {
-    ensureBuiltUi(t);
     const world = donePool(t);
     // The window's worth restored, and the boot's own lines past it.
     const restored = await restoreLongLog(t, world, POOL_LOG_WINDOW);

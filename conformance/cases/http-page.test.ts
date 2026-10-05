@@ -14,7 +14,7 @@ import type { CaseServer } from "../harness/case.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import { doneTicket, snapshotOf } from "./config-support.ts";
-import { CLAUDE, REVIEW, ensureBuiltUi, interruptFor, servedPage } from "./protocol-support.ts";
+import { CLAUDE, REVIEW, interruptFor, servedPage } from "./protocol-support.ts";
 
 const HOSTILE = "</script><script>alert(1)</script>";
 
@@ -47,7 +47,6 @@ conformance(
   "http",
   "the embedded boot snapshot › reads back what was embedded, a hostile title included",
   async (t) => {
-    ensureBuiltUi(t);
     const world = t.world({
       tickets: [{ file: "01-a.md", marker: "<!-- state: id=01 blocked-by=none status=done -->", body: `# ${HOSTILE}` }],
       config: CLAUDE,
@@ -73,7 +72,6 @@ conformance(
   "http",
   "the served page › serves the build's scripts and stylesheets by their types, and nothing from outside the build",
   async (t) => {
-    ensureBuiltUi(t);
     const server = await t.start(t.world({ tickets: [doneTicket("01")], config: CLAUDE }));
     await interruptFor(server, REVIEW);
 

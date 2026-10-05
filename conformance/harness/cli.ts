@@ -1,10 +1,9 @@
 /**
  * The command lines under test, run as processes the way an operator or a
  * Steward runs them (ADR-0036): Boot, the fleet list and the Steward's
- * command. The same --server switch as the servers picks the build:
+ * command, each a subcommand of the binary the servers run:
  *
- *   bun    bun run engine/boot-cli.ts | fleet-cli.ts | steward-cli.ts
- *   rust   <binary> boot | fleet | steward
+ *   <binary> boot | fleet | steward
  *
  * A case observes what any caller could: the exit code, both streams, the
  * prompts Boot puts and the answers it is given, the files it writes, the
@@ -29,14 +28,13 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { makeTempDir } from "../fixtures/tmp.ts";
 import type { Case } from "./case.ts";
-import { CHECKOUT, serverChoice, type ServerChoice } from "./server.ts";
+import { serverChoice, type ServerChoice } from "./server.ts";
 
 export type Command = "boot" | "fleet" | "steward";
 
 /** The argv that runs one command line of the chosen build. */
 export function commandArgv(choice: ServerChoice, command: Command, args: string[]): string[] {
-  if (choice.kind === "bun") return [process.execPath, "run", join(CHECKOUT, "engine", `${command}-cli.ts`), ...args];
-  return [choice.rustBin!, command, ...args];
+  return [choice.rustBin, command, ...args];
 }
 
 /** What a command line and the server Boot starts may run, besides the stubs. */
@@ -149,33 +147,6 @@ function pidFiles(dir: string, depth = 0, out: string[] = []): string[] {
   return out;
 }
 
-let uiBuild: Promise<void> | null = null;
-
-/**
- * Boot rebuilds `ui/dist` when it is missing or older than the last commit
- * to `ui/src`, with `bun` from PATH. A fresh checkout has no build, so the
- * Bun build is brought up to date once per run, the way Boot itself would
- * do it, rather than by every case's first Boot. The decision is no part of
- * the contract: the Rust binary embeds its UI. A case whose server hands
- * its pool to Boot (a Restart) calls this itself before it does.
- */
-export function ensureUiBuilt(): Promise<void> {
-  uiBuild ??= (async () => {
-    const index = join(CHECKOUT, "ui", "dist", "index.html");
-    const built = existsSync(index) ? statSync(index).mtimeMs : null;
-    const log = Bun.spawnSync(["git", "-C", CHECKOUT, "log", "-1", "--format=%ct", "--", "ui/src"], { stdout: "pipe" });
-    const source = Number(log.stdout.toString().trim()) * 1000 || null;
-    if (built !== null && (source === null || source <= built)) return;
-    for (const args of [["install"], ["run", "build"]]) {
-      const run = Bun.spawnSync([process.execPath, ...args], { cwd: join(CHECKOUT, "ui"), stdout: "pipe", stderr: "pipe" });
-      if (run.exitCode !== 0) {
-        throw new Error(`bun ${args.join(" ")} in ui/ failed:\n${run.stdout.toString()}${run.stderr.toString()}`);
-      }
-    }
-  })();
-  return uiBuild;
-}
-
 /** The Console URL Boot printed, `Console on http://localhost:<port>`, or null. */
 export function consoleUrl(run: CliRun): string | null {
   return /Console on (http:\/\/localhost:\d+)/.exec(run.stdout)?.[1] ?? null;
@@ -193,8 +164,6 @@ export function cliWorld(t: Case, spec: CliSpec = {}): CliWorld {
     const found = Bun.which(tool, { PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" });
     if (found) symlinkSync(found, join(tools, tool));
   }
-  // Boot starts the Bun server as `bun` from PATH.
-  symlinkSync(process.execPath, join(tools, "bun"));
   for (const name of spec.harnesses ?? []) {
     writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n");
     chmodSync(join(bin, name), 0o755);
@@ -288,7 +257,6 @@ export function cliWorld(t: Case, spec: CliSpec = {}): CliWorld {
       return repo;
     },
     async run(command, args, options = {}) {
-      if (command === "boot" && choice.kind === "bun") await ensureUiBuilt();
       const started = Date.now();
       const proc = Bun.spawn(commandArgv(choice, command, args), {
         cwd: options.cwd ?? root,

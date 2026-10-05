@@ -87,7 +87,6 @@ impl CheckpointStore for SqliteCheckpointStore {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::process::Command;
 
     fn temp_pool() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -188,56 +187,5 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         holder.execute_batch("COMMIT").unwrap();
         store.write(&state(1)).unwrap();
-    }
-
-    // The store moves Bun -> Rust -> Bun: the TypeScript's own store writes what this one reads, and
-    // reads what this one writes. Skipped where no Bun is installed.
-    #[test]
-    fn round_trips_with_the_typescript_store_through_bun() {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let bun = [format!("{home}/.bun/bin/bun"), "bun".to_owned()]
-            .into_iter()
-            .find(|bun| {
-                Command::new(bun)
-                    .arg("--version")
-                    .output()
-                    .is_ok_and(|o| o.status.success())
-            });
-        let Some(bun) = bun else {
-            eprintln!("no bun: skipping the Bun round trip");
-            return;
-        };
-        let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../engine/checkpoints.ts");
-        let pool = temp_pool();
-        let script = pool.path().join("bun-store.ts");
-        std::fs::write(
-            &script,
-            format!(
-                "import {{ SqliteCheckpointStore }} from {module:?};\n\
-                 const store = new SqliteCheckpointStore(process.argv[2]);\n\
-                 if (process.argv[3] === 'write') store.write(JSON.parse(process.argv[4]));\n\
-                 else console.log(JSON.stringify(store.latest()));\n\
-                 store.close();\n",
-                module = module.display().to_string()
-            ),
-        )
-        .unwrap();
-        let run = |args: &[&str]| {
-            let out = Command::new(&bun).arg(&script).args(args).output().unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8(out.stdout).unwrap()
-        };
-        let pool_dir = pool.path().to_str().unwrap();
-        run(&[pool_dir, "write", &js::stringify(&state(1))]);
-        let mut store = SqliteCheckpointStore::open(pool.path()).unwrap();
-        assert_eq!(store.latest().unwrap(), Some(state(1)));
-        store.write(&state(2)).unwrap();
-        store.close();
-        let read = run(&[pool_dir, "read"]);
-        assert_eq!(js::parse(read.trim()).unwrap(), state(2));
     }
 }

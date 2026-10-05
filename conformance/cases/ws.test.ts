@@ -14,7 +14,7 @@
  */
 
 import { expect } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   LogPush,
@@ -28,7 +28,6 @@ import { openSocket, framesOf, type SocketClient } from "../fixtures/socket-fixt
 import { PROTOCOL_VERSION, WS_PATH, applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectParsedEqual, expectSameFile } from "../harness/equal.ts";
-import { CHECKOUT } from "../harness/server.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 
@@ -880,27 +879,11 @@ conformance("server", "the stop › replies, sends the `stopped` delta, then clo
 // the served page
 // ---------------------------------------------------------------------------
 
-/**
- * The Bun server serves the UI from the checkout's ui/dist, and the Rust
- * binary embeds it (ADR-0036); either way the case needs a built UI, so a
- * Bun run without one builds it first, as Boot does.
- */
-function ensureBuiltUi(t: Case): void {
-  if (t.kind !== "bun" || existsSync(join(CHECKOUT, "ui", "dist", "index.html"))) return;
-  const build = Bun.spawnSync([process.execPath, "run", "build"], {
-    cwd: join(CHECKOUT, "ui"),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) throw new Error(`the UI build failed:\n${build.stderr.toString()}`);
-}
-
 // engine/ws.test.ts:1142
 conformance(
   "http",
   "the served page › embeds the boot snapshot the socket's first frames repeat",
   async (t) => {
-    ensureBuiltUi(t);
     const world = poolWorld(t, ["01"]);
     const server = await t.start(world);
     await interruptFor(server, REVIEW);
@@ -1020,11 +1003,11 @@ async function parity<K extends RequestKind>(
   seen.add(`${kind}:${reply.ok ? "ok" : reply.refusal.status}`);
 }
 
-/** A `bun` first on the world's PATH that only records it ran: the Restart's
+/** An `agent-console` first on the world's PATH that only records it ran: the Restart's
  *  hand-off to Boot, which would otherwise start a server the case does not own. */
 function stubBoot(world: World): void {
-  writeFileSync(join(world.stubs.bin, "bun"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(world.root, "boot-handoff"))}\n`);
-  chmodSync(join(world.stubs.bin, "bun"), 0o755);
+  writeFileSync(join(world.stubs.bin, "agent-console"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(world.root, "boot-handoff"))}\n`);
+  chmodSync(join(world.stubs.bin, "agent-console"), 0o755);
 }
 
 // engine/ws.test.ts:1223

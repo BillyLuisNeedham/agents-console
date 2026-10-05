@@ -1,10 +1,10 @@
 /**
  * A stand-in for Boot, for the cases that make a server restart itself. A
- * Restart stops the server and hands the pool to Boot, `bun` running the
- * boot command for Bun's server and `agent-console boot` for Rust's; a real
- * Boot would start a server the case does not own. The recorder puts both
- * names first on the server's PATH, each only writing down its argv and
- * working directory, so the hand-off is something a case can read back.
+ * Restart stops the server and hands the pool to Boot, `agent-console boot`
+ * as PATH finds it; a real Boot would start a server the case does not own.
+ * The recorder puts that name first on the server's PATH, only writing down
+ * its argv and working directory, so the hand-off is something a case can
+ * read back.
  *
  *   const recorder = bootRecorder(world);
  *   const server = await t.start(world, { env: recorder.env });
@@ -45,10 +45,8 @@ export function bootRecorder(world: World): BootRecorder {
     'printf \'%s\\0\' "$@" > "$f.tmp"\n' +
     'mv "$f.tmp" "$f.argv"\n' +
     'echo "boot recorder: $*"\n';
-  for (const name of ["bun", "agent-console"]) {
-    writeFileSync(join(bin, name), script);
-    chmodSync(join(bin, name), 0o755);
-  }
+  writeFileSync(join(bin, "agent-console"), script);
+  chmodSync(join(bin, "agent-console"), 0o755);
   const calls = (): BootHandOff[] =>
     readdirSync(record)
       .filter((name) => name.endsWith(".argv"))
