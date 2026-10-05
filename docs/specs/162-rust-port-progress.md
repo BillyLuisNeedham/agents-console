@@ -103,7 +103,21 @@ M5 state at ae1a36f (2026-10-05 17:15):
   1.1/1.5/177.5; fr-4 rust 17:03 load 0.26 9/9 1.3/2.4/171.5. Worst Rust Open in herdr over 72 samples
   2.4 ms. Server CPU over the window: Bun 11.1%, Rust 0.9 to 1.0%. Start to usable is within noise.
 - Render-survival at 9d9f81f: 191 passed, 0 failed, 27 skipped.
-- Open: the ws parity case ("socket and HTTP parity") failed on debug builds with "rust server stopped
+- Shim: with ui/ and crates/ stale, `bin/agent-console --help` rebuilt ui/dist with Bun, then ran
+  `cargo build --release` (1 m 20 s), build output on stderr only, then printed boot's usage on stdout.
+- Two real throwaway pools on the release binary, booted through the shim (`bin/agent-console <pool>
+  --yes --no-open`), live herdr 0.8.2 and claude haiku, 17:10 to 17:15: pool A ran 01 then 02 (02 blocked
+  by 01), each merged to the repo's main in order (e7cc113, 8ec368f), Review approved, `pool done`; pool B
+  ran a Conversation (live, answered, Turn waiting, ended, pane closed) and Ticket 01 (merged 0812cd8),
+  Review approved, `pool done`. Ticket files ended `status=done`. Haiku did not take
+  `--permission-mode auto` (claude showed manual mode), so I answered its edit prompts as an operator;
+  the argv is the TypeScript's. Finished terminals stayed open as designed; servers stopped, tabs closed.
+- Final bench at edb2106 (release binary from the shim): final-1 17:14 load 0.74 9/9 (cold 2.1, herdr
+  2.2, usable 177.8 ms); final-2 17:16 load 0.65 9/9 (2.5, 2.4, 179.5).
+- Settled: the ws parity case's leaked servers came from rust-port-bench's pre-flip copy of the case,
+  whose Restart stand-in was named `bun`; at the head it stubs `agent-console` and passes (debug 4/4,
+  release 3/3) with nothing left behind.
+- Old note: the ws parity case ("socket and HTTP parity") failed on debug builds with "rust server stopped
   without releasing runs/server.pid" and leaves two debug servers per run; r-flip is diagnosing it at
   ae1a36f. 12 such servers from r-bench2's runs are still alive at 0% CPU (not killed: Billy decides).
 - Then: release build through the shim, cargo test/clippy/fmt and bun test, full conformance on the
