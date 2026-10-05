@@ -170,7 +170,7 @@ console.log("pool server on http://localhost:" + port + " (" + process.argv[proc
     return path;
   }
 
-  test("is ready at its boot line, pings a static asset and answers the parent's asks from the process table", async () => {
+  test("is ready at its boot line and answers the parent's asks from the process table", async () => {
     const root = tempRoot();
     mkdirSync(join(root, "pool"));
     const server = await startRustServer({
@@ -182,8 +182,7 @@ console.log("pool server on http://localhost:" + port + " (" + process.argv[proc
     });
     try {
       expect(server.ready).toMatch(/^http:\/\/localhost:\d+$/);
-      expect(server.pingPath).toBe("/assets/app.css");
-      expect((await fetch(`${server.ready}${server.pingPath}`)).status).toBe(200);
+      expect((await fetch(`${server.ready}/api/state`)).status).toBe(200);
 
       const begun = await server.ask("begin", "begun");
       expect(begun.kind).toBe("begun");

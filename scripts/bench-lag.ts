@@ -6,9 +6,9 @@
  *
  *   bun run scripts/bench-lag.ts [--repo <checkout>] [--out <file.json>]
  *       [--duration <s>] [--tabs <n>] [--rtt <ms>] [--ui-duration <s>] [--skip-ui] [--skip-server]
- *       [--server bun|rust] [--rust-bin <path>]
+ *       [--server bun|rust] [--rust-bin <path>] [--keep-root]
  *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>]
- *       [--idle <s>] [--out <file.json>] [--server bun|rust] [--rust-bin <path>]
+ *       [--idle <s>] [--out <file.json>] [--server bun|rust] [--rust-bin <path>] [--keep-root]
  *
  * `--repo` points it at any checkout of this repository (default: the one
  * this script lives in) whose root and ui/ have had `bun install`: the
@@ -47,6 +47,9 @@
  * end-to-end run serves the UI the binary serves: a release build embeds it,
  * a debug build reads `ui/dist` of the checkout it was built in, which the
  * bench builds there when it is missing.
+ *
+ * `--keep-root` leaves the bench's temp root in place at the end and prints
+ * where it is: the pool, and the Rust server's log (`rust-server.log`).
  *
  * `--rtt` adds a simulated round trip to every tab request (not the
  * responsiveness probe), for a browser on another machine; the default is
@@ -90,6 +93,7 @@ import {
   installHarnesses,
   NOT_RUST,
   parseServerKind,
+  pingPathOf,
   startRustServer,
   type ServerHandle,
   type ServerKind,
@@ -145,6 +149,8 @@ if (serverKind === "rust" && !existsSync(rustBin)) {
   console.error(`the Rust server binary is not built: no file at ${rustBin} (cargo build --release, or pass --rust-bin)`);
   process.exit(2);
 }
+/** Leave the temp root in place at the end, for the pool and rust-server.log. */
+const keepRoot = argv.includes("--keep-root");
 /** The end-to-end run's idle window, no input at all; the polling gate needs at least 10 s. */
 const idleS = Number(flag("idle") ?? 15);
 
@@ -363,10 +369,18 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
         ],
         "pool server",
       )),
-      pingPath: "/ping.txt",
     };
   }
   const base = serve.ready;
+  // The responsiveness probe's file: the stylesheet the served page names, which both servers serve
+  // from the same built UI (the Rust one has no ping.txt). A server with no UI to serve, the Bun one
+  // when the checkout has no build, keeps serve.ts's ping.txt.
+  let pingPath = "/ping.txt";
+  try {
+    pingPath = pingPathOf(await (await fetch(`${base}/`)).text()) ?? pingPath;
+  } catch {
+    // The page is not served: the probe keeps ping.txt and reports its failures.
+  }
   const killNow = () => {
     writeFileSync(pool.releaseFile, "");
     serve.proc.kill("SIGKILL");
@@ -397,7 +411,9 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
       const res = await fetch(`${base}/api/conversations`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title, assign: { harness: "convo", model: "m" } }),
+        // The Bun server's `convo` stub holds its pane open; the Rust server knows only the stock
+        // harnesses, and the wrapped `claude` holds a launch whose prompt names no outcome file.
+        body: JSON.stringify({ title, assign: { harness: serverKind === "rust" ? "claude" : "convo", model: "m" } }),
       });
       if (res.status !== 201) throw new Error(`starting a Conversation: ${res.status} ${await res.text()}`);
     }
@@ -414,7 +430,7 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
         ...(ready.state.conversations ?? []).map((c) => ({ paneId: c.paneId!, kind: "conversation" })),
       ],
     });
-    return { base, pingPath: serve.pingPath, serve, herdr, state, kill };
+    return { base, pingPath, serve, herdr, state, kill };
   } catch (err) {
     await kill();
     throw err;
@@ -700,8 +716,9 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     //    as in the server half. A throwaway page on the same origin goes
     //    first, so a fresh browser's renderer process start (a cost the
     //    operator's long-open browser does not pay) is not counted in the
-    //    Console's start; it is the server's static ping file, so it warms
-    //    nothing of the Console's own: no script, style or HTTP cache entry.
+    //    Console's start; it is ping.txt (the Bun server's ping file, the
+    //    Rust server's 500 page), so it warms nothing of the Console's own:
+    //    no script, style or HTTP cache entry.
     const warm = await browser.open(`${proxy.ready}/ping.txt`);
     await waitFor("the warm-up page", 10_000, async () =>
       (await browser.evaluate<string>(warm, "document.readyState")) === "complete" ? true : null,
@@ -892,7 +909,8 @@ try {
   // Anything the fake herdr's panes started outlives the herdr process, so
   // reap whatever still runs from inside the root before removing it.
   Bun.spawnSync(["pkill", "-f", root]);
-  rmSync(root, { recursive: true, force: true });
+  if (keepRoot) console.error(`kept the bench's root (the pool, the Rust server's log): ${root}`);
+  else rmSync(root, { recursive: true, force: true });
 }
 
 const result = {
