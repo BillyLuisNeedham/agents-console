@@ -29,6 +29,18 @@ describe("slowAnswers", () => {
     );
   });
 
+  test("with no server timeline, Open in herdr's call is timed from the proxy, within the trip", () => {
+    const trips: WireTrip[] = [
+      { kind: "terminal.focus", id: 4, at: 1_000, ms: 9, idealMs: 9 },
+      { kind: "terminal.focus", id: 5, at: 1_007.6, ms: 2, idealMs: 2 },
+    ];
+    const slow = slowAnswers(trips, [], [...herdr, mark(1_020, "herdr got", 0, "pane.focus")], 1);
+    expect(slow.map((s) => [s.serverMs, s.toHerdrMs])).toEqual([
+      [null, 7.5],
+      [null, null],
+    ]);
+  });
+
   test("a trip the server never marked says so, rather than borrow another's", () => {
     const slow = slowAnswers([{ kind: "subscribe", id: "99", at: 5_010, ms: 50, idealMs: 49 }], server, herdr, 45);
     expect(slow[0]!.serverMs).toBeNull();
