@@ -14,7 +14,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LogAttemptInfo, TicketLogResponse } from "../../engine/wire.ts";
+import type { LogAttemptInfo, TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual, expectSameBytes, expectSameFile } from "../harness/equal.ts";
 import type { Http } from "../harness/http.ts";

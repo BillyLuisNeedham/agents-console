@@ -8,7 +8,7 @@ import { expect } from "bun:test";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { readStateLine, readTicketFile } from "../harness/pool-files.ts";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import type { World } from "../harness/world.ts";
 import {
   CONFIG,

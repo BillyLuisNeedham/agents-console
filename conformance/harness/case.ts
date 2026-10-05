@@ -27,7 +27,7 @@
 
 import { test } from "bun:test";
 import { rmSync } from "node:fs";
-import type { CardSubscription } from "../../engine/protocol.ts";
+import type { CardSubscription } from "../../protocol/protocol.ts";
 import { serveFakeJev, type ServedFakeJev, type ServedFakeJevOptions } from "../fixtures/jev-fake.ts";
 import { openSocket, type SocketClient } from "../fixtures/socket-fixture.ts";
 import type { Area } from "./areas.ts";

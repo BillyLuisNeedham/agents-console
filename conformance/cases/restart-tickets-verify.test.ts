@@ -17,7 +17,7 @@
 import { expect } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import type { TicketEvent } from "../../engine/wire.ts";
+import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { readEvents, readStateLine } from "../harness/pool-files.ts";
 import { takeover } from "../harness/takeover.ts";

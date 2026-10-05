@@ -16,7 +16,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseOptions, type CaseServer, type CaseStartOptions } from "../harness/case.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";

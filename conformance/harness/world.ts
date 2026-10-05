@@ -14,7 +14,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { PoolConfig } from "../../engine/wire.ts";
+import type { PoolConfig } from "../../protocol/wire.ts";
 import { makeTempDir } from "../fixtures/tmp.ts";
 import { installStubs, type Stubs } from "./stubs.ts";
 

@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, TicketEvent } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { HerdrCall, HerdrProcess } from "../harness/herdr.ts";
 import { awaitPrompt, type TypedPrompt } from "../harness/herdr-tui.ts";

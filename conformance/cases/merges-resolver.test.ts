@@ -11,7 +11,7 @@
 import { expect } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes, expectSameFile } from "../harness/equal.ts";
 import {

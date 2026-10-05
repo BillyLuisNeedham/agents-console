@@ -16,7 +16,7 @@
 import { expect } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RestartResponse } from "../../engine/wire.ts";
+import type { RestartResponse } from "../../protocol/wire.ts";
 import { CLOSE_STOPPED } from "../fixtures/socket-protocol.ts";
 import { conformance } from "../harness/case.ts";
 import { ensureUiBuilt } from "../harness/cli.ts";

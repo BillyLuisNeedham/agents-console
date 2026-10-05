@@ -19,7 +19,7 @@
 import { expect } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ConversationView, EnrichedSnapshot, PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { ConversationView, EnrichedSnapshot, PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import type { Case, CaseServer } from "../harness/case.ts";

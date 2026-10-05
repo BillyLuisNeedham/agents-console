@@ -9,8 +9,8 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { EmbeddedBoot, SnapshotDelta } from "../../engine/protocol.ts";
-import type { ConversationView, EnrichedSnapshot, PoolConfig } from "../../engine/wire.ts";
+import type { EmbeddedBoot, SnapshotDelta } from "../../protocol/protocol.ts";
+import type { ConversationView, EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { HerdrProcess } from "../harness/herdr.ts";
@@ -22,7 +22,7 @@ import { snapshotOf, untilSnapshot } from "./config-support.ts";
 /** The stub harness every case's pool runs. */
 export const CLAUDE = { defaults: { harness: "claude", model: "m" } } satisfies PoolConfig;
 
-// engine/protocol.ts EMBED_ELEMENT_ID: the page's boot snapshot element.
+// protocol/protocol.ts EMBED_ELEMENT_ID: the page's boot snapshot element.
 export const EMBED_ELEMENT_ID = "console-boot";
 
 // engine/engine.ts REVIEW_TICKET_ID: the final Review gate's Interrupt.

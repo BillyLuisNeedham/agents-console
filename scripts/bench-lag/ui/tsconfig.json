@@ -15,7 +15,7 @@
     "types": ["bun"],
     "paths": {
       "@console/*": ["../../../ui/src/*"],
-      "@engine/*": ["../../../engine/*"],
+      "@shapes/*": ["../../../protocol/*"],
       "@protocol": ["../../../ui/src/protocol.ts"],
       "@bench/page": ["./bench.ts"],
       "@bench/frame": ["../../../ui/src/frame.ts"]

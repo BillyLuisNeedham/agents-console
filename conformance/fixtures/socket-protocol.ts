@@ -3,8 +3,8 @@
  * the envelope every server frame must have, and the delta apply that keeps
  * a client's copy of the snapshot current. ui/src/protocol.ts holds the
  * Console's own copy of these rules, which the TypeScript server runs too,
- * but conformance/ may import only types from engine/protocol.ts and
- * engine/wire.ts (ADR-0036), so the rules are restated here from what they
+ * but conformance/ may import only types from protocol/protocol.ts and
+ * protocol/wire.ts (ADR-0036), so the rules are restated here from what they
  * document. That is the point rather than a cost: a server whose frames
  * only its own decoder accepts, or whose deltas only its own apply rebuilds,
  * fails here, whichever language it is written in.
@@ -17,8 +17,8 @@ import type {
   RequestKind,
   ServerMessage,
   SnapshotDelta,
-} from "../../engine/protocol.ts";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+} from "../../protocol/protocol.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 
 /** Where the server takes the socket. */
 export const WS_PATH = "/api/ws";
@@ -29,13 +29,13 @@ export const PROTOCOL_VERSION = 1;
 /** How many of the pool log's last lines a pushed snapshot carries. */
 export const POOL_LOG_WINDOW = 500;
 
-/** The heartbeat interval a server announces in its hello by default (HEARTBEAT_MS in engine/protocol.ts). */
+/** The heartbeat interval a server announces in its hello by default (HEARTBEAT_MS in protocol/protocol.ts). */
 export const HEARTBEAT_MS = 20_000;
 
-/** How often the server checks activity and peeks for its visible sockets (LIVE_CHECK_MS in engine/protocol.ts). */
+/** How often the server checks activity and peeks for its visible sockets (LIVE_CHECK_MS in protocol/protocol.ts). */
 export const LIVE_CHECK_MS = 2_000;
 
-/** How the server closes every socket on an orderly stop (CLOSE_STOPPED in engine/protocol.ts). */
+/** How the server closes every socket on an orderly stop (CLOSE_STOPPED in protocol/protocol.ts). */
 export const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
 
 /**

@@ -12,7 +12,7 @@ import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TicketEvent } from "../../engine/wire.ts";
+import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import type { HerdrCall, HerdrProcess } from "../harness/herdr.ts";

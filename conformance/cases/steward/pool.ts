@@ -16,7 +16,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { EnrichedSnapshot as PoolSnapshot, Interrupt, PoolConfig } from "../../../engine/wire.ts";
+import type { EnrichedSnapshot as PoolSnapshot, Interrupt, PoolConfig } from "../../../protocol/wire.ts";
 import type { Case, CaseServer } from "../../harness/case.ts";
 import { CHECKOUT, serverChoice } from "../../harness/server.ts";
 import type { HerdrCall, HerdrProcess } from "../../harness/herdr.ts";

@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { anyIsoTime, expectJsonlEqual, expectParsedEqual } from "../harness/equal.ts";
 import type { Http } from "../harness/http.ts";

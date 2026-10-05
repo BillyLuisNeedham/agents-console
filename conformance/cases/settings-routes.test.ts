@@ -15,7 +15,7 @@
 import { expect } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig, RestartResponse, SettingsResponse } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, PoolConfig, RestartResponse, SettingsResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson, readEvents, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
@@ -23,7 +23,7 @@ import type { World } from "../harness/world.ts";
 const DEFAULTS: PoolConfig = { defaults: { harness: "claude", model: "m" } };
 const DONE = "<!-- state: id=01 blocked-by=none status=done -->";
 const READY = "<!-- state: id=01 blocked-by=none status=ready -->";
-// engine/protocol.ts CLOSE_STOPPED: how the server closes a socket on its way out.
+// protocol/protocol.ts CLOSE_STOPPED: how the server closes a socket on its way out.
 const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
 
 /** A world whose one Ticket is done already, so the pool settles at once. */

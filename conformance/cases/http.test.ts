@@ -4,7 +4,7 @@
  */
 
 import { expect } from "bun:test";
-import type { EnrichedTicketState } from "../../engine/wire.ts";
+import type { EnrichedTicketState } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import { until } from "../harness/pool-files.ts";

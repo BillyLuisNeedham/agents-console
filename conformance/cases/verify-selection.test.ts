@@ -11,7 +11,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { readEvents, readStateLine } from "../harness/pool-files.ts";

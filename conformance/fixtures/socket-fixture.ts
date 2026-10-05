@@ -18,7 +18,7 @@ import type {
   RequestKind,
   RequestPayload,
   ServerMessage,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import {
   PROTOCOL_VERSION,
   WS_PATH,

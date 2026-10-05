@@ -22,7 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig } from "../../engine/wire.ts";
+import type { PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case } from "../harness/case.ts";
 import { ticketWorktree } from "../harness/git-pool.ts";
 import { spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";

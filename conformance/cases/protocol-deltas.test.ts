@@ -16,8 +16,8 @@
 import { expect } from "bun:test";
 import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PushedSnapshot, ServerMessage } from "../../engine/protocol.ts";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { PushedSnapshot, ServerMessage } from "../../protocol/protocol.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";

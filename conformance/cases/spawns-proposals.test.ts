@@ -7,7 +7,7 @@
 import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, HeldSpawnView } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, HeldSpawnView } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { anyIsoTime } from "../harness/equal.ts";
 import {

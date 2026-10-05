@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance, type Case, type CaseOptions, type CaseServer } from "../harness/case.ts";

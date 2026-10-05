@@ -1,5 +1,5 @@
 //! The Console's push protocol (issue #161, ADR-0032): the one WebSocket at `/api/ws` the Console and
-//! its pool server talk over (engine/protocol.ts). It holds shapes and constants only.
+//! its pool server talk over (protocol/protocol.ts). It holds shapes and constants only.
 //!
 //! The socket carries four things. The pool snapshot: whole when the socket opens, then as deltas
 //! keyed by ticket and Conversation id, every version numbered by a server-side revision. The live

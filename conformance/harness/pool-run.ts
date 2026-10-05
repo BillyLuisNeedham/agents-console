@@ -4,7 +4,7 @@
  * case reads the same whichever server it drives (ADR-0036).
  */
 
-import type { EnrichedSnapshot, ResumeAction } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, ResumeAction } from "../../protocol/wire.ts";
 import type { HttpAnswer } from "./http.ts";
 import type { CaseServer } from "./case.ts";
 import { until } from "./pool-files.ts";

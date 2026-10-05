@@ -3,11 +3,11 @@
  * log's trim, the snapshot diff and its apply, the envelope's encode and
  * decode, and the boot snapshot embedded in the page. They are pure and
  * dependency-free, so the server and the browser run the very same
- * functions. The shapes and constants they work on are engine/protocol.ts,
- * which the Rust port (issue #162) generates at its flip and which may then
- * carry nothing else (ADR-0036); this file outlives it, because the Console
- * and the lag bench keep running these functions against whichever server
- * they talk to. Until the flip the TypeScript server imports them from here.
+ * functions. The shapes and constants they work on are protocol/protocol.ts,
+ * which the Rust port (issue #162) generates from its types and which carries
+ * nothing else (ADR-0036); this file holds the code, because the Console and
+ * the lag bench keep running these functions against whichever server they
+ * talk to. Until the flip the TypeScript server imports them from here.
  */
 
 import {
@@ -22,8 +22,8 @@ import {
   type PushedSnapshot,
   type ServerMessage,
   type SnapshotDelta,
-} from "../../engine/protocol.ts";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+} from "../../protocol/protocol.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 
 // ---------------------------------------------------------------------------
 // The snapshot as pushed

@@ -10,7 +10,7 @@
  */
 
 import { expect } from "bun:test";
-import type { AssignmentSources, PoolConfig, ReassignResponse } from "../../engine/wire.ts";
+import type { AssignmentSources, PoolConfig, ReassignResponse } from "../../protocol/wire.ts";
 import { conformance, type Case } from "../harness/case.ts";
 import { readConsoleJson } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";

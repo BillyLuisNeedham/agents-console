@@ -18,7 +18,7 @@
  */
 
 import { expect } from "bun:test";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import type { World } from "../harness/world.ts";
 import {

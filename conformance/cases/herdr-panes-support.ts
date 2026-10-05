@@ -24,7 +24,7 @@ import type {
   EnrichedTicketState,
   TicketEvent,
   TicketEventKind,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import type { Case, CaseServer } from "../harness/case.ts";

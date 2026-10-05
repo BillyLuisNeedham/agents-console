@@ -20,7 +20,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { gitIn, ticketWorktree } from "../harness/git-pool.ts";

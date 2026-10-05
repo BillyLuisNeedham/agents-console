@@ -9,7 +9,7 @@
  */
 
 import { expect } from "bun:test";
-import type { ServerMessage } from "../../engine/protocol.ts";
+import type { ServerMessage } from "../../protocol/protocol.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";

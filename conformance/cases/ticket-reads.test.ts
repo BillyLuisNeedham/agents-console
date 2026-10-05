@@ -20,7 +20,7 @@ import type {
   TicketEvent,
   TicketGradeSummary,
   TicketLogResponse,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";

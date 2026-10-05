@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { PROTOCOL_VERSION, WS_PATH, type ClientMessage } from "../../engine/protocol.ts";
+import { PROTOCOL_VERSION, WS_PATH, type ClientMessage } from "../../protocol/protocol.ts";
 import { decodeClientMessage, encodeMessage } from "../../ui/src/protocol.ts";
 import { ConnectionPool, detectProtocol, Tab } from "./load.ts";
 

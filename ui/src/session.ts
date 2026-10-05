@@ -23,7 +23,7 @@ import {
   type RequestPayload,
   type RequestResult,
   type SnapshotDelta,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import { LogPane, type LogPaneState } from "./log-pane";
 import { answered, applyOverlays, type Overlay } from "./optimistic";
 import {
@@ -64,7 +64,7 @@ import {
   type VitalsState,
 } from "./project";
 import type { CardMessage, ConnectionChange, LiveMessage } from "./socket";
-import type { PeekFailure } from "../../engine/protocol.ts";
+import type { PeekFailure } from "../../protocol/protocol.ts";
 import type { AppModel, StopState } from "./view";
 
 /** The vitals store, as the session consumes it. */

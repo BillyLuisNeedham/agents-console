@@ -6,7 +6,7 @@ import {
   POOL_LOG_WINDOW,
   PROTOCOL_VERSION,
   type PushedSnapshot,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import {
   applyDelta,
   decodeClientMessage,
@@ -19,7 +19,7 @@ import {
   toPushed,
   trimPoolLog,
 } from "./protocol";
-import type { ConversationView, EnrichedSnapshot, EnrichedTicketState } from "../../engine/wire.ts";
+import type { ConversationView, EnrichedSnapshot, EnrichedTicketState } from "../../protocol/wire.ts";
 
 // A ticket as the snapshot carries one, with only the fields these tests
 // move filled in faithfully; the rest are plausible stand-ins.

@@ -10,8 +10,8 @@
 import { expect } from "bun:test";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LogPush, ServerMessage } from "../../engine/protocol.ts";
-import type { TicketEvent, TicketEventsResponse, TicketGradeSummary } from "../../engine/wire.ts";
+import type { LogPush, ServerMessage } from "../../protocol/protocol.ts";
+import type { TicketEvent, TicketEventsResponse, TicketGradeSummary } from "../../protocol/wire.ts";
 import { framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";

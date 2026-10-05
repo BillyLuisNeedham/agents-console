@@ -11,7 +11,7 @@
 import { expect } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig, ReassignResponse } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig, ReassignResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";

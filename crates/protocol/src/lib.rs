@@ -1,6 +1,6 @@
-//! The wire shapes and the socket protocol (engine/wire.ts and engine/protocol.ts until the flip), with
-//! the serde derives that send and take exactly the JSON the TypeScript server does, and the TypeScript
-//! generated from them (ADR-0036).
+//! The wire shapes and the socket protocol, with the serde derives that send and take exactly the JSON
+//! the TypeScript server did, and the TypeScript generated from them (ADR-0036): protocol/wire.ts and
+//! protocol/protocol.ts.
 
 #[macro_use]
 mod macros;

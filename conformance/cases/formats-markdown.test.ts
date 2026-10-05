@@ -13,7 +13,7 @@
 import { expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ConversationView, EnrichedSnapshot } from "../../engine/wire.ts";
+import type { ConversationView, EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes, expectSameFile } from "../harness/equal.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";

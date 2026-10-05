@@ -9,7 +9,7 @@
  */
 
 import { expect } from "bun:test";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { FakeJevRequest, ScriptedAnswer } from "../fixtures/jev-fake.ts";
 import { readEvents } from "../harness/pool-files.ts";
 import { snapshot, settle } from "../harness/pool-run.ts";

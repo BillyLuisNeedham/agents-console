@@ -14,7 +14,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig } from "../../engine/wire.ts";
+import type { PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import type { HerdrCall, HerdrProcess } from "../harness/herdr.ts";
 import type { HttpAnswer } from "../harness/http.ts";

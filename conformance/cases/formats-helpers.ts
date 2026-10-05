@@ -6,7 +6,7 @@
 
 import { expect } from "bun:test";
 import { join } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState, TicketEventsResponse } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState, TicketEventsResponse } from "../../protocol/wire.ts";
 import type { Http } from "../harness/http.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
 import { freePort, serverArgv, serverChoice } from "../harness/server.ts";

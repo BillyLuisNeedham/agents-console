@@ -5,7 +5,7 @@
  * that waits for a change polls with `settled` or `until`.
  */
 
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import type { Http } from "./http.ts";
 import { until } from "./pool-files.ts";
 
