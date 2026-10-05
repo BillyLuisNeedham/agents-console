@@ -33,7 +33,12 @@ if (!fakePath) throw new Error(`herdr.ts: no executing fake herdr in ${repo}`);
 
 const { startExecutingFakeHerdr } = (await import(fakePath)) as FakeModule;
 
-const fake = await startExecutingFakeHerdr({ rendered: "agent starting\n> " });
+// Every new pane shows claude's ready frame (conformance/harness/herdr-tui.ts
+// TUI_FRAMES), which the Rust server's wrapped `claude` launches wait for
+// before they type the prompt; the Bun server's stub harnesses declare no
+// TUI and never read it.
+const CLAUDE_READY_FRAME = "Claude Code v1\n❯ ";
+const fake = await startExecutingFakeHerdr({ rendered: CLAUDE_READY_FRAME });
 process.stdout.write(`READY ${fake.socketPath}\n`);
 
 // This process's timeline (issue #161), on the wall clock the server and the

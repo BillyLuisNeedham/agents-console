@@ -18,7 +18,7 @@
  */
 
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Mark } from "./timeline.ts";
 import { answerOf, askOf } from "./wsframes.ts";
 
@@ -224,11 +224,18 @@ const convo: HarnessCommand = () => [
 ];
 
 const home = arg("home");
-// The built UI's directory holds one file, the responsiveness probe's
-// target: a static read the server answers without touching the pool, so its
-// latency is the event loop's and nothing else's.
+// The built UI's directory: the end-to-end run builds the checkout's UI into
+// it first, and the server half copies the checkout's own build in, so the
+// responsiveness probe reads the page's stylesheet, the same file the Rust
+// server serves (bench-lag.ts startPool): a static read the server answers
+// without touching the pool, so its latency is the server's and nothing
+// else's. ping.txt is the probe's target when the checkout has no build.
 const distDir = join(home, "dist");
 mkdirSync(distDir, { recursive: true });
+const checkoutDist = join(repo, "ui", "dist");
+if (!existsSync(join(distDir, "index.html")) && existsSync(join(checkoutDist, "index.html"))) {
+  cpSync(checkoutDist, distDir, { recursive: true });
+}
 writeFileSync(join(distDir, "ping.txt"), "pong");
 const server = createPoolServer({
   poolDir,

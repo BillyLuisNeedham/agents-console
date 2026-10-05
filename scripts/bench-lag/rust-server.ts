@@ -15,12 +15,16 @@
  *   running one adapter that finds the outcome file the prompt names, as
  *   conformance/fixtures/stub-harness.sh does, and hands it to the pool's own
  *   harness script in the mode the Ticket plays (pool.ts). A launch whose
- *   prompt names no outcome file is a Conversation's: it holds its pane open
- *   until the release file appears;
+ *   prompt names no outcome file is a Conversation's (the bench starts its
+ *   Conversations on `claude` here, where the Bun server's run on its `convo`
+ *   stub): it holds its pane open until the release file appears. The fake
+ *   herdr renders claude's ready frame in every new pane (herdr.ts), so the
+ *   terminal-backed launch's readiness wait passes and the prompt is typed;
  * - its herdr is the HERDR_SOCKET_PATH of the environment, its machine files
  *   come from HOME, and its UI is the binary's own (embedded in a release
- *   build, read from ui/dist in a debug one), so the static ping probe is
- *   whichever stylesheet or script the served page names, not a ping.txt;
+ *   build, read from ui/dist in a debug one). It has no ping.txt, so the
+ *   static ping probe reads the stylesheet the served page names, on both
+ *   servers (pingPathOf);
  * - it has no IPC. The parent's "begin", "report" and "timeline" asks are
  *   answered from the process table: RSS and CPU of the server's pid. What
  *   reads Bun internals (event-loop lag, sync spawns, the server timeline)
@@ -218,9 +222,10 @@ export function bootLinePort(log: string): number | null {
 
 /**
  * A static asset of the served page to time the server with: the first
- * stylesheet it links, else the first script. The Bun server answers its own
- * ping.txt; the Rust server's UI is the binary's, so the probe reads one of
- * the files that UI is made of. Null when the page names neither.
+ * stylesheet it links, else the first script. Both servers serve the same
+ * built UI (the Rust binary's own, the Bun server's from the checkout's
+ * build), so the probe reads the same file on either. Null when the page
+ * names neither.
  */
 export function pingPathOf(html: string): string | null {
   const css = /<link[^>]*\bhref="([^"]+\.css)"/.exec(html) ?? /<link[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"/.exec(html);
@@ -235,8 +240,6 @@ export interface ServerHandle {
   proc: Bun.Subprocess;
   ready: string;
   ask: (msg: unknown, kind: string) => Promise<any>;
-  /** The path of a static file to ping; Bun's is /ping.txt. */
-  pingPath: string;
 }
 
 function tailOf(text: string, lines = 20): string {
@@ -297,13 +300,6 @@ export async function startRustServer(options: RustServerOptions): Promise<Serve
     await Bun.sleep(50);
   }
 
-  let pingPath = "/ping.txt";
-  try {
-    pingPath = pingPathOf(await (await fetch(`${base}/`)).text()) ?? pingPath;
-  } catch {
-    // The page is not served: the probe keeps its default and reports its failures.
-  }
-
   const sampleOrZero = () => sampleProcess(proc.pid) ?? { rssBytes: 0, cpuSeconds: 0 };
   let cpuAtStart = sampleOrZero().cpuSeconds;
   let wallAtStart = performance.now();
@@ -329,5 +325,5 @@ export async function startRustServer(options: RustServerOptions): Promise<Serve
     if (msg === "timeline") return { kind, marks: [] };
     throw new Error(`the Rust server takes no ${JSON.stringify(msg)} ask`);
   };
-  return { proc, ready: base, ask, pingPath };
+  return { proc, ready: base, ask };
 }
