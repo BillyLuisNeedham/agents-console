@@ -83,6 +83,12 @@ Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flake
 default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
 rust,bun,rust, 86/86 each.
 
+M5 running: r-bench2 (Opus, rust-port-bench from ce20218) gets the Rust bench to its gate table and
+compares it with Bun's on a quiet box (Bun's first run here failed 3 gates; the Rust run timed out at the
+pool's working state). r-flip (Opus, rust-port-flip from ce20218) does the generated protocol files under
+protocol/ and the shim now, and deletes the TypeScript engine only when told (after the bench). Briefs:
+brief-r-bench2.md, brief-r-flip.md in the scratchpad.
+
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
    `--legs bun,rust,bun`.
