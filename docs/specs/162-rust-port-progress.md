@@ -73,6 +73,16 @@ conversations 74/74, verify 94/94, interrupts 48/48, merges 63/65, herdr 82/82, 
 scheduling 46/46, formats 41/41, spawns 72/72. Every failure left is r-restart's (a merge a shutdown
 dropped, re-adopting an enlisted pane at boot). Still running: r-restart.
 
+M3/M4 done (all five feature ports landed; r-restart at 5d1692e and 2a331e4). Fixes after the wave:
+ab358d6 (the drive's closing gate waits for merges in flight off the drive, a finalize that lands while a
+drive closes kicks the next, and crashed siblings' log lines land in the job of the last exit, as the
+TypeScript's single turn does), c186c1b and 3c497eb (three restart cases and one delta case raced timing
+that differs between the servers; they now wait for the event they read).
+Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flakes that pass on rerun
+(attempts-argv, protocol-cards; protocol-deltas fixed in 3c497eb); the one not run on both is the
+default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
+rust,bun,rust, 86/86 each.
+
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
    `--legs bun,rust,bun`.
