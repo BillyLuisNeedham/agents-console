@@ -79,7 +79,7 @@
  * pure parts are, in scripts/bench-lag/*.test.ts.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HOVER_DWELL_MS, PROTOCOL_VERSION } from "../engine/protocol.ts";
@@ -319,6 +319,9 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
     serverKind === "rust"
       ? { PATH: `${installHarnesses(root, pool.harnessScript, pool.releaseFile, modes)}:${process.env.PATH ?? ""}` }
       : {};
+  // The pool's `bench` harness is a stub only the in-process Bun server knows; the Rust server launches
+  // the wrapped `claude` instead.
+  if (serverKind === "rust") useWrappedHarness(pool.poolDir);
   const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr", rustEnv);
   let serve: ServerHandle;
   if (serverKind === "rust") {
@@ -1039,3 +1042,11 @@ if (outPath) {
   console.log(`\nwrote ${outPath}`);
 }
 process.exit(gates && gates.some((gate) => !gate.pass) ? 1 : 0);
+
+/** Point the pool's default harness at the wrapped `claude` binary the Rust server runs. */
+function useWrappedHarness(poolDir: string): void {
+  const path = join(poolDir, "console.json");
+  const config = JSON.parse(readFileSync(path, "utf8")) as { defaults: { harness: string } };
+  config.defaults.harness = "claude";
+  writeFileSync(path, JSON.stringify(config, null, 2));
+}
