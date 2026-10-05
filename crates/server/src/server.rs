@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::serve::ListenerExt;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared as SharedFuture};
 use indexmap::IndexMap;
@@ -397,6 +398,12 @@ impl Server {
     fn serve(&self, listener: tokio::net::TcpListener) {
         let (stop, stopped) = oneshot::channel::<()>();
         let app = crate::http::router(self.clone());
+        // Every connection sends with TCP_NODELAY, as Bun's server does. Without it Nagle holds a small
+        // write (a request's reply) behind a frame the peer has not acknowledged yet, until the peer's
+        // delayed ACK lands about 40 ms later.
+        let listener = listener.tap_io(|stream| {
+            let _ = stream.set_nodelay(true);
+        });
         let task = self.0.runtime.spawn(async move {
             let _ = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
