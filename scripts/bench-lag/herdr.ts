@@ -23,20 +23,15 @@ const i = process.argv.indexOf("--repo");
 const repo = i >= 0 ? process.argv[i + 1] : undefined;
 if (!repo) throw new Error("herdr.ts: --repo is required");
 
-// The fake moved to conformance/fixtures (ADR-0036); a checkout from before
-// the move still keeps it under engine/.
-const fakePath = [
-  join(repo, "conformance/fixtures/herdr-executing-fake.ts"),
-  join(repo, "engine/herdr-executing-fake.ts"),
-].find((path) => existsSync(path));
-if (!fakePath) throw new Error(`herdr.ts: no executing fake herdr in ${repo}`);
+// The checkout's own executing fake, from the conformance suite's fixtures (ADR-0036).
+const fakePath = join(repo, "conformance/fixtures/herdr-executing-fake.ts");
+if (!existsSync(fakePath)) throw new Error(`herdr.ts: no executing fake herdr in ${repo}`);
 
 const { startExecutingFakeHerdr } = (await import(fakePath)) as FakeModule;
 
 // Every new pane shows claude's ready frame (conformance/harness/herdr-tui.ts
-// TUI_FRAMES), which the Rust server's wrapped `claude` launches wait for
-// before they type the prompt; the Bun server's stub harnesses declare no
-// TUI and never read it.
+// TUI_FRAMES), which the server's wrapped `claude` launches wait for before
+// they type the prompt.
 const CLAUDE_READY_FRAME = "Claude Code v1\n❯ ";
 const fake = await startExecutingFakeHerdr({ rendered: CLAUDE_READY_FRAME });
 process.stdout.write(`READY ${fake.socketPath}\n`);

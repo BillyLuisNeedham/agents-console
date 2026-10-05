@@ -1,8 +1,8 @@
 [test]
-# Every test run starts from engine/test-preload.ts, which points the tools
-# whose per-machine files the engine writes at scratch locations, so a suite
+# Every test run starts from conformance/preload.ts, which points the tools
+# whose per-machine files a server writes at scratch locations, so a suite
 # can never touch the operator's own config (issue #127).
-preload = ["./engine/test-preload.ts"]
+preload = ["./conformance/preload.ts"]
 # The conformance cases start a real server process each, so they run only
 # through `bun run conformance`, from conformance/ with its own bunfig.toml.
 # The suite's static checks beside them (the boundary test) stay in here.

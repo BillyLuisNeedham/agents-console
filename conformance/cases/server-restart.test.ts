@@ -19,7 +19,6 @@ import { join } from "node:path";
 import type { RestartResponse } from "../../protocol/wire.ts";
 import { CLOSE_STOPPED } from "../fixtures/socket-protocol.ts";
 import { conformance } from "../harness/case.ts";
-import { ensureUiBuilt } from "../harness/cli.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import { CONFIG, readLock, ticket, untilSnapshot } from "./server-support.ts";
@@ -67,9 +66,6 @@ conformance(
   "server",
   "the Restart hand-off › POST /api/restart answers its port, says farewell and exits 0, and the Boot it hands the pool to brings a new server up on that port",
   async (t) => {
-    // Boot rebuilds a stale Console build before it starts a server; the
-    // Bun build is brought up to date first, as the Boot cases do.
-    if (t.kind === "bun") await ensureUiBuilt();
     const world = t.world({ tickets: [ticket("01", { status: "done" })], config: CONFIG });
     const server = await t.start(world, { env: { PATH: browserRecorder(world) } });
     t.defer(() => stopRelaunched(world, server.pid));

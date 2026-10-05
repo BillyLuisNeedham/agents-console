@@ -125,11 +125,11 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   stewardMayClose: false,
 };
 
-/** The engine's Steward budget when the file sets none (engine/steward.ts),
+/** The engine's Steward budget when the file sets none (crates/core/src/steward.rs),
  *  shown as the field's placeholder. */
 const DEFAULT_STEWARD_BUDGET = 5;
 
-/** The engine's Spawn caps when the file sets none (engine/spawn-caps.ts),
+/** The engine's Spawn caps when the file sets none (crates/core/src/spawn_caps.rs),
  *  shown as the fields' placeholders. */
 const DEFAULT_SPAWN_CAPS = { perAttempt: 5, perRun: 20 };
 

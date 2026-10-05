@@ -6,18 +6,18 @@
  *
  *   bun run scripts/bench-lag.ts [--repo <checkout>] [--out <file.json>]
  *       [--duration <s>] [--tabs <n>] [--rtt <ms>] [--ui-duration <s>] [--skip-ui] [--skip-server]
- *       [--server bun|rust] [--rust-bin <path>] [--keep-root]
+ *       [--server rust] [--rust-bin <path>] [--keep-root]
  *   bun run scripts/bench-lag.ts --e2e [--repo <checkout>] [--rtt <ms>] [--tabs <n>] [--duration <s>]
- *       [--idle <s>] [--out <file.json>] [--server bun|rust] [--rust-bin <path>] [--keep-root]
+ *       [--idle <s>] [--out <file.json>] [--server rust] [--rust-bin <path>] [--keep-root]
  *
  * `--repo` points it at any checkout of this repository (default: the one
  * this script lives in) whose root and ui/ have had `bun install`: the
- * server, the fake herdr and the UI modules measured are that checkout's,
+ * server binary, the fake herdr and the UI modules measured are that checkout's,
  * while the pool, the load and the measuring stay this script's, so two
  * checkouts are compared on the same yardstick.
  *
  * The server half builds a throwaway pool (scripts/bench-lag/pool.ts), runs
- * the checkout's pool server in a process of its own against the checkout's
+ * the checkout's Rust pool server in a process of its own against the checkout's
  * executing fake herdr in another, lets the engine work the pool into a
  * realistic state (a merge queue standing, four Tickets in progress, some
  * blocked, three Conversations whose panes keep moving), then opens N
@@ -25,8 +25,7 @@
  * window: the server's responsiveness to a trivial GET every 25 ms, the
  * operator's card clicks and Open in herdr (over the push protocol's socket,
  * or through a tab's six connections on a checkout that predates it), the
- * snapshot rate and size, the server's RSS, CPU, event-loop lag and time
- * blocked in synchronous spawns. Which protocol a checkout speaks is asked
+ * snapshot rate and size, the server's RSS and CPU. Which protocol a checkout speaks is asked
  * of its running server (load.ts detectProtocol), so the same bench runs on
  * both sides of issue #161.
  *
@@ -37,16 +36,16 @@
  * click-to-Detail and drag under the same churn, at the snapshot rate the
  * server half measured.
  *
- * `--server rust` (issue #162) runs the Rust binary, `--rust-bin` (default
- * `<repo>/target/release/agent-console`), as the pool server instead of the
- * checkout's TypeScript one, in both halves and in `--e2e`, with the same pool,
- * fake herdr, load and gates (scripts/bench-lag/rust-server.ts says how its
- * harnesses and UI are met). The measures that read Bun internals, the
- * server's event-loop lag and time blocked in synchronous spawns, have no
- * Rust counterpart and are reported "n/a (rust)"; no gate reads them. The
- * end-to-end run serves the UI the binary serves: a release build embeds it,
- * a debug build reads `ui/dist` of the checkout it was built in, which the
- * bench builds there when it is missing.
+ * The pool server is the Rust binary, `--rust-bin` (default
+ * `<repo>/target/release/agent-console`), in both halves and in `--e2e`
+ * (scripts/bench-lag/rust-server.ts says how its harnesses and UI are met).
+ * `--server rust` is the only choice: the Bun server was removed at the flip
+ * (issue #162), so `--server bun` is refused. The measures only the Bun
+ * server could give, its event-loop lag and time blocked in synchronous
+ * spawns, are reported "n/a (rust)"; no gate reads them. The end-to-end run
+ * serves the UI the binary serves: a release build embeds it, a debug build
+ * reads `ui/dist` of the checkout it was built in, which the bench builds
+ * there when it is missing.
  *
  * `--keep-root` leaves the bench's temp root in place at the end and prints
  * where it is: the pool, and the Rust server's log (`rust-server.log`).
@@ -89,6 +88,7 @@ import { HOVER_DWELL_MS, PROTOCOL_VERSION } from "../protocol/protocol.ts";
 import { decodeServerMessage, encodeMessage } from "../ui/src/protocol.ts";
 import { buildPool, modeFor, type BenchPool } from "./bench-lag/pool.ts";
 import {
+  BUN_REMOVED,
   defaultRustBin,
   installHarnesses,
   NOT_RUST,
@@ -138,14 +138,19 @@ const skipUi = e2e || argv.includes("--skip-ui");
 const skipServer = e2e || argv.includes("--skip-server");
 const rttMs = Number(flag("rtt") ?? 0);
 setSimulatedRtt(rttMs);
-const chosenServer = parseServerKind(flag("server") ?? "bun");
+const serverFlag = flag("server") ?? "rust";
+if (serverFlag === "bun") {
+  console.error(BUN_REMOVED);
+  process.exit(2);
+}
+const chosenServer = parseServerKind(serverFlag);
 if (!chosenServer) {
-  console.error(`--server must name bun or rust, not ${flag("server")}`);
+  console.error(`--server must name rust, not ${serverFlag}`);
   process.exit(2);
 }
 const serverKind: ServerKind = chosenServer;
 const rustBin = resolve(flag("rust-bin") ?? defaultRustBin(repo));
-if (serverKind === "rust" && !existsSync(rustBin)) {
+if (!existsSync(rustBin)) {
   console.error(`the Rust server binary is not built: no file at ${rustBin} (cargo build --release, or pass --rust-bin)`);
   process.exit(2);
 }
@@ -267,7 +272,7 @@ interface ServerResult {
   durationS: number;
   tabs: number;
   rttMs: number;
-  /** Which server ran: the checkout's TypeScript one or the Rust binary. */
+  /** Which server ran: the Rust binary, the only one since the flip. */
   serverKind: ServerKind;
   /** What the server spoke to the tabs. */
   protocol: Protocol;
@@ -318,63 +323,41 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
   const modes = Object.fromEntries(
     [...pool.quick, ...pool.conflicting, ...pool.live, ...pool.blocked].map((id) => [id, modeFor(pool, id)]),
   );
-  // The Rust server's harnesses are real binary names (rust-server.ts): the
+  // The server's harnesses are real binary names (rust-server.ts): the
   // wrappers go first on PATH for the server and for the fake herdr, whose
   // panes inherit its environment.
-  const rustEnv: Record<string, string> =
-    serverKind === "rust"
-      ? { PATH: `${installHarnesses(root, pool.harnessScript, pool.releaseFile, modes)}:${process.env.PATH ?? ""}` }
-      : {};
-  // The pool's `bench` harness is a stub only the in-process Bun server knows; the Rust server launches
-  // the wrapped `claude` instead.
-  if (serverKind === "rust") useWrappedHarness(pool.poolDir);
-  const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr", rustEnv);
+  const harnessEnv: Record<string, string> = {
+    PATH: `${installHarnesses(root, pool.harnessScript, pool.releaseFile, modes)}:${process.env.PATH ?? ""}`,
+  };
+  // The pool's `bench` harness is a name the server does not know; it launches the wrapped `claude`.
+  useWrappedHarness(pool.poolDir);
+  const herdr = await child([join(here, "herdr.ts"), "--repo", repo], "fake herdr", harnessEnv);
   let serve: ServerHandle;
-  if (serverKind === "rust") {
-    const home = join(root, "home");
-    mkdirSync(home, { recursive: true });
-    mkdirSync(join(root, "claude-config"), { recursive: true });
-    try {
-      serve = await startRustServer({
-        bin: rustBin,
-        cwd: repo,
-        poolDir: pool.poolDir,
-        logPath: join(root, "rust-server.log"),
-        env: {
-          ...(process.env as Record<string, string>),
-          ...rustEnv,
-          HOME: home,
-          TYPESAFE_API_KEY: "",
-          HERDR_WORKSPACE_ID: "",
-          CLAUDE_CONFIG_DIR: join(root, "claude-config"),
-          HERDR_SOCKET_PATH: herdr.ready,
-        },
-      });
-    } catch (err) {
-      herdr.proc.kill("SIGKILL");
-      throw err;
-    }
-  } else {
-    serve = {
-      ...(await child(
-        [
-          join(here, "serve.ts"),
-          "--repo", repo,
-          "--pool", pool.poolDir,
-          "--herdr", herdr.ready,
-          "--script", pool.harnessScript,
-          "--release", pool.releaseFile,
-          "--home", join(root, "home"),
-          "--modes", JSON.stringify(modes),
-        ],
-        "pool server",
-      )),
-    };
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(join(root, "claude-config"), { recursive: true });
+  try {
+    serve = await startRustServer({
+      bin: rustBin,
+      cwd: repo,
+      poolDir: pool.poolDir,
+      logPath: join(root, "rust-server.log"),
+      env: {
+        ...(process.env as Record<string, string>),
+        ...harnessEnv,
+        HOME: home,
+        TYPESAFE_API_KEY: "",
+        HERDR_WORKSPACE_ID: "",
+        CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+        HERDR_SOCKET_PATH: herdr.ready,
+      },
+    });
+  } catch (err) {
+    herdr.proc.kill("SIGKILL");
+    throw err;
   }
   const base = serve.ready;
-  // The responsiveness probe's file: the stylesheet the served page names, which both servers serve
-  // from the same built UI (the Rust one has no ping.txt). A server with no UI to serve, the Bun one
-  // when the checkout has no build, keeps serve.ts's ping.txt.
+  // The responsiveness probe's file: the stylesheet the served page names.
   let pingPath = "/ping.txt";
   try {
     pingPath = pingPathOf(await (await fetch(`${base}/`)).text()) ?? pingPath;
@@ -411,9 +394,9 @@ async function startPool(pool: BenchPool): Promise<RunningPool> {
       const res = await fetch(`${base}/api/conversations`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // The Bun server's `convo` stub holds its pane open; the Rust server knows only the stock
-        // harnesses, and the wrapped `claude` holds a launch whose prompt names no outcome file.
-        body: JSON.stringify({ title, assign: { harness: serverKind === "rust" ? "claude" : "convo", model: "m" } }),
+        // The server knows only the stock harnesses, and the wrapped `claude` holds a launch whose
+        // prompt names no outcome file.
+        body: JSON.stringify({ title, assign: { harness: "claude", model: "m" } }),
       });
       if (res.status !== 201) throw new Error(`starting a Conversation: ${res.status} ${await res.text()}`);
     }
@@ -602,7 +585,7 @@ async function runServerHalf(pool: BenchPool): Promise<ServerResult> {
 // --- the end-to-end half ---------------------------------------------------------
 
 interface E2eHalfResult extends E2eResult {
-  /** Which server ran: the checkout's TypeScript one or the Rust binary. */
+  /** Which server ran: the Rust binary, the only one since the flip. */
   serverKind: ServerKind;
   /** What the pool server spoke; `protocol` is what the page did. */
   serverProtocol: Protocol;
@@ -690,18 +673,12 @@ function countSnapshots(base: string, protocol: Protocol): { stop: () => { count
 type Armed = { x: number; y: number; park: { x: number; y: number } | null } | null;
 
 async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
-  // 1. The checkout's own UI, built by its own build script into the
-  //    directory the server serves (serve.ts adds the ping file after). The
-  //    Rust binary serves its own UI: embedded in a release build, read from
-  //    ui/dist of the checkout it was built in by a debug one, so that
+  // 1. The binary serves its own UI: embedded in a release build, read
+  //    from ui/dist of the checkout it was built in by a debug one, so that
   //    directory is built here when it is missing and nothing else is.
-  const rust = serverKind === "rust";
-  if (!rust || !existsSync(join(repo, "ui", "dist", "index.html"))) {
+  if (!existsSync(join(repo, "ui", "dist", "index.html"))) {
     console.error("building the checkout's UI…");
-    const build = Bun.spawnSync(
-      rust ? ["bun", "run", "build"] : ["bun", "run", "build", "--outDir", join(root, "home", "dist"), "--emptyOutDir"],
-      { cwd: join(repo, "ui"), stdout: "pipe", stderr: "pipe" },
-    );
+    const build = Bun.spawnSync(["bun", "run", "build"], { cwd: join(repo, "ui"), stdout: "pipe", stderr: "pipe" });
     if (build.exitCode !== 0) throw new Error(`building ${repo}/ui failed:\n${build.stdout}\n${build.stderr}`);
   }
 
@@ -716,8 +693,8 @@ async function runE2eHalf(pool: BenchPool): Promise<E2eHalfResult> {
     //    as in the server half. A throwaway page on the same origin goes
     //    first, so a fresh browser's renderer process start (a cost the
     //    operator's long-open browser does not pay) is not counted in the
-    //    Console's start; it is ping.txt (the Bun server's ping file, the
-    //    Rust server's 500 page), so it warms nothing of the Console's own:
+    //    Console's start; it is ping.txt (the server's 500 page), so it
+    //    warms nothing of the Console's own:
     //    no script, style or HTTP cache entry.
     const warm = await browser.open(`${proxy.ready}/ping.txt`);
     await waitFor("the warm-up page", 10_000, async () =>
@@ -918,7 +895,7 @@ const result = {
   repo,
   revision: gitHead(repo),
   serverKind,
-  rustBin: serverKind === "rust" ? rustBin : null,
+  rustBin,
   // The box's load when the run began: other work on the machine (another
   // agent's suite, say) moves every number here, so a comparison should
   // check the two runs started on similarly quiet machines.
@@ -1044,7 +1021,7 @@ if (e2eResult) {
   }
 }
 const width = Math.max(...rows.map(([k]) => k.length));
-console.log(`\nlag bench: ${result.revision} (${repo}), server ${serverKind}${serverKind === "rust" ? ` (${rustBin})` : ""}, load average at start ${loadavgAtStart.join(" ")}`);
+console.log(`\nlag bench: ${result.revision} (${repo}), server ${serverKind} (${rustBin}), load average at start ${loadavgAtStart.join(" ")}`);
 for (const [k, v] of rows) console.log(`${k.padEnd(width)}  ${v}`);
 
 // The gates: an end-to-end run fails when any one is missed.

@@ -1,9 +1,7 @@
 /**
  * Takeover: one pool run across several server processes in turn, each
- * picking up from what the last left on disk (ADR-0036). This is how a pool
- * started on Bun resumes on Rust after the flip, and how a git revert
- * leaves it resumable on Bun again: with CONFORMANCE_LEGS=bun,rust,bun the
- * same case runs Bun, then Rust, then Bun.
+ * picking up from what the last left on disk (ADR-0036), as a pool does
+ * across a Restart. CONFORMANCE_LEGS names each leg's server.
  *
  *   takeover("restart", "a checkpoint Interrupt survives a takeover", {
  *     world: { tickets: [...], config: {...} },

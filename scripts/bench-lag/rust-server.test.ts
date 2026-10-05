@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 describe("the server choice", () => {
-  test("names bun or rust and nothing else", () => {
-    expect(parseServerKind("bun")).toBe("bun");
+  test("names rust and nothing else", () => {
+    expect(parseServerKind("bun")).toBeNull();
     expect(parseServerKind("rust")).toBe("rust");
     expect(parseServerKind("node")).toBeNull();
     expect(parseServerKind("")).toBeNull();

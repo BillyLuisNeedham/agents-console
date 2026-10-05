@@ -1,6 +1,6 @@
 /**
- * The lag bench's timelines (issue #161): what the pool server (serve.ts)
- * and the fake herdr (herdr.ts) did, each mark on the wall clock the proxy
+ * The lag bench's timelines (issue #161): what the pool server and the fake
+ * herdr (herdr.ts) did, each mark on the wall clock the proxy
  * (proxy.ts) shares, and the reading of them beside an answer the proxy
  * timed as slow: whether the proxy's own timers, the server's handling, the
  * fake herdr, or something holding the server's loop took the time.

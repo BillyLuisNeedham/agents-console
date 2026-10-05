@@ -2,12 +2,11 @@
  * The Console's push protocol (issue #161, ADR-0032) as code: the pool
  * log's trim, the snapshot diff and its apply, the envelope's encode and
  * decode, and the boot snapshot embedded in the page. They are pure and
- * dependency-free, so the server and the browser run the very same
- * functions. The shapes and constants they work on are protocol/protocol.ts,
+ * dependency-free. The shapes and constants they work on are protocol/protocol.ts,
  * which the Rust port (issue #162) generates from its types and which carries
  * nothing else (ADR-0036); this file holds the code, because the Console and
  * the lag bench keep running these functions against whichever server they
- * talk to. Until the flip the TypeScript server imports them from here.
+ * talk to.
  */
 
 import {

@@ -1,15 +1,16 @@
 /**
  * The conformance suite's runner (ADR-0036):
  *
- *   bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...]
+ *   bun run conformance [--server rust] [--rust-bin <path>] [--legs <kind>,<kind>,...]
  *                       [--fast] [<bun test arguments>]
  *
- * Runs every test under conformance/ against the chosen server, Bun's
- * (`bun run engine/server.ts`) or Rust's (`<binary> server`, by default
- * target/release/agent-console), and prints the pass share per contract
- * area. `--legs bun,rust,bun` names the server each leg of a takeover case
- * runs, in order (CONFORMANCE_LEGS does the same); by default every leg
- * runs the chosen server. `--fast` skips the slow cases, those that wait
+ * Runs every test under conformance/ against the Rust server (`<binary>
+ * server`, by default target/release/agent-console) and prints the pass
+ * share per contract area. The Bun server was removed at the flip, so
+ * `--server bun`, or a `bun` leg, is refused with one line. `--legs
+ * rust,rust` names the server each leg of a takeover case runs, in order
+ * (CONFORMANCE_LEGS does the same); by default three legs of the chosen
+ * server. `--fast` skips the slow cases, those that wait
  * out a real timer of ten seconds or more, and counts them as not run.
  * Anything after the options goes to `bun test` as it is: a file filter,
  * or `-t <pattern>` for a name.
@@ -24,20 +25,20 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countByArea, formatReport, parseJunit } from "./report.ts";
-import { legsMissing, serverChoice, serverLegs, serverMissing } from "./harness/server.ts";
+import { BUN_REMOVED, legsMissing, serverChoice, serverLegs, serverMissing } from "./harness/server.ts";
 
 const USAGE =
-  "usage: bun run conformance --server bun|rust [--rust-bin <path>] [--legs <kind>,<kind>,...] [--fast] [<bun test arguments>]";
+  "usage: bun run conformance [--server rust] [--rust-bin <path>] [--legs <kind>,<kind>,...] [--fast] [<bun test arguments>]";
 
 const args = process.argv.slice(2);
 const passthrough: string[] = [];
-let server: string | undefined;
+let server = "rust";
 let rustBin: string | undefined;
 let legs: string | undefined;
 let fast = false;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
-  if (arg === "--server") server = args[++i];
+  if (arg === "--server") server = args[++i] ?? "";
   else if (arg.startsWith("--server=")) server = arg.slice("--server=".length);
   else if (arg === "--rust-bin") rustBin = args[++i];
   else if (arg.startsWith("--rust-bin=")) rustBin = arg.slice("--rust-bin=".length);
@@ -49,7 +50,11 @@ for (let i = 0; i < args.length; i++) {
     process.exit(0);
   } else passthrough.push(arg);
 }
-if (server !== "bun" && server !== "rust") {
+if (server === "bun" || legs?.split(",").some((leg) => leg.trim() === "bun")) {
+  console.error(BUN_REMOVED);
+  process.exit(1);
+}
+if (server !== "rust") {
   console.error(USAGE);
   process.exit(1);
 }
@@ -72,10 +77,7 @@ try {
 const missing = serverMissing(choice);
 const legMissing = missing ? null : legsMissing(legChoices);
 const legNames = legChoices.map((leg) => leg.kind).join(",");
-const title =
-  (choice.kind === "bun"
-    ? "conformance against the Bun server (engine/server.ts)"
-    : `conformance against the Rust server (${choice.rustBin})`) + `, takeover legs ${legNames}`;
+const title = `conformance against the Rust server (${choice.rustBin}), takeover legs ${legNames}`;
 if (missing) {
   console.log(`${missing}.\nEvery case that needs a server is listed below as not run; none has failed.\n`);
 } else if (legMissing) {
@@ -91,8 +93,7 @@ const runTmp = realpathSync(mkdtempSync(join(tmpdir(), "cf-")));
 env.TMPDIR = runTmp;
 const junit = join(runTmp, "report.xml");
 
-// From the suite's own directory, so its bunfig.toml (not the root's, with
-// the engine's test preload) is the one in force.
+// From the suite's own directory, so its bunfig.toml is the one in force.
 const run = Bun.spawn(
   [process.execPath, "test", "--reporter=junit", `--reporter-outfile=${junit}`, ...passthrough],
   { cwd: import.meta.dir, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" },
