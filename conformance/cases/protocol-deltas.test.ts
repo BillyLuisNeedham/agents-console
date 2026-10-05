@@ -286,6 +286,8 @@ conformance(
 conformance("protocol", "diffSnapshot and applyDelta › chain over many versions to what the server holds", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: CLAUDE });
   const held = world.stubs.hold("01");
+  // 02 is held too, so the run's remaining versions cannot all fall inside one 50 ms push window.
+  const second = world.stubs.hold("02");
   const server = await t.start(world);
   await untilSnapshot(
     server,
@@ -299,6 +301,13 @@ conformance("protocol", "diffSnapshot and applyDelta › chain over many version
   const from = early.frames.length;
 
   await held.release(30_000);
+  await untilSnapshot(
+    server,
+    (snap) => ticketOf(snap, "02").liveAttempt !== null,
+    "02's Attempt to be in flight",
+    30_000,
+  );
+  await second.release(30_000);
   await settledOn(server, early, atReview, "the final Review");
   expect(deltasFrom(early, from).length).toBeGreaterThan(1);
 
