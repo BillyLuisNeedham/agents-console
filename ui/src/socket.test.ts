@@ -11,7 +11,7 @@ import {
   type ServerMessage,
   type SnapshotDelta,
   type SocketLike,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import { diffSnapshot, encodeMessage, toPushed } from "./protocol";
 import type { EnrichedSnapshot, EnrichedTicketState } from "./project";
 import {

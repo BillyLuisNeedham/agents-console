@@ -6,7 +6,7 @@
  */
 
 import { expect } from "bun:test";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";

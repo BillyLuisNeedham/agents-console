@@ -17,7 +17,7 @@
 
 import { expect } from "bun:test";
 import { join } from "node:path";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { answerPrompt, awaitPrompt, callsOf, doneOutcome, poolLog, readyTicket, TERMINAL_CONFIG } from "../harness/herdr-tui.ts";
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";

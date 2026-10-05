@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TicketEvent } from "../../engine/wire.ts";
+import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { readEvents, readStateLine, readTicketFile } from "../harness/pool-files.ts";

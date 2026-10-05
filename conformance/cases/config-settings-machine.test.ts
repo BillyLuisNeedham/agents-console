@@ -11,7 +11,7 @@
 import { expect } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SettingsResponse } from "../../engine/wire.ts";
+import type { SettingsResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import type { World } from "../harness/world.ts";
 import { doneTicket, errorOf, restedSnapshot, settingsOf } from "./config-support.ts";

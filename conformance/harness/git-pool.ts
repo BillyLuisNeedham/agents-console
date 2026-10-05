@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState } from "../../protocol/wire.ts";
 import type { CaseServer } from "./case.ts";
 import { until } from "./pool-files.ts";
 

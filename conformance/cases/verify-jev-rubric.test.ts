@@ -14,7 +14,7 @@
 import { expect } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import type { ScriptedAnswer } from "../fixtures/jev-fake.ts";
 import { conformance, type Case } from "../harness/case.ts";
 import { readStateLine } from "../harness/pool-files.ts";

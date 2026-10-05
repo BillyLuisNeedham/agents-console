@@ -8,7 +8,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 
 /** A Ticket file's first line, its state marker, parsed. */
 export interface StateLine {

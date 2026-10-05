@@ -10,7 +10,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig } from "../../engine/wire.ts";
+import type { PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { StubCall } from "../harness/stubs.ts";

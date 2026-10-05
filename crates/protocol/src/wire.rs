@@ -1,5 +1,5 @@
 //! The wire shapes (CONTEXT.md: Wire shape): every message between engine and Console, declared once.
-//! This is engine/wire.ts and every type it re-exports from the engine's other modules: the Ticket
+//! This is protocol/wire.ts (once engine/wire.ts) and every type it re-exports from the engine's other modules: the Ticket
 //! events, the Conversation view, the Interrupt and Outcome, the Assignment views, the Spawn and Merge
 //! queue views, the enlist, Steward, Settings and Reassign bodies, and the response envelopes the
 //! server assembles (the enriched snapshot, the per-ticket reads, the terminal peek).

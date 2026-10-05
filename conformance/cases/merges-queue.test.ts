@@ -14,7 +14,7 @@
 import { expect } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, EnrichedTicketState, MergeQueueEntry } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, EnrichedTicketState, MergeQueueEntry } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import {
   cardOf,

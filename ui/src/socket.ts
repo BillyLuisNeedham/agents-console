@@ -36,7 +36,7 @@ import {
   type ServerMessage,
   type SnapshotDelta,
   type SocketLike,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import { applyDelta, decodeServerMessage, encodeMessage, ProtocolError } from "./protocol";
 
 /** A `live` frame: the activity, peeks and grades that moved. */

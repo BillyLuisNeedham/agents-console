@@ -82,7 +82,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { HOVER_DWELL_MS, PROTOCOL_VERSION } from "../engine/protocol.ts";
+import { HOVER_DWELL_MS, PROTOCOL_VERSION } from "../protocol/protocol.ts";
 import { decodeServerMessage, encodeMessage } from "../ui/src/protocol.ts";
 import { buildPool, modeFor, type BenchPool } from "./bench-lag/pool.ts";
 import {

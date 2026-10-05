@@ -21,7 +21,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, TicketEvent } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { ticketWorktree } from "../harness/git-pool.ts";

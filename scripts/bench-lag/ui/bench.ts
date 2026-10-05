@@ -43,7 +43,7 @@ import {
   type PushedSnapshot,
   type ServerMessage,
   type SocketLike,
-} from "@engine/protocol.ts";
+} from "@shapes/protocol.ts";
 import { decodeClientMessage, diffSnapshot, encodeMessage, toPushed } from "@protocol";
 import {
   activity,

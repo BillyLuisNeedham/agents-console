@@ -108,8 +108,8 @@ socket then pushes the snapshot's changes as deltas, the live values (activity,
 peeks, grades) while the tab is visible, and the data of the cards the Console
 subscribes to, and it carries every action and read as a request answered by
 the same function as its HTTP twin. The messages are declared in
-`engine/protocol.ts`, the code that encodes, decodes, diffs and applies them is
-`ui/src/protocol.ts`, the server's side is `engine/ws.ts`, and every HTTP route
+`protocol/protocol.ts` (generated from the Rust types), the code that encodes,
+decodes, diffs and applies them is `ui/src/protocol.ts`, the server's side is `engine/ws.ts`, and every HTTP route
 but the old `/api/stream` stays for the Steward's command, Boot and scripts.
 It prints its URL (`pool server on http://localhost:<port>`); open it in a
 browser. An optional `--port <n>` overrides the pinned port, and a busy pinned

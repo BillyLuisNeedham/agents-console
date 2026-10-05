@@ -6,7 +6,7 @@ import type {
   LogFollowResult,
   LogPush,
   LogReadRequest,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import { LOG_PANE_MAX_CHARS, LogPane, noteLogScroll } from "./log-pane";
 import { earlierLogOffset, type TicketLogResponse } from "./project";
 

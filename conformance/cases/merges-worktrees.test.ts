@@ -15,7 +15,7 @@ import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import {
   approveReview,

@@ -8,7 +8,7 @@
 import { expect } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { anyIsoTime } from "../harness/equal.ts";
 import type { HerdrCall } from "../harness/herdr.ts";
 import { until } from "../harness/pool-files.ts";

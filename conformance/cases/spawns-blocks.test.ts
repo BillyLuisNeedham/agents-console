@@ -5,7 +5,7 @@
  */
 
 import { expect } from "bun:test";
-import type { EnrichedSnapshot, HeldSpawnResponse } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, HeldSpawnResponse } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";

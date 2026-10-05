@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { freePort, launchServer, type LaunchedServer } from "../harness/server.ts";
@@ -17,7 +17,7 @@ import type { World } from "../harness/world.ts";
 
 // engine/engine.ts REVIEW_TICKET_ID: the final review gate's Ticket id.
 const REVIEW = "REVIEW";
-// engine/protocol.ts CLOSE_STOPPED: how the server closes a socket on an orderly stop.
+// protocol/protocol.ts CLOSE_STOPPED: how the server closes a socket on an orderly stop.
 const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
 // engine/ports.ts DEFAULT_PORT: where the unpinned hunt starts.
 const DEFAULT_PORT = 8787;

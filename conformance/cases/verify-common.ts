@@ -7,7 +7,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 import { readEvents } from "../harness/pool-files.ts";
 

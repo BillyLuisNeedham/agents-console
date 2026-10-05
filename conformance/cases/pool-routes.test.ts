@@ -11,7 +11,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, TicketBodyResponse, TicketEventsResponse, TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import { CHECKOUT, freePort, serverArgv, serverChoice } from "../harness/server.ts";
@@ -20,7 +20,7 @@ import { PROTOCOL_VERSION } from "../fixtures/socket-protocol.ts";
 
 /** The review gate's Ticket id (REVIEW_TICKET_ID in engine/engine.ts). */
 const REVIEW = "REVIEW";
-/** How the server closes its sockets on a Stop (CLOSE_STOPPED in engine/protocol.ts). */
+/** How the server closes its sockets on a Stop (CLOSE_STOPPED in protocol/protocol.ts). */
 const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
 /** The socket heartbeat interval a server publishes by default (engine/server.ts). */
 const HEARTBEAT_MS = 20_000;

@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import type { CaseServer } from "../harness/case.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";

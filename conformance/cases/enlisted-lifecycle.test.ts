@@ -21,7 +21,7 @@ import type {
   EnrichedSnapshot,
   EnrichedTicketState,
   KeepTalkingResponse,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import type { HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, until } from "../harness/pool-files.ts";

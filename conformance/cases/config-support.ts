@@ -15,7 +15,7 @@ import type {
   PoolConfig,
   ReassignResponse,
   SettingsResponse,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 import type { CaseServer } from "../harness/case.ts";
 import type { HttpAnswer } from "../harness/http.ts";
 import { until } from "../harness/pool-files.ts";

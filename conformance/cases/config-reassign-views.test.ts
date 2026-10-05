@@ -16,7 +16,7 @@
 import { expect } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssignmentSources, PoolConfig } from "../../engine/wire.ts";
+import type { AssignmentSources, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case } from "../harness/case.ts";
 import { ticketContent, type TicketSeed, type World } from "../harness/world.ts";
 import {

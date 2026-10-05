@@ -21,7 +21,7 @@
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, TicketEvent } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { conformance, type Case } from "../harness/case.ts";

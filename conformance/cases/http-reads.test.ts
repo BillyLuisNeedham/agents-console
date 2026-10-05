@@ -16,7 +16,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, mkdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TicketEvent, TicketLogResponse } from "../../engine/wire.ts";
+import type { TicketEvent, TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import type { World } from "../harness/world.ts";

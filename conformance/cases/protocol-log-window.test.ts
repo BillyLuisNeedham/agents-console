@@ -13,7 +13,7 @@
  */
 
 import { expect } from "bun:test";
-import type { EnrichedSnapshot } from "../../engine/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { framesOf } from "../fixtures/socket-fixture.ts";
 import { POOL_LOG_WINDOW } from "../fixtures/socket-protocol.ts";
 import { conformance, type Case } from "../harness/case.ts";

@@ -17,7 +17,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { QueuedAnswer, TicketEvent } from "../../engine/wire.ts";
+import type { QueuedAnswer, TicketEvent } from "../../protocol/wire.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
 import { readEvents, readStateLine, readTicketFile, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";

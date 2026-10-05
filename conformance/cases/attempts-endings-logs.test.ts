@@ -18,7 +18,7 @@
 import { expect } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { TicketLogResponse } from "../../engine/wire.ts";
+import type { TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { approveReview, answer, settleOn } from "../harness/pool-run.ts";

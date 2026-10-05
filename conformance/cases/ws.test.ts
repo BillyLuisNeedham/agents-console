@@ -22,8 +22,8 @@ import type {
   RequestKind,
   RequestPayload,
   ServerMessage,
-} from "../../engine/protocol.ts";
-import type { EnrichedSnapshot, PoolConfig, TicketLogResponse } from "../../engine/wire.ts";
+} from "../../protocol/protocol.ts";
+import type { EnrichedSnapshot, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { openSocket, framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { PROTOCOL_VERSION, WS_PATH, applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
@@ -32,11 +32,11 @@ import { CHECKOUT } from "../harness/server.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 
-// engine/protocol.ts HEARTBEAT_MS: the heartbeat interval the hello announces.
+// protocol/protocol.ts HEARTBEAT_MS: the heartbeat interval the hello announces.
 const HEARTBEAT_MS = 20_000;
-// engine/protocol.ts EMBED_ELEMENT_ID: the page's boot snapshot element.
+// protocol/protocol.ts EMBED_ELEMENT_ID: the page's boot snapshot element.
 const EMBED_ELEMENT_ID = "console-boot";
-// engine/protocol.ts CLOSE_STOPPED: the farewell close.
+// protocol/protocol.ts CLOSE_STOPPED: the farewell close.
 const CLOSE_STOPPED = { code: 1000, reason: "stopped" };
 // engine/engine.ts REVIEW_TICKET_ID: the final Review gate's Interrupt.
 const REVIEW = "REVIEW";

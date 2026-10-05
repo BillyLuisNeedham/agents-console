@@ -17,7 +17,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig } from "../../engine/wire.ts";
+import type { PoolConfig } from "../../protocol/wire.ts";
 import type { HerdrCall, HerdrProcess } from "./herdr.ts";
 import { readEvents, readMarkers, until } from "./pool-files.ts";
 import type { TicketSeed, World } from "./world.ts";

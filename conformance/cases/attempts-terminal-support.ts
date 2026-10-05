@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, TicketEvent } from "../../engine/wire.ts";
+import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { CaseServer } from "../harness/case.ts";
 import type { HerdrCall, HerdrProcess } from "../harness/herdr.ts";
 import { TUI_FRAMES } from "../harness/herdr-tui.ts";

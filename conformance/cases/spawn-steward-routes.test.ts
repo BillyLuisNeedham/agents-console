@@ -8,7 +8,7 @@
 import { expect } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { HeldSpawnView, PendingSpawnView } from "../../engine/wire.ts";
+import type { HeldSpawnView, PendingSpawnView } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson, readEvents, until } from "../harness/pool-files.ts";
 import { CHECKOUT, serverChoice } from "../harness/server.ts";

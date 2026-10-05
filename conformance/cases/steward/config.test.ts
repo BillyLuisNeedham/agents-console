@@ -9,7 +9,7 @@
 import { expect } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { StewardStateResponse } from "../../../engine/wire.ts";
+import type { StewardStateResponse } from "../../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../../harness/case.ts";
 import { expectParsedEqual } from "../../harness/equal.ts";
 import { CHECKOUT, freePort, serverArgv, serverChoice } from "../../harness/server.ts";

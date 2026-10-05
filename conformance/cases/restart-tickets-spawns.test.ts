@@ -17,7 +17,7 @@ import { Database } from "bun:sqlite";
 import { expect } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig } from "../../engine/wire.ts";
+import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
 import { readEvents, readTicketFile } from "../harness/pool-files.ts";

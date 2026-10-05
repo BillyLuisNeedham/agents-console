@@ -17,7 +17,7 @@
 import { expect } from "bun:test";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ConversationView, EnrichedSnapshot, TicketEvent } from "../../engine/wire.ts";
+import type { ConversationView, EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import { ticketWorktree } from "../harness/git-pool.ts";
 import { CLAUDE_READY, type HerdrCall, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";

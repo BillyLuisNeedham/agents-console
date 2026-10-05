@@ -15,7 +15,7 @@
 import { expect } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig, SettingsResponse } from "../../engine/wire.ts";
+import type { PoolConfig, SettingsResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";

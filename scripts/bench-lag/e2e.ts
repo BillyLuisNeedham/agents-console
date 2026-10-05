@@ -23,7 +23,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { WS_PATH } from "../../engine/protocol.ts";
+import { WS_PATH } from "../../protocol/protocol.ts";
 import { requireChromium } from "./chromium.ts";
 import { frameBudget, type FrameBudget, type GateInputs, type IdleTab } from "./gates.ts";
 
