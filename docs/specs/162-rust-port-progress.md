@@ -83,23 +83,32 @@ Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flake
 default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
 rust,bun,rust, 86/86 each.
 
-M5 running (state at 4fea052):
-- r-flip (Opus, rust-port-flip): items 1 and 2 landed as merge 4fea052 (c537445 the generated
-  protocol/wire.ts and protocol/protocol.ts with a byte-equality Rust test; ffe572b the shim that builds a
-  stale UI and release binary and execs `boot`). Item 3 (delete engine/, Bun legs refused in conformance and
-  bench, package.json, bunfig preload, README, delete the checkpoints.rs round-trip test, keep the boundary
-  engine/ guard, leave prototype/ spikes) is HELD: send r-flip the go plus the commit to merge once r-bench2
-  has its Bun numbers.
-- r-bench2 (Opus, rust-port-bench from ce20218): Rust bench timed out at "the pool to reach its working
-  state"; Bun's first run failed 3 of 9 gates on this box (Cold data network 18.9 ms, Open in herdr 12.4 ms,
-  38 frames over budget). It is debugging the Rust run and re-measuring both on a quieter box. Box noise:
-  185 orphaned TS engine-test stubs (/tmp/pool-*/tui.sh, agent.sh, from engine/server.test.ts sentinel loops)
-  that the permission system would not let an agent kill; Billy was given the command; they go away for good
-  with engine/ at the flip.
-- Then: render-survival (`cd ui && bun harness/run.ts`), two real throwaway pools through the shim (memory
-  e2e-real-herdr-pool-on-this-box), merge main, reword default merge messages (filter-branch msg-filter),
-  delete docs/specs before the PR is the operator's, ticket notes, outcome JSON (checkpoint for the Mac
-  sign-off), final message with deviations and bench numbers.
+M5 running (state at 17b9aa2, 2026-10-05 16:25):
+- Leaked test processes (231, hour-old conformance servers, stubs, /tmp/pool-*/tui.sh and agent.sh) were
+  killed at 09:35 with Billy's approval; the box is quiet (load under 1).
+- r-bench2 (Opus, rust-port-bench): its fix 4be024a is merged as 17b9aa2. Cause of the Rust timeout: the
+  bench's fake herdr never drew claude's ready frame ("Claude Code v"), and its Conversations named the
+  Bun-only `convo` stub; the ping probe now reads the same stylesheet on both servers. Quiet-box tables,
+  RTT 0: rust-1 09:36 load 3.2 9/9 (cold 1.7, herdr 1.9, usable 180 ms); bun-1 10:17 load 0.23 9/9 (2.0,
+  2.5, 178); rust-2 10:19 load 0.9 9/9 (1.4, 2.9, 183); bun-2 10:20 load 0.77 9/9 (2.3, 2.1, 181); rust-3
+  10:22 load 0.5 8/9: Open in herdr one of 18 at 43.3 ms, server side (actor jobs of 12 to 32 ms hold the
+  pool files' write gate in warm-up; a request that re-enriches the snapshot waits on it). It committed
+  aa43ed1 (bench timing only, not landed) and is fixing that in Rust (crates/server/src/server.rs, not yet
+  committed). It must ask before its next measuring run so the box is quiet; it tends to go idle after a
+  background run ends, so nudge it when its runs finish.
+- r-flip (Opus, rust-port-flip): item 3 edits done on merge f0f59af (17b9aa2): engine/ deleted,
+  conformance and bench Rust-only (Bun refused with a one-line message), bunfig preloads
+  conformance/preload.ts, package.json boot and fleet, README, AGENTS.md, checkpoints round-trip test
+  deleted. Accepted extras: the stopped screen's relaunch text says `agent-console <dir>` (checking it
+  matches what boot takes; a visible change, list it as a deviation), and Restart's boot stand-ins stub
+  `agent-console` instead of `bun`. Left naming the old engine on purpose: prototype/ spikes, the bench UI
+  vite fallback for pre-flip checkouts, history docs and NOT-PORTED.md. It is running the full checks and
+  full conformance --server rust now, then commits; land it after checking trailers.
+- Then: re-run the bench (Bun numbers above stand as the reference, Bun is gone after the flip) on the
+  final head, render-survival (`cd ui && bun harness/run.ts`), two real throwaway pools through the shim
+  (memory e2e-real-herdr-pool-on-this-box), merge main, reword default merge messages (filter-branch
+  msg-filter), delete target-check/, ticket notes, outcome JSON (checkpoint for the Mac sign-off), final
+  message with deviations and bench numbers.
 
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
