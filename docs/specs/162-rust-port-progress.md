@@ -83,32 +83,33 @@ Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flake
 default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
 rust,bun,rust, 86/86 each.
 
-M5 running (state at 17b9aa2, 2026-10-05 16:25):
-- Leaked test processes (231, hour-old conformance servers, stubs, /tmp/pool-*/tui.sh and agent.sh) were
-  killed at 09:35 with Billy's approval; the box is quiet (load under 1).
-- r-bench2 (Opus, rust-port-bench): its fix 4be024a is merged as 17b9aa2. Cause of the Rust timeout: the
-  bench's fake herdr never drew claude's ready frame ("Claude Code v"), and its Conversations named the
-  Bun-only `convo` stub; the ping probe now reads the same stylesheet on both servers. Quiet-box tables,
-  RTT 0: rust-1 09:36 load 3.2 9/9 (cold 1.7, herdr 1.9, usable 180 ms); bun-1 10:17 load 0.23 9/9 (2.0,
-  2.5, 178); rust-2 10:19 load 0.9 9/9 (1.4, 2.9, 183); bun-2 10:20 load 0.77 9/9 (2.3, 2.1, 181); rust-3
-  10:22 load 0.5 8/9: Open in herdr one of 18 at 43.3 ms, server side (actor jobs of 12 to 32 ms hold the
-  pool files' write gate in warm-up; a request that re-enriches the snapshot waits on it). It committed
-  aa43ed1 (bench timing only, not landed) and is fixing that in Rust (crates/server/src/server.rs, not yet
-  committed). It must ask before its next measuring run so the box is quiet; it tends to go idle after a
-  background run ends, so nudge it when its runs finish.
-- r-flip (Opus, rust-port-flip): item 3 edits done on merge f0f59af (17b9aa2): engine/ deleted,
-  conformance and bench Rust-only (Bun refused with a one-line message), bunfig preloads
-  conformance/preload.ts, package.json boot and fleet, README, AGENTS.md, checkpoints round-trip test
-  deleted. Accepted extras: the stopped screen's relaunch text says `agent-console <dir>` (checking it
-  matches what boot takes; a visible change, list it as a deviation), and Restart's boot stand-ins stub
-  `agent-console` instead of `bun`. Left naming the old engine on purpose: prototype/ spikes, the bench UI
-  vite fallback for pre-flip checkouts, history docs and NOT-PORTED.md. It is running the full checks and
-  full conformance --server rust now, then commits; land it after checking trailers.
-- Then: re-run the bench (Bun numbers above stand as the reference, Bun is gone after the flip) on the
-  final head, render-survival (`cd ui && bun harness/run.ts`), two real throwaway pools through the shim
-  (memory e2e-real-herdr-pool-on-this-box), merge main, reword default merge messages (filter-branch
-  msg-filter), delete target-check/, ticket notes, outcome JSON (checkpoint for the Mac sign-off), final
-  message with deviations and bench numbers.
+M5 state at ae1a36f (2026-10-05 17:15):
+- Landed: the flip (c838f06, merged as 9d9f81f): engine/ deleted, conformance and the bench Rust-only
+  (`--server bun` refused with one line), protocol/ generated, the shim builds and execs the binary.
+  The stopped screen's relaunch text is now `agent-console <dir>` (boot takes the first non-flag argument
+  as the pool dir; a visible change, a deviation). Restart's boot stand-ins stub `agent-console`. Left
+  naming the old engine on purpose: prototype/ spikes, the bench UI vite fallback for pre-flip checkouts,
+  history docs, NOT-PORTED.md, provenance comments.
+- 1ec29c6: the many-versions delta case failed on both Bun and Rust on a quiet box (every version fell in
+  one 50 ms push window); it now releases 02 only once the early socket holds it in flight (3 of 3 on
+  each server before the deletion).
+- r-bench2's 03f45a3 (TCP_NODELAY on every accepted connection) and aa43ed1 (bench timing) merged as
+  ae1a36f. Cause of the 42 ms Open in herdr outliers: Nagle held a small reply behind a delta frame until
+  the peer's delayed ACK; the handler itself took 0.74 ms. Bun's server sets nodelay.
+- Final bench series (RTT 0, 2 tabs, 60 s plus 15 s idle; cold data network / Open in herdr / start to
+  usable; every run 0 frames over budget of about 9850, the other gates at worst 1 frame):
+  fb-1 bun 16:55 load 0.94 9/9 2.4/4.5/185.3; fr-1 rust 16:57 load 0.64 9/9 1.3/1.3/169.9; fb-2 bun 16:59
+  load 0.73 9/9 1.7/3.6/181.7; fr-2 rust 17:00 load 1.11 9/9 1.5/1.6/176.8; fr-3 rust 17:02 load 0.55 9/9
+  1.1/1.5/177.5; fr-4 rust 17:03 load 0.26 9/9 1.3/2.4/171.5. Worst Rust Open in herdr over 72 samples
+  2.4 ms. Server CPU over the window: Bun 11.1%, Rust 0.9 to 1.0%. Start to usable is within noise.
+- Render-survival at 9d9f81f: 191 passed, 0 failed, 27 skipped.
+- Open: the ws parity case ("socket and HTTP parity") failed on debug builds with "rust server stopped
+  without releasing runs/server.pid" and leaves two debug servers per run; r-flip is diagnosing it at
+  ae1a36f. 12 such servers from r-bench2's runs are still alive at 0% CPU (not killed: Billy decides).
+- Then: release build through the shim, cargo test/clippy/fmt and bun test, full conformance on the
+  release binary, one bench run on the final head, two real throwaway pools through the shim, reword
+  default merge messages (filter-branch msg-filter), delete target-check/, ticket notes, outcome JSON
+  (checkpoint for the Mac sign-off), final message.
 
 Next, in order:
 1. Land the wave, run each area against Rust, then the whole suite `--server rust`, then takeover with
