@@ -120,7 +120,21 @@ M5 state at ae1a36f (2026-10-05 17:15):
 - Old note: the ws parity case ("socket and HTTP parity") failed on debug builds with "rust server stopped
   without releasing runs/server.pid" and leaves two debug servers per run; r-flip is diagnosing it at
   ae1a36f. 12 such servers from r-bench2's runs are still alive at 0% CPU (not killed: Billy decides).
-- Then: release build through the shim, cargo test/clippy/fmt and bun test, full conformance on the
+- Final checks at edb2106 (r-flip): cargo test 867/867, clippy and fmt clean, root bun test 903/903,
+  typechecks clean; full conformance on the shim-built release binary 1242/1243, 0 failed (default-port
+  case not run, 8787 busy), 2504 s.
+- Running at 18:08: full `bun run conformance --server bun` at 1ec29c6 (the last commit with the TS
+  engine) in the detached worktree scratchpad/bun-final, log scratchpad/bun-final-conformance.log
+  (background task bdwt9vlfv, about 42 min). It closes Done-when 1 with one clean full Bun run.
+- Left, in order: read the Bun result (rerun any failure alone 3 times; the box must stay quiet);
+  `git worktree remove` scratchpad/bun-final; reword the five "Merge commit 'X' into HEAD" merges with
+  `git filter-branch -f --msg-filter 'sh scratchpad/reword.sh' main..HEAD` (the script maps each original
+  SHA to a sentence; four older commits from before this Ticket carry trailers and are left alone);
+  delete target-check/; ticket `## Notes`; outcome JSON as checkpoint (Mac sign-off); final message from
+  scratchpad/deviations.md (verified deviation list) plus bench numbers and Mac steps. r-flip and r-bench2
+  are idle with nothing left to do. The 12 leaked debug servers from rust-port-bench's pre-flip ws runs
+  are alive at 0% CPU; Billy decides.
+- Old plan line: release build through the shim, cargo test/clippy/fmt and bun test, full conformance on the
   release binary, one bench run on the final head, two real throwaway pools through the shim, reword
   default merge messages (filter-branch msg-filter), delete target-check/, ticket notes, outcome JSON
   (checkpoint for the Mac sign-off), final message.
