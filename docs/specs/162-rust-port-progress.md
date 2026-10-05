@@ -62,39 +62,39 @@ steward_actions, steward.ts), r-conversations, r-panes (enlist, held, Pool works
 (restart, Reassign, config reload). Land each with `git merge --no-ff` after checking for attribution
 trailers (`git log --format=%B | grep -c 'Co-Authored\|Claude-Session'`); rewrite any that carry them.
 
-Landed: r-verify at 728577c (verify 89/90, interrupts 47/48, merges 60/62; the rest wait on spawns,
+Landed: r-verify at 58b13d5 (verify 89/90, interrupts 47/48, merges 60/62; the rest wait on spawns,
 conversations and restart). The wave agents merge each other's commits; some carry git's default "Merge
 commit '...' into HEAD" message. Before the final message, reword those across the branch (one
 `git filter-branch --msg-filter` over the branch's own range, no other change).
 
-Landed after it: r-conversations (6b59547, with the compile reconcile against verify folded in),
-r-panes (93172dc), r-spawns (eb116b7 and its server snapshot re-check). On Rust at those heads:
+Landed after it: r-conversations (6d3b540, with the compile reconcile against verify folded in),
+r-panes (5267dd5), r-spawns (0acda27 and its server snapshot re-check). On Rust at those heads:
 conversations 74/74, verify 94/94, interrupts 48/48, merges 63/65, herdr 82/82, enlist 39/41,
 scheduling 46/46, formats 41/41, spawns 72/72. Every failure left is r-restart's (a merge a shutdown
 dropped, re-adopting an enlisted pane at boot). Still running: r-restart.
 
-M3/M4 done (all five feature ports landed; r-restart at 5d1692e and 2a331e4). Fixes after the wave:
-ab358d6 (the drive's closing gate waits for merges in flight off the drive, a finalize that lands while a
+M3/M4 done (all five feature ports landed; r-restart at 6a107ea and a08e804). Fixes after the wave:
+91a9be4 (the drive's closing gate waits for merges in flight off the drive, a finalize that lands while a
 drive closes kicks the next, and crashed siblings' log lines land in the job of the last exit, as the
-TypeScript's single turn does), c186c1b and 3c497eb (three restart cases and one delta case raced timing
+TypeScript's single turn does), e7e12af and 4294284 (three restart cases and one delta case raced timing
 that differs between the servers; they now wait for the event they read).
-Full suite at 3c497eb: Rust 1242/1243, Bun 1239/1243 under load with three flakes that pass on rerun
-(attempts-argv, protocol-cards; protocol-deltas fixed in 3c497eb); the one not run on both is the
+Full suite at 4294284: Rust 1242/1243, Bun 1239/1243 under load with three flakes that pass on rerun
+(attempts-argv, protocol-cards; protocol-deltas fixed in 4294284); the one not run on both is the
 default-port case (8787 is the live Console's). Takeover: restart area with legs bun,rust,bun and
 rust,bun,rust, 86/86 each.
 
-M5 state at ae1a36f (2026-10-05 17:15):
-- Landed: the flip (c838f06, merged as 9d9f81f): engine/ deleted, conformance and the bench Rust-only
+M5 state at 1e942cf (2026-10-05 17:15):
+- Landed: the flip (75ea8fe, merged as 17189f1): engine/ deleted, conformance and the bench Rust-only
   (`--server bun` refused with one line), protocol/ generated, the shim builds and execs the binary.
   The stopped screen's relaunch text is now `agent-console <dir>` (boot takes the first non-flag argument
   as the pool dir; a visible change, a deviation). Restart's boot stand-ins stub `agent-console`. Left
   naming the old engine on purpose: prototype/ spikes, the bench UI vite fallback for pre-flip checkouts,
   history docs, NOT-PORTED.md, provenance comments.
-- 1ec29c6: the many-versions delta case failed on both Bun and Rust on a quiet box (every version fell in
+- 2428185: the many-versions delta case failed on both Bun and Rust on a quiet box (every version fell in
   one 50 ms push window); it now releases 02 only once the early socket holds it in flight (3 of 3 on
   each server before the deletion).
-- r-bench2's 03f45a3 (TCP_NODELAY on every accepted connection) and aa43ed1 (bench timing) merged as
-  ae1a36f. Cause of the 42 ms Open in herdr outliers: Nagle held a small reply behind a delta frame until
+- r-bench2's c0f6564 (TCP_NODELAY on every accepted connection) and 93ff2ac (bench timing) merged as
+  1e942cf. Cause of the 42 ms Open in herdr outliers: Nagle held a small reply behind a delta frame until
   the peer's delayed ACK; the handler itself took 0.74 ms. Bun's server sets nodelay.
 - Final bench series (RTT 0, 2 tabs, 60 s plus 15 s idle; cold data network / Open in herdr / start to
   usable; every run 0 frames over budget of about 9850, the other gates at worst 1 frame):
@@ -102,7 +102,7 @@ M5 state at ae1a36f (2026-10-05 17:15):
   load 0.73 9/9 1.7/3.6/181.7; fr-2 rust 17:00 load 1.11 9/9 1.5/1.6/176.8; fr-3 rust 17:02 load 0.55 9/9
   1.1/1.5/177.5; fr-4 rust 17:03 load 0.26 9/9 1.3/2.4/171.5. Worst Rust Open in herdr over 72 samples
   2.4 ms. Server CPU over the window: Bun 11.1%, Rust 0.9 to 1.0%. Start to usable is within noise.
-- Render-survival at 9d9f81f: 191 passed, 0 failed, 27 skipped.
+- Render-survival at 17189f1: 191 passed, 0 failed, 27 skipped.
 - Shim: with ui/ and crates/ stale, `bin/agent-console --help` rebuilt ui/dist with Bun, then ran
   `cargo build --release` (1 m 20 s), build output on stderr only, then printed boot's usage on stdout.
 - Two real throwaway pools on the release binary, booted through the shim (`bin/agent-console <pool>
@@ -112,28 +112,25 @@ M5 state at ae1a36f (2026-10-05 17:15):
   Review approved, `pool done`. Ticket files ended `status=done`. Haiku did not take
   `--permission-mode auto` (claude showed manual mode), so I answered its edit prompts as an operator;
   the argv is the TypeScript's. Finished terminals stayed open as designed; servers stopped, tabs closed.
-- Final bench at edb2106 (release binary from the shim): final-1 17:14 load 0.74 9/9 (cold 2.1, herdr
+- Final bench at 6fe6250 (release binary from the shim): final-1 17:14 load 0.74 9/9 (cold 2.1, herdr
   2.2, usable 177.8 ms); final-2 17:16 load 0.65 9/9 (2.5, 2.4, 179.5).
 - Settled: the ws parity case's leaked servers came from rust-port-bench's pre-flip copy of the case,
   whose Restart stand-in was named `bun`; at the head it stubs `agent-console` and passes (debug 4/4,
   release 3/3) with nothing left behind.
 - Old note: the ws parity case ("socket and HTTP parity") failed on debug builds with "rust server stopped
   without releasing runs/server.pid" and leaves two debug servers per run; r-flip is diagnosing it at
-  ae1a36f. 12 such servers from r-bench2's runs are still alive at 0% CPU (not killed: Billy decides).
-- Final checks at edb2106 (r-flip): cargo test 867/867, clippy and fmt clean, root bun test 903/903,
+  1e942cf. 12 such servers from r-bench2's runs are still alive at 0% CPU (not killed: Billy decides).
+- Final checks at 6fe6250 (r-flip): cargo test 867/867, clippy and fmt clean, root bun test 903/903,
   typechecks clean; full conformance on the shim-built release binary 1242/1243, 0 failed (default-port
   case not run, 8787 busy), 2504 s.
-- Running at 18:08: full `bun run conformance --server bun` at 1ec29c6 (the last commit with the TS
-  engine) in the detached worktree scratchpad/bun-final, log scratchpad/bun-final-conformance.log
-  (background task bdwt9vlfv, about 42 min). It closes Done-when 1 with one clean full Bun run.
-- Left, in order: read the Bun result (rerun any failure alone 3 times; the box must stay quiet);
-  `git worktree remove` scratchpad/bun-final; reword the five "Merge commit 'X' into HEAD" merges with
-  `git filter-branch -f --msg-filter 'sh scratchpad/reword.sh' main..HEAD` (the script maps each original
-  SHA to a sentence; four older commits from before this Ticket carry trailers and are left alone);
-  delete target-check/; ticket `## Notes`; outcome JSON as checkpoint (Mac sign-off); final message from
-  scratchpad/deviations.md (verified deviation list) plus bench numbers and Mac steps. r-flip and r-bench2
-  are idle with nothing left to do. The 12 leaked debug servers from rust-port-bench's pre-flip ws runs
-  are alive at 0% CPU; Billy decides.
+- Bun reference, 18:05 to 18:48: full `bun run conformance --server bun` at 2428185 (the last commit with
+  the TS engine, in a detached worktree since removed): 1242/1243, 0 failed (default-port case not run,
+  8787 busy). Done-when 1 is closed.
+- Merge messages: the five default "Merge commit 'X' into HEAD" merges were reworded with filter-branch
+  msg-filter over main..HEAD; every tree is unchanged, and the SHAs in this file were updated to the
+  rewritten ones. Four older commits from before this Ticket carry trailers and are left alone.
+- target-check/ (a 7.3 GB cargo cache) is deleted. Left: ticket `## Notes`, outcome JSON as a checkpoint
+  for the Mac sign-off, final message. The 12 leaked debug servers are still alive at 0% CPU; Billy decides.
 - Old plan line: release build through the shim, cargo test/clippy/fmt and bun test, full conformance on the
   release binary, one bench run on the final head, two real throwaway pools through the shim, reword
   default merge messages (filter-branch msg-filter), delete target-check/, ticket notes, outcome JSON
