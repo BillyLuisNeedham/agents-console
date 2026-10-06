@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
-import type { HerdrCall, HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
 import { awaitPrompt, type TypedPrompt } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
@@ -174,11 +174,6 @@ export function transcriptPayload(payload: Record<string, unknown>): Record<stri
 /** The bytes of lines each ended by a newline. */
 export function lines(...all: string[]): string {
   return all.map((line) => `${line}\n`).join("");
-}
-
-/** Every call of `method` the server has made so far, from index `from`. */
-export function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** The server's watch on an Attempt's ending, as the fake herdr saw it begin. */

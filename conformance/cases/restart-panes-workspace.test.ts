@@ -18,7 +18,7 @@ import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Case, CaseServer } from "../harness/case.ts";
-import { CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { StubHold } from "../harness/stubs.ts";
 import type { World } from "../harness/world.ts";
@@ -54,11 +54,6 @@ function workspaceCalls(herdr: HerdrProcess, from: number): { method: string; pa
     .slice(from)
     .filter((call) => call.method.startsWith("workspace."))
     .map((call) => ({ method: call.method, params: call.params }));
-}
-
-/** The calls of one method from index `from` on. */
-function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** A world whose pool is `POOL`, terminal-backed on claude, with Ticket 01 ready. */

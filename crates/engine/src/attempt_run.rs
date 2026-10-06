@@ -67,6 +67,7 @@ use crate::attempt_ending::{
 use crate::children::{ChildTracker, signal_group};
 use crate::claude_trust::{FolderTrustSeed, default_claude_config_path, seed_claude_folder_trust};
 use crate::live_attempts::{LiveAttemptEntry, LiveAttempts};
+use crate::lock;
 use crate::pane_session::{
     LaunchCadence, Readiness, WrapperContext, close_pane_in_background, send_wrapper_to_pane,
     type_verified, wait_for_readiness, wait_for_shell_settled, wait_for_wrapper_landed,
@@ -1371,11 +1372,6 @@ impl Sink {
 
 type SharedSink = Arc<Mutex<Sink>>;
 
-fn lock(sink: &SharedSink) -> std::sync::MutexGuard<'_, Sink> {
-    sink.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// The follow-file tailer (ADR-0014, ADR-0016): reads the pane's `script` typescript Stream file as it
 /// grows and derives the attempt log from it line by line, stripping the terminal's escapes and control
 /// noise (`TranscriptLineBuffer`). Polls by positioned reads every 250 ms; `finish` drains the tail,
@@ -1546,9 +1542,7 @@ async fn run_headless(
         ),
         pump(stderr, err_mode, &log, None, &failure, exited.subscribe()),
     );
-    let error = failure
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let error = lock(&failure)
         .take()
         .or_else(|| lock(&log).error.take())
         .or_else(|| tee.as_ref().and_then(|tee| lock(tee).error.take()));
@@ -1607,10 +1601,7 @@ async fn pump(
                 }
             }
             Err(err) => {
-                failure
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get_or_insert(err.to_string());
+                lock(failure).get_or_insert(err.to_string());
                 return;
             }
         }

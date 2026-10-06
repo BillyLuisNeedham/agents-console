@@ -11,7 +11,7 @@ import { expect } from "bun:test";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { poolKey } from "../harness/git-pool.ts";
-import { awaitPrompt, callsOf, spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";
+import { awaitPrompt, spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";
 import {
   interactiveArgv,
   poolLogLines,
@@ -21,6 +21,7 @@ import {
   ticket,
   wrapperFor,
 } from "./attempts-terminal-support.ts";
+import { callsOf } from "../harness/herdr.ts";
 
 /** The headless claude argv Ticket `id` falls back to, as the stub records it. */
 const HEADLESS_FLAG = "-p";

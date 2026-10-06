@@ -17,12 +17,11 @@
 import { expect } from "bun:test";
 import { join } from "node:path";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
-import type { HerdrOptions, HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
   awaitEndingWatch,
-  callsOf,
   CLAUDE_READY,
   eventsOf,
   heldUntil,

@@ -128,9 +128,7 @@ impl Rt {
     }
 
     fn lock(&self) -> MutexGuard<'_, Runtime> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::lock(&self.0)
     }
 
     /// Run `f` on the runtime. Never await inside `f`, and never call `with` on the same runtime

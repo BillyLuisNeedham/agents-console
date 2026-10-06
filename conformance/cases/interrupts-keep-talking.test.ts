@@ -22,7 +22,7 @@ import { join } from "node:path";
 import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
-import { CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
 import type { HttpAnswer } from "../harness/http.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import type { ConformanceStubBehaviour } from "../harness/stubs.ts";
@@ -108,11 +108,6 @@ async function expectContinued(server: CaseServer, ticketId: string, attempt: nu
     { status: 202, body: { ticketId, attempt } },
     `keep talking on ${ticketId}`,
   );
-}
-
-/** The calls of `method` the server made from call `from` on. */
-function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** Everything submitted with Enter into one pane from call `from` on, each Turn whole. */

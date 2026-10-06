@@ -11,6 +11,9 @@ bun run conformance [--server rust] [--rust-bin <path>] [--legs <kind>,<kind>,..
 The binary defaults to `target/release/agent-console` (`cargo build --release`). The Bun server was
 removed at the flip, so `--server bun`, or a `bun` leg, is refused with one line.
 
+Comments under `conformance/` that cite `engine/<file>.ts:<line>` point at the TypeScript server as it
+stood at the flip, commit `75ea8fe`, which deleted it. Read one with `git show 75ea8fe^:engine/<file>.ts`.
+
 ## Takeover cases and legs
 
 A takeover case runs one pool across several server processes in turn, as a Restart does. Each server is

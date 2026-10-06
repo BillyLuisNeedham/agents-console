@@ -19,7 +19,7 @@ import { expect } from "bun:test";
 import { join } from "node:path";
 import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
-import { answerPrompt, awaitPrompt, callsOf, doneOutcome, poolLog, readyTicket, TERMINAL_CONFIG } from "../harness/herdr-tui.ts";
+import { answerPrompt, awaitPrompt, doneOutcome, poolLog, readyTicket, TERMINAL_CONFIG } from "../harness/herdr-tui.ts";
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";
 import {
   bootWorld,
@@ -43,6 +43,7 @@ import {
   untilSurveyed,
   writeEvents,
 } from "./herdr-panes-support.ts";
+import { callsOf } from "../harness/herdr.ts";
 
 /** The Finished terminals count GET /api/state serves now. */
 async function finishedNow(server: Parameters<typeof snapshotOf>[0]): Promise<number> {

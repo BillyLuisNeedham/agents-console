@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { ConversationView, EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import { ticketWorktree } from "../harness/git-pool.ts";
-import { CLAUDE_READY, type HerdrCall, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 import { snapshotOf, startLeg } from "./restart-support.ts";
@@ -93,11 +93,6 @@ export async function startedThenStopped(t: Case, world = conversationWorld(t)):
 /** Start the next server on the pool (leg `n`, the second by default) on the same fake herdr. */
 export function reboot(t: Case, started: Started, n = 1): Promise<CaseServer> {
   return startLeg(t, started.world, n, { herdr: started.herdr });
-}
-
-/** The calls of one method on the fake, from index `from` on. */
-export function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** Every herdr call naming one tab, from index `from` on, once the fake's record is complete. */

@@ -268,6 +268,9 @@ pub fn merge_with_issue_aside(
 ) -> anyhow::Result<MergeResult> {
     let ours = js::read_text(&marker.file)?;
     let file = file_text(marker);
+    // The base for the reconcile's fallback, taken before the merge lands: once the branch is merged,
+    // the merge base is the branch's own tip and its edits to the Ticket file would read as no change.
+    let merge_base = git::merge_base(&session.cwd, &merge_target_ref(session), branch);
     let pool_checkout = session.cwd.clone();
     let merged = git::with_merge_checkout(&session.cwd, session.merge_target.as_deref(), |cwd| {
         if cwd == pool_checkout {
@@ -284,7 +287,14 @@ pub fn merge_with_issue_aside(
     let Some(theirs) = theirs.filter(|_| result.ok) else {
         return Ok(result);
     };
-    let (content, conflicted) = reconcile_ticket_file(session, marker, branch, &ours, &theirs)?;
+    let (content, conflicted) = reconcile_ticket_file(
+        session,
+        marker,
+        branch,
+        merge_base.as_deref(),
+        &ours,
+        &theirs,
+    )?;
     js::write_file(&marker.file, &content)?;
     if conflicted {
         record_ticket_file_conflict(session, marker, branch)?;
@@ -337,18 +347,19 @@ pub fn seed_path_for(session: &Session, ticket_id: &str, branch: &str) -> String
 }
 
 // `ticketSeedFor`: the base for the reconcile: the seed planTicket kept, or the file as committed at
-// the merge base, or the pool copy itself.
+// the merge base taken before the merge landed, or the pool copy itself.
 fn ticket_seed_for(
     session: &Session,
     marker: &TicketMarker,
     branch: &str,
+    merge_base: Option<&str>,
     ours: &str,
 ) -> anyhow::Result<String> {
     let seed = seed_path_for(session, &marker.id, branch);
     if Path::new(&seed).exists() {
         return Ok(js::read_text(&seed)?);
     }
-    if let Some(base) = git::merge_base(&session.cwd, &merge_target_ref(session), branch) {
+    if let Some(base) = merge_base {
         let rel = js::path_relative(&session.cwd, &file_text(marker));
         if let Some(shown) = git::show_file(&session.cwd, &format!("{base}:{rel}")) {
             return Ok(shown);
@@ -359,18 +370,21 @@ fn ticket_seed_for(
 
 /// `reconcileTicketFile`: the three-way body merge through `git merge-file` (its exit status the
 /// conflict count; above 127 git's own error, read as a whole-file conflict). Line 1 always comes from
-/// the pool copy. The reconciled text, and whether it holds conflict markers.
+/// the pool copy. `merge_base` is the branch's merge base with the working branch, taken before any
+/// merge of it landed; it stands in as the base when no seed was kept. The reconciled text, and
+/// whether it holds conflict markers.
 pub fn reconcile_ticket_file(
     session: &Session,
     marker: &TicketMarker,
     branch: &str,
+    merge_base: Option<&str>,
     ours: &str,
     theirs: &str,
 ) -> anyhow::Result<(String, bool)> {
     if ours == theirs {
         return Ok((ours.to_owned(), false));
     }
-    let seed = ticket_seed_for(session, marker, branch, ours)?;
+    let seed = ticket_seed_for(session, marker, branch, merge_base, ours)?;
     let (line1, mine) = split_marker_line(ours);
     let (_, base) = split_marker_line(&seed);
     let (_, other) = split_marker_line(theirs);

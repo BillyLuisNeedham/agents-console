@@ -25,7 +25,7 @@ import type { EnrichedSnapshot, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { ticketWorktree } from "../harness/git-pool.ts";
-import { CLAUDE_READY, OPENCODE_READY, OPENCODE_WAITING, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, OPENCODE_READY, OPENCODE_WAITING, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readMarkers, readTicketFile, until } from "../harness/pool-files.ts";
 import type { StubHold } from "../harness/stubs.ts";
 import type { World } from "../harness/world.ts";
@@ -95,11 +95,6 @@ function holdStub(t: Case, world: World, key: string, behaviour: Parameters<Worl
 /** Wait for a pool file to be there. */
 function untilFile(world: World, path: string): Promise<boolean> {
   return until(() => existsSync(join(world.pool, path)), (there) => there, { what: path, ms: 30_000 });
-}
-
-/** The herdr calls of one method from index `from` on. */
-function callsOf(herdr: HerdrProcess, method: string, from = 0) {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** A Ticket's events of one kind. */

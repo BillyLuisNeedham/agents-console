@@ -5,14 +5,14 @@
 //! and the ids the next record takes. The runtime that drives a Conversation lives in ac-engine.
 
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use ac_protocol::{ConversationRole, ConversationStatus};
 use anyhow::{Result, anyhow};
 use regex::Regex;
 
 use crate::js;
-use crate::stat_cache::StampCache;
+use crate::marker_file::{MarkerCache, field, marker_fields, read_marker_file, write_status_field};
 
 /// What an enlisted Conversation was found as (issue #101): the pane the operator opened, its tab, its
 /// directory and branch as found, and the harness session herdr reported. Absent for a started
@@ -67,32 +67,8 @@ static STATUS_FIELD_RE: LazyLock<Regex> =
 static CONV_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^conv-([0-9]+)$").expect("the conv id pattern compiles"));
 
-// Every view re-reads the conversations directory, once per snapshot and more (issue #157): a file
-// whose stamp has not moved since its last parse is served from that parse, a changed one is parsed
-// afresh. One cache for the process, as the TypeScript module had one.
-static READ_CACHE: LazyLock<Mutex<StampCache<ConversationRecord>>> =
-    LazyLock::new(|| Mutex::new(StampCache::new()));
-
-/// The marker line's fields, as `key=value` words; a later word wins over an earlier one with its key.
-fn marker_fields(body: &str) -> Vec<(&str, &str)> {
-    let mut fields: Vec<(&str, &str)> = Vec::new();
-    for word in js::words(body) {
-        if let Some(eq) = word.find('=')
-            && eq > 0
-        {
-            let (key, value) = (&word[..eq], &word[eq + 1..]);
-            match fields.iter_mut().find(|(k, _)| *k == key) {
-                Some(field) => field.1 = value,
-                None => fields.push((key, value)),
-            }
-        }
-    }
-    fields
-}
-
-fn field<'a>(fields: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
-    fields.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
-}
+// Every view re-reads the conversations directory, once per snapshot and more (issue #157).
+static READ_CACHE: MarkerCache<ConversationRecord> = MarkerCache::new();
 
 fn decode(raw: &str) -> Result<String> {
     js::decode_uri_component(raw).map_err(|err| anyhow!(err))
@@ -219,38 +195,18 @@ pub fn marker_line(rec: &ConversationRecord) -> String {
     format!("<!-- conversation: {} -->", fields.join(" "))
 }
 
-// The issue file's heading grammar, mirrored from pool.ts: the title is the first "# " heading, the
-// opening Turn everything after it.
-fn read_title(lines: &[&str]) -> String {
-    match lines.iter().find(|line| line.starts_with("# ")) {
-        Some(heading) => js::trim(&heading[1..]).to_owned(),
-        None => "(untitled)".to_owned(),
-    }
-}
-
-fn read_opening(lines: &[&str]) -> String {
-    let start = lines
-        .iter()
-        .position(|line| line.starts_with("# "))
-        .map_or(0, |at| at + 1);
-    js::trim(&lines[start..].join("\n")).to_owned()
-}
-
 /// One Conversation's file, read and parsed.
 pub fn read_conversation(file: &Path) -> Result<ConversationRecord> {
-    let text = js::read_text(file)?;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut rec = parse_marker_line(lines[0], file)?;
-    rec.title = read_title(&lines);
-    rec.opening = read_opening(&lines);
-    Ok(rec)
+    let read = read_marker_file(file, parse_marker_line)?;
+    Ok(ConversationRecord {
+        title: read.title,
+        opening: read.body,
+        ..read.marker
+    })
 }
 
 fn read_conversation_cached(file: &Path) -> Result<ConversationRecord> {
-    let mut cache = READ_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.read(file, read_conversation)
+    READ_CACHE.read(file, read_conversation)
 }
 
 /// Every Conversation on disk, sorted by file name. An absent directory reads as none: a pool with no
@@ -290,18 +246,18 @@ pub fn write_conversation(dir: &Path, rec: &ConversationRecord) -> Result<()> {
 
 /// Rewrite only the marker's `status=` field, every other byte of the file kept, CRLF endings too.
 pub fn write_conversation_status(file: &Path, status: ConversationStatus) -> Result<()> {
-    let raw = js::read_text(file)?;
-    let newline = if raw.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut lines: Vec<String> = raw.split(newline).map(str::to_owned).collect();
-    if !CONVERSATION_MARKER_RE.is_match(&lines[0]) {
-        return Err(anyhow!(
-            "conversation marker write: {} has no line-1 marker",
-            file.display()
-        ));
-    }
-    lines[0] = js::replace_first(&lines[0], &STATUS_FIELD_RE, &format!("status={status}"));
-    js::write_file(file, &lines.join(newline))?;
-    Ok(())
+    write_status_field(
+        file,
+        &CONVERSATION_MARKER_RE,
+        &STATUS_FIELD_RE,
+        &status.to_string(),
+        || {
+            anyhow!(
+                "conversation marker write: {} has no line-1 marker",
+                file.display()
+            )
+        },
+    )
 }
 
 /// The next operator-started id: `conv-N`, one past the highest existing and clear of any start still

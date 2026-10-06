@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use ac_protocol::{SpawnAssignRequest, SpawnProposal, TicketStatus};
 use anyhow::{Result, anyhow};
@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::assignment::AssignmentMarker;
 use crate::conversation_record::load_conversations;
 use crate::js;
-use crate::stat_cache::StampCache;
+use crate::marker_file::{MarkerCache, field, marker_fields, read_marker_file, write_status_field};
 
 /// The pool files' gate, one per process. The TypeScript engine changes the pool's files on its one
 /// thread, so no reader ever sees a change half made (the Ticket file a merge steps aside, a state line
@@ -119,11 +119,8 @@ static SPAWN_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
 static ENLIST_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^enlist-([0-9]+)$").expect("the enlist id pattern compiles"));
 
-// Every load re-reads the issues directory, and the server loads on every snapshot (issue #157): a
-// file whose stamp has not moved since its last parse is served from that parse, a changed one is
-// parsed afresh. One cache for the process, as the TypeScript module had one.
-static READ_CACHE: LazyLock<Mutex<StampCache<TicketMarker>>> =
-    LazyLock::new(|| Mutex::new(StampCache::new()));
+// Every load re-reads the issues directory, and the server loads on every snapshot (issue #157).
+static READ_CACHE: MarkerCache<TicketMarker> = MarkerCache::new();
 
 const SPAWN_ASSIGN_FIELDS: [&str; 4] = ["harness", "model", "effort", "drivers"];
 
@@ -175,27 +172,6 @@ fn decode_spawn_assign(raw: &str, file: &Path) -> Result<SpawnAssignRequest> {
         *slot = Some(text.clone());
     }
     Ok(request)
-}
-
-/// The state line's fields, as `key=value` words; a later word wins over an earlier one with its key.
-fn marker_fields(body: &str) -> Vec<(&str, &str)> {
-    let mut fields: Vec<(&str, &str)> = Vec::new();
-    for word in js::words(body) {
-        if let Some(eq) = word.find('=')
-            && eq > 0
-        {
-            let (key, value) = (&word[..eq], &word[eq + 1..]);
-            match fields.iter_mut().find(|(k, _)| *k == key) {
-                Some(field) => field.1 = value,
-                None => fields.push((key, value)),
-            }
-        }
-    }
-    fields
-}
-
-fn field<'a>(fields: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
-    fields.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
 const STATUS_LIST: &str = "ready|in-progress|done|checkpoint|closed";
@@ -253,55 +229,34 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
     })
 }
 
-// The issue file's heading grammar, parsed here beside the marker loading: the title is the first "# "
-// heading, the spec everything after it. One parser owns this format, so a heading-format change breaks
-// exactly here.
-fn read_title(lines: &[&str]) -> String {
-    match lines.iter().find(|line| line.starts_with("# ")) {
-        Some(heading) => js::trim(&heading[1..]).to_owned(),
-        None => "(untitled)".to_owned(),
-    }
-}
-
-fn read_spec(lines: &[&str]) -> String {
-    let start = lines
-        .iter()
-        .position(|line| line.starts_with("# "))
-        .map_or(0, |at| at + 1);
-    js::trim(&lines[start..].join("\n")).to_owned()
-}
-
 /// One Ticket file, read and parsed. Errors name the file.
 pub fn read_marker(file: &Path) -> Result<TicketMarker> {
-    let text = js::read_text(file)?;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut marker = parse_marker_line(lines[0], file)?;
-    marker.title = read_title(&lines);
-    marker.spec = read_spec(&lines);
-    Ok(marker)
+    let read = read_marker_file(file, parse_marker_line)?;
+    Ok(TicketMarker {
+        title: read.title,
+        spec: read.body,
+        ..read.marker
+    })
 }
 
 fn read_marker_cached(file: &Path) -> Result<TicketMarker> {
-    let mut cache = READ_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.read(file, read_marker)
+    READ_CACHE.read(file, read_marker)
 }
 
 /// Rewrite only the state line's `status=` field, every other byte of the file kept, CRLF endings too.
 pub fn write_marker_status(file: &Path, status: TicketStatus) -> Result<()> {
-    let raw = js::read_text(file)?;
-    let newline = if raw.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut lines: Vec<String> = raw.split(newline).map(str::to_owned).collect();
-    if !MARKER_RE.is_match(&lines[0]) {
-        return Err(anyhow!(
-            "marker write: {} has no line-1 state marker",
-            file.display()
-        ));
-    }
-    lines[0] = js::replace_first(&lines[0], &STATUS_FIELD_RE, &format!("status={status}"));
-    js::write_file(file, &lines.join(newline))?;
-    Ok(())
+    write_status_field(
+        file,
+        &MARKER_RE,
+        &STATUS_FIELD_RE,
+        &status.to_string(),
+        || {
+            anyhow!(
+                "marker write: {} has no line-1 state marker",
+                file.display()
+            )
+        },
+    )
 }
 
 /// Markers dual-write (engine.ts's writeMarkers): before every checkpoint write, the state lines on

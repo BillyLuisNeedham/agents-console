@@ -568,7 +568,14 @@ async fn end_merge_link(engine: &Engine, rt: Rt) {
     let (id, file) = rt.with(|r| (r.id.clone(), r.file.clone()));
     let marker = marker_of_conversation(&id, &file);
     let _ = crate::merges::handle_merge_conflict(engine, marker, result, 1).await;
-    let _ = engine.call(move |s| release_pool_checkout(s, hold)).await;
+    // The Interrupt the handling raised is published here: the End runs off the drive loop, so no
+    // drive boundary would carry it to the snapshot.
+    let _ = engine
+        .call(move |s| {
+            release_pool_checkout(s, hold);
+            publish(s);
+        })
+        .await;
 }
 
 // The merge itself, one job: the hold taken, the branch merged. A landed merge finishes the End and lets

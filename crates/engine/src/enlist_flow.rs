@@ -1,4 +1,4 @@
-//! Enlist (issue #101, docs/specs/2026-09-19-enlist-herdr-terminal.md; engine.ts 3935-4196 and
+//! Enlist (issue #101; its spec is in git history; engine.ts 3935-4196 and
 //! 10163-10699): the engine's one-shot orchestration behind `POST /api/enlist`, and the endings of an
 //! enlisted attempt. Where [`crate::enlisted`] owns what lives on in the pane (the Turn tick, the
 //! teaching Turn, the ending watch), this module re-judges the pane, applies the branch rule, claims

@@ -18,7 +18,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolConfig } from "../../protocol/wire.ts";
-import type { HerdrCall, HerdrProcess } from "./herdr.ts";
+import { callsOf, type HerdrCall, type HerdrProcess } from "./herdr.ts";
 import { readEvents, readMarkers, until } from "./pool-files.ts";
 import type { TicketSeed, World } from "./world.ts";
 
@@ -195,11 +195,6 @@ export function spawnedPayloads(world: World, id: string): Record<string, unknow
   return readEvents(world.pool, id)
     .filter((event) => event.kind === "spawned")
     .map((event) => event.payload);
-}
-
-/** Every call of `method` the server has made so far. */
-export function callsOf(herdr: HerdrProcess, method: string): HerdrCall[] {
-  return herdr.calls.filter((call) => call.method === method);
 }
 
 /** Wait for a Ticket's state line to read `status`. */

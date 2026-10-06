@@ -4,7 +4,6 @@
 //! hard limit, and a Restart then hands the pool to Boot.
 
 use std::fs::OpenOptions;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,23 +18,14 @@ use ac_core::machine_defaults::default_machine_defaults_paths;
 use ac_io::herdr::default_socket_path;
 use ac_server::{PoolServerOptions, Server};
 
+use crate::boot::home_dir;
+use crate::detach::spawn_detached;
+
 /// Well past the children's TERM grace plus the drive's settle wait: a stop that has not finished by
 /// then is stuck on something the exit will free.
 const SHUTDOWN_HARD_LIMIT: Duration = Duration::from_millis(15_000);
 
 const USAGE: &str = "usage: agent-console server --pool <dir> [--port <n>] [--registry <file>]";
-
-/// Node's `os.homedir()`: `$HOME` when set, else the password database's entry for this user.
-pub fn home_dir() -> String {
-    if let Some(home) = std::env::var_os("HOME") {
-        return home.to_string_lossy().into_owned();
-    }
-    nix::unistd::User::from_uid(nix::unistd::getuid())
-        .ok()
-        .flatten()
-        .map(|user| user.dir.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
 
 // An environment variable as `process.env.X || undefined` reads it: unset and empty are both absent.
 fn env_value(name: &str) -> Option<String> {
@@ -113,14 +103,7 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err_log));
-        // SAFETY: setsid is async-signal-safe and touches nothing of the parent's.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        command.spawn().map(drop)
+        spawn_detached(&mut command)
     };
     let (log_again, err_again) = (
         log.try_clone().map_err(|err| err.to_string())?,

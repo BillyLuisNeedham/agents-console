@@ -2,6 +2,7 @@
 //! subcommands.
 
 mod boot;
+mod detach;
 mod fleet;
 mod server_cli;
 mod steward;

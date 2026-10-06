@@ -684,3 +684,38 @@ async fn an_ending_conversation_drops_what_it_never_delivered_and_tells_its_pare
         "A Conversation you spawned was ended by the operator.\nBranch: pool/key/b\nClosing note: wrapped up"
     );
 }
+
+// NOT-PORTED.md, "Ported in part" (server.test.ts:5003): ending an enlisted Conversation makes no
+// `pane.read` of its pane, so a Peek after the End has nothing fresh to serve.
+#[tokio::test]
+async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
+    let rig = Rig::new().await;
+    rig.live("conv-1", true).await;
+    assert!(
+        rig.engine
+            .call(|s| s
+                .conversations
+                .runtime("conv-1")
+                .unwrap()
+                .with(|r| r.enlisted))
+            .await
+            .unwrap()
+    );
+    let before = rig.fake.methods().len();
+    end(
+        &rig.engine,
+        "conv-1",
+        Some("bye".into()),
+        ac_protocol::AnswerBy::Operator,
+    )
+    .await
+    .unwrap();
+    // Nothing the End started in the background is still to come.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let methods: Vec<String> = rig.fake.methods()[before..].to_vec();
+    assert!(
+        !methods.iter().any(|m| m == "pane.read"),
+        "the End read the pane: {methods:?}"
+    );
+    assert!(rig.kinds("conv-1").contains(&TicketEventKind::Ended));
+}

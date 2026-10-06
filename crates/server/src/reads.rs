@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use ac_core::events::{read_event_values, read_events};
 use ac_core::js;
-use ac_core::pool::{MARKER_RE, TicketMarker};
+use ac_core::pool::{MARKER_RE, TicketMarker, read_marker};
 use ac_core::streamlog::{list_attempt_logs, reconstruct_attempts};
 use ac_protocol::{TicketBodyResponse, TicketEventKind, TicketGradeSummary};
 
@@ -285,19 +285,34 @@ pub fn strip_state_marker(text: &str) -> String {
     lines[first..].join("\n")
 }
 
-/// A ticket's Issue file: `<id>.md` first, then any `.md` file whose prefix before its first `-` is the
-/// id. Scoped to what the issues directory lists, so an arbitrary id can never walk out of it.
+/// A ticket's Issue file: `<id>.md` first, then, among the `.md` files whose prefix before their first `-`
+/// is the id, the one whose state line names the id, so `01-a.md` answers for 01 beside an adopted
+/// `01-spawn-1.md` whatever order the directory lists them in. A file with no readable state line is the
+/// last resort, the first by name. Scoped to what the issues directory lists, so an arbitrary id can never
+/// walk out of it.
 pub fn ticket_body_file(issues_dir: &Path, ticket_id: &str) -> Option<PathBuf> {
     let files = js::read_dir_names(issues_dir).ok()?;
-    let markdown: Vec<&String> = files.iter().filter(|file| file.ends_with(".md")).collect();
+    let mut markdown: Vec<&String> = files.iter().filter(|file| file.ends_with(".md")).collect();
+    markdown.sort();
     let exact = format!("{ticket_id}.md");
-    let file = markdown.iter().find(|file| ***file == exact).or_else(|| {
-        markdown.iter().find(|file| {
-            file.find('-')
-                .is_some_and(|dash| dash > 0 && file[..dash] == *ticket_id)
-        })
-    })?;
-    Some(issues_dir.join(file.as_str()))
+    if let Some(file) = markdown.iter().find(|file| ***file == exact) {
+        return Some(issues_dir.join(file.as_str()));
+    }
+    let mut unmarked = None;
+    for file in markdown.into_iter().filter(|file| {
+        file.find('-')
+            .is_some_and(|dash| dash > 0 && file[..dash] == *ticket_id)
+    }) {
+        let path = issues_dir.join(file.as_str());
+        match read_marker(&path) {
+            Ok(marker) if marker.id == ticket_id => return Some(path),
+            Ok(_) => {}
+            Err(_) => {
+                unmarked.get_or_insert(path);
+            }
+        }
+    }
+    unmarked
 }
 
 /// GET /api/ticket's answer, or `None` when the id has no Issue file. A file that cannot be read is the
@@ -612,6 +627,45 @@ mod tests {
             Some(dir.path().join("01.md"))
         );
         assert_eq!(ticket_body_file(dir.path(), "zzz"), None);
+    }
+
+    // NOT-PORTED.md, http "Left out": GET /api/ticket?id=01 beside an adopted 01-spawn-1.md.
+    #[test]
+    fn ticket_body_lookup_takes_the_file_whose_state_line_names_the_id_in_any_listing_order() {
+        for spawn_first in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let own = "<!-- state: id=01 blocked-by=none status=done -->\n\n# own\n";
+            let child = "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 -->\n\n# child\n";
+            let files = [("01-a.md", own), ("01-spawn-1.md", child)];
+            let order: Vec<_> = if spawn_first {
+                files.iter().rev().collect()
+            } else {
+                files.iter().collect()
+            };
+            for (name, text) in order {
+                std::fs::write(dir.path().join(name), text).unwrap();
+            }
+            assert_eq!(
+                ticket_body_file(dir.path(), "01"),
+                Some(dir.path().join("01-a.md"))
+            );
+            assert_eq!(
+                ticket_body(dir.path(), "01").unwrap().unwrap().body,
+                "# own\n"
+            );
+            assert_eq!(
+                ticket_body_file(dir.path(), "01-spawn-1"),
+                Some(dir.path().join("01-spawn-1.md"))
+            );
+        }
+        // A child alone never answers for its parent's id.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("01-spawn-1.md"),
+            "<!-- state: id=01-spawn-1 blocked-by=none status=ready -->\n",
+        )
+        .unwrap();
+        assert_eq!(ticket_body_file(dir.path(), "01"), None);
     }
 
     #[test]

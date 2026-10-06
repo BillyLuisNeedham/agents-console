@@ -12,11 +12,10 @@ import { expect } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
-import type { HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, type HerdrProcess } from "../harness/herdr.ts";
 import {
   answerPrompt,
   awaitPrompt,
-  callsOf,
   poolLog,
   readyTicket,
   TERMINAL_CONFIG,

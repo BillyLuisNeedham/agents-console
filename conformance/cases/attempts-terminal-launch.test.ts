@@ -12,7 +12,7 @@
 import { expect } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { conformance } from "../harness/case.ts";
-import { callsOf, spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr-tui.ts";
+import { spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import {
   BYPASS_WARNING,
@@ -32,6 +32,7 @@ import {
   untilEvent,
   wrapperFor,
 } from "./attempts-terminal-support.ts";
+import { callsOf } from "../harness/herdr.ts";
 
 const LAUNCH_NEVER_RAN = "launch command never ran";
 

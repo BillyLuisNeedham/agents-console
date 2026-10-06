@@ -554,4 +554,66 @@ mod tests {
         assert_eq!(queue[0].state, MergeQueueState::Stalled);
         assert_eq!(queue[2].state, MergeQueueState::Resolving);
     }
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn order_of(queue: &[MergeQueueEntry]) -> Vec<&str> {
+        queue.iter().map(|e| e.ticket_id.as_str()).collect()
+    }
+
+    // merge-hold.test.ts:543 (NOT-PORTED.md, merges "Partly ported"): a ticket taken again after it left
+    // the line joins the back, behind tickets taken since; one resumed in place keeps its place; one
+    // that landed leaves the queue.
+    #[test]
+    fn a_ticket_taken_again_joins_the_back_and_one_resumed_in_place_keeps_its_place() {
+        let mut line = MergeLine::new();
+        line.taken("01");
+        line.taken("02");
+        line.taken("03");
+        // 02's merge stopped on the operator and left the line's pending set; 04 is taken since.
+        line.settled("02");
+        line.taken("04");
+        let none = HashSet::new();
+        let hold = ids(&["01", "02", "03", "04"]);
+        // Resumed in place, never taken again: 02 keeps its place.
+        assert_eq!(
+            order_of(&line.queue(&hold, &none, &[])),
+            ["01", "02", "03", "04"]
+        );
+        // Taken again: 02 goes to the back, behind 04.
+        line.taken("02");
+        let queue = line.queue(&hold, &none, &[]);
+        assert_eq!(order_of(&queue), ["01", "03", "04", "02"]);
+        assert_eq!(queue[3].state, MergeQueueState::Queued);
+        // 01 landed: it is no longer held, so it leaves the queue.
+        line.settled("01");
+        assert_eq!(
+            order_of(&line.queue(&ids(&["03", "04", "02"]), &none, &[])),
+            ["03", "04", "02"]
+        );
+    }
+
+    // merge-hold.test.ts:536 (NOT-PORTED.md, restart "Left out"): a held ticket whose resolver Attempt is
+    // live reads resolving, not needs-you, even when the merge line never took it and its
+    // merge-conflict Interrupt is on record.
+    #[test]
+    fn a_live_resolver_reads_resolving_though_the_line_never_took_the_ticket() {
+        let line = MergeLine::new();
+        let resolvers: HashSet<String> = ["01".to_string()].into_iter().collect();
+        let queue = line.queue(
+            &ids(&["01"]),
+            &resolvers,
+            &[interrupt("01", InterruptKind::MergeConflict)],
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].state, MergeQueueState::Resolving);
+        // With no live resolver the same record reads needs-you.
+        let queue = line.queue(
+            &ids(&["01"]),
+            &HashSet::new(),
+            &[interrupt("01", InterruptKind::MergeConflict)],
+        );
+        assert_eq!(queue[0].state, MergeQueueState::NeedsYou);
+    }
 }

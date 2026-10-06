@@ -75,3 +75,70 @@ pub fn close_store(session: &mut Session) {
     session.store_open = false;
     session.store.close();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use ac_protocol::{InterruptKind, ResumeAction, RunPhase, TicketStatus};
+
+    use crate::testkit::{Pool, answer, last, settled};
+
+    // NOT-PORTED.md, interrupts "Pinned short" (engine.test.ts:7033): a boundary checkpoint write that
+    // fails once is retried after the backoff, the next Ticket is scheduled and no persistence Interrupt
+    // is raised; a run to done makes seven write attempts, the failed one and six rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_that_fails_once_is_retried_and_the_run_goes_on() {
+        let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
+        pool.store.fail.store(1, Ordering::SeqCst);
+        let engine = pool.start().await;
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let snap = last(&engine);
+        assert_eq!(snap.state.tickets["01"], TicketStatus::Done);
+        assert_eq!(snap.state.tickets["02"], TicketStatus::Done);
+        assert!(
+            !snap
+                .state
+                .interrupts
+                .iter()
+                .any(|i| i.kind == InterruptKind::Persistence)
+        );
+        assert_eq!(
+            pool.store.fail.load(Ordering::SeqCst),
+            0,
+            "the failure was spent"
+        );
+        let phase = answer(&engine, "REVIEW".into(), None, ResumeAction::Approve, None)
+            .await
+            .unwrap();
+        assert_eq!(phase, RunPhase::Done);
+        let rows = pool.store.writes.lock().unwrap().clone();
+        assert_eq!(rows.len(), 6, "seven attempts: the failed one and six rows");
+        assert_eq!(
+            rows[0]["tickets"],
+            serde_json::json!({"01": "done", "02": "ready"})
+        );
+    }
+
+    // NOT-PORTED.md, interrupts "Pinned short": with a store that always fails, the boundary write and
+    // the closing write each make four attempts, eight in all, and the store is never closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_that_always_fails_makes_four_attempts_per_write_and_stays_open() {
+        let pool = Pool::git(&[("01", &[])]);
+        let budget = 1_000;
+        pool.store.fail.store(budget, Ordering::SeqCst);
+        let engine = pool.start().await;
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let attempts = budget - pool.store.fail.load(Ordering::SeqCst);
+        assert_eq!(attempts, 8);
+        assert!(pool.store.writes.lock().unwrap().is_empty());
+        assert!(
+            last(&engine)
+                .state
+                .interrupts
+                .iter()
+                .any(|i| i.kind == InterruptKind::Persistence)
+        );
+        assert_eq!(pool.store.closed.load(Ordering::SeqCst), 0);
+    }
+}

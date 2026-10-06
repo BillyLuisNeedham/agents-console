@@ -17,7 +17,7 @@
  * ready Ticket runs in the pool checkout and has no copy to reconcile.
  */
 
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Case } from "../harness/case.ts";
@@ -144,13 +144,6 @@ async function runToDone(server: Awaited<ReturnType<Case["start"]>>): Promise<vo
 
 function eventKinds(world: World, id: string): string[] {
   return readEvents(world.repo, id).map((event) => event.kind);
-}
-
-/** A merges case the server does not pass yet: a visible todo in the run,
- *  and a real case under CONFORMANCE_PENDING=1. */
-function pending(name: string, body: (t: Case) => Promise<void>): void {
-  if (process.env.CONFORMANCE_PENDING === "1") conformance("merges", name, body);
-  else test.todo(`[merges] ${name}`, () => {});
 }
 
 conformance(
@@ -293,20 +286,17 @@ conformance(
 );
 
 /**
- * PENDING A SERVER FIX. The Bun server loses the branch's edits here: with
- * no seed kept, ticketSeedFor (engine/engine.ts:6054-6082) asks git for
- * `merge-base HEAD <branch>` only after the merge has landed, so HEAD already
- * contains the branch and the "base" is the branch's own copy. The three-way
- * merge then sees no change on the branch side and keeps the pool copy alone:
- * the pool-side note survives and the committed tick is dropped. This case
- * pins the intended behaviour (inventory decision 5), so it is registered as
- * a todo, and runs only with CONFORMANCE_PENDING=1, until the fix lands.
+ * The Bun server lost the branch's edits here: with no seed kept,
+ * ticketSeedFor (engine/engine.ts:6054-6082) asked git for
+ * `merge-base HEAD <branch>` only after the merge had landed, so HEAD already
+ * contained the branch and the "base" was the branch's own copy. The
+ * three-way merge then saw no change on the branch side and kept the pool
+ * copy alone, dropping the committed tick. The Rust server takes the merge
+ * base before the merge (inventory decision 5), and this case pins that.
  */
-const SEED_FALLBACK =
-  "with its kept seed gone, the reconcile takes the merge base's committed copy as its base and keeps both copies' edits";
-
-pending(
-  SEED_FALLBACK,
+conformance(
+  "merges",
+  "with its kept seed gone, the reconcile takes the merge base's committed copy as its base and keeps both copies' edits",
   async (t) => {
     const note = "\n## Notes\n\n- pool-side note\n";
     const world = trackedPool(t, {

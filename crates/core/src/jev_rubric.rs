@@ -878,6 +878,33 @@ mod tests {
         assert_eq!(to_fixed_1(1.45), "1.4");
     }
 
+    // NOT-PORTED.md, verify with Jev "Hidden behaviour": the composed score's rounding. The fake
+    // spreads 1 - 0.9 in floating point, so at level 0 the expected levels sit a hair under 0.25, 0.2
+    // and 0.2, the weighted sum, added in rubric order, a hair under 0.065, and the score is 0.6, not
+    // 0.7.
+    #[test]
+    fn the_composed_score_sums_in_rubric_order_and_rounds_a_hair_under_half_down() {
+        let composed = compose(&with(&[
+            ("ticket_fit", 0.into()),
+            ("claim_fidelity", 0.into()),
+            ("log_health", 0.into()),
+        ]));
+        let levels: Vec<f64> = composed
+            .per_dimension
+            .values()
+            .map(|dimension| dimension.level)
+            .collect();
+        assert!(levels[0] < 0.25 && levels[0] > 0.2499, "{levels:?}");
+        assert!(levels[1] < 0.2 && levels[1] > 0.1999, "{levels:?}");
+        assert!(levels[2] < 0.2 && levels[2] > 0.1999, "{levels:?}");
+        let weighted: f64 = DIMENSIONS
+            .iter()
+            .map(|(name, dimension)| dimension.weight * composed.per_dimension[*name].normalised)
+            .fold(0.0, |sum, part| sum + part);
+        assert!(weighted < 0.065 && weighted > 0.0649, "{weighted}");
+        assert_eq!(composed.score10, 0.6);
+    }
+
     #[test]
     fn grade_of_carries_the_composed_score_verdict_and_reasons() {
         let composed = compose(&answers(&clean()));

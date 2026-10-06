@@ -143,6 +143,17 @@ impl PaneSurvey {
     pub fn latest(&self) -> Option<Arc<PaneListing>> {
         self.last.clone()
     }
+
+    /// A survey whose last listing is `listing` and which lists nothing more: for a test that reads
+    /// the listing without an engine to run the survey.
+    #[cfg(test)]
+    pub(crate) fn listed(listing: PaneListing) -> Self {
+        let lister: Lister = Arc::new(|| async { None }.boxed());
+        PaneSurvey {
+            last: Some(Arc::new(listing)),
+            ..PaneSurvey::new(lister)
+        }
+    }
 }
 
 /// `createPaneSurvey`: start the survey and its cadence. Only a terminal-backed pool has panes to list.

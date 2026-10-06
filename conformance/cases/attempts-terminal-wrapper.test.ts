@@ -13,7 +13,7 @@ import { expect } from "bun:test";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
-import { awaitPrompt, callsOf, spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";
+import { awaitPrompt, spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import {
   interactiveArgv,
@@ -29,6 +29,7 @@ import {
   untilEvent,
   wrapperFor,
 } from "./attempts-terminal-support.ts";
+import { callsOf } from "../harness/herdr.ts";
 
 const AGENT_SOURCE = "herdr:agent-console";
 

@@ -24,7 +24,7 @@ import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig } from "../../pr
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { gitIn, ticketWorktree } from "../harness/git-pool.ts";
-import { CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readTicketFile, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
@@ -59,11 +59,6 @@ function cardOf(snapshot: EnrichedSnapshot, id: string): EnrichedTicketState {
   const card = snapshot.state.tickets.find((each) => each.id === id);
   if (!card) throw new Error(`no Ticket ${id} in the snapshot`);
   return card;
-}
-
-/** The calls of one method from index `from` on. */
-function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
-  return herdr.calls.slice(from).filter((call) => call.method === method);
 }
 
 /** Wait for Ticket `id`'s Held pane of `attempt`. */

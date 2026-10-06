@@ -50,8 +50,10 @@ mod tests {
         assert_eq!(register.latest("p1").unwrap().text, "two");
         register.forget("p1");
         assert_eq!(register.latest("p1"), None);
-        // Forgetting a pane never recorded is a no-op (pane-reads.test.ts:20).
+        // Forgetting a pane never recorded is a no-op and leaves the others (pane-reads.test.ts:20).
+        register.record("p2", "kept".into(), "2026-01-01T00:00:02.000Z".into());
         register.forget("never");
         assert_eq!(register.latest("never"), None);
+        assert_eq!(register.latest("p2").unwrap().text, "kept");
     }
 }

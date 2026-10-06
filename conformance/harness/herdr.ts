@@ -65,6 +65,11 @@ export interface HerdrProcess {
   kill(): Promise<void>;
 }
 
+/** The calls of one method the server has made on the fake, from index `from` on. */
+export function callsOf(herdr: HerdrProcess, method: string, from = 0): HerdrCall[] {
+  return herdr.calls.slice(from).filter((call) => call.method === method);
+}
+
 /** The fake's options a process can be handed: everything but the callback. */
 export type HerdrOptions = Omit<ExecutingFakeHerdrOptions, "onRequest">;
 

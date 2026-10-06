@@ -12,8 +12,8 @@
 import { expect } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { conformance } from "../harness/case.ts";
-import type { HerdrProcess } from "../harness/herdr.ts";
-import { awaitPrompt, callsOf, spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr-tui.ts";
+import { callsOf, type HerdrProcess } from "../harness/herdr.ts";
+import { awaitPrompt, spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {

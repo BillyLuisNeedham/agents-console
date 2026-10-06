@@ -883,3 +883,21 @@ conformance("http", "ticket body endpoint › answers 404 for an id with no Issu
   expect(answer.status).toBe(404);
   expect(answer.json<{ error: string }>()).toEqual({ error: "not found" });
 });
+
+// The gap at engine/server.ts:958 (NOT-PORTED.md, http): the Ticket's own file answers, whatever order the
+// directory lists 01-a.md and an adopted 01-spawn-1.md in.
+conformance("http", "ticket body endpoint › serves the file whose state line names the id beside an adopted spawn", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "01-spawn-1.md", content: `${marker("01-spawn-1", "done", "none", " spawned-by=01")}\n\n# Spawned child\n` },
+      { file: "01-a.md", content: `${marker("01", "done")}\n\n# Own body\n` },
+    ],
+    config: DEFAULTS,
+  });
+  const server = await t.start(world);
+  expect((await server.http.get("/api/ticket?id=01")).json<TicketBodyResponse>()).toEqual({ id: "01", body: "# Own body\n" });
+  expect((await server.http.get("/api/ticket?id=01-spawn-1")).json<TicketBodyResponse>()).toEqual({
+    id: "01-spawn-1",
+    body: "# Spawned child\n",
+  });
+});

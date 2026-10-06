@@ -8,8 +8,8 @@
 //! Boot no longer builds the Console (ADR-0036): the release binary embeds the UI and the shim
 //! rebuilds a stale binary, so boot-launch.ts's build staleness decision has no counterpart here.
 
+use crate::detach::{detach, spawn_detached};
 use std::fs::OpenOptions;
-use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -182,17 +182,6 @@ pub fn start_server(
     }
 }
 
-// Its own session, as Bun's `detached: true`.
-fn detach(command: &mut Command) {
-    // SAFETY: setsid is async-signal-safe and touches nothing in the parent.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-}
-
 /// What the log poll concluded.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BootVerdict {
@@ -272,8 +261,7 @@ pub fn open_browser(url: &str) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    detach(&mut command);
-    command.spawn().is_ok()
+    spawn_detached(&mut command).is_ok()
 }
 
 /// The last few lines of a log, which is what a failed boot has to say.

@@ -9,7 +9,13 @@
 //!
 //! A job that panics is caught, so a bug in one job cannot take the whole pool down silently: the
 //! panic is reported to [`Engine::call`]'s caller as [`EngineGone::Panicked`] with its message, and the
-//! actor carries on with the next job.
+//! actor carries on with the next job. A [`Engine::cast`] job has no caller to hear it, so its panic is
+//! written to stderr (the server's log) with the line that cast it.
+//!
+//! Carrying on, rather than stopping the actor, is a decision: a job mutates the in-memory Session and
+//! writes pool files as separate steps, each file write whole, so a job cut short leaves at worst a
+//! Session that disagrees with a file. The next drive, reconcile or Restart reads the files again, and a
+//! stopped actor would instead leave the server up with a pool that answers nothing until it restarts.
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -59,14 +65,16 @@ impl Engine {
         tokio::spawn(async move {
             attach(&mut session, own);
             while let Some(job) = inbox.recv().await {
-                // A panic is reported through the job's own reply channel (see `call`); here it only
-                // must not end the loop.
+                // A panic is reported through the job's own reply channel (see `call`) or written to
+                // stderr (see `cast`); here it only must not end the loop.
                 // The pool files' gate (ac_core::pool::POOL_FILES): a reader on another thread sees
                 // the pool's files between two jobs, never mid-job.
                 let _files = ac_core::pool::POOL_FILES
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let _ = catch_unwind(AssertUnwindSafe(|| job(&mut session)));
+                if let Err(panic) = catch_unwind(AssertUnwindSafe(|| job(&mut session))) {
+                    eprintln!("{}", panic_report("a job", &panic_message(&panic)));
+                }
                 // What the job emitted is visible once it ends, never part way through it.
                 session.publish_now();
             }
@@ -92,12 +100,22 @@ impl Engine {
         answer.await.unwrap_or(Err(EngineGone::Stopped))
     }
 
-    /// Sends `job` to the actor without waiting for it: TypeScript's un-awaited call.
+    /// Sends `job` to the actor without waiting for it: TypeScript's un-awaited call. A panic in it is
+    /// written to stderr with the line that cast it, and the actor carries on (see the module doc).
+    #[track_caller]
     pub fn cast<F>(&self, job: F)
     where
         F: FnOnce(&mut Session) + Send + 'static,
     {
-        let _ = self.jobs.send(Box::new(job));
+        let from = std::panic::Location::caller();
+        let _ = self.jobs.send(Box::new(move |session| {
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| job(session))) {
+                eprintln!(
+                    "{}",
+                    panic_report(&format!("the job cast at {from}"), &panic_message(&panic))
+                );
+            }
+        }));
     }
 
     /// The last snapshot the engine emitted, or `None` before the first.
@@ -114,6 +132,11 @@ impl Engine {
     pub fn is_running(&self) -> bool {
         !self.jobs.is_closed()
     }
+}
+
+/// The stderr line for a panic no caller hears.
+fn panic_report(job: &str, message: &str) -> String {
+    format!("engine: {job} panicked and was abandoned part way; the engine carries on: {message}")
 }
 
 fn panic_message(panic: &Box<dyn Any + Send>) -> String {
@@ -154,5 +177,20 @@ mod tests {
         let failed = engine.call(|_| -> u32 { panic!("boom") }).await;
         assert_eq!(failed, Err(EngineGone::Panicked("boom".into())));
         assert_eq!(engine.call(|_| 7).await, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_cast_is_reported_with_where_it_was_cast_and_the_actor_carries_on() {
+        let (session, snapshots) = session();
+        let engine = Engine::spawn(session, snapshots, |_, _| {});
+        engine.cast(|_| panic!("boom"));
+        engine.cast(|s| s.pane_reads.record("p", "after".into(), "t1".into()));
+        let read = engine.call(|s| s.pane_reads.latest("p")).await.unwrap();
+        assert_eq!(read.unwrap().text, "after");
+        assert_eq!(
+            panic_report("the job cast at crates/engine/src/x.rs:1:2", "boom"),
+            "engine: the job cast at crates/engine/src/x.rs:1:2 panicked and was abandoned part way; \
+             the engine carries on: boom"
+        );
     }
 }

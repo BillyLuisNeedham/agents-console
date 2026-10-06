@@ -618,8 +618,9 @@ fn keep_ticket_file_notes(
         return Ok(());
     }
     let ours = js::read_text(&marker.file)?;
+    // The seed is kept (checked above), so the reconcile never falls back to a merge base here.
     let (content, conflicted) =
-        reconcile_ticket_file(session, marker, &worktree.branch, &ours, &theirs)?;
+        reconcile_ticket_file(session, marker, &worktree.branch, None, &ours, &theirs)?;
     js::write_file(&marker.file, &content)?;
     if conflicted {
         record_ticket_file_conflict(session, marker, &worktree.branch)?;
@@ -641,4 +642,84 @@ fn close_engine_tickets(session: &mut Session, build_id: &str) -> anyhow::Result
         closed.push(marker.id.clone());
     }
     Ok(closed)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use ac_protocol::{InterruptKind, ResumeAction, RunPhase, TicketStatus};
+
+    use crate::testkit::{Pool, answer, last, settled};
+
+    // NOT-PORTED.md, interrupts "Pinned as the TypeScript server does it" (engine.ts:5587-5592): an
+    // answer whose persist fails is refused with the store's error and its queued record stays pending,
+    // with the Interrupt still served; the next answer drains that record and the run carries on. As
+    // on Bun, the failed processing has already cleared the Interrupt in memory, so the second drain
+    // consumes the record with a refusal and the drive it starts is the retry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on() {
+        let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
+        // The first boundary write fails all four attempts and raises the persistence Interrupt.
+        pool.store.fail.store(4, Ordering::SeqCst);
+        let engine = pool.start().await;
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let served = |engine: &crate::actor::Engine| {
+            last(engine)
+                .state
+                .interrupts
+                .iter()
+                .map(|i| i.kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(served(&engine), [InterruptKind::Persistence]);
+        let pending = |engine: &crate::actor::Engine| {
+            let engine = engine.clone();
+            async move {
+                engine
+                    .call(|s| {
+                        s.answers
+                            .pending()
+                            .iter()
+                            .map(|a| a.ticket_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+
+        pool.store.fail.store(1, Ordering::SeqCst);
+        let refused = answer(
+            &engine,
+            "PERSISTENCE".into(),
+            None,
+            ResumeAction::Resume,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.message(), "database is locked");
+        assert_eq!(pending(&engine).await, ["PERSISTENCE"]);
+        assert_eq!(served(&engine), [InterruptKind::Persistence]);
+        assert_eq!(last(&engine).state.tickets["02"], TicketStatus::Ready);
+
+        let _ = answer(
+            &engine,
+            "PERSISTENCE".into(),
+            None,
+            ResumeAction::Resume,
+            None,
+        )
+        .await;
+        assert!(pending(&engine).await.is_empty(), "the record is drained");
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let snap = last(&engine);
+        assert_eq!(snap.state.tickets["02"], TicketStatus::Done);
+        assert_eq!(served(&engine), [InterruptKind::Review]);
+        assert!(snap.state.log.contains(
+            &"interrupt answered for PERSISTENCE (persistence): the drive retries the checkpoint write"
+                .to_string()
+        ));
+    }
 }

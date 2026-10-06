@@ -7,22 +7,23 @@ test it implies; and the places where a case pins less than the TypeScript
 server does, or works around what it does, because that looks like a bug.
 One section per contract area.
 
+The `engine/<file>.ts:<line>` paths below are as of the flip, commit `75ea8fe`,
+which deleted the TypeScript server. Read one with
+`git show 75ea8fe^:engine/<file>.ts`.
+
 ## `conversations`
 
 Every row of ticket C16 (the lifecycle rows) is a case in
 `cases/conversations-lifecycle.test.ts`. Left out or worked around:
 
-- **A conflicted End's Interrupt is not published** (`conversations.test.ts:602`).
-  `raiseInterrupt` in `engine/engine.ts` changes the state without emitting a
-  snapshot, and a Conversation's End runs off the drive loop, so the
-  merge-approval it raises once the resolver resolves stays out of
-  `/api/state` and the socket until something else publishes: 28 s passed
-  with it unseen in a run of the case. The case starts a second Conversation
-  to carry it, then answers it. Intended behaviour: the snapshot carries the
-  Interrupt the moment it is raised, as the Conversation's start and End
-  snapshots already do. The Rust server should publish it; the Bun server
-  needs the fix Decided 5 gives suspected bugs before the case can drop the
-  carrier.
+- **A conflicted End's Interrupt was not published** (`conversations.test.ts:602`).
+  Fixed in the Rust server. `raiseInterrupt` in `engine/engine.ts` changed the
+  state without emitting a snapshot, and a Conversation's End runs off the
+  drive loop, so the merge-approval it raised once the resolver resolved
+  stayed out of `/api/state` and the socket until something else published.
+  The Rust server publishes once the End's merge handling settles
+  (`crates/engine/src/conversations/end.rs`, `end_merge_link`), and the case
+  asserts the socket frame directly, with no carrier Conversation.
 - **A refused empty pool leaves its lock** (`conversations.test.ts:727`,
   `pool.test.ts:206`). The server exits 1 and names the Seeded Pool opt-in, as
   the case pins, but `runs/server.pid` is left behind: the lock is taken
@@ -109,17 +110,18 @@ that is not a plain passing case.
   the boot re-chain of a merge dropped at shutdown, an enlisted ticket's merge), none of which re-takes a
   merge already in the line from outside today.
   Rust unit test: *merge line: a ticket taken again after it left the line joins the back, behind tickets
-  taken since; one resumed in place keeps its place.*
+  taken since; one resumed in place keeps its place.* It is
+  `a_ticket_taken_again_joins_the_back_and_one_resumed_in_place_keeps_its_place` in
+  `crates/core/src/merge_hold.rs`.
 
-### Pinned pending a TypeScript fix (Decided 5)
+### Fixed in the Rust server (Decided 5)
 
-- **Gap: the reconcile's merge-base fallback** (engine.ts:6054-6082). With `runs/01.seed.md` deleted, the
-  Bun server loses the branch's committed edits to the Ticket file and keeps only the pool copy's. The
-  inferred cause, confirmed by experiment: `ticketSeedFor` runs `git merge-base HEAD <branch>` after the merge
-  has been committed, so the base is the branch's own copy. The case in `merges-reconcile.test.ts` pins the
-  intended result (both copies' edits kept) and is a `test.todo` until the fix lands; it runs with
-  `CONFORMANCE_PENDING=1`. Once the TypeScript server computes the base before the merge (or from `HEAD^1`),
-  drop the pending wrapper.
+- **The reconcile's merge-base fallback** (engine.ts:6054-6082). With `runs/01.seed.md` deleted, the
+  Bun server lost the branch's committed edits to the Ticket file and kept only the pool copy's:
+  `ticketSeedFor` ran `git merge-base HEAD <branch>` after the merge had been committed, so the base was
+  the branch's own copy. The Rust server takes the merge base before the merge lands
+  (`merge_with_issue_aside` in `crates/engine/src/merges.rs`), and the case in
+  `merges-reconcile.test.ts` that pins the intended result (both copies' edits kept) is a real case.
 
 ### Pinned differently from the inventory's wording
 
@@ -175,7 +177,9 @@ Gaps from the inventory's `herdr` list:
   title only when it next enriches a snapshot (`server.ts` `titleNow`), and nothing a case can do from
   outside makes that happen within a bound. Rust unit test: *server: a Pool title read from
   console.json at any snapshot is handed to the run's relabel exactly once per change, whether it came
-  from a Settings save or a hand edit.*
+  from a Settings save or a hand edit.* It is
+  `hands_each_pool_title_change_to_the_relabel_once_from_a_hand_edit_or_a_save` in
+  `crates/server/src/tests.rs`.
 - Left to C15, whose rows they sit beside: the bulk close when `pane.list` fails, the bulk close itself
   and its refused `tab.close`, and Peek of a pane no Turn loop watches.
 
@@ -246,14 +250,14 @@ The engine tests that have no conformance case, each with why it cannot be one a
 - `engine/ws.test.ts:571` a push or a reply that cannot go › logs a push that throws with no coalescing window, and pushes the next emit: needs a snapshot read that throws and a zero coalescing window, both in-process seams of the push hub the server process never exposes. Rust unit test: snapshot push: a snapshot build that fails is logged as 'snapshot push: <reason>' and escapes nowhere, and the next emit is pushed as usual.
 - `engine/ws.test.ts:598` a push or a reply that cannot go › keeps every socket at the last good revision when a snapshot cannot be encoded: needs a snapshot that cannot be encoded (a BigInt in a Ticket), which no pool on disk can make the real server build. Rust unit test: snapshot push: a version whose frame cannot be encoded is logged once and not counted, every socket stays at the last good revision, a socket opening meanwhile is sent that revision, and the next good version's delta is based on it.
 - `engine/ws.test.ts:655` a push or a reply that cannot go › never counts a first snapshot it cannot encode, and sends the next good one whole: needs a first snapshot that cannot be encoded, which no pool on disk can make the real server build. Rust unit test: snapshot push: a first snapshot that cannot be encoded is logged and never counted pushed, sockets keep the null snapshot of revision 0, and the next good version goes whole as revision 1, not as a delta.
-- `engine/ws.test.ts:685` a push or a reply that cannot go › logs a pushed version that no longer encodes whole, drops only the socket opening on it, and serves the page bare: needs a pushed snapshot object changed in place after its delta went out, which only an in-process source can do. Rust unit test: socket open and page: when the version the sockets hold cannot be encoded whole, only the socket opening on it is dropped with no snapshot frame, sockets already open are untouched, and the page is served as built, without the embedded boot, with cache-control no-store.
+- `engine/ws.test.ts:685` a push or a reply that cannot go › logs a pushed version that no longer encodes whole, drops only the socket opening on it, and serves the page bare: needs a pushed snapshot object changed in place after its delta went out, which only an in-process source can do. Rust unit test: socket open and page: when the version the sockets hold cannot be encoded whole, only the socket opening on it is dropped with no snapshot frame, sockets already open are untouched, and the page is served as built, without the embedded boot, with cache-control no-store. Not needed in Rust: a pushed version is an immutable `serde_json::Value` that nothing changes after its delta goes out, and encoding a `Value` cannot fail, so no version the sockets hold can stop encoding; `hub::page` keeps the bare fallback all the same.
 ### Ported in part
 
 Engine tests that have a conformance case, but whose case cannot carry the whole claim from outside. The rest of each claim is a Rust unit test.
 
 * `engine/server.test.ts:861` snapshot push coalescing › pushes a burst of emits as one frame carrying the latest: the case runs against the fixed 50 ms window (open question 2), so it keeps "fewer frames than emits" but cannot read `/api/state` inside a window that is still holding a push back. Rust unit test: snapshot push: while the coalescing window is open, the state the HTTP route serves already carries the latest seq and the socket has not been sent it yet.
 * `engine/server.test.ts:884` snapshot push coalescing › pushes a waiting snapshot before the sockets close: with a 50 ms window the `stopped` snapshot may go out on its timer before the close, so the case proves the farewell arrives, not that a snapshot still waiting is flushed on close. Rust unit test: closing the sockets on stop first sends any snapshot the coalescing window is still holding, then closes with 1000 "stopped".
-* `engine/server.test.ts:5003` enlist a pane as a conversation › peek serves the engine's own viewport read of an enlisted Conversation's pane, and forgets it at End (issue #122): the server's real 2 s pane poll reads the pane around End, so the case checks only that the 404 peek after End reads nothing. Rust unit test: ending an enlisted Conversation makes no `pane.read` of its pane.
+* `engine/server.test.ts:5003` enlist a pane as a conversation › peek serves the engine's own viewport read of an enlisted Conversation's pane, and forgets it at End (issue #122): the server's real 2 s pane poll reads the pane around End, so the case checks only that the 404 peek after End reads nothing. Rust unit test: ending an enlisted Conversation makes no `pane.read` of its pane. It is `ending_an_enlisted_conversation_reads_nothing_of_its_pane` in `crates/engine/src/conversations/tests.rs`.
 * `engine/ws.test.ts:1142` the served page › embeds the boot snapshot the socket's first frames repeat: the "revision 0, null snapshot" boot before the pool starts cannot be reached from outside (open question 6); the case checks the boot once the pool has started. Rust unit test: before the pool starts, the page's embedded boot carries protocol 1, revision 0 and a null snapshot.
 
 ### TypeScript divergences found while porting
@@ -289,7 +293,9 @@ that will not parse, seen from every route), is `config-settings-unreadable.test
   the server never does. The case pins all four `unset`. Intended behaviour (inference): the harness names
   the layer the file supplies it from and drivers reads `default`, while the card keeps the engine's record.
   Rust unit test: *reassign views: an enlisted ticket at rest reads harness from its layer (default with only
-  pool defaults), model and effort unset and drivers default, and its card shows the engine's record.*
+  pool defaults), model and effort unset and drivers default, and its card shows the engine's record.* Not
+  written yet: the Rust port serves all four `unset`, as the case pins, so this test waits on the operator
+  choosing the intended behaviour.
 - **PUT /api/settings/machine with an unreadable console.json** (`config-settings-unreadable.test.ts`). The
   save writes `~/.agent-graphs/defaults.json`, then fails to read the pool half of its answer and refuses with
   400 and the parse error, so the operator is told the request was refused when it landed; GET /api/settings
@@ -363,7 +369,8 @@ the store still refuses). What follows is the part that is not a plain passing c
   checkpoint write that fails once is retried after the backoff, the next Ticket is scheduled and no persistence
   Interrupt is raised; a run to done makes seven write attempts, the failed one and six rows*, and *persistence
   Interrupt: with a store that always fails, the boundary write and the closing write each make four attempts,
-  eight in all, and the store is never closed.*
+  eight in all, and the store is never closed.* They are `a_write_that_fails_once_is_retried_and_the_run_goes_on`
+  and `a_store_that_always_fails_makes_four_attempts_per_write_and_stays_open` in `crates/engine/src/persist.rs`.
 - **Two Keep talking refusals are never given** (gap entries `engine/engine.ts:4682` and `:4685`). keepTalking
   checks the hold again after its fresh pane listing, and by then that listing's own handler (`surveyListed`,
   called before `paneSurvey.refresh()` resolves) has already let the hold go. So a pane that is gone, or whose
@@ -373,7 +380,10 @@ the store still refuses). What follows is the part that is not a plain passing c
   Intended behaviour (inference): the refusal says why. Rust unit test: *keep talking: over a Held pane the fresh
   listing no longer has, answer 409 `keep talking: ticket <id> lost its terminal: pane <pane> is gone`; over one
   whose TUI's exit-code file landed after the attempt began, answer `keep talking: ticket <id> lost its agent:
-  the TUI in pane <pane> has exited`; each lets the hold go.*
+  the TUI in pane <pane> has exited`; each lets the hold go.* The Rust port keeps today's answer from outside, as
+  the cases pin; `the_claim_says_why_a_held_pane_cannot_be_continued_and_lets_the_hold_go` in
+  `crates/engine/src/keep_talking.rs` holds the claim's own two refusals, which a listing that has not let the
+  hold go would reach.
 - **A Continued attempt's crash body is pinned at its head and foot only** (`keep-talking.test.ts:198`, `:208`,
   `:226`). The log-tail lines between come from the pane's Stream file, where util-linux `script` writes its own
   start and done lines as the TUI exits and BSD `script -q` writes none. So the cases pin the reason, the log
@@ -400,7 +410,11 @@ the store still refuses). What follows is the part that is not a plain passing c
   on. The case pins the 400, the Interrupt still served, the one event and record, and the run carrying on. The
   drain's own comment expects the run to go down there, which it does not on the idle path. Rust unit test:
   *answer drain: an answer whose persist fails leaves the pool state and its queued record as they were, and the
-  next answer to the same Interrupt processes it.*
+  next answer to the same Interrupt processes it.* The Rust port does what the Bun server does, which the case
+  pins: the failed processing has already cleared the Interrupt in memory, so the next answer's drain consumes
+  the pending record with a refusal and the drive it starts is the retry.
+  `an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on` in
+  `crates/engine/src/answers.rs` pins that; making the state as it was is the operator's call.
 
 ## `attempts`: terminal-backed launch (C12)
 
@@ -604,7 +618,8 @@ Where the cases reach a row differently from its wording:
   live pane's recorded read, leaves nothing to see once the process is gone. Rust unit test: *enlisted
   attempts: dispose stops every tick and forgets every pane's recorded read.*
 - `pane-reads.test.ts:20`: that forgetting a pane never recorded changes nothing is in-memory only. Rust unit
-  test: *pane read register: forgetting a pane with no recorded read is a no-op and leaves the others.*
+  test: *pane read register: forgetting a pane with no recorded read is a no-op and leaves the others.* It is
+  `records_replaces_and_forgets` in `crates/engine/src/pane_reads.rs`.
 
 Behaviour of the TypeScript server the cases pin as it is today, each worth a look before the port copies it:
 
@@ -644,7 +659,8 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
   Interrupt stands and its `mergeState` reads needs-you. Every resolver the server does launch is one whose merge
   it took and marked resolving before the launch, so a live resolver the merge line never took cannot be made from
   outside. Rust unit test: *merge queue: a held ticket whose resolver Attempt is live reads resolving, not
-  needs-you, even when the merge line never took it and its merge-conflict Interrupt is on record.*
+  needs-you, even when the merge line never took it and its merge-conflict Interrupt is on record.* It is
+  `a_live_resolver_reads_resolving_though_the_line_never_took_the_ticket` in `crates/core/src/merge_hold.rs`.
 
 ### Pinned short
 
@@ -828,18 +844,19 @@ below the line the inventory cites.) All six of the `protocol` area's gaps and n
 are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-page.test.ts`,
 `http-reads.test.ts` and `http-bodies.test.ts`.
 
-### Left out
+### Fixed in the Rust server (Decided 5)
 
 - **GET /api/ticket?id=01 beside an adopted `01-spawn-1.md`** (the gap at `engine/server.ts:958`).
-  `ticketBodyFile` serves the first file `readdir` lists whose name before its first `-` is the id, so which
-  of `01-a.md` and `01-spawn-1.md` answers for 01 depends on the filesystem: tmpfs lists the newest first, so
-  under this machine's `/tmp` the spawned child's body is served, while a sorted listing (APFS) serves
-  `01-a.md`. No case can pin today's answer on both, and the control over directory order the inventory names
-  does not exist. The intended answer, the Ticket's own file, is open question 5's (Decided 5);
-  conv-1-spawn-14 was to fix it and was closed before it ran. The socket's card for 01 reads the same file.
-  Rust unit test: *ticket body lookup: with `01-a.md` and `01-spawn-1.md` in issues/, id 01 resolves to
-  `01-a.md`, the file whose state line says id=01, whatever order the directory lists them in, for GET
-  /api/ticket and the card alike.*
+  `ticketBodyFile` served the first file `readdir` listed whose name before its first `-` is the id, so which
+  of `01-a.md` and `01-spawn-1.md` answered for 01 depended on the filesystem: tmpfs lists the newest first,
+  while a sorted listing (APFS) serves `01-a.md`. The intended answer, the Ticket's own file, is open question
+  5's (Decided 5). The Rust server takes `<id>.md`, then the `<id>-*.md` file whose state line names the id,
+  and only then a file with no readable state line, by name; a spawned child's file never answers for its
+  parent. The socket's card for 01 reads the same file. The case in `pool-routes.test.ts` pins it, and the
+  Rust unit test, *ticket body lookup: with `01-a.md` and `01-spawn-1.md` in issues/, id 01 resolves to
+  `01-a.md`, the file whose state line says id=01, whatever order the directory lists them in*, is
+  `ticket_body_lookup_takes_the_file_whose_state_line_names_the_id_in_any_listing_order` in
+  `crates/server/src/reads.rs`.
 
 ### Pinned as the Bun server does it, worth a look before the port copies it
 
@@ -896,11 +913,14 @@ are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-p
   the whole live cache before its hello is read. The hidden-grades case counts only what follows its hello's
   round trip. Rust unit test: *live check: a socket is visible until its hello says otherwise; once a hello
   says visible false, no live frame it is sent carries activity or peeks, and a change of grades still
-  reaches it as a live frame with grades alone.*
+  reaches it as a live frame with grades alone.* It is
+  `a_socket_is_visible_until_its_hello_says_otherwise_and_a_hidden_one_gets_grades_alone` in
+  `crates/server/src/tests.rs`.
 - A Ticket file that will not load leaves the server on the last Ticket list that did, for every route and
   the snapshot alike, and each later read tries again. The draft case pins two readers of it. Rust unit test:
   *pool meta: a read of issues/ that fails keeps the last list that loaded, and the next read that loads
-  replaces it.*
+  replaces it.* It is `a_read_of_issues_that_fails_keeps_the_last_list_and_the_next_good_read_replaces_it` in
+  `crates/server/src/tests.rs`.
 
 ### Observed while writing these, not pinned
 
@@ -908,7 +928,7 @@ are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-p
   Conversation starts, on its Turn polls).
 - The Steward routes answer a body that is not JSON with 400 `{reason: "invalid JSON body"}` too (C18's area).
 - GET / with no UI build answers 500, Bun's page for the missing `index.html`; the Rust binary embeds the UI,
-  so it never lacks one.
+  so it never lacks one: `crates/server/build.rs` refuses a release build without `ui/dist/index.html`.
 
 ## `restart`: Conversations and panes (C06)
 
@@ -1068,7 +1088,8 @@ Hidden behaviour the cases cannot show, for the Rust port:
 - **The composed score's rounding.** The score is `round(sum * 10 * 10) / 10` in floating point, summed ticket
   fit, then claim fidelity, then log health. The rubric case at level 0 depends on it: the fake's expected levels
   sit a hair under 0.25, 0.2 and 0.2, the sum a hair under 0.065, and the score is 0.6, not 0.7. A Rust server
-  summing `f64` in the same order and rounding half up matches.
+  summing `f64` in the same order and rounding half up matches:
+  `the_composed_score_sums_in_rubric_order_and_rounds_a_hair_under_half_down` in `crates/core/src/jev_rubric.rs`.
 - **A Score answered outside its levels** (inference, from reading `engine/jev-rubric.ts`). The answer check
   accepts any finite score, so a ticket fit of 4.6 on its five levels normalises to 1.15, the composed score can
   pass 10, and the reason reads `ticket fit: level 4.6`. No case pins it, since the API answers within the

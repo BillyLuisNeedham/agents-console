@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { ConversationView, EnrichedSnapshot, PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes, expectSameFile } from "../harness/equal.ts";
-import type { HerdrCall, HerdrOptions, HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, type HerdrCall, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";
 import { freePort, serverArgv, serverChoice } from "../harness/server.ts";
 import type { TicketSeed, World, WorldSpec } from "../harness/world.ts";
@@ -143,10 +143,6 @@ function eventOf(events: TicketEvent[], kind: string): TicketEvent {
   const found = events.find((event) => event.kind === kind);
   if (!found) throw new Error(`no ${kind} event in ${JSON.stringify(kinds(events))}`);
   return found;
-}
-
-function callsOf(herdr: HerdrProcess, method: string): HerdrCall[] {
-  return herdr.calls.filter((call) => call.method === method);
 }
 
 function branches(world: World): string[] {
@@ -902,7 +898,7 @@ conformance("conversations", "a conflicted End waits on a merge-approval under t
   const resolverOutcome = join(world.pool, "runs", "conv-1.resolver.outcome.json");
   // Launch 1 is the Conversation's TUI; launch 2 the resolver, run in the
   // Conversation's worktree: it merges main, keeps its own text, and
-  // reports the conflict resolved; launch 3 is a TUI again.
+  // reports the conflict resolved; any later launch is a TUI again.
   world.stubs.script("_claude", {
     hold: HOLD_SECONDS,
     run: [
@@ -924,6 +920,9 @@ conformance("conversations", "a conflicted End waits on a merge-approval under t
   world.git(["-C", worktree, "commit", "-qam", "worktree change"]);
   writeFileSync(join(world.repo, "shared.txt"), "main-change\n");
   world.git(["commit", "-qam", "main change"]);
+  const socket = await t.socket(server, { visible: true });
+  await socket.sync();
+  const from = socket.frames.length;
 
   const end = await server.http.post("/api/conversations/end", { id: "conv-1" });
   expect(end.status).toBe(202);
@@ -932,15 +931,13 @@ conformance("conversations", "a conflicted End waits on a merge-approval under t
     (call) => call.method === "pane.release_agent" && call.params.pane_id !== view.paneId,
     { ms: 30_000 },
   );
-  // The Bun server raises the Interrupt without publishing it
-  // (conformance/NOT-PORTED.md): another Conversation's start carries it.
-  await Bun.sleep(500);
-  await startConversation(server, { title: "Carrier" });
-  const waiting = await until(
-    () => state(server),
-    (snapshot) => snapshot.state.interrupts.some((i) => i.ticketId === "conv-1"),
-    { what: "an Interrupt under conv-1" },
+  // The End runs off the drive loop, so the server publishes the Interrupt
+  // it raises itself: the socket carries it with nothing else to prompt it.
+  await socket.waitFor(
+    () => socket.pushed?.snapshot.state.interrupts.some((i) => i.ticketId === "conv-1") === true,
+    { from, ms: 5_000, what: "a frame carrying the Interrupt under conv-1" },
   );
+  const waiting = await state(server);
   expect(waiting.state.interrupts.find((i) => i.ticketId === "conv-1")?.kind).toBe("merge-approval");
   expect(recordStatus(world, "conv-1")).toBe("live");
   expect(kinds(readEvents(world.pool, "conv-1"))).toEqual([

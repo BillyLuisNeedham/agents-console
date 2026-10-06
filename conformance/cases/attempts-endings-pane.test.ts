@@ -19,7 +19,6 @@ import { readStateLine, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
   awaitEndingWatch,
-  callsOf,
   CLAUDE_READY,
   crashBody,
   eventsOf,
@@ -38,6 +37,7 @@ import {
   waitForEvent,
   waitForExit,
 } from "./attempts-endings-support.ts";
+import { callsOf } from "../harness/herdr.ts";
 
 /** The crash reason of an Attempt whose wrapper never wrote its exit code. */
 function unreadable(world: World, id: string): string {

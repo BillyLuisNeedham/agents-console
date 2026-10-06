@@ -358,18 +358,3 @@ export function startFakeHerdr(options?: {
     );
   });
 }
-
-/**
- * Wait for something the fake daemon has seen, so a test drives the daemon's
- * side only once the client has actually got there.
- */
-export async function until(
-  what: string,
-  held: () => boolean,
-): Promise<void> {
-  for (let tries = 0; tries < 500; tries++) {
-    if (held()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error(`the fake daemon never saw ${what}`);
-}

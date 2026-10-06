@@ -21,11 +21,10 @@ import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { branches } from "../harness/git-pool.ts";
-import { CLAUDE_READY } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY } from "../harness/herdr.ts";
 import { poolLog, restartCase, settle, snapshotOf, untilLogged } from "./restart-support.ts";
 import {
   DONE_01,
-  callsOf,
   callsOnPane,
   callsOnTab,
   closeFinished,

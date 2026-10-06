@@ -194,9 +194,7 @@ pub fn dispose(session: &mut Session) {
 
 impl EnlistedRuntime {
     fn lock(&self) -> std::sync::MutexGuard<'_, RuntimeState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::lock(&self.state)
     }
 
     fn report_state(&self, state: PaneAgentState) {

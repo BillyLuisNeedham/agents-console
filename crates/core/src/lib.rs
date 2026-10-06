@@ -13,6 +13,7 @@ pub mod jev_questions;
 pub mod jev_rubric;
 pub mod js;
 pub mod machine_defaults;
+mod marker_file;
 pub mod merge_hold;
 pub mod notices;
 pub mod outcome;

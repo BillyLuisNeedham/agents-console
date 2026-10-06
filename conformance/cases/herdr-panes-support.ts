@@ -28,8 +28,8 @@ import type {
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
-import type { HerdrOptions, HerdrProcess } from "../harness/herdr.ts";
-import { callsOf, TERMINAL_CONFIG, TUI_FRAMES, tuiStandIn, type TuiStandIn } from "../harness/herdr-tui.ts";
+import { callsOf, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
+import { TERMINAL_CONFIG, TUI_FRAMES, tuiStandIn, type TuiStandIn } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World, WorldSpec } from "../harness/world.ts";
 

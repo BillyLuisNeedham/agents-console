@@ -2,8 +2,7 @@
 //! ([`crate::actor`]) and touched only inside its jobs; the state the checkpoints carry
 //! ([`PoolState`]) and the one way it changes ([`apply_update`]).
 //!
-//! Fields whose module another port owns carry that module's type, a narrow stub where the module is
-//! not ported yet (marked STUB in the module).
+//! Fields an engine module owns carry that module's type.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

@@ -1033,6 +1033,62 @@ mod tests {
         }
     }
 
+    // NOT-PORTED.md, interrupts "Pinned short" (gap entries engine.ts:4682, :4685): the claim's own
+    // refusals. Over a Held pane the fresh listing no longer has it answers that the pane is gone; over
+    // one whose TUI's exit-code file landed after the attempt began, that the TUI has exited; each lets
+    // the hold go. From outside, the survey's listing handler lets such a hold go before the claim
+    // runs, so a request is told there is no terminal left, as on Bun (the conformance cases pin that).
+    #[test]
+    fn the_claim_says_why_a_held_pane_cannot_be_continued_and_lets_the_hold_go() {
+        use crate::pane_survey::{ListedPane, PaneListing, PaneSurvey};
+        let listing = |panes: Vec<&str>| PaneListing {
+            tabs: ["t1".to_string()].into_iter().collect(),
+            panes: panes
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_owned(),
+                        ListedPane {
+                            pane_id: id.to_owned(),
+                            tab_id: Some("t1".into()),
+                            workspace_id: None,
+                            cwd: Some("/w".into()),
+                            terminal_id: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let words = |s: &mut Session| {
+            claim(s, "01", true, None)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string()
+        };
+
+        let mut s = session();
+        checkpointed(&mut s, true);
+        s.pane_survey = Some(PaneSurvey::listed(listing(vec!["p2"])));
+        assert_eq!(
+            words(&mut s),
+            "keep talking: ticket 01 lost its terminal: pane p1 is gone"
+        );
+        assert!(!s.held.contains_key("01"), "the hold is let go");
+
+        let runs = tempfile::tempdir().unwrap();
+        let mut s = session();
+        checkpointed(&mut s, true);
+        s.runs_dir = runs.path().to_string_lossy().into_owned();
+        s.pane_survey = Some(PaneSurvey::listed(listing(vec!["p1"])));
+        let exit_code = held_exit_code_path(&s, "01", &s.held["01"]).unwrap();
+        std::fs::write(exit_code, "0\n").unwrap();
+        assert_eq!(
+            words(&mut s),
+            "keep talking: ticket 01 lost its agent: the TUI in pane p1 has exited"
+        );
+        assert!(!s.held.contains_key("01"), "the hold is let go");
+    }
+
     #[test]
     fn keep_talking_refuses_what_is_not_waiting_at_a_checkpoint_with_a_pane_held() {
         let mut s = session();

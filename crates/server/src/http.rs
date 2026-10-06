@@ -392,6 +392,13 @@ fn steward_done(message: String, status: u16) -> Response {
     json_response(status, &json!({ "ok": true, "message": message }))
 }
 
+/// What `/api/steward/held` does with a Held spawn, parsed once from its `action`.
+#[derive(Clone, Copy)]
+enum HeldSpawnAction {
+    Adopt,
+    Discard,
+}
+
 // A refusal of the Steward's is a 409; a file this server cannot read is its own failure, a 500.
 fn engine_refused(err: EngineError) -> Response {
     let status = if matches!(err, EngineError::ConfigUnreadable(_)) {
@@ -510,28 +517,35 @@ async fn steward_route(
             }
         }
         "/api/steward/held" => {
-            let action = text("action");
             let id = text("id");
-            if id.is_empty() || (action != "adopt" && action != "discard") {
-                return steward_refusal(400, "id and an action of adopt or discard are required");
+            let action = match text("action").as_str() {
+                "adopt" => Some(HeldSpawnAction::Adopt),
+                "discard" => Some(HeldSpawnAction::Discard),
+                _ => None,
             }
-            let done = if action == "adopt" {
-                engine
-                    .steward_adopt_held_spawn(conversation, id.clone())
-                    .await
-            } else {
-                engine
-                    .steward_discard_held_spawn(conversation, id.clone())
-                    .await
+            .filter(|_| !id.is_empty());
+            let Some(action) = action else {
+                return steward_refusal(400, "id and an action of adopt or discard are required");
+            };
+            let done = match action {
+                HeldSpawnAction::Adopt => {
+                    engine
+                        .steward_adopt_held_spawn(conversation, id.clone())
+                        .await
+                }
+                HeldSpawnAction::Discard => {
+                    engine
+                        .steward_discard_held_spawn(conversation, id.clone())
+                        .await
+                }
             };
             match done {
                 Ok(()) => steward_done(
                     format!(
                         "{} held spawn {id}",
-                        if action == "adopt" {
-                            "adopted"
-                        } else {
-                            "discarded"
+                        match action {
+                            HeldSpawnAction::Adopt => "adopted",
+                            HeldSpawnAction::Discard => "discarded",
                         }
                     ),
                     200,

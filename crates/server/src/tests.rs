@@ -1038,3 +1038,187 @@ async fn sends_a_waiting_snapshot_before_the_sockets_close() {
         other => panic!("expected the stopped close, got {other:?}"),
     }
 }
+
+// NOT-PORTED.md, protocol/http "Hidden behaviour": a socket is visible until its hello says otherwise;
+// once a hello says visible false, no live frame it is sent carries activity or peeks, and a change of
+// grades still reaches it as a live frame with grades alone.
+#[tokio::test]
+async fn a_socket_is_visible_until_its_hello_says_otherwise_and_a_hidden_one_gets_grades_alone() {
+    let rig = rig(RigOptions::default()).await;
+    publish(
+        &rig.engine(),
+        snapshot(
+            1,
+            RunPhase::Running,
+            &[("01", TicketStatus::InProgress)],
+            &[],
+        ),
+    )
+    .await;
+    // No hello yet, so the socket counts as visible and the live check reads 01's activity for it.
+    let mut shown = rig.socket().await;
+    let live = shown.frame_of("live").await;
+    assert!(live["activity"]["01"].is_object(), "{live}");
+
+    let mut hidden = rig.socket().await;
+    hidden
+        .send(json!({ "type": "hello", "protocol": 1, "visible": false, "cards": [] }))
+        .await;
+    // Drain what the opening sent (hello, snapshot, the live values as they stood), and let the
+    // hello land.
+    while hidden.next_within(300).await.is_some() {}
+
+    // 01 is graded, and its status moves, so its activity is read again.
+    let runs = rig.pool().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join("01.events.jsonl"),
+        "{\"at\":\"t1\",\"attempt\":1,\"kind\":\"graded\",\"payload\":{\"score\":7,\"verdict\":\"pass\",\"reasons\":\"r\"}}\n",
+    )
+    .unwrap();
+    publish(
+        &rig.engine(),
+        snapshot(
+            2,
+            RunPhase::Running,
+            &[("01", TicketStatus::Checkpoint)],
+            &[],
+        ),
+    )
+    .await;
+    let mut shown_activity = false;
+    while !shown_activity {
+        let frame = shown.frame_of("live").await;
+        shown_activity = frame["activity"]["01"]["lastEventAt"] == "t1";
+    }
+
+    let mut hidden_live = Vec::new();
+    while let Some(message) = hidden.next_within(2_500).await {
+        if let Message::Text(text) = message {
+            let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+            if frame["type"] == "live" {
+                hidden_live.push(frame);
+            }
+        }
+    }
+    assert!(
+        !hidden_live.is_empty(),
+        "the grades reach the hidden socket"
+    );
+    for frame in &hidden_live {
+        let keys: Vec<&String> = frame.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["type", "grades"], "{frame}");
+        assert_eq!(frame["grades"]["01"]["verdict"], "pass");
+    }
+}
+
+// NOT-PORTED.md, protocol/http "Hidden behaviour": a read of issues/ that fails keeps the last list
+// that loaded, and the next read that loads replaces it.
+#[tokio::test]
+async fn a_read_of_issues_that_fails_keeps_the_last_list_and_the_next_good_read_replaces_it() {
+    let rig = rig(RigOptions::default()).await;
+    let ids = |rig: &Rig| {
+        let mut inner = rig.server.lock();
+        rig.server.refresh_meta(&mut inner, None);
+        inner
+            .meta
+            .iter()
+            .map(|marker| marker.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&rig), ["01", "02"]);
+    let broken = rig.pool().join("issues/03-third.md");
+    std::fs::write(&broken, "# Third, with no state line\n").unwrap();
+    assert_eq!(ids(&rig), ["01", "02"], "the last list that loaded");
+    assert!(rig.server.lock().ticket_ids.contains("02"));
+    std::fs::write(
+        &broken,
+        "<!-- state: id=03 blocked-by=none status=ready -->\n\n# Third\n",
+    )
+    .unwrap();
+    assert_eq!(ids(&rig), ["01", "02", "03"]);
+    assert!(rig.server.lock().ticket_ids.contains("03"));
+}
+
+// NOT-PORTED.md, herdr (C14) "Partly taken": a Pool title read from console.json at any snapshot is
+// handed to the run's relabel exactly once per change, whether it came from a Settings save or a hand
+// edit.
+#[tokio::test]
+async fn hands_each_pool_title_change_to_the_relabel_once_from_a_hand_edit_or_a_save() {
+    let rig = rig(RigOptions::default()).await;
+    let engine = rig.engine();
+    let wanted = || {
+        let engine = engine.clone();
+        async move {
+            engine
+                .call(|s| s.pool_workspace.wanted.clone())
+                .await
+                .unwrap()
+        }
+    };
+    // A relabel that runs again would put the label back over this mark.
+    let mark = || {
+        let engine = engine.clone();
+        async move {
+            engine
+                .call(|s| s.pool_workspace.wanted = "-".to_owned())
+                .await
+                .unwrap()
+        }
+    };
+    let until_wanted = |label: &'static str| async move {
+        for _ in 0..100 {
+            if wanted().await == label {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the relabel never asked for {label}");
+    };
+    let snapshots_again = |seq: u64| {
+        let engine = engine.clone();
+        let server = rig.server.clone();
+        async move {
+            publish(
+                &engine,
+                snapshot(seq, RunPhase::Quiescent, &[("01", TicketStatus::Done)], &[]),
+            )
+            .await;
+            server.snapshot();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    std::fs::write(
+        rig.pool().join("console.json"),
+        r#"{ "defaults": { "harness": "claude", "model": "m" }, "title": "Alpha" }"#,
+    )
+    .unwrap();
+    snapshots_again(1).await;
+    until_wanted("Alpha").await;
+    mark().await;
+    snapshots_again(2).await;
+    snapshots_again(3).await;
+    assert_eq!(
+        wanted().await,
+        "-",
+        "an unchanged title is not handed on again"
+    );
+
+    let (status, _) = rig
+        .json(
+            "PUT",
+            "/api/settings/pool",
+            Some(r#"{"config":{"title":"Beta"}}"#),
+        )
+        .await;
+    assert_eq!(status, 200);
+    until_wanted("Beta").await;
+    mark().await;
+    snapshots_again(4).await;
+    assert_eq!(
+        wanted().await,
+        "-",
+        "an unchanged title is not handed on again"
+    );
+}

@@ -18,7 +18,8 @@ pub enum Ui {
 #[cfg(not(debug_assertions))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../../ui/dist"]
-#[allow_missing = true]
+// No allow_missing: build.rs refuses a release build without ui/dist/index.html, so the binary never
+// lacks the Console.
 struct Dist;
 
 /// One served file: its bytes and a stamp that moves when the file does (the page is rebuilt when it

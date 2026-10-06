@@ -26,6 +26,7 @@ use crate::checkout_gate::{
 };
 use crate::error::EngineError;
 use crate::interrupts::{interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt};
+use crate::lock;
 use crate::merges::{
     EngineHoldHost, handle_merge_conflict, hold_poll, merge_hold, merge_target_ref,
     merge_target_sha, merge_ticket, merged_payload, through_merge_hold,
@@ -489,12 +490,6 @@ struct StepMerges {
     unjoined: Mutex<Vec<(usize, PoolUpdate)>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 // The `.then` on each attempt's ending: proposals ride to the boundary, a verify candidate moves only
 // the pool log, a done attempt with a worktree joins the merge chain, and a terminal result joins state
 // at once (a checkpoint raises its interrupt here).
@@ -799,7 +794,11 @@ pub async fn run_super_step(engine: &Engine, plan: SuperStepPlan) -> anyhow::Res
             PostJoin::Conflict(index) => {
                 let (marker, result, attempt) = {
                     let merges = lock(&step.merges);
-                    let merge = &merges[index];
+                    let merge = merges.get(index).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the merge conflict at {index} is not among the step's merges"
+                        )
+                    })?;
                     (merge.marker.clone(), merge.result.clone(), merge.attempt)
                 };
                 handle_merge_conflict(engine, marker, result, attempt).await?;

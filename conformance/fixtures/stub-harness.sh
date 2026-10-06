@@ -111,22 +111,25 @@ fi
 
 calls="$stubs/calls"
 mkdir -p "$calls"
-count_file="$calls/$key.count"
-n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
-printf '%s\n' "$n" > "$count_file"
-call="$calls/$key.$n"
-mkdir -p "$call"
 
-# The launch's place in the order of every launch. mkdir is the lock: it is
-# atomic everywhere. A holder killed mid-update cannot wedge the rest, since
-# the wait gives up after five seconds and takes the next number anyway.
+# The launch's number among its key's launches, and its place in the order of
+# every launch, both taken under one lock: two launches of one key at once
+# (two Tickets on one TUI harness) must not both read the same count. mkdir
+# is the lock: it is atomic everywhere. A holder killed mid-update cannot
+# wedge the rest, since the wait gives up after five seconds and takes the
+# next number anyway.
 for _ in $(seq 1 500); do
   mkdir "$calls/.lock" 2>/dev/null && break
   sleep 0.01
 done
+count_file="$calls/$key.count"
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$count_file"
 seq_n=$(( $(cat "$calls/.seq" 2>/dev/null || echo 0) + 1 ))
 printf '%s\n' "$seq_n" > "$calls/.seq"
 rmdir "$calls/.lock" 2>/dev/null
+call="$calls/$key.$n"
+mkdir -p "$call"
 
 printf '%s' "$seq_n" > "$call/seq"
 printf '%s\0' "$name" "$@" > "$call/argv"
