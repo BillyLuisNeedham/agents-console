@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "boot": "bun run engine/boot-cli.ts",
-    "fleet": "bun run engine/fleet-cli.ts"
+    "boot": "bin/agent-console",
+    "fleet": "cargo run --release --bin agent-console -- fleet",
+    "conformance": "bun run conformance/run.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

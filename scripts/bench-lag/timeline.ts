@@ -1,6 +1,6 @@
 /**
- * The lag bench's timelines (issue #161): what the pool server (serve.ts)
- * and the fake herdr (herdr.ts) did, each mark on the wall clock the proxy
+ * The lag bench's timelines (issue #161): what the pool server and the fake
+ * herdr (herdr.ts) did, each mark on the wall clock the proxy
  * (proxy.ts) shares, and the reading of them beside an answer the proxy
  * timed as slow: whether the proxy's own timers, the server's handling, the
  * fake herdr, or something holding the server's loop took the time.
@@ -34,7 +34,8 @@ export interface SlowAnswer {
   idealMs: number;
   /** The server's handler getting the frame, to the answer sent; null when either went unmarked. */
   serverMs: number | null;
-  /** Open in herdr: the server getting the request, to the fake herdr getting its pane.focus. */
+  /** Open in herdr: the server getting the request (the proxy, when the server keeps no timeline), to
+   *  the fake herdr getting its pane.focus. */
   toHerdrMs: number | null;
   /** What else the server and the fake herdr did meanwhile: late wakes, long callbacks, spawns. */
   meanwhile: Mark[];
@@ -52,9 +53,14 @@ export function slowAnswers(trips: WireTrip[], server: Mark[], herdr: Mark[], li
       const id = String(t.id);
       const got = server.find((m) => m.what === asked && m.detail === id && m.at >= t.at - 5 && m.at <= t.at + t.ms);
       const sent = got ? server.find((m) => m.what === answered && m.detail === id && m.at >= got.at) : undefined;
+      // A server with no timeline (the Rust one) marks no "got": the herdr call is then timed from
+      // the frame reaching the proxy, within the trip.
+      const askedAt = got?.at ?? t.at;
       const focused =
-        got && t.kind === "terminal.focus"
-          ? herdr.find((m) => m.what === "herdr got" && m.detail === "pane.focus" && m.at >= got.at)
+        t.kind === "terminal.focus"
+          ? herdr.find(
+              (m) => m.what === "herdr got" && m.detail === "pane.focus" && m.at >= askedAt && (got || m.at <= t.at + t.ms),
+            )
           : undefined;
       const from = (got?.at ?? t.at) - 1;
       const to = sent?.at ?? t.at + t.ms;
@@ -68,7 +74,7 @@ export function slowAnswers(trips: WireTrip[], server: Mark[], herdr: Mark[], li
         ms: round(t.ms),
         idealMs: round(t.idealMs),
         serverMs: got && sent ? round(sent.at - got.at) : null,
-        toHerdrMs: got && focused ? round(focused.at - got.at) : null,
+        toHerdrMs: focused ? round(focused.at - askedAt) : null,
         meanwhile,
       };
     });

@@ -6,9 +6,14 @@ the domain model and vocabulary.
 
 ## Layout
 
-- `engine/`: the pool engine, one Bun process per pool drives the graph, writes
-  checkpoints and ticket logs, and serves the UI and its API
+- `crates/`: the pool engine in Rust, one binary, `agent-console`, with `boot`,
+  `server`, `steward` and `fleet` subcommands. One server process per pool
+  drives the graph, writes checkpoints and ticket logs, and serves the UI and
+  its API (`docs/adr/0036-port-to-rust-behind-a-black-box-conformance-suite.md`)
+- `protocol/`: the wire shapes and the socket protocol as TypeScript, generated
+  from the Rust types, which the UI and the conformance suite import
 - `ui/`: the Console UI (Vite + TypeScript, no framework)
+- `conformance/`: the server's black-box suite (`conformance/README.md`)
 - `docs/adr/`: architecture decision records
 - `CONTEXT.md`: the domain glossary
 
@@ -72,26 +77,47 @@ boot. Without the key, or whenever Jev cannot answer, every decision takes
 the heuristic path it always had (see
 `docs/adr/0020-jev-gates-paths-engine-writes-status.md`).
 
-## Run
+`JEV_BASE_URL` sends Jev's requests to another API root instead of
+`https://api.typesafe.ai`. Leave it unset in everyday use: it exists so the
+conformance suite can point the server at a fake TypeSafe endpoint and script
+what Jev answers (`docs/adr/0036-port-to-rust-behind-a-black-box-conformance-suite.md`).
+The SDK's own `TYPESAFE_BASE_URL` changes nothing.
 
-Runtime is bun.
+## Install
+
+You need Rust (cargo, from https://rustup.rs) to build the engine, and Bun
+(https://bun.sh) to build the UI and run the suites. Bun is a development tool
+only: the engine is one binary, and a release build embeds the built UI.
+
+```sh
+bun install                 # the suites' and scripts' dependencies
+bun install --cwd ui        # UI dependencies
+skills/link.sh              # skills, and the agent-console shim on PATH
+```
+
+## Run
 
 The everyday way in is `agent-console`, the Boot script. Run it from a project
 checkout and it finds the pool (the working directory when that is a pool, the
 one under the checkout's `.scratch/` when there is one, otherwise a choice or a
 new one), prefills its config from the pool, a Setup and the machine defaults,
-asks only for what is left, rebuilds the Console when the build is stale, starts
-the server and opens the browser. It takes
+asks only for what is left, starts the server and opens the browser. It takes
 `[pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]`.
 `skills/link.sh` puts it on PATH; from this checkout it is `bun run boot -- <dir>`.
+
+`agent-console` is a shim (`bin/agent-console`) in front of the binary. Before it
+hands its arguments to `target/release/agent-console boot`, it rebuilds what is
+stale: the UI with Bun when `ui/dist` is missing or older than the UI's sources
+or `protocol/`, then the binary with `cargo build --release` when it is missing
+or older than `crates/`, `Cargo.toml`, `Cargo.lock` or `ui/dist`. Build output
+goes to stderr.
 
 The pieces it drives, for running them by hand:
 
 ```sh
-bun install                             # engine deps
-bun install --cwd ui                    # UI deps
-cd ui && bun run build                  # build the SPA into ui/dist
-bun run engine/server.ts --pool <dir>   # pool server
+cd ui && bun run build                              # build the SPA into ui/dist
+cargo build --release                               # the binary, with ui/dist embedded
+target/release/agent-console server --pool <dir>    # pool server
 ```
 
 The pool server binds one pool at a time and serves the built SPA, a small JSON
@@ -102,8 +128,10 @@ socket then pushes the snapshot's changes as deltas, the live values (activity,
 peeks, grades) while the tab is visible, and the data of the cards the Console
 subscribes to, and it carries every action and read as a request answered by
 the same function as its HTTP twin. The messages are declared in
-`engine/protocol.ts`, the server's side is `engine/ws.ts`, and every HTTP route
-but the old `/api/stream` stays for the Steward's command, Boot and scripts.
+`protocol/protocol.ts` (generated from the Rust types), the code that encodes,
+decodes, diffs and applies them is `ui/src/protocol.ts`, the server's side is in
+`crates/server`, and every HTTP route but the old `/api/stream` stays for the
+Steward's command, Boot and scripts.
 It prints its URL (`pool server on http://localhost:<port>`); open it in a
 browser. An optional `--port <n>` overrides the pinned port, and a busy pinned
 port fails loudly (see `docs/adr/0001-one-console-per-pool.md`).
@@ -115,7 +143,7 @@ per pool, so any of them can be found.
 
 ```sh
 cd ui && bun run dev       # Vite dev server
-cd ui && bun run build     # build the SPA into ui/dist, which the pool server serves
+cd ui && bun run build     # build the SPA into ui/dist, which the binary embeds
 cd ui && bun test          # UI unit tests
 cd ui && bun run typecheck # UI typecheck
 ```
@@ -123,6 +151,14 @@ cd ui && bun run typecheck # UI typecheck
 ## Checks
 
 ```sh
-bun test             # engine tests
-bun run typecheck    # engine typecheck
+cargo test --workspace                              # engine tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check
+cargo build --release && bun run conformance        # the black-box suite against the binary
+bun test                                            # the suites' and bench's own tests
+bun run typecheck                                   # conformance, scripts and protocol typecheck
 ```
+
+`protocol/*.ts` is generated: after changing the Rust types in
+`crates/protocol`, run `cargo run -p ac-protocol --bin gen-typescript --
+protocol`, and a test fails until the checked-in files match.

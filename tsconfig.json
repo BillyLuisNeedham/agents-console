@@ -10,7 +10,7 @@
     "allowImportingTsExtensions": true,
     "types": ["bun"]
   },
-  "include": ["engine", "scripts"],
+  "include": ["protocol", "scripts", "conformance"],
   // The lag bench's page is a browser module, checked by its own tsconfig.
   "exclude": ["scripts/bench-lag/ui"]
 }

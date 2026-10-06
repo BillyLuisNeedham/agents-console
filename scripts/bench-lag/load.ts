@@ -34,13 +34,12 @@
  */
 
 import {
-  decodeServerMessage,
-  encodeMessage,
   PROTOCOL_VERSION,
   WS_PATH,
   type ClientMessage,
   type ServerMessage,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
+import { decodeServerMessage, encodeMessage } from "../../ui/src/protocol.ts";
 
 /** What a server under test speaks to its Console. */
 export type Protocol = "ws" | "sse";

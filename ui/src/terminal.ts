@@ -23,7 +23,7 @@ import {
   type TerminalPeekResponse,
   type TerminalSurfaceView,
 } from "./project";
-import type { PeekFailure } from "../../engine/protocol.ts";
+import type { PeekFailure } from "../../protocol/protocol.ts";
 import { h } from "./dom";
 
 /** How long the card confirms an "Open in herdr". */

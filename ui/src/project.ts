@@ -38,7 +38,7 @@ import type {
   TicketGradeSummary,
   TicketStatus,
   TurnSide,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 
 // ---------------------------------------------------------------------------
 // Wire shapes (CONTEXT.md: Wire shape): declared once in the engine's wire
@@ -99,7 +99,7 @@ export type {
   TicketReassignView,
   TicketStatus,
   TurnSide,
-} from "../../engine/wire.ts";
+} from "../../protocol/wire.ts";
 
 /** The snapshot's state slice, as the projections take it. */
 type PoolState = EnrichedSnapshot["state"];
