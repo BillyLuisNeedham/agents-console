@@ -65,16 +65,14 @@ impl Engine {
         tokio::spawn(async move {
             attach(&mut session, own);
             while let Some(job) = inbox.recv().await {
-                // A panic is reported through the job's own reply channel (see `call`) or written to
-                // stderr (see `cast`); here it only must not end the loop.
                 // The pool files' gate (ac_core::pool::POOL_FILES): a reader on another thread sees
                 // the pool's files between two jobs, never mid-job.
                 let _files = ac_core::pool::POOL_FILES
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Err(panic) = catch_unwind(AssertUnwindSafe(|| job(&mut session))) {
-                    eprintln!("{}", panic_report("a job", &panic_message(&panic)));
-                }
+                // Every job comes wrapped by `call` or `cast`, which catch its panic and report it
+                // there, so no job ends the loop.
+                job(&mut session);
                 // What the job emitted is visible once it ends, never part way through it.
                 session.publish_now();
             }

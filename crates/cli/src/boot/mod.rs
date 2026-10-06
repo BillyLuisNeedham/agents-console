@@ -28,6 +28,7 @@ use ac_core::machine_defaults::{
     write_machine_defaults,
 };
 use ac_core::pool_title::normalise_title;
+use ac_io::own_exe::own_exe;
 use serde_json::{Map, Value};
 
 use config::{
@@ -978,7 +979,7 @@ fn start_and_report(
     let log_path = js::path_join(&[&runs, "server.log"]);
     // Truncated so the boot line the poll reads is always this boot's.
     js::write_file(&log_path, "").map_err(|err| err.to_string())?;
-    let program = std::env::current_exe()
+    let program = own_exe()
         .map(|exe| js::path_text(&exe))
         .map_err(|err| err.to_string())?;
     let mut server = launch::start_server(&program, engine_dir, pool_dir, args.port, &log_path)?;

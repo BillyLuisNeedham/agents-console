@@ -18,13 +18,6 @@
 //! [`AttemptHost`]: each synchronous stretch that touches them (the `spawned` event with its register
 //! and its child, the ending's events with the clear) is one job on the host, so it stays atomic exactly
 //! as it was. The engine's [`Engine`] is the host; a test passes a local one.
-//!
-//! Port notes (issue #162, M2, r-f1-attempts). Done: `attempt_run` (launch, await, run, the headless
-//! spawn and its pumps, the pane tailer, the terminal launch with its botched-launch retries, prompt
-//! delivery, the frame block), `attempt_ending`, `pane_session`, `children`, `live_attempts`,
-//! `claude_trust`, and `ac_core::turn_state`. Next: the engine core wires `AttemptEnv` (the host is its
-//! `Engine`, the Pool workspace its own `PoolWorkspace`), then the `attempts` conformance area against
-//! the Rust binary.
 
 use std::fs::File;
 use std::io::Write;

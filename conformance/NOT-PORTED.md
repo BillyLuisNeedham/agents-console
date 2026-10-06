@@ -409,12 +409,13 @@ the store still refuses). What follows is the part that is not a plain passing c
   next answer, once the store is healthy, is acknowledged as a retry of the pending record and the run carries
   on. The case pins the 400, the Interrupt still served, the one event and record, and the run carrying on. The
   drain's own comment expects the run to go down there, which it does not on the idle path. Rust unit test:
-  *answer drain: an answer whose persist fails leaves the pool state and its queued record as they were, and the
-  next answer to the same Interrupt processes it.* The Rust port does what the Bun server does, which the case
-  pins: the failed processing has already cleared the Interrupt in memory, so the next answer's drain consumes
-  the pending record with a refusal and the drive it starts is the retry.
+  *answer drain: an answer whose persist fails is refused with the store's error and its queued record stays
+  pending, with the Interrupt still served though the failed processing has already cleared it in memory; the
+  next answer to the same Interrupt drains the record with a refusal, and the drive it starts is the retry.* The
+  Rust port does what the Bun server does, which the case pins, and
   `an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on` in
-  `crates/engine/src/answers.rs` pins that; making the state as it was is the operator's call.
+  `crates/engine/src/answers.rs` pins it too. Whether a failed persist should instead leave the pool state as it
+  was is an open decision for the operator.
 
 ## `attempts`: terminal-backed launch (C12)
 
@@ -851,8 +852,12 @@ are cases too, in `protocol-envelope.test.ts`, `protocol-cards.test.ts`, `http-p
   of `01-a.md` and `01-spawn-1.md` answered for 01 depended on the filesystem: tmpfs lists the newest first,
   while a sorted listing (APFS) serves `01-a.md`. The intended answer, the Ticket's own file, is open question
   5's (Decided 5). The Rust server takes `<id>.md`, then the `<id>-*.md` file whose state line names the id,
-  and only then a file with no readable state line, by name; a spawned child's file never answers for its
-  parent. The socket's card for 01 reads the same file. The case in `pool-routes.test.ts` pins it, and the
+  and only then a file with no readable state line, by name. So a spawned child's file never answers for its
+  parent while its state line can be read; one whose state line cannot be read counts as unmarked, and answers
+  for 01 when there is no `01.md`, no `01-*.md` file's state line names 01, and it is first by name among the
+  unmarked. The socket's card for 01 reads the same file. Two cases in `pool-routes.test.ts` pin it: the own
+  file, `01-task.md`, written before `01-spawn-1.md`, so a sorted and a newest-first listing both put the
+  child first; and a lone `conv-1-spawn-1.md` that answers 404 for `conv`. The
   Rust unit test, *ticket body lookup: with `01-a.md` and `01-spawn-1.md` in issues/, id 01 resolves to
   `01-a.md`, the file whose state line says id=01, whatever order the directory lists them in*, is
   `ticket_body_lookup_takes_the_file_whose_state_line_names_the_id_in_any_listing_order` in
@@ -1093,8 +1098,10 @@ Hidden behaviour the cases cannot show, for the Rust port:
 - **A Score answered outside its levels** (inference, from reading `engine/jev-rubric.ts`). The answer check
   accepts any finite score, so a ticket fit of 4.6 on its five levels normalises to 1.15, the composed score can
   pass 10, and the reason reads `ticket fit: level 4.6`. No case pins it, since the API answers within the
-  levels. Intended behaviour (inference): a score outside `0..levels-1` is malformed. Rust unit test: *Jev answer
-  check: a Score outside its levels falls back as malformed.*
+  levels. Rust's answer check is the same (the `Question::Score` arm in `crates/io/src/jev/mod.rs`), so the port
+  changes nothing here. Whether a score outside `0..levels-1` should count as malformed is an open decision, not
+  something the port requires. Once decided, the check lands with a Rust unit test: *Jev answer check: a Score
+  outside its levels falls back as malformed.*
 
 ## `herdr` and `enlist`: the Rust port's choices (r-panes)
 

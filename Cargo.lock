@@ -48,13 +48,11 @@ name = "ac-io"
 version = "0.1.0"
 dependencies = [
  "ac-core",
- "ac-protocol",
  "anyhow",
  "axum",
  "chrono",
  "futures",
  "libc",
- "nix",
  "regex",
  "reqwest",
  "serde",
@@ -83,7 +81,6 @@ dependencies = [
  "ac-engine",
  "ac-io",
  "ac-protocol",
- "anyhow",
  "axum",
  "futures",
  "indexmap",
@@ -103,16 +100,13 @@ name = "agent-console"
 version = "0.1.0"
 dependencies = [
  "ac-core",
- "ac-engine",
  "ac-io",
  "ac-protocol",
  "ac-server",
- "anyhow",
  "libc",
  "nix",
  "regex",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",

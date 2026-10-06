@@ -18,7 +18,7 @@ import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Case, CaseServer } from "../harness/case.ts";
-import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { StubHold } from "../harness/stubs.ts";
 import type { World } from "../harness/world.ts";

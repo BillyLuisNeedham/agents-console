@@ -45,6 +45,7 @@ use ac_core::prompt::TeachingAssignment;
 use ac_core::turn_state::TurnState;
 use ac_io::git::{self, WorktreeInfo};
 use ac_io::herdr::{Herdr, PaneAgentState};
+use ac_io::own_exe::own_exe;
 use ac_protocol::{
     AnswerBy, ConversationRole, ConversationStatus, ConversationTurn, ConversationView,
     NoticeDelivery, TicketEventKind, TurnSide,
@@ -750,7 +751,7 @@ pub(crate) mod stewards {
         per_file: u64,
         ledger: &str,
     ) -> String {
-        let exe = std::env::current_exe()
+        let exe = own_exe()
             .map(|path| js::path_text(&path))
             .unwrap_or_else(|_| "agent-console".to_owned());
         let command = steward_command(&exe, &s.pool_dir, s.console_url.as_deref(), id);

@@ -885,12 +885,13 @@ conformance("http", "ticket body endpoint › answers 404 for an id with no Issu
 });
 
 // The gap at engine/server.ts:958 (NOT-PORTED.md, http): the Ticket's own file answers, whatever order the
-// directory lists 01-a.md and an adopted 01-spawn-1.md in.
+// directory lists it and an adopted 01-spawn-1.md in. The own file is written first and named to sort after
+// the child, so a sorted listing and tmpfs's newest-first one both list the child first.
 conformance("http", "ticket body endpoint › serves the file whose state line names the id beside an adopted spawn", async (t) => {
   const world = t.world({
     tickets: [
+      { file: "01-task.md", content: `${marker("01", "done")}\n\n# Own body\n` },
       { file: "01-spawn-1.md", content: `${marker("01-spawn-1", "done", "none", " spawned-by=01")}\n\n# Spawned child\n` },
-      { file: "01-a.md", content: `${marker("01", "done")}\n\n# Own body\n` },
     ],
     config: DEFAULTS,
   });
@@ -900,4 +901,25 @@ conformance("http", "ticket body endpoint › serves the file whose state line n
     id: "01-spawn-1",
     body: "# Spawned child\n",
   });
+});
+
+// The same gap, whatever the listing order: an adopted spawn's file never answers for the id its name starts
+// with, even when no other file does. A pool whose only file is 01-spawn-1.md does not load, its spawned-by
+// naming no Ticket, so the spawn here is a Conversation's, and conv-1-spawn-1.md starts with `conv-`.
+conformance("http", "ticket body endpoint › answers 404 for an id whose only prefixed file is an adopted spawn", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "conv-1-spawn-1.md", content: `${marker("conv-1-spawn-1", "done", "none", " spawned-by=conv-1")}\n\n# Spawned child\n` },
+    ],
+    config: DEFAULTS,
+    poolFiles: {
+      "conversations/conv-1.md":
+        "<!-- conversation: id=conv-1 status=ended spawned-by=none harness=claude " +
+        "model=m drivers=implement -->\n\n# Talk\n\n\n",
+    },
+  });
+  const server = await t.start(world);
+  const answer = await server.http.get("/api/ticket?id=conv");
+  expect(answer.status).toBe(404);
+  expect(answer.json<{ error: string }>()).toEqual({ error: "not found" });
 });

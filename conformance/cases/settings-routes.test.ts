@@ -6,15 +6,18 @@
  * farewell on the socket, the exit, and the Boot hand-off.
  *
  * The Boot hand-off is observed through a recording stand-in: the server
- * starts Boot as `agent-console boot ...` by name from PATH, so a case that
- * restarts puts a recorder named `agent-console` first on the server's PATH. The recorder notes its argv and prints one line,
- * which lands in the pool's runs/boot.log, and starts nothing.
+ * runs the shim of the checkout its binary sits in, so a case that restarts
+ * starts the server from a copy of the binary in a checkout whose shim is
+ * the recorder (harness/boot-recorder.ts). The recorder notes its argv and
+ * prints one line, which lands in the pool's runs/boot.log, and starts
+ * nothing.
  */
 
 import { expect } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, PoolConfig, RestartResponse, SettingsResponse } from "../../protocol/wire.ts";
+import { bootRecorder, type BootHandOff, type BootRecorder } from "../harness/boot-recorder.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readConsoleJson, readEvents, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
@@ -68,46 +71,8 @@ function machineFile(world: World): string {
 }
 
 // ---------------------------------------------------------------------------
-// The Boot hand-off recorder
+// The Boot hand-off
 // ---------------------------------------------------------------------------
-
-interface BootRecorder {
-  /** The server's environment, the recorder first on PATH. */
-  env: Record<string, string>;
-  /** Every hand-off so far: the argv after the binary's name, and its cwd. */
-  calls(): { argv: string[]; cwd: string }[];
-}
-
-function bootRecorder(world: World): BootRecorder {
-  const bin = join(world.root, "boot-bin");
-  const record = join(world.root, "boot-calls");
-  mkdirSync(bin, { recursive: true });
-  mkdirSync(record, { recursive: true });
-  const script =
-    "#!/usr/bin/env bash\n" +
-    `d=${JSON.stringify(record)}\n` +
-    'f="$d/$$"\n' +
-    'printf \'%s\' "$PWD" > "$f.cwd"\n' +
-    'printf \'%s\\0\' "$@" > "$f.tmp"\n' +
-    'mv "$f.tmp" "$f.argv"\n' +
-    'echo "boot recorder: $*"\n';
-  writeFileSync(join(bin, "agent-console"), script);
-  chmodSync(join(bin, "agent-console"), 0o755);
-  return {
-    env: { PATH: `${bin}:${world.env("").PATH}` },
-    calls() {
-      return readdirSync(record)
-        .filter((name) => name.endsWith(".argv"))
-        .map((name) => {
-          const stem = name.slice(0, -".argv".length);
-          return {
-            argv: readFileSync(join(record, name), "utf8").split("\0").slice(0, -1),
-            cwd: readFileSync(join(record, `${stem}.cwd`), "utf8"),
-          };
-        });
-    },
-  };
-}
 
 /** The `--port` a hand-off's argv carries, or null without one. */
 function portArg(argv: string[]): number | null {
@@ -115,8 +80,17 @@ function portArg(argv: string[]): number | null {
   return i >= 0 ? Number(argv[i + 1]) : null;
 }
 
-/** A hand-off is Boot for this pool, unattended, as a relaunch. */
-function expectBootFor(argv: string[], world: World): void {
+/**
+ * A hand-off is Boot for this pool, unattended, as a relaunch, run by the
+ * shim of the checkout the server's binary sits in and from that checkout:
+ * not an `agent-console` found on PATH, and not handed the `boot` the shim
+ * adds itself.
+ */
+function expectBootFor(call: BootHandOff, world: World, recorder: BootRecorder): void {
+  expect(call.ran).toBe("shim");
+  expect(call.cwd).toBe(recorder.checkout);
+  expect(call.argv).not.toContain("boot");
+  const argv = call.argv;
   const pool = argv.indexOf("--pool");
   expect(pool).toBeGreaterThanOrEqual(0);
   expect(argv[pool + 1]).toBe(world.pool);
@@ -132,13 +106,6 @@ async function exitedCleanly(server: CaseServer, world: World): Promise<void> {
   });
   expect(code).toBe(0);
   expect(existsSync(join(world.pool, "runs", "server.pid"))).toBe(false);
-}
-
-/** Wait for exactly `n` Boot hand-offs, then a moment more for a stray one. */
-async function handOffs(recorder: BootRecorder, n: number): Promise<{ argv: string[]; cwd: string }[]> {
-  await until(() => recorder.calls().length, (got) => got >= n, { what: `${n} Boot hand-off(s)`, ms: 20_000 });
-  await Bun.sleep(500);
-  return recorder.calls();
 }
 
 function bootLog(world: World): string {
@@ -587,7 +554,7 @@ conformance(
     // done stands in for one not started: Stop refuses it, Restart does not.
     const { world } = heldWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await running(server);
 
     const stop = await server.http.post("/api/stop");
@@ -597,8 +564,8 @@ conformance(
     expect(restart.status).toBe(202);
 
     await exitedCleanly(server, world);
-    const [call] = await handOffs(recorder, 1);
-    expectBootFor(call!.argv, world);
+    const [call] = await recorder.handOffs(1);
+    expectBootFor(call!, world, recorder);
     expect(bootLog(world)).toContain("boot recorder:");
   },
 );
@@ -610,7 +577,7 @@ conformance(
   async (t) => {
     const { world } = heldWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await running(server);
     const spawned = await until(
       () => readEvents(world.pool, "01").find((event) => event.kind === "spawned"),
@@ -637,8 +604,8 @@ conformance(
       (alive) => !alive,
       { what: `the stub harness (pid ${pid}) to be stopped`, ms: 5_000 },
     );
-    const [call] = await handOffs(recorder, 1);
-    expectBootFor(call!.argv, world);
+    const [call] = await recorder.handOffs(1);
+    expectBootFor(call!, world, recorder);
   },
 );
 
@@ -649,7 +616,7 @@ conformance(
   async (t) => {
     const pinnedWorld = settledWorld(t, { port: 8790 });
     const pinnedBoot = bootRecorder(pinnedWorld);
-    const pinned = await t.start(pinnedWorld, { env: pinnedBoot.env });
+    const pinned = await t.start(pinnedWorld, pinnedBoot.start);
     await settled(pinned);
     const res = await pinned.http.post("/api/restart");
     expect(res.status).toBe(202);
@@ -657,7 +624,7 @@ conformance(
 
     const freeWorld = settledWorld(t);
     const freeBoot = bootRecorder(freeWorld);
-    const free = await t.start(freeWorld, { env: freeBoot.env });
+    const free = await t.start(freeWorld, freeBoot.start);
     await settled(free);
     const own = await free.http.post("/api/restart");
     expect(own.status).toBe(202);
@@ -666,8 +633,8 @@ conformance(
     // Boot is handed the same port the tab was promised.
     await exitedCleanly(pinned, pinnedWorld);
     await exitedCleanly(free, freeWorld);
-    const [pinnedCall] = await handOffs(pinnedBoot, 1);
-    const [freeCall] = await handOffs(freeBoot, 1);
+    const [pinnedCall] = await pinnedBoot.handOffs(1);
+    const [freeCall] = await freeBoot.handOffs(1);
     expect(portArg(pinnedCall!.argv)).toBe(8790);
     expect(portArg(freeCall!.argv)).toBe(free.port);
   },
@@ -680,7 +647,7 @@ conformance(
   async (t) => {
     const world = settledWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await settled(server);
 
     expect((await server.http.put("/api/settings/pool", { config: { port: 8791 } })).status).toBe(200);
@@ -698,7 +665,7 @@ conformance(
     // Every case's server is started with --port and no pin in console.json.
     const world = settledWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await settled(server);
     expect(server.port).not.toBe(8795);
 
@@ -716,7 +683,7 @@ conformance(
   async (t) => {
     const world = settledWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await settled(server);
 
     const first = await server.http.post("/api/restart");
@@ -727,7 +694,7 @@ conformance(
     // One stop: a clean exit 0. One relaunch: a single Boot hand-off.
     await exitedCleanly(server, world);
     await Bun.sleep(1_000);
-    expect(await handOffs(recorder, 1)).toHaveLength(1);
+    expect(await recorder.handOffs(1)).toHaveLength(1);
   },
 );
 
@@ -738,7 +705,7 @@ conformance(
   async (t) => {
     const world = settledWorld(t);
     const recorder = bootRecorder(world);
-    const server = await t.start(world, { env: recorder.env });
+    const server = await t.start(world, recorder.start);
     await settled(server);
 
     const tab = await t.socket(server);

@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { ConversationView, EnrichedSnapshot, PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes, expectSameFile } from "../harness/equal.ts";
-import { callsOf, type HerdrCall, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";
 import { freePort, serverArgv, serverChoice } from "../harness/server.ts";
 import type { TicketSeed, World, WorldSpec } from "../harness/world.ts";

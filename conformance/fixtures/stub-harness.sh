@@ -34,7 +34,9 @@
 #                                ends the launch with exit 97 and no outcome
 #   scripts/<key>/hold           a FIFO to read one line from first, before
 #                                anything but the record, however long that
-#                                takes: the case's release
+#                                takes: the case's release. The launch ends
+#                                instead when the world is deleted, or ten
+#                                minutes on, past any case's timeout
 #   scripts/<key>/touch          a file to create first, before any wait
 #   scripts/<key>/wait           a file to wait for, up to ten seconds, first
 #   scripts/<key>/work           a file to write in the working directory and
@@ -154,7 +156,23 @@ fi
 steps="$(cat "$script/steps")"
 k=$(( n < steps ? n : steps ))
 if [ -p "$script/hold" ]; then
+  # Opening the FIFO blocks until the release opens it to write, and bash
+  # cannot bound an open. A watchdog of the launch's own ends it instead
+  # once the world is deleted, or ten minutes on, so a case that fails or
+  # never releases it leaves nothing running: the fake herdr's close kills
+  # only the pane's shell. The watchdog leaves with the launch, or once the
+  # release comes.
+  (
+    give_up=$(( SECONDS + 600 ))
+    while [ "$SECONDS" -lt "$give_up" ] && [ -d "$stubs" ]; do
+      sleep 1
+      kill -0 "$$" 2>/dev/null || exit 0
+    done
+    kill "$$"
+  ) </dev/null >/dev/null 2>&1 &
+  watchdog=$!
   read -r _ < "$script/hold"
+  kill "$watchdog" 2>/dev/null
 fi
 if [ -f "$script/touch" ]; then
   touch "$(cat "$script/touch")"

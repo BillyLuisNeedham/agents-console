@@ -9,14 +9,15 @@
  */
 
 import { expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { EnrichedSnapshot } from "../../../protocol/wire.ts";
 import type { Case, CaseServer } from "../../harness/case.ts";
 import { conformance } from "../../harness/case.ts";
 import { expectSameBytes, expectSameFile } from "../../harness/equal.ts";
 import type { HerdrProcess } from "../../harness/herdr.ts";
 import { until } from "../../harness/pool-files.ts";
+import { serverChoice } from "../../harness/server.ts";
 import {
   checkpoint,
   DONE_01,
@@ -313,6 +314,32 @@ conformance(
       "--as",
       id,
     ]);
+  },
+  { timeoutMs: 90_000 },
+);
+
+conformance(
+  "steward",
+  "a Steward started after the server's binary was rebuilt under it is taught the rebuilt binary's path, never a deleted file's",
+  async (t) => {
+    const sw = await stewardWorld(t, { tickets: [{ file: "01.md", marker: DONE_01, body: "# Done\n\nbody" }] });
+    // The server runs from a copy of its binary, and the copy is replaced
+    // while it runs, the way `cargo build` relinks target/release/agent-console:
+    // on Linux the running process's own link then reads `<path> (deleted)`.
+    const binary = join(sw.world.root, "rebuilt", "agent-console");
+    mkdirSync(dirname(binary), { recursive: true });
+    copyFileSync(serverChoice().rustBin, binary);
+    chmodSync(binary, 0o755);
+    const server = await sw.start({ binary });
+    copyFileSync(serverChoice().rustBin, `${binary}.new`);
+    chmodSync(`${binary}.new`, 0o755);
+    renameSync(`${binary}.new`, binary);
+
+    const started = await startConversation(server, { title: "Night", role: "steward" });
+    const teaching = await untilTeaching(sw.herdr, started.paneId!);
+    const command = `${binary} steward --pool ${sw.world.pool} --url ${server.url} --as ${started.id}`;
+    expect(teaching).not.toContain("(deleted)");
+    expect(teaching).toContain(`\n    ${command} <verb> ...\n`);
   },
   { timeoutMs: 90_000 },
 );

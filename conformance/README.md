@@ -8,7 +8,8 @@ directory, the calls on the herdr socket and the harness processes it starts.
 bun run conformance [--server rust] [--rust-bin <path>] [--legs <kind>,<kind>,...] [<bun test arguments>]
 ```
 
-The binary defaults to `target/release/agent-console` (`cargo build --release`). The Bun server was
+The binary defaults to `target/release/agent-console`. A release build embeds the Console, so build it
+first (`cd ui && bun install && bun run build`), then `cargo build --release`. The Bun server was
 removed at the flip, so `--server bun`, or a `bun` leg, is refused with one line.
 
 Comments under `conformance/` that cite `engine/<file>.ts:<line>` point at the TypeScript server as it

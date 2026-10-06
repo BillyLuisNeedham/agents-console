@@ -22,7 +22,7 @@ import { join } from "node:path";
 import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
-import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrProcess } from "../harness/herdr.ts";
 import type { HttpAnswer } from "../harness/http.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import type { ConformanceStubBehaviour } from "../harness/stubs.ts";

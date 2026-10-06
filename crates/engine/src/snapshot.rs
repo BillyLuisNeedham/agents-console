@@ -203,3 +203,40 @@ fn hold_watch_emitted(session: &mut Session, hold: &[String]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ac_protocol::{ResumeAction, RunPhase};
+
+    use crate::testkit::{Pool, answer, settled};
+
+    // Runs a one-Ticket pool to done, keeping `history` snapshots, and hands back the seq and phase of
+    // each snapshot the session kept.
+    async fn run_to_done(pool: &Pool, history: Option<usize>) -> Vec<(u64, RunPhase)> {
+        let mut options = pool.options();
+        options.snapshot_history = history;
+        let engine = crate::boot::start_pool(options).await.unwrap();
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let phase = answer(&engine, "REVIEW".into(), None, ResumeAction::Approve, None)
+            .await
+            .unwrap();
+        assert_eq!(phase, RunPhase::Done);
+        engine
+            .call(|s| s.snapshots.iter().map(|s| (s.seq, s.phase)).collect())
+            .await
+            .unwrap()
+    }
+
+    // The inventory's hidden row (engine.test.ts:360): bounded to one, the pool keeps only its newest
+    // snapshot while seq still numbers every emit from 0 without gaps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_to_one_the_pool_keeps_its_newest_snapshot_and_seq_counts_every_emit() {
+        let all = run_to_done(&Pool::git(&[("01", &[])]), None).await;
+        let seqs: Vec<u64> = all.iter().map(|(seq, _)| *seq).collect();
+        assert_eq!(seqs, (0..all.len() as u64).collect::<Vec<_>>());
+        let last = run_to_done(&Pool::git(&[("01", &[])]), Some(1)).await;
+        assert_eq!(last.len(), 1);
+        assert!(last[0].0 > 2, "seq {}", last[0].0);
+        assert_eq!(last[0].1, RunPhase::Done);
+    }
+}

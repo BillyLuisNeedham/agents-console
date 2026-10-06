@@ -24,7 +24,7 @@ import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig } from "../../pr
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { gitIn, ticketWorktree } from "../harness/git-pool.ts";
-import { callsOf, CLAUDE_READY, type HerdrCall, type HerdrProcess } from "../harness/herdr.ts";
+import { callsOf, CLAUDE_READY, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readTicketFile, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {

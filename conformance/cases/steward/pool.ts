@@ -97,8 +97,8 @@ export interface StewardWorld {
   herdr: HerdrProcess;
   /** The Steward pane's own worktree. */
   stewardDir: string;
-  /** Start (or restart) the server on this world. */
-  start(): Promise<CaseServer>;
+  /** Start (or restart) the server on this world; with `binary`, from that file (`Case.start`'s). */
+  start(options?: { binary?: string }): Promise<CaseServer>;
 }
 
 /**
@@ -128,7 +128,7 @@ export async function stewardWorld(t: Case, spec: StewardWorldSpec = {}): Promis
     rendered: OPENCODE_IDLE,
     tabId: "tab-steward",
   });
-  return { world, herdr, stewardDir, start: () => t.start(world, { herdr }) };
+  return { world, herdr, stewardDir, start: (options = {}) => t.start(world, { herdr, ...options }) };
 }
 
 /**

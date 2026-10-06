@@ -16,6 +16,7 @@ use ac_core::fleet::default_registry_path;
 use ac_core::js;
 use ac_core::machine_defaults::default_machine_defaults_paths;
 use ac_io::herdr::default_socket_path;
+use ac_io::own_exe::own_exe;
 use ac_server::{PoolServerOptions, Server};
 
 use crate::boot::home_dir;
@@ -78,10 +79,16 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         .open(&log_path)
         .map_err(|err| js::FsError::new(&err, "open", &log_path).to_string())?;
     let err_log = log.try_clone().map_err(|err| err.to_string())?;
+    let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Boot may run in another directory, so a pool named relative to this one is named in full.
+    let pool = if Path::new(pool_dir).is_relative() {
+        js::path_text(&here.join(pool_dir))
+    } else {
+        pool_dir.to_owned()
+    };
     let mut args = vec![
-        "boot".to_owned(),
         "--pool".to_owned(),
-        pool_dir.to_owned(),
+        pool,
         "--yes".to_owned(),
         "--relaunch".to_owned(),
     ];
@@ -93,28 +100,49 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         args.push("--port".to_owned());
         args.push(js::string_of(port));
     }
-    // `agent-console` as PATH finds it, as the TypeScript runs `bun` by name; with none on PATH, this
-    // same binary.
-    let spawn = |program: PathBuf, log: std::fs::File, err_log: std::fs::File| {
-        let mut command = Command::new(program);
-        command
-            .args(&args)
-            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(err_log));
-        spawn_detached(&mut command)
-    };
-    let (log_again, err_again) = (
-        log.try_clone().map_err(|err| err.to_string())?,
-        err_log.try_clone().map_err(|err| err.to_string())?,
-    );
-    match spawn(PathBuf::from("agent-console"), log, err_log) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let own = std::env::current_exe().map_err(|err| format!("{err}"))?;
-            spawn(own, log_again, err_again).map_err(|err| format!("{err}"))
-        }
-        other => other.map_err(|err| format!("{err}")),
+    let exe = own_exe().map_err(|err| format!("{err}"))?;
+    let boot = boot_command(&exe, args, here);
+    let mut command = Command::new(&boot.program);
+    command
+        .args(&boot.args)
+        .current_dir(&boot.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log));
+    spawn_detached(&mut command).map_err(|err| format!("{err}"))
+}
+
+/// What a Restart runs to bring the pool back: the program, its arguments, and the directory it runs in.
+#[derive(Debug, PartialEq)]
+struct BootCommand {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+/// Boot from the checkout this binary was built in, never whichever `agent-console` is first on PATH: the
+/// TypeScript ran its own checkout's boot-cli.ts from that checkout. A binary at
+/// `<checkout>/target/<profile>/agent-console` runs that checkout's shim, `bin/agent-console`, which
+/// rebuilds what is stale there and hands its arguments to `boot` itself. A binary with no shim beside it
+/// runs its own `boot`, from `here`.
+fn boot_command(exe: &Path, boot_args: Vec<String>, here: PathBuf) -> BootCommand {
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let checkout = exe
+        .parent()
+        .and_then(Path::parent)
+        .filter(|target| target.file_name().is_some_and(|name| name == "target"))
+        .and_then(Path::parent);
+    match checkout.map(|dir| (dir, dir.join("bin").join("agent-console"))) {
+        Some((dir, shim)) if shim.is_file() => BootCommand {
+            program: shim,
+            args: boot_args,
+            cwd: dir.to_path_buf(),
+        },
+        _ => BootCommand {
+            program: exe,
+            args: std::iter::once("boot".to_owned()).chain(boot_args).collect(),
+            cwd: here,
+        },
     }
 }
 
@@ -245,4 +273,69 @@ pub fn run(args: Vec<String>) -> ! {
         std::future::pending::<()>().await;
     });
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boot_args() -> Vec<String> {
+        ["--pool", "/p", "--yes", "--relaunch"]
+            .map(str::to_owned)
+            .to_vec()
+    }
+
+    /// A file at `dir/relative`, its parents made.
+    fn touch(dir: &Path, relative: &str) -> PathBuf {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_restart_runs_the_shim_of_the_checkout_the_binary_sits_in_from_that_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = std::fs::canonicalize(dir.path()).unwrap();
+        let exe = touch(&checkout, "target/release/agent-console");
+        let shim = touch(&checkout, "bin/agent-console");
+        assert_eq!(
+            boot_command(&exe, boot_args(), PathBuf::from("/elsewhere")),
+            BootCommand {
+                program: shim,
+                args: boot_args(),
+                cwd: checkout,
+            }
+        );
+    }
+
+    #[test]
+    fn a_binary_with_no_shim_beside_it_runs_its_own_boot_from_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let exe = touch(&root, "target/release/agent-console");
+        let mut args = vec!["boot".to_owned()];
+        args.extend(boot_args());
+        assert_eq!(
+            boot_command(&exe, boot_args(), PathBuf::from("/elsewhere")),
+            BootCommand {
+                program: exe,
+                args,
+                cwd: PathBuf::from("/elsewhere"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_shim_two_levels_up_counts_only_from_a_target_directory() {
+        // A build with its own target directory, ~/.cargo-target/release say, beside a ~/bin that holds
+        // some checkout's shim: that shim is not this binary's.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let exe = touch(&root, "cargo-target/release/agent-console");
+        touch(&root, "bin/agent-console");
+        let got = boot_command(&exe, boot_args(), PathBuf::from("/elsewhere"));
+        assert_eq!(got.program, exe);
+        assert_eq!(got.args[0], "boot");
+    }
 }

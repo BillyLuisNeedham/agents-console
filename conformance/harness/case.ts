@@ -77,7 +77,9 @@ export interface Case {
    * directory as its pool instead, spelled as given: a second pool in the
    * world's repository, or the pool reached through a symlink. `leg` picks
    * the server from `legs` (default 0); another server on the same pool
-   * must have stopped first, since the pool lock admits one.
+   * must have stopped first, since the pool lock admits one. With `binary`
+   * it runs that file instead of the leg's binary: a copy laid out in a
+   * checkout of the case's own (harness/boot-recorder.ts).
    */
   start(world: World, options?: CaseStartOptions): Promise<CaseServer>;
   /**
@@ -108,6 +110,8 @@ export interface CaseStartOptions {
   env?: Record<string, string | null>;
   pool?: string;
   leg?: number;
+  /** The server binary to run in place of the leg's. */
+  binary?: string;
 }
 
 export interface CaseOptions {
@@ -172,7 +176,11 @@ function caseContext(legs: ServerChoice[]): { t: Case; teardown(failed: boolean)
         if (value === null) delete env[name];
         else env[name] = value;
       }
-      const running = await startServer({ pool: options.pool ?? world.pool, env, choice: leg });
+      const running = await startServer({
+        pool: options.pool ?? world.pool,
+        env,
+        choice: options.binary ? { ...leg, rustBin: options.binary } : leg,
+      });
       const server: CaseServer = { ...running, http: http(running.url) };
       servers.push(server);
       return server;
