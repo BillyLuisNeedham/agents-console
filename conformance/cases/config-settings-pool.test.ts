@@ -8,8 +8,8 @@
  * inventory's ticket C20, area `config`; each case names the engine test it
  * came from.
  *
- * Every pool's Tickets are done, so nothing runs under the case. JSON is
- * compared once parsed (ADR-0036).
+ * Every pool's Tickets are done or wait at their checkpoint, so nothing runs
+ * under the case. JSON is compared once parsed (ADR-0036).
  */
 
 import { expect } from "bun:test";
@@ -24,9 +24,11 @@ import {
   doneTicket,
   errorOf,
   putPool,
+  putReassign,
   rawConfig,
   restedSnapshot,
   settingsOf,
+  ticket,
 } from "./config-support.ts";
 
 const DEFAULTS: PoolConfig = { defaults: { harness: "claude", model: "m" } };
@@ -337,4 +339,37 @@ conformance("config", "the boot-only keys are selection, terminal and port, each
     terminal: "herdr",
     port: 8790,
   });
+});
+
+// Visible behaviour no engine test covered: the server answers requests on several threads, and the
+// TypeScript one never met two writes of console.json at once.
+
+conformance("config", "Pool settings saves of different keys sent at once, and a Reassign among them, each answer 200 and all land", async (t) => {
+  const world = t.world({ tickets: [ticket("01", { status: "checkpoint" })], config: DEFAULTS });
+  const server = await t.start(world);
+  await restedSnapshot(server);
+
+  for (let round = 0; round < 5; round++) {
+    const patches: Record<string, unknown>[] = [
+      { title: `Round ${round}` },
+      { reviewer: `reviewer ${round}` },
+      { checkpoint: `checkpoint ${round}` },
+      { selection: round % 2 === 0 ? "human" : "auto" },
+      { port: 8800 + round },
+      { resolver: { harness: "claude", model: `r${round}` } },
+      { spawnCaps: { perAttempt: round + 1, perRun: 10 + round } },
+      { steward: { budget: round + 1 } },
+    ];
+    const answers = await Promise.all([
+      ...patches.map((patch) => putPool(server, patch)),
+      putReassign(server, { tickets: ["01"], fields: { model: `m${round}` } }),
+    ]);
+    for (const answer of answers) expect(answer.status, answer.text).toBe(200);
+    expect(readConsoleJson(world.pool)).toEqual({
+      ...DEFAULTS,
+      ...Object.assign({}, ...patches),
+      assign: { "01": { model: `m${round}` } },
+    });
+  }
+  expect(readdirSync(world.pool).filter((name) => name.startsWith("console.json"))).toEqual(["console.json"]);
 });

@@ -2,7 +2,7 @@
 //! publishes by hand: what the conformance areas `http`, `socket` and `protocol` check, reachable before
 //! the engine core lands, and the hidden rows the inventory gives the server.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1302,4 +1302,126 @@ fn lets_its_watchers_go_outside_the_lock_on_a_stop() {
 #[test]
 fn lets_its_watchers_go_outside_the_lock_on_close() {
     check_watchers_go_outside_the_lock(|server| async move { server.close().await }.boxed());
+}
+
+// The temp files a write through a rename left beside `name` in `dir`.
+fn temp_files_beside(dir: &std::path::Path, name: &str) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|file| file.starts_with(&format!("{name}.tmp")))
+        .collect()
+}
+
+// A Settings save and a Reassign each read console.json, change their own keys and write it back. On
+// a runtime that runs them in parallel, saves of different keys must each answer 200 and all land, and
+// a reader must find the file whole at every moment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn lands_every_key_of_concurrent_settings_saves_and_a_reassign() {
+    let rig = rig(RigOptions::default()).await;
+    let file = rig.pool().join("console.json");
+    let watching = Arc::new(AtomicBool::new(true));
+    let reader = {
+        let (file, watching) = (file.clone(), watching.clone());
+        std::thread::spawn(move || {
+            let mut reads = 0;
+            while watching.load(Ordering::SeqCst) {
+                let text = std::fs::read_to_string(&file).unwrap();
+                if let Err(err) = serde_json::from_str::<Value>(&text) {
+                    panic!("console.json did not parse ({err}): {text:?}");
+                }
+                reads += 1;
+            }
+            reads
+        })
+    };
+    for round in 0u64..5 {
+        let patches = [
+            json!({ "title": format!("Round {round}") }),
+            json!({ "reviewer": format!("reviewer {round}") }),
+            json!({ "checkpoint": format!("checkpoint {round}") }),
+            json!({ "selection": if round % 2 == 0 { "human" } else { "auto" } }),
+            json!({ "port": 8800 + round }),
+            json!({ "resolver": { "harness": "claude", "model": format!("r{round}") } }),
+            json!({ "spawnCaps": { "perAttempt": round + 1, "perRun": 10 + round } }),
+            json!({ "steward": { "budget": round + 1 } }),
+        ];
+        let bodies: Vec<String> = patches
+            .iter()
+            .map(|patch| json!({ "config": patch }).to_string())
+            .collect();
+        let reassign =
+            json!({ "tickets": ["02"], "fields": { "model": format!("m{round}") } }).to_string();
+        let saves = bodies
+            .iter()
+            .map(|body| rig.json("PUT", "/api/settings/pool", Some(body)));
+        let (saved, reassigned) = tokio::join!(
+            futures::future::join_all(saves),
+            rig.json("PUT", "/api/reassign", Some(&reassign))
+        );
+        for (status, answer) in saved {
+            assert_eq!(status, 200, "round {round}: {answer}");
+        }
+        assert_eq!(reassigned.0, 200, "round {round}: {}", reassigned.1);
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        for patch in &patches {
+            for (key, value) in patch.as_object().unwrap() {
+                assert_eq!(&on_disk[key], value, "round {round}: {key} was lost");
+            }
+        }
+        assert_eq!(
+            on_disk["assign"]["02"]["model"],
+            format!("m{round}"),
+            "round {round}: the Reassign was lost"
+        );
+        assert_eq!(
+            on_disk["defaults"],
+            json!({ "harness": "claude", "model": "m" })
+        );
+    }
+    watching.store(false, Ordering::SeqCst);
+    assert!(reader.join().unwrap() > 0);
+    assert_eq!(
+        temp_files_beside(&rig.pool(), "console.json"),
+        Vec::<String>::new()
+    );
+}
+
+// The Machine defaults are written whole, so the last of several concurrent saves wins. Each must still
+// answer 200 and leave one of the saved records on disk, never a rename of a temp file another save
+// was writing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn answers_every_concurrent_machine_defaults_save_and_keeps_one_whole() {
+    let rig = rig(RigOptions::default()).await;
+    let dir = rig.dir.path().join("home/.agent-graphs");
+    for round in 0..5 {
+        let records: Vec<Value> = (0..8)
+            .map(|n| json!({ "harness": "claude", "model": format!("m{round}-{n}") }))
+            .collect();
+        let bodies: Vec<String> = records
+            .iter()
+            .map(|record| json!({ "defaults": record }).to_string())
+            .collect();
+        let saved = futures::future::join_all(
+            bodies
+                .iter()
+                .map(|body| rig.json("PUT", "/api/settings/machine", Some(body))),
+        )
+        .await;
+        for (status, answer) in saved {
+            assert_eq!(status, 200, "round {round}: {answer}");
+        }
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("defaults.json")).unwrap())
+                .unwrap();
+        assert!(
+            records.contains(&on_disk),
+            "round {round}: {on_disk} is none of the saves"
+        );
+    }
+    assert_eq!(
+        temp_files_beside(&dir, "defaults.json"),
+        Vec::<String>::new()
+    );
 }

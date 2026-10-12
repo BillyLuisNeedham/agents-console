@@ -18,7 +18,9 @@ use ac_core::config::PoolConfig;
 use ac_core::harness::{Harnesses, effort_applies, pool_harness_mode};
 use ac_core::js;
 use ac_core::pool::TicketMarker;
-use ac_core::pool_settings::{read_pool_settings, require_known_harness, write_config_atomically};
+use ac_core::pool_settings::{
+    POOL_CONFIG, read_pool_settings, require_known_harness, write_config_atomically,
+};
 use ac_protocol::{
     AssignmentSource, AssignmentSources, AssignmentView, ReassignSkipped, TicketReassignView,
     TicketStatus,
@@ -467,7 +469,8 @@ fn dry_run(
 /// Write the named tickets' `assign` entries, or refuse the whole request. `tickets` and `fields` are
 /// the body's as sent (`fields` already defaulted to `{}` when absent or null). Validation covers the
 /// request as a whole and writes nothing on a refusal; a ticket that stopped being eligible is left
-/// alone and named in `skipped`; the write is one atomic replace of the file read fresh from disk.
+/// alone and named in `skipped`; the write is one atomic replace of the file read fresh from disk, with
+/// POOL_CONFIG held from that read, so a Settings save in between cannot be lost.
 pub fn write_reassign(
     pool_dir: &str,
     tickets: Option<&Value>,
@@ -476,6 +479,7 @@ pub fn write_reassign(
 ) -> Result<ReassignOutcome, ReassignError> {
     let ids = requested_ids(tickets)?;
     let fields = normalise_fields(fields, &context.harnesses.names())?;
+    let _held = POOL_CONFIG.hold();
     let config = read_pool_settings(pool_dir)
         .map_err(|err| ReassignError::ConfigUnreadable(err.to_string()))?
         .config;

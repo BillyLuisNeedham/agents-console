@@ -6,7 +6,9 @@
  *
  * Runs every test under conformance/ against the Rust server (`<binary>
  * server`, by default target/release/agent-console) and prints the pass
- * share per contract area. The Bun server was removed at the flip, so
+ * share per contract area. The cases run a copy of the binary from a guard
+ * checkout under the run's temporary directory, so no Restart reaches this
+ * checkout's shim and rebuilds it. The Bun server was removed at the flip, so
  * `--server bun`, or a `bun` leg, is refused with one line. `--legs
  * rust,rust` names the server each leg of a takeover case runs, in order
  * (CONFORMANCE_LEGS does the same); by default three legs of the chosen
@@ -15,15 +17,16 @@
  * Anything after the options goes to `bun test` as it is: a file filter,
  * or `-t <pattern>` for a name.
  *
- * Exit codes: 0 when every case that ran passed; 1 when one failed or
- * `bun test` itself did; 2 when the chosen server, or a leg's, cannot run
- * at all (the Rust binary not built yet), which is reported as such and
- * never counted as failures.
+ * Exit codes: 0 when every case that ran passed; 1 when one failed,
+ * `bun test` itself did, or a Restart reached the guard's shim; 2 when the
+ * chosen server, or a leg's, cannot run at all (the Rust binary not built
+ * yet), which is reported as such and never counted as failures.
  */
 
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { guardCheckout } from "./harness/boot-recorder.ts";
 import { countByArea, formatReport, parseJunit } from "./report.ts";
 import { BUN_REMOVED, legsMissing, serverChoice, serverLegs, serverMissing } from "./harness/server.ts";
 
@@ -93,6 +96,10 @@ const runTmp = realpathSync(mkdtempSync(join(tmpdir(), "cf-")));
 env.TMPDIR = runTmp;
 const junit = join(runTmp, "report.xml");
 
+// See guardCheckout: no case's Restart reaches this checkout's shim.
+const guard = missing ? null : guardCheckout(join(runTmp, "checkout"), choice.rustBin);
+if (guard) env.CONFORMANCE_RUST_BIN = guard.binary;
+
 // From the suite's own directory, so its bunfig.toml is the one in force.
 const run = Bun.spawn(
   [process.execPath, "test", "--reporter=junit", `--reporter-outfile=${junit}`, ...passthrough],
@@ -100,6 +107,7 @@ const run = Bun.spawn(
 );
 const code = await run.exited;
 const report = existsSync(junit) ? readFileSync(junit, "utf8") : null;
+const strayRestarts = guard?.calls() ?? [];
 if (process.env.CONFORMANCE_KEEP === "1") console.error(`kept the run's temporary files at ${runTmp}`);
 else rmSync(runTmp, { recursive: true, force: true });
 
@@ -111,7 +119,11 @@ const results = parseJunit(report);
 const counts = countByArea(results);
 console.log(`\n${formatReport(title, counts, results)}`);
 
+for (const call of strayRestarts) {
+  console.error(`a Restart reached the guard checkout instead of a case's bootRecorder: boot ${call.argv.join(" ")}`);
+}
+
 const failed = counts.some((count) => count.fail > 0);
-if (failed || code !== 0) process.exit(1);
+if (failed || code !== 0 || strayRestarts.length > 0) process.exit(1);
 if (missing || legMissing) process.exit(2);
 process.exit(0);

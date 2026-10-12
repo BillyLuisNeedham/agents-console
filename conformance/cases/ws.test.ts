@@ -26,6 +26,7 @@ import type {
 import type { EnrichedSnapshot, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { openSocket, framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { PROTOCOL_VERSION, WS_PATH, applySnapshotDelta } from "../fixtures/socket-protocol.ts";
+import { bootRecorder } from "../harness/boot-recorder.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectParsedEqual, expectSameFile } from "../harness/equal.ts";
 import { until } from "../harness/pool-files.ts";
@@ -1037,13 +1038,6 @@ async function parity<K extends RequestKind>(
   seen.add(`${kind}:${reply.ok ? "ok" : reply.refusal.status}`);
 }
 
-/** An `agent-console` first on the world's PATH that only records it ran: the Restart's
- *  hand-off to Boot, which would otherwise start a server the case does not own. */
-function stubBoot(world: World): void {
-  writeFileSync(join(world.stubs.bin, "agent-console"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(world.root, "boot-handoff"))}\n`);
-  chmodSync(join(world.stubs.bin, "agent-console"), 0o755);
-}
-
 // engine/ws.test.ts:1223
 conformance(
   "protocol",
@@ -1103,14 +1097,15 @@ conformance(
 
     // Stop and Restart each end the server they are asked of, so each is
     // asked of two servers in the same state: one on the socket, one over
-    // HTTP. Stop on finished pools; Restart (any phase) with Boot stubbed.
+    // HTTP. Stop on finished pools; Restart (any phase) from a stand-in
+    // checkout whose Boot only records the hand-off, which would otherwise
+    // start a server the case does not own.
     const [stopSocket, stopHttp] = await Promise.all([finishedPool(t), finishedPool(t)]);
     const stopClient = await t.socket(stopSocket.server);
     await parity(stopClient, stopSocket.server, stopHttp.server, "stop", {}, { method: "POST", path: "/api/stop" }, seen);
 
-    const restartWorlds = [poolWorld(t, ["01"]), poolWorld(t, ["01"])];
-    for (const world of restartWorlds) stubBoot(world);
-    const [restartSocket, restartHttp] = await Promise.all(restartWorlds.map((world) => t.start(world)));
+    const restarts = [poolWorld(t, ["01"]), poolWorld(t, ["01"])].map((world) => ({ world, boot: bootRecorder(world) }));
+    const [restartSocket, restartHttp] = await Promise.all(restarts.map(({ world, boot }) => t.start(world, boot.start)));
     await Promise.all([interruptFor(restartSocket!, REVIEW), interruptFor(restartHttp!, REVIEW)]);
     const restartClient = await t.socket(restartSocket!);
     await parity(restartClient, restartSocket!, restartHttp!, "restart", {}, { method: "POST", path: "/api/restart" }, seen);
@@ -1119,6 +1114,10 @@ conformance(
     for (const ended of [stopSocket.server, stopHttp.server, restartSocket!, restartHttp!]) {
       await until(() => ended.exited(), (gone) => gone, { what: "the asked server to exit", ms: 20_000 });
       await ended.stop();
+    }
+    // Each Restart handed its pool to its own stand-in, once.
+    for (const { boot } of restarts) {
+      expect((await boot.handOffs(1)).map((call) => call.ran)).toEqual(["shim"]);
     }
 
     // Both shapes are exercised: answers and refusals of several classes.

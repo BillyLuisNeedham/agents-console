@@ -3,14 +3,19 @@
  * gap at engine/server.ts:2821): POST /api/restart stops this server and
  * hands the pool to Boot, and the Boot it starts brings a new server up on
  * the port the reply promised. The route cases (settings-routes.test.ts)
- * stand a recorder in for Boot; here the real one runs, so the case reads
+ * stand a recorder in for Boot; here the real Boot runs, so the case reads
  * what it leaves: runs/boot.log, a new pid in runs/server.pid, and a server
  * answering on the promised port.
  *
- * Boot opens the Console in a browser once its server answers, so the
- * browser opener is a recorder first on the server's PATH, inherited by the
- * Boot it starts. The Boot and the server it starts outlive the server the
- * case started, so teardown stops the server runs/server.pid names.
+ * The server runs from a stand-in checkout of the world's own
+ * (boot-recorder.ts), whose shim records the hand-off and runs the copied
+ * binary's `boot` without building anything, so the Restart never reaches
+ * this checkout's shim, cargo or ui/dist. Boot opens the Console in a
+ * browser once its server answers, so the browser opener is a recorder first
+ * on the server's PATH, inherited by the Boot it starts. The Boot and the
+ * server it starts outlive the server the case started, so teardown stops
+ * every process running from the stand-in checkout, Boot first, whether the
+ * case passed or failed partway through the hand-off.
  */
 
 import { expect } from "bun:test";
@@ -18,6 +23,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join } from "node:path";
 import type { RestartResponse } from "../../protocol/wire.ts";
 import { CLOSE_STOPPED } from "../fixtures/socket-protocol.ts";
+import { bootRecorder } from "../harness/boot-recorder.ts";
 import { conformance } from "../harness/case.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
@@ -38,9 +44,9 @@ function readIfPresent(path: string): string {
 
 /**
  * `xdg-open` and `open` that write down the URL they were given rather than
- * open it, first on the PATH this returns for the server.
+ * open it, first on the PATH this returns for the server, before `path`.
  */
-function browserRecorder(world: World): string {
+function browserRecorder(world: World, path: string): string {
   const bin = join(world.root, "opener-bin");
   const calls = join(world.root, "opener.calls");
   mkdirSync(bin, { recursive: true });
@@ -48,17 +54,7 @@ function browserRecorder(world: World): string {
     writeFileSync(join(bin, name), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`);
     chmodSync(join(bin, name), 0o755);
   }
-  return `${bin}:${world.env("").PATH}`;
-}
-
-/** SIGTERM the server runs/server.pid names, unless it is `except`, and wait for it to go. */
-async function stopRelaunched(world: World, except: number): Promise<void> {
-  const pid = Number(readLock(world.pool)?.trim());
-  if (!Number.isInteger(pid) || pid <= 0 || pid === except || !alive(pid)) return;
-  process.kill(pid, "SIGTERM");
-  const deadline = Date.now() + 15_000;
-  while (alive(pid) && Date.now() < deadline) await Bun.sleep(25);
-  if (alive(pid)) process.kill(pid, "SIGKILL");
+  return `${bin}:${path}`;
 }
 
 // The gap at engine/server.ts:2821.
@@ -67,8 +63,12 @@ conformance(
   "the Restart hand-off › POST /api/restart answers its port, says farewell and exits 0, and the Boot it hands the pool to brings a new server up on that port",
   async (t) => {
     const world = t.world({ tickets: [ticket("01", { status: "done" })], config: CONFIG });
-    const server = await t.start(world, { env: { PATH: browserRecorder(world) } });
-    t.defer(() => stopRelaunched(world, server.pid));
+    const recorder = bootRecorder(world, { boot: true });
+    const server = await t.start(world, {
+      binary: recorder.start.binary,
+      env: { PATH: browserRecorder(world, recorder.start.env.PATH!) },
+    });
+    t.defer(() => recorder.stopStarted(server.pid));
     await untilSnapshot(server, (snapshot) => snapshot.phase === "quiescent", "the pool to settle at its Review");
     const bootLog = join(world.pool, "runs", "boot.log");
     expect(existsSync(bootLog)).toBe(false);
@@ -85,10 +85,15 @@ conformance(
     const code = await until(() => server.exitCode(), (got) => got !== null, { ms: 30_000, what: "the server to exit" });
     expect(code).toBe(0);
 
+    // The hand-off went to the stand-in checkout's shim, from that checkout.
+    const [handOff, ...stray] = await recorder.handOffs(1);
+    expect(stray).toEqual([]);
+    expect(handOff).toMatchObject({ ran: "shim", cwd: recorder.checkout });
+
     // Boot's report, in the log the hand-off made for it.
     const consoleLine = `Console on http://localhost:${server.port}`;
     await until(() => readIfPresent(bootLog), (text) => text.split("\n").includes(consoleLine), {
-      ms: 90_000,
+      ms: 30_000,
       what: `runs/boot.log to say ${consoleLine}`,
     });
 
@@ -100,5 +105,5 @@ conformance(
     expect(state.status).toBe(200);
     await state.arrayBuffer();
   },
-  { timeoutMs: 180_000 },
+  { timeoutMs: 90_000 },
 );

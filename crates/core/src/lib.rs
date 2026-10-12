@@ -6,6 +6,7 @@ pub mod config;
 pub mod conversation_record;
 pub mod drive_errors;
 pub mod events;
+pub mod file_lock;
 pub mod fleet;
 pub mod harness;
 pub mod jev_evidence;
