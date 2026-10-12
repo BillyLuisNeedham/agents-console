@@ -24,9 +24,23 @@ use crate::ui;
 /// The largest request body read (Bun's default).
 const BODY_MAX_BYTES: usize = 128 * 1024 * 1024;
 
-/// The server's router: every path goes through [`fetch`].
+/// The server's router: every path goes through [`fetch`], each request on its own task.
 pub fn router(server: Server) -> Router {
-    Router::new().fallback(fetch).with_state(server)
+    Router::new().fallback(fetch_on_own_task).with_state(server)
+}
+
+// Bun runs a fetch handler to its end whatever the client does. Hyper drops a handler whose client hangs
+// up mid-request, and a flow dropped at an await can leave a Conversation `ending` for good, so each
+// request runs on a task of its own and only the wait for its answer is dropped. A route that panics
+// still takes its connection down with it.
+async fn fetch_on_own_task(State(server): State<Server>, request: Request) -> Response {
+    match server.0.runtime.clone().spawn(fetch(server, request)).await {
+        Ok(response) => response,
+        Err(err) => match err.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(err) => uncaught(&err.to_string()),
+        },
+    }
 }
 
 fn json_response(status: u16, value: &Value) -> Response {
@@ -163,7 +177,7 @@ async fn read_body(body: HttpBody) -> Body {
     }
 }
 
-async fn fetch(State(server): State<Server>, request: Request) -> Response {
+async fn fetch(server: Server, request: Request) -> Response {
     let (mut parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
     let query = parts.uri.query().unwrap_or("").to_owned();
