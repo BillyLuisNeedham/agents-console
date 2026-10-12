@@ -16,6 +16,7 @@ use ac_protocol::{
 use serde_json::{Map, Value};
 
 use crate::config::{ConfigError, PoolConfig, config_path, read_config};
+use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
 use crate::machine_defaults::{
     MachineDefaultsPaths, read_machine_defaults, read_machine_defaults_file,
@@ -42,6 +43,11 @@ pub const POOL_SETTINGS_KEYS: [&str; 10] = [
 /// The settings a saved edit does not reach until the next Restart: selection, terminal and port stay
 /// as this process read them at boot, and terminal and port must never move under a live run.
 pub const BOOT_ONLY_KEYS: [&str; 3] = ["selection", "terminal", "port"];
+
+/// console.json's writers, one at a time: a Settings save and a Reassign each read the file, change
+/// their own keys and write it back, and the server answers them on several threads. A writer holds
+/// it from its read to its rename, or two saves of different keys would each drop the other's.
+pub static POOL_CONFIG: FileLock = FileLock::new();
 
 /// Where a pool keeps its config.
 pub fn pool_settings_path(pool_dir: &str) -> String {
@@ -84,6 +90,7 @@ pub fn write_pool_settings(
     patch: &Map<String, Value>,
     harnesses: &[String],
 ) -> Result<PoolConfig, ConfigError> {
+    let _held = POOL_CONFIG.hold();
     let mut next = read_pool_settings(pool_dir)?.config;
     for key in POOL_SETTINGS_KEYS {
         let Some(value) = patch.get(key) else {
@@ -101,14 +108,14 @@ pub fn write_pool_settings(
 }
 
 /// The pool's config file, replaced whole through a rename so a reader never sees half a file: written
-/// to `console.json.tmp-<pid>` as `JSON.stringify(config, null, 2)` and a newline, then renamed over
-/// it. Every writer of console.json in the server goes through here: the Settings pane and Reassign.
+/// to a temp name of this write's own as `JSON.stringify(config, null, 2)` and a newline, then renamed
+/// over it. Every writer of console.json in the server goes through here: the Settings pane and
+/// Reassign, each holding POOL_CONFIG from the read its `config` came from.
 pub fn write_config_atomically(pool_dir: &str, config: &PoolConfig) -> Result<(), ConfigError> {
     let path = pool_settings_path(pool_dir);
     js::mkdir_all(pool_dir).map_err(ConfigError::from)?;
-    let tmp = format!("{path}.tmp-{}", std::process::id());
     let text = format!("{}\n", config.to_pretty_json());
-    js::write_through_rename(&path, &tmp, &text).map_err(ConfigError::from)
+    write_through_own_temp(&path, &text).map_err(ConfigError::from)
 }
 
 // One key's value, validated: None means remove the key. Empty is always a removal, whatever the key's

@@ -16,6 +16,7 @@ use ac_protocol::{MachineDefaults, TerminalKind};
 use serde_json::{Map, Value};
 
 use crate::config::ConfigError;
+use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
 
 /// The fields the file may hold.
@@ -25,6 +26,9 @@ pub const MACHINE_DEFAULTS_KEYS: [&str; 6] = [
 
 // The string fields, in the order the file is written.
 const STRING_KEYS: [&str; 5] = ["harness", "model", "effort", "drivers", "engine"];
+
+// The file's writers, one at a time: the server answers Settings saves on several threads.
+static MACHINE_DEFAULTS: FileLock = FileLock::new();
 
 /// Where the file lives under a home directory.
 pub fn default_machine_defaults_path(home: &str) -> String {
@@ -85,9 +89,10 @@ pub fn read_machine_defaults_file(file: &str) -> MachineDefaults {
     }
 }
 
-/// Validate and write the file, creating its directory when missing. Written whole, via a rename, so a
-/// reader never sees half a file. Empty strings drop the field rather than storing "no value" as a
-/// value. Answers what was written.
+/// Validate and write the file, creating its directory when missing. Written whole, via a rename of a
+/// temp name of this write's own, so a reader never sees half a file and two saves at once never trip
+/// over each other's. Empty strings drop the field rather than storing "no value" as a value. Answers
+/// what was written.
 pub fn write_machine_defaults(
     defaults: &Value,
     file: &str,
@@ -99,12 +104,12 @@ pub fn write_machine_defaults(
         .filter(|dir| !dir.is_empty())
         .unwrap_or_else(|| ".".to_owned());
     js::mkdir_all(&dir).map_err(ConfigError::from)?;
-    let tmp = format!("{file}.tmp-{}", std::process::id());
     let text = format!(
         "{}\n",
         js::stringify_pretty(&machine_defaults_value(&clean))
     );
-    js::write_through_rename(file, &tmp, &text).map_err(ConfigError::from)?;
+    let _held = MACHINE_DEFAULTS.hold();
+    write_through_own_temp(file, &text).map_err(ConfigError::from)?;
     Ok(clean)
 }
 

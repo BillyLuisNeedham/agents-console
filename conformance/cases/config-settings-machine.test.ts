@@ -9,7 +9,7 @@
  */
 
 import { expect } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SettingsResponse } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
@@ -107,4 +107,20 @@ conformance("config", "a Machine defaults save refuses a terminal other than her
   const answer = await putMachine(server, { terminal: "", harness: "claude" });
   expect(answer.status, answer.text).toBe(200);
   expect(JSON.parse(readFileSync(defaultsFile(world), "utf8"))).toEqual({ harness: "claude" });
+});
+
+// Visible behaviour no engine test covered: the server answers requests on several threads, and the
+// TypeScript one never met two writes of the Machine defaults at once.
+
+conformance("config", "Machine defaults saves sent at once each answer 200 and leave one of them whole on disk", async (t) => {
+  const { world, server } = await settledPool(t);
+
+  for (let round = 0; round < 5; round++) {
+    const records = Array.from({ length: 8 }, (_, n) => ({ harness: "claude", model: `m${round}-${n}` }));
+    const answers = await Promise.all(records.map((record) => putMachine(server, record)));
+    for (const answer of answers) expect(answer.status, answer.text).toBe(200);
+    expect(records).toContainEqual(JSON.parse(readFileSync(defaultsFile(world), "utf8")));
+  }
+  const beside = readdirSync(join(world.home, ".agent-graphs")).filter((name) => name.startsWith("defaults.json"));
+  expect(beside).toEqual(["defaults.json"]);
 });
