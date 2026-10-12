@@ -10,7 +10,9 @@
  * reads it the same way:
  *
  *   CONFORMANCE_SERVER     rust (the default)
- *   CONFORMANCE_RUST_BIN   the Rust binary; default target/release/agent-console
+ *   CONFORMANCE_RUST_BIN   the Rust binary; default target/release/agent-console.
+ *                          The runner sets it to its guard checkout's copy
+ *                          (boot-recorder.ts guardCheckout)
  *   CONFORMANCE_LEGS       the servers a takeover case's legs run, in order,
  *                          comma-separated (rust,rust,rust); default three legs
  *                          of CONFORMANCE_SERVER's

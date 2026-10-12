@@ -18,7 +18,10 @@ pub fn own_exe() -> std::io::Result<PathBuf> {
 /// The path before a trailing ` (deleted)` when nothing is at the path as given; otherwise the path as
 /// given, so a file that really is named that way is left alone.
 pub fn without_deleted_mark(path: &Path) -> PathBuf {
-    match path.to_str().and_then(|text| text.strip_suffix(DELETED_MARK)) {
+    match path
+        .to_str()
+        .and_then(|text| text.strip_suffix(DELETED_MARK))
+    {
         Some(live) if !path.exists() => PathBuf::from(live),
         _ => path.to_path_buf(),
     }
@@ -76,7 +79,10 @@ mod tests {
         let replaced = std::fs::read_link(&link).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(replaced, PathBuf::from(format!("{} (deleted)", exe.display())));
+        assert_eq!(
+            replaced,
+            PathBuf::from(format!("{} (deleted)", exe.display()))
+        );
         assert_eq!(without_deleted_mark(&replaced), exe);
     }
 }

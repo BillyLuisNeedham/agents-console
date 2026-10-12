@@ -83,11 +83,16 @@ const orphanNote = (attempt: number, pid: number): string =>
   "done at best and the agent left no brief. The ticket is back to ready; " +
   "read the working tree before it runs again.\n";
 
-/** The working directory read from /proc, which the server's orphan check depends on. */
+/**
+ * The working directory of a pid, which the server's orphan check depends
+ * on: read from /proc on Linux, and on macOS from proc_pidinfo (process_cwd
+ * in crates/engine/src/children.rs), which no Mac has run yet. Off Linux
+ * these cases stay skipped until one has.
+ */
 const LINUX_ONLY =
   process.platform === "linux"
     ? undefined
-    : "the server reads a pid's working directory from /proc; off Linux it trusts liveness alone (engine/children.ts processCwd)";
+    : "the server reads a pid's working directory with proc_pidinfo on macOS (process_cwd in crates/engine/src/children.rs), not yet proven on a Mac";
 
 /**
  * Whether `pid` names a process still running: one that has exited but not

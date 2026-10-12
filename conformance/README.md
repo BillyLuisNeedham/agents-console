@@ -12,6 +12,13 @@ The binary defaults to `target/release/agent-console`. A release build embeds th
 first (`cd ui && bun install && bun run build`), then `cargo build --release`. The Bun server was
 removed at the flip, so `--server bun`, or a `bun` leg, is refused with one line.
 
+A Restart runs the shim beside the server's binary, `<checkout>/bin/agent-console`, and this checkout's
+shim rebuilds whatever is stale with cargo and bun. So the runner copies the binary into a guard checkout
+under the run's temporary directory, whose shim only refuses, and every case runs that copy. A case that
+restarts a server starts it from `bootRecorder(world).start` (`harness/boot-recorder.ts`) instead, a
+checkout of the world's own. A Restart that reaches the guard fails the run. No case may run cargo,
+write to this checkout's `target/` or `ui/dist`, or reach past localhost.
+
 Comments under `conformance/` that cite `engine/<file>.ts:<line>` point at the TypeScript server as it
 stood at the flip, commit `75ea8fe`, which deleted it. Read one with `git show 75ea8fe^:engine/<file>.ts`.
 

@@ -140,7 +140,9 @@ fn boot_command(exe: &Path, boot_args: Vec<String>, here: PathBuf) -> BootComman
         },
         _ => BootCommand {
             program: exe,
-            args: std::iter::once("boot".to_owned()).chain(boot_args).collect(),
+            args: std::iter::once("boot".to_owned())
+                .chain(boot_args)
+                .collect(),
             cwd: here,
         },
     }
