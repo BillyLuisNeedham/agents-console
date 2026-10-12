@@ -1,7 +1,7 @@
 //! Unit tests of the Conversation runtime: the rows the conformance suite cannot see from outside
 //! (the claim per id, the queue claimed whole, a failed Turn put back, a Turn-state read that fails, the
-//! boot's exit-code rule, an End on an unadopted record) and the Notice and end paths with a scripted
-//! herdr.
+//! boot's exit-code rule, an End on an unadopted record, a refused start's reservation) and the Notice
+//! and end paths with a scripted herdr.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -718,4 +718,33 @@ async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
         "the End read the pane: {methods:?}"
     );
     assert!(rig.kinds("conv-1").contains(&TicketEventKind::Ended));
+}
+
+// A start refused before its launch gives back the id it was fired with: Spawn adoption reserves the
+// id it mints before the start runs, and a reservation left behind would make the parent's next Spawn
+// skip the number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_start_gives_back_the_id_reserved_for_it() {
+    let pool = Pool::git(&[("01", &[])]);
+    let engine = pool.start().await;
+    engine.call(|s| reserve(s, "01-spawn-1")).await.unwrap();
+    let err = start(
+        &engine,
+        ac_protocol::StartConversationRequest {
+            title: "Talk".into(),
+            opening: None,
+            role: None,
+            assign: None,
+            spawned_by: Some("01".into()),
+            id: Some("01-spawn-1".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message(),
+        r#"conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")"#
+    );
+    let reserved = engine.call(|s| reserved_ids(s)).await.unwrap();
+    assert!(reserved.is_empty(), "still reserved: {reserved:?}");
 }

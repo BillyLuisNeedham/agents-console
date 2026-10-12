@@ -109,9 +109,9 @@ fn resolve_start_assignment(
     .map_err(|err| refused(err.0))
 }
 
-// The synchronous stretch of `start` up to the launch: the checks, the id, the reservation, the
-// Assignment, the worktree and the teaching.
-fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, EngineError> {
+// The refusals a start meets before it mints or takes its id: a pool that cannot host a Conversation,
+// no title, a second Steward.
+fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), EngineError> {
     if !terminal_backed(s) {
         return Err(refused(
             "conversation start: the pool is not terminal-backed (set console.json terminal: \"herdr\")",
@@ -126,13 +126,29 @@ fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, 
     if js::trim(&req.title).is_empty() {
         return Err(refused("conversation start: title is required"));
     }
-    let is_steward = req.role == Some(ConversationRole::Steward);
-    if is_steward && let Some(on_duty) = steward_on_duty(s) {
+    if req.role == Some(ConversationRole::Steward)
+        && let Some(on_duty) = steward_on_duty(s)
+    {
         return Err(refused(format!(
             "steward start: {}",
             second_steward_reason(&on_duty)
         )));
     }
+    Ok(())
+}
+
+// The synchronous stretch of `start` up to the launch: the checks, the id, the reservation, the
+// Assignment, the worktree and the teaching.
+fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, EngineError> {
+    if let Err(err) = check_start(s, req) {
+        // A Spawn's id was reserved when its start was fired (`land_spawn`), so a refusal gives it
+        // back, or the parent's next Spawn would skip the number.
+        if let Some(id) = &req.id {
+            unreserve(s, id);
+        }
+        return Err(err);
+    }
+    let is_steward = req.role == Some(ConversationRole::Steward);
     let existing = load(s);
     let id = match (&req.id, &req.spawned_by) {
         (Some(id), _) => id.clone(),
@@ -451,8 +467,8 @@ fn enlist_claim(
     if is_steward && let Some(on_duty) = steward_on_duty(s) {
         return Err(second_steward_reason(&on_duty));
     }
-    // Reserved before the first await: the id is already fixed by the branch rule the engine applied, so
-    // a concurrent start must not mint it too.
+    // The enlist flow reserved the id in the job that minted it; reserved again here, before the first
+    // await, so the claim holds it whoever called.
     s.conversations.reserved.insert(req.id.clone());
     if is_steward {
         s.conversations.steward_starting = Some(req.id.clone());
@@ -490,18 +506,19 @@ fn enlist_claim(
 ///
 /// Resolves a reason rather than failing when the pane cannot be claimed: the caller (the enlist flow)
 /// unwinds the branch it may have created and answers its 409. A failure after the record is written
-/// removes the record, its events and the agent identity, so a failed enlist leaves nothing.
+/// removes the record, its events and the agent identity, so a failed enlist leaves nothing. The id's
+/// reservation, which the enlist flow took when it minted the id, is released whatever the claim
+/// answers, a refused claim included.
 pub async fn enlist(
     engine: &Engine,
     req: EnlistConversationRegistration,
 ) -> EnlistConversationResult {
     let (claim_req, id, role) = (req.clone(), req.id.clone(), req.role());
-    let claim = match engine.call(move |s| enlist_claim(s, &claim_req)).await {
-        Ok(Ok(claim)) => claim,
-        Ok(Err(reason)) => return Err(reason),
-        Err(gone) => return Err(gone.to_string()),
+    let result = match engine.call(move |s| enlist_claim(s, &claim_req)).await {
+        Ok(Ok(claim)) => enlist_claimed(engine, req, &claim).await,
+        Ok(Err(reason)) => Err(reason),
+        Err(gone) => Err(gone.to_string()),
     };
-    let result = enlist_claimed(engine, req, &claim).await;
     let _ = engine
         .call(move |s| {
             s.conversations.reserved.shift_remove(&id);

@@ -14,6 +14,7 @@ import {
   CONFIG,
   GOOD_BODY,
   eventsOf,
+  hasTicket,
   heldSpawnsFile,
   ledger,
   proposal,
@@ -322,5 +323,42 @@ conformance("spawns", "serves each pending spawn as the Console shows it", async
     },
   ]);
   release.release();
+  await settled(server);
+});
+
+// The pool is headless, so the Conversation Spawn is refused at its start, after its landing minted and
+// reserved its id. The refusal gives the id back, as the TypeScript server never held it, and the
+// parent's next Spawn takes the number again (NOT-PORTED.md, r-spawns). 02 waits on 01 and then on a
+// release file, so the Adopt lands at a later boundary than the refused start.
+conformance("spawns", "gives a refused Conversation Spawn's id to the parent's next Spawn", async (t) => {
+  const world = t.world({ tickets: [ticket("01"), ticket("02", "01")], config: withCaps({ perAttempt: 1 }) });
+  const gate = releaseFile(world, "02");
+  world.stubs.script("01", { spawn: [proposal("Talk", { kind: "conversation" }), proposal("Later")] });
+  world.stubs.script("02", { waitFor: gate.path });
+  const server = await t.start(world);
+
+  await snapshotUntil(
+    server,
+    () => eventsOf(world, "01", "spawn-rejected").length > 0,
+    "the Conversation Spawn's refused start",
+  );
+  expect(eventsOf(world, "01", "spawn-rejected")[0]?.payload).toEqual({
+    title: "Talk",
+    reason:
+      'conversation start failed: conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")',
+  });
+  const held = (await snapshot(server)).heldSpawns.find((view) => view.title === "Later");
+  expect(held).toMatchObject({ reason: "per-attempt" });
+  expect((await server.http.post("/api/spawns/held/adopt", { id: held!.id })).status).toBe(202);
+
+  gate.release();
+  await snapshotUntil(server, (snap) => statusOf(snap, "01-spawn-1") !== undefined, "the adopted Spawn to land");
+  expect(hasTicket(world, "01-spawn-1.md")).toBe(true);
+  expect(hasTicket(world, "01-spawn-2.md")).toBe(false);
+  // The refused Conversation was adopted under the same id first.
+  expect(eventsOf(world, "01", "spawn-adopted").map((event) => event.payload.adopted)).toEqual([
+    ["01-spawn-1"],
+    ["01-spawn-1"],
+  ]);
   await settled(server);
 });

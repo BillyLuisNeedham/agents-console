@@ -473,15 +473,9 @@ async fn watch_ending(runtime: Arc<EnlistedRuntime>, outcome_path: String, poll_
     else {
         return;
     };
-    if runtime.release.is_cancelled() {
+    if !report_ending(&runtime, ending).await {
         return;
     }
-    runtime.stop_tick().await;
-    let id = runtime.id.clone();
-    let _ = runtime
-        .engine
-        .call(move |s| crate::enlist_flow::end_enlisted_attempt(s, &id, ending, None))
-        .await;
     match ending {
         EnlistedEnding::Outcome => watch_trailing_exit(runtime, poll_ms).await,
         EnlistedEnding::PaneGone => {
@@ -492,6 +486,29 @@ async fn watch_ending(runtime: Arc<EnlistedRuntime>, outcome_path: String, poll_
                 .await;
         }
     }
+}
+
+/// Stop the Turn tick and tell the engine how the attempt ended; false when the runtime was released
+/// first, so there is no ending to record, or the engine has stopped. The release is checked inside the job that records the
+/// ending: `release` runs on the actor, so a release queued while the tick stopped is seen here rather
+/// than lost. The TypeScript stopped its tick synchronously, so it had no such gap.
+async fn report_ending(runtime: &Arc<EnlistedRuntime>, ending: EnlistedEnding) -> bool {
+    if runtime.release.is_cancelled() {
+        return false;
+    }
+    runtime.stop_tick().await;
+    let (id, release) = (runtime.id.clone(), runtime.release.clone());
+    runtime
+        .engine
+        .call(move |s| {
+            if release.is_cancelled() {
+                return false;
+            }
+            let _ = crate::enlist_flow::end_enlisted_attempt(s, &id, ending, None);
+            true
+        })
+        .await
+        .unwrap_or(false)
 }
 
 /// `watchTrailingExit`: wait for the pane to leave the listing after its Outcome, once.
@@ -601,6 +618,14 @@ mod tests {
         }
     }
 
+    async fn registered(rig: &Rig) -> Arc<EnlistedRuntime> {
+        rig.engine
+            .call(|s| s.enlisted.runtimes.get("enlist-1").cloned())
+            .await
+            .unwrap()
+            .expect("the claim registered the runtime")
+    }
+
     async fn latest_read(engine: &Engine) -> Option<String> {
         engine
             .call(|s| s.pane_reads.latest("pane-op"))
@@ -679,6 +704,51 @@ mod tests {
         let rig = rig(OPENCODE_WAITING, true, 60_000).await;
         let refused = register_enlisted(&rig.engine, registration(&rig, None)).await;
         assert!(refused.unwrap_err().contains("could not be read"));
+        assert_eq!(latest_read(&rig.engine).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_that_lands_after_the_watch_saw_the_ending_still_stops_it_being_recorded() {
+        let rig = rig(OPENCODE_WAITING, false, 60_000).await;
+        assert_eq!(
+            register_enlisted(&rig.engine, registration(&rig, None)).await,
+            Ok(())
+        );
+        let runtime = registered(&rig).await;
+
+        // Hold the actor, and queue a release behind the hold: the watch's own check passes, since the
+        // release has not run, and the release lands before the watch's next job.
+        let (open, held) = std::sync::mpsc::channel::<()>();
+        rig.engine.cast(move |_| {
+            let _ = held.recv();
+        });
+        rig.engine.cast(|s| release(s, "enlist-1"));
+        let tick = runtime.tick.clone();
+        tokio::spawn(async move {
+            // Only the watch cancels the tick while the actor is held, and only once its check passed.
+            while !tick.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let _ = open.send(());
+        });
+
+        assert!(
+            !report_ending(&runtime, EnlistedEnding::Outcome).await,
+            "a released runtime records no ending"
+        );
+        assert!(runtime.release.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn an_ending_with_no_release_is_recorded() {
+        let rig = rig(OPENCODE_WAITING, false, 60_000).await;
+        assert_eq!(
+            register_enlisted(&rig.engine, registration(&rig, None)).await,
+            Ok(())
+        );
+        let runtime = registered(&rig).await;
+        assert!(report_ending(&runtime, EnlistedEnding::PaneGone).await);
+        assert!(runtime.tick.is_cancelled());
         assert_eq!(latest_read(&rig.engine).await, None);
     }
 

@@ -163,6 +163,37 @@ async fn holds_every_proposal_when_a_cap_is_0() {
     }
 }
 
+// A cap too large to count room in is no limit, never a wrapped negative number that holds everything
+// (the engine counts room in signed numbers; JavaScript compared 1e300 as it stood).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn takes_every_proposal_when_a_cap_is_too_large_to_count() {
+    for caps in [
+        json!({ "perAttempt": 9_223_372_036_854_775_808_u64 }),
+        json!({ "perRun": 1e300 }),
+    ] {
+        let pool = Pool::git(&[("01", &[])]);
+        configure(&pool, json!({ "spawnCaps": caps }));
+        pool.script(
+            "01",
+            vec![spawning(vec![
+                proposal("A", json!({})),
+                proposal("B", json!({})),
+            ])],
+        );
+        let engine = pool.start().await;
+        assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+        let snapshot = last(&engine);
+        assert!(snapshot.held_spawns.is_empty(), "{caps}");
+        for id in ["01-spawn-1", "01-spawn-2"] {
+            assert_eq!(
+                snapshot.state.tickets.get(id),
+                Some(&TicketStatus::Done),
+                "{caps}: {id}"
+            );
+        }
+    }
+}
+
 // engine.test.ts "holds a proposal whose overlaps names ids the pool never knew, noting them".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn holds_a_proposal_whose_overlaps_names_ids_the_pool_never_knew_noting_them() {

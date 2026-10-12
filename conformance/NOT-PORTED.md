@@ -1122,6 +1122,26 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
   moves their viewport; copied as the TypeScript has it (see `herdr` panes above).
 - **A refused `tab.close` outside the bulk close** writes its pool-log line and a `tab-close-failed` event with no
   snapshot emitted; copied as is.
+- **An enlisted Conversation's id is reserved in the job that mints it.** The TypeScript minted the id, applied the
+  branch rule and reserved the id with no await between them (`engine/engine.ts:10332`, then
+  `engine/conversations.ts:1619`). The Rust port first minted it in one actor job and reserved it in a later one, so a
+  `POST /api/conversations` that landed between the two could take the same id. One job now does both, and the claim
+  releases the id whatever it answers. No case can force the order: the two jobs run back to back, with no call
+  outside the server between them that a case could hold. Rust unit tests in `crates/engine/src/enlist_flow.rs`:
+  *an enlisted conversation id is reserved in the job that mints it*, *a refused branch rule reserves nothing*, *a
+  refused claim releases the id the enlist reserved*.
+- **An enlisted Ticket's ending checks for a release inside the job that records it.** The TypeScript stopped the Turn
+  tick synchronously (`engine/enlisted.ts`, `watchEnding`). The Rust `stop_tick` awaits an actor job, and a release
+  (the Ticket closed) that landed during that wait was lost: the ending was recorded anyway. No case can force it: the
+  gap is one actor job long. Rust unit test in `crates/engine/src/enlisted.rs`: *a release that lands after the watch
+  saw the ending still stops it being recorded*, which holds the actor to force the order and fails with the check
+  moved back outside the job.
+- **An enlist whose ticked Ticket left the pool before the write unwinds.** The Ticket arm checks every "Blocks" entry,
+  claims the pane (awaiting it), then writes. The Rust port panicked when an entry had gone by the write, which
+  skipped the unwind; the TypeScript threw there (`engine/engine.ts`, the `!` in `enlistTicket`'s blocks loop) and
+  unwound. Rust now refuses with "enlist: ticket <id> is not in the pool" and unwinds. No case can force it: the pool's
+  markers change only at a boundary, not while a claim awaits. Rust unit test in `crates/engine/src/enlist_flow.rs`: *a
+  ticked ticket gone from the pool by the write unwinds the enlist*.
 
 ## `restart`: what the Rust port does differently (r-restart)
 
@@ -1138,3 +1158,31 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
 - **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
   resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
   merge's resolver names a different writer.
+- **A recorded pid of 1 or less, or one that is not a whole number, names no process.** The boot's orphan scan reads
+  each unfinished headless attempt's `spawned` pid. The TypeScript passed 0, 1 and negatives through
+  (`engine/engine.ts:2762`, `engine/children.ts:77`): `kill(0, 0)` succeeds, and with no `/proc/<pid>/cwd` to compare
+  the pid reads as a live orphan. The reap then signalled the server's own process group (pid 0), or every process the
+  user owns (pid 1: `killpg(1)` is `kill(-1)`). The Rust port turned a negative pid into 0 and 1.5 into 1, so it
+  reached both. Now the scan and every signal refuse any pid below 2. A case could reach this from outside by planting
+  the event and booting, but a case's server runs in the runner's own process group, so on a regression the case
+  would SIGTERM the runner (pid 0) or every process the user owns (pid 1). Rust unit tests pin it without sending a
+  signal: in `crates/engine/src/restart.rs`, *a pid is a whole number a signal may
+  name* and *a recorded pid that names no process is never an orphan*; in `crates/engine/src/children.rs`, *only a pid
+  above 1 within pid t can be signalled*.
+
+## `spawns`: what the Rust port does differently (r-spawns)
+
+- **A Conversation Spawn refused at its start gives its id back.** The TypeScript `landSpawn` (`engine/engine.ts:11094`)
+  called `start` synchronously, and `start` reserved the id only once its checks passed
+  (`engine/conversations.ts:1308-1336`), so a refusal held nothing. The Rust Spawn landing reserves the id up front,
+  because its start runs in a later job, and a start refused before its own reservation left that id reserved until
+  the server stopped: the parent's next Spawn skipped the number. The refusal now releases the id, as the TypeScript
+  never held it, and the next Spawn takes it again. The parent's `spawn-adopted` events then name that id twice: once
+  for the refused Conversation, once for the Spawn that took it. The case is
+  *gives a refused Conversation Spawn's id to the parent's next Spawn* (`cases/spawns-proposals.test.ts`), with the
+  Rust unit test *a refused start gives back the id reserved for it* (`crates/engine/src/conversations/tests.rs`).
+- **A Spawn cap too large to count room in is no limit.** The Rust port wrapped a cap of 2^63 or more negative and
+  held every proposal; it now holds the cap at `i64::MAX`. The TypeScript compared such a cap as it stood. The case is
+  *lands every proposal when a cap is too large to count* (`cases/spawns-pending.test.ts`). The caps the snapshot and
+  the Ticket prompt show read 9223372036854775807 for such a cap, where the TypeScript printed the number as written
+  (`1e+300`); the case does not pin them.
