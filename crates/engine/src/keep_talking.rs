@@ -605,13 +605,15 @@ fn end_continued_attempt(
     let (work, log_path, outcome_path) = (entry.work, entry.log_path, entry.outcome_path);
     // A valid Outcome is the ending whichever observation came first: the agent may write it and the
     // operator close the tab (or quit the TUI) before the next sweep, and that is a finished attempt,
-    // not a crash.
+    // not a crash. Any other ending is the one observed: an Outcome that parses but fails validation
+    // is still an Outcome ending, recorded as the crash its reason gives.
     let read = read_attempt_result(&outcome_path, validate_outcome);
     let observed = match &ending {
         ContinuedEnding::Untaught { .. } => Observed::Untaught,
         _ if read.is_ok() => Observed::Outcome,
+        ContinuedEnding::Outcome => Observed::Outcome,
         ContinuedEnding::Exited => Observed::Exited,
-        _ => Observed::PaneGone,
+        ContinuedEnding::PaneGone | ContinuedEnding::Released => Observed::PaneGone,
     };
     // An enlisted ticket's Continued attempt ends the way its enlisted attempt did (ADR-0021): the same
     // two observations, recorded by the same hands, so done merges the found branch in place, a pane
@@ -1155,5 +1157,244 @@ mod tests {
         assert_eq!(owed.work.pane_id, "p1");
         write(2, TicketEventKind::Graded, serde_json::json!({"score": 8}));
         assert!(owed_continued_grade(&s, &marker).is_none());
+    }
+
+    /// The Outcome files a Continued attempt can end beside: the text on disk, or none, and the reason
+    /// the engine's read gives for it.
+    const OUTCOME_FILES: [(&str, Option<&str>, Option<&str>); 4] = [
+        ("missing", None, Some("no outcome written")),
+        (
+            "unparseable",
+            Some("{\"status\": \"do"),
+            Some("outcome is not parseable JSON"),
+        ),
+        (
+            "parseable but invalid",
+            Some(r#"{"status": "finished", "summary": "s", "commitSha": null}"#),
+            Some("outcome's status is not done or checkpoint"),
+        ),
+        (
+            "valid",
+            Some(r#"{"status": "done", "summary": "s", "commitSha": null}"#),
+            None,
+        ),
+    ];
+
+    /// The endings the race reports for a Continued attempt that was taught.
+    fn endings() -> [ContinuedEnding; 3] {
+        [
+            ContinuedEnding::Outcome,
+            ContinuedEnding::Exited,
+            ContinuedEnding::PaneGone,
+        ]
+    }
+
+    /// A pool with ticket 01's Continued attempt 2 running in pane p1, whose TUI's wrapper has written
+    /// exit code 3, and `outcome` on disk.
+    fn continuing(dir: &Path, outcome: Option<&str>, enlisted: bool) -> Session {
+        let runs = dir.join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::create_dir_all(dir.join("issues")).unwrap();
+        let file = dir.join("issues/01.md");
+        std::fs::write(&file, crate::testkit::ticket_text("01", &[], "in-progress")).unwrap();
+        let mut s = session();
+        s.runs_dir = js::path_text(&runs);
+        // A finalize kicks the drive only while none runs; this session has no engine to drive.
+        s.driving = true;
+        s.markers.push(TicketMarker {
+            file,
+            status: TicketStatus::InProgress,
+            enlisted_from: enlisted.then(|| "w1:p1".into()),
+            ..marker()
+        });
+        s.state
+            .tickets
+            .insert("01".into(), TicketStatus::InProgress);
+        if enlisted {
+            s.enlisted_work.insert(
+                "01".into(),
+                crate::session::EnlistedWork {
+                    branch: "found".into(),
+                    directory: "/w".into(),
+                },
+            );
+        }
+        let work = HeldPane {
+            attempt: 1,
+            pane_id: "p1".into(),
+            tab_id: Some("t1".into()),
+            terminal_id: None,
+            cwd: "/w".into(),
+            branch: None,
+            harness: "claude".into(),
+            model: "m".into(),
+            effort: None,
+            work_attempt: 1,
+            numbered: false,
+            stream: None,
+            spawned_at: "2026-10-04T00:00:00.000Z".into(),
+            wrapped: !enlisted,
+        };
+        if let Some(exit_code) = held_exit_code_path(&s, "01", &work) {
+            std::fs::write(exit_code, "3\n").unwrap();
+        }
+        let outcome_path = js::path_text(&runs.join("01.outcome.json"));
+        if let Some(text) = outcome {
+            std::fs::write(&outcome_path, text).unwrap();
+        }
+        s.continued.insert(
+            "01".into(),
+            ContinuedAttempt {
+                attempt: 2,
+                work,
+                in_pool_checkout: false,
+                release: ContinuedRelease::detached(),
+                log_path: js::path_text(&runs.join("01.log")),
+                outcome_path,
+            },
+        );
+        s
+    }
+
+    /// Attempt 2's events, each kind with its payload.
+    fn attempt_two(s: &Session) -> Vec<(TicketEventKind, Value)> {
+        read_events(Path::new(&s.runs_dir), "01")
+            .iter()
+            .filter(|event| event.attempt == 2)
+            .map(|event| (event.kind, Value::Object(event.payload.clone())))
+            .collect()
+    }
+
+    // engine.ts endContinuedAttempt: `read.ok ? "outcome" : ending.kind`. A valid Outcome is the
+    // ending whichever observation came first; otherwise the ending is the one observed, so an
+    // Outcome that parses but fails validation crashes on the validator's reason, never as a pane gone.
+    #[tokio::test]
+    async fn a_continued_attempt_ends_as_typescript_records_it_for_every_outcome_and_ending() {
+        for (file, outcome, reason) in OUTCOME_FILES {
+            for ending in endings() {
+                let dir = tempfile::tempdir().unwrap();
+                let mut s = continuing(dir.path(), outcome, false);
+                end_continued_attempt(&mut s, "01", 2, ending.clone()).unwrap();
+                let case = format!("{file} outcome, {ending:?} ending");
+                let exists = outcome.is_some();
+
+                let Some(reason) = reason else {
+                    assert_eq!(
+                        attempt_two(&s),
+                        [(
+                            TicketEventKind::Exited,
+                            serde_json::json!({"code": 0, "status": "done", "logTail": [],
+                                "outcomeExists": true})
+                        )],
+                        "{case}"
+                    );
+                    assert_eq!(s.state.tickets["01"], TicketStatus::Done, "{case}");
+                    assert!(s.state.interrupts.is_empty(), "{case}");
+                    continue;
+                };
+                let (code, phrase, reason) = match ending {
+                    ContinuedEnding::Outcome => (
+                        EXIT_CODE_UNREADABLE,
+                        "ended with no exit code",
+                        reason.to_owned(),
+                    ),
+                    ContinuedEnding::Exited => (
+                        3,
+                        "exited 3",
+                        "the TUI in pane p1 exited before continued attempt 2 wrote an Outcome"
+                            .to_owned(),
+                    ),
+                    _ => (
+                        EXIT_CODE_PANE_GONE,
+                        "ended with its pane gone",
+                        "pane p1 went before continued attempt 2 wrote an Outcome".to_owned(),
+                    ),
+                };
+                assert_eq!(
+                    attempt_two(&s),
+                    [
+                        (
+                            TicketEventKind::Exited,
+                            serde_json::json!({"code": code, "status": "in-progress",
+                                "logTail": [], "outcomeExists": exists})
+                        ),
+                        (
+                            TicketEventKind::Crash,
+                            serde_json::json!({"code": code, "reason": reason, "logTail": [],
+                                "outcomeExists": exists})
+                        ),
+                    ],
+                    "{case}"
+                );
+                assert_eq!(s.state.tickets["01"], TicketStatus::InProgress, "{case}");
+                assert_eq!(
+                    s.state
+                        .interrupts
+                        .iter()
+                        .map(|i| (i.ticket_id.as_str(), i.kind))
+                        .collect::<Vec<_>>(),
+                    [("01", InterruptKind::Crash)],
+                    "{case}"
+                );
+                assert!(
+                    s.state.interrupts[0]
+                        .body
+                        .starts_with(&format!("crash: {reason}\n")),
+                    "{case}: {}",
+                    s.state.interrupts[0].body
+                );
+                let line = format!(
+                    "ticket 01: continued attempt 2 {phrase}, marker in-progress, crash: {reason}"
+                );
+                assert!(s.state.log.contains(&line), "{case}: {:#?}", s.state.log);
+            }
+        }
+    }
+
+    // engine.ts endContinuedAttempt hands an enlisted ticket's ending to endEnlistedAttempt as
+    // `observed === "outcome" ? "outcome" : "pane-gone"`. An Outcome that does not pass the validator is
+    // still the Outcome ending: a crash on its reason, with the found branch kept as the ticket's
+    // working branch, never the pane-gone checkpoint that lets the as-found record go.
+    #[tokio::test]
+    async fn an_enlisted_continued_attempt_whose_outcome_fails_validation_crashes_and_keeps_its_pane()
+     {
+        for (file, outcome, reason) in OUTCOME_FILES {
+            let Some(reason) = reason else { continue };
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = continuing(dir.path(), outcome, true);
+            end_continued_attempt(&mut s, "01", 2, ContinuedEnding::Outcome).unwrap();
+            let exists = outcome.is_some();
+            assert_eq!(
+                attempt_two(&s),
+                [
+                    (
+                        TicketEventKind::Exited,
+                        serde_json::json!({"code": EXIT_CODE_UNREADABLE, "status": "in-progress",
+                            "logTail": [], "outcomeExists": exists})
+                    ),
+                    (
+                        TicketEventKind::Crash,
+                        serde_json::json!({"code": EXIT_CODE_UNREADABLE, "reason": reason,
+                            "logTail": [], "outcomeExists": exists})
+                    ),
+                ],
+                "{file} outcome"
+            );
+            assert_eq!(s.state.tickets["01"], TicketStatus::InProgress, "{file}");
+            assert_eq!(
+                s.enlisted_work.get("01").map(|work| work.branch.as_str()),
+                Some("found"),
+                "{file}: the found branch is still the ticket's"
+            );
+            assert_eq!(
+                s.state
+                    .interrupts
+                    .iter()
+                    .map(|i| (i.ticket_id.as_str(), i.kind))
+                    .collect::<Vec<_>>(),
+                [("01", InterruptKind::Crash)],
+                "{file}"
+            );
+        }
     }
 }

@@ -329,6 +329,74 @@ conformance(
   { timeoutMs: 150_000 },
 );
 
+// engine/engine.ts:4940, engine/engine.ts:4951 (an enlisted ending goes on as `observed === "outcome" ? "outcome" : "pane-gone"`)
+conformance(
+  "enlist",
+  "enlisted ticket lifecycle › a Continued attempt whose Outcome fails validation crashes and keeps the pane as found, never the pane-gone checkpoint",
+  async (t) => {
+    const world = gitTerminalWorld(t, [
+      { file: "01.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+    ]);
+    const worktree = featureWorktree(world);
+    const herdr = await herdrFor(t, world);
+    await seedPane(herdr, "pane-op", "tab-op", worktree, "OC");
+    const server = await t.start(world, { herdr });
+    expect((await enlist(server, { becomes: "ticket", paneId: "pane-op", title: "Talk", spec: "" })).status).toBe(201);
+
+    writeOutcome(world, "enlist-1", { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" });
+    // The pane survey runs every 15 s (engine/pane-survey.ts PANE_SURVEY_MS).
+    await until(() => ticketOf(server, "enlist-1"), (ticket) => ticket?.heldPane != null, {
+      ms: 45_000,
+      what: "the enlisted pane held at its checkpoint",
+    });
+    expect((await server.http.post("/api/keep-talking", { ticketId: "enlist-1" })).status).toBe(202);
+    await until(
+      () => herdr.control<string[]>("submitted"),
+      (texts) => texts.some((text) => text.includes(outcomePath(world, "enlist-1"))),
+      { ms: 30_000, what: "the teaching Turn typed into the enlisted pane" },
+    );
+    const issue = join(world.pool, "issues", "enlist-1.md");
+    const talking = readFileSync(issue, "utf8");
+
+    writeOutcome(world, "enlist-1", { status: "finished", summary: "not a status", commitSha: null });
+
+    const reason = "outcome's status is not done or checkpoint";
+    const crashed = await until(
+      () => snapshotOf(server),
+      (snapshot) => snapshot.state.interrupts.some((i) => i.ticketId === "enlist-1" && i.kind === "crash"),
+      { ms: 30_000, what: "the crash Interrupt" },
+    );
+    expect(crashed.state.interrupts.filter((i) => i.ticketId === "enlist-1")).toEqual([
+      expect.objectContaining({
+        kind: "crash",
+        body: `crash: ${reason}\n\n\noutcome file: ${outcomePath(world, "enlist-1")} (exists)\n`,
+      }),
+    ]);
+    expect(crashed.state.log).toContain(`ticket enlist-1: enlisted attempt 2 ended with no exit code, crash: ${reason}`);
+    const ticket = crashed.state.tickets.find((candidate) => candidate.id === "enlist-1")!;
+    expect(ticket.status).toBe("in-progress");
+    // Still as found, never the re-run Assignment a pane gone gives it: the harness herdr named, no model.
+    expect(ticket.assignment).toMatchObject({ harness: "opencode", model: null });
+    // The Ticket file is as the Continued attempt left it: no pane-gone Brief, no checkpoint.
+    expect(readFileSync(issue, "utf8")).toBe(talking);
+    expect(marker(world, "enlist-1")).toContain("status=in-progress");
+    expect(
+      readEvents(world.pool, "enlist-1")
+        .filter((event) => event.attempt === 2 && event.kind !== "spawned")
+        .map((event) => [event.kind, event.payload]),
+    ).toEqual([
+      ["exited", { code: -1, status: "in-progress", logTail: [], outcomeExists: true }],
+      ["crash", { code: -1, reason, logTail: [], outcomeExists: true }],
+    ]);
+    // Never let go: the found directory, the found branch and the operator's tab.
+    expect(existsSync(worktree)).toBe(true);
+    expect(branchNames(world)).toContain("feature/x");
+    await herdr.settle();
+    expect(herdr.calls.some((call) => call.method === "tab.close" && call.params.tab_id === "tab-op")).toBe(false);
+  },
+  { timeoutMs: 150_000 },
+);
+
 // engine/server.test.ts:5771
 conformance(
   "enlist",

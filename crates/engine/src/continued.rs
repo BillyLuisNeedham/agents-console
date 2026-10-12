@@ -106,6 +106,12 @@ impl ContinuedRelease {
     pub fn release(&self) {
         self.0.cancel();
     }
+
+    /// A handle on no runtime, for a test that records an ending by hand.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self(CancellationToken::new())
+    }
 }
 
 /// `runContinued`: start a Continued attempt's runtime in its Held pane.
