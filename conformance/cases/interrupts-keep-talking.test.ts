@@ -448,6 +448,43 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
+// engine/engine.ts:4940 (`read.ok ? "outcome" : ending.kind`)
+conformance(
+  "interrupts",
+  "a Continued attempt whose Outcome parses but fails validation crashes on the validator's reason, not as a pane gone",
+  async (t) => {
+    const { world, herdr, server, paneId } = await checkpointed(t);
+    await expectContinued(server, "01", 2);
+    writeOutcome(world, "01", { status: "finished", summary: "not a status", commitSha: null });
+
+    const reason = "outcome's status is not done or checkpoint";
+    const interrupt = await untilInterrupt(server, "01", "crash");
+    expect(interrupt.body).toStartWith(`crash: ${reason}\n${join(world.pool, "runs", "01.log")}\n\n`);
+    expect(interrupt.body).toEndWith(`outcome file: ${join(world.pool, "runs", "01.outcome.json")} (exists)\n`);
+    const ended = await snapshot(server);
+    expect(ticketOf(ended, "01").status).toBe("in-progress");
+    expect(ticketOf(ended, "01").liveAttempt).toBeNull();
+    expect(ended.state.log).toContain(
+      `ticket 01: continued attempt 2 ended with no exit code, marker in-progress, crash: ${reason}`,
+    );
+    expect(readStateLine(world.pool, "01.md").status).toBe("in-progress");
+    expectParsedEqual(
+      readEvents(world.pool, "01").filter((e) => e.attempt === 2 && e.kind !== "spawned").map((e) => [e.kind, e.payload]),
+      [
+        ["exited", { code: -1, status: "in-progress", logTail: expect.any(Array), outcomeExists: true }],
+        ["crash", { code: -1, reason, logTail: expect.any(Array), outcomeExists: true }],
+      ],
+      "attempt 2's ending",
+    );
+    // The pane never went: the engine closed nothing, and it is still there.
+    await herdr.settle();
+    expect(callsOf(herdr, "tab.close")).toEqual([]);
+    expect(callsOf(herdr, "pane.close")).toEqual([]);
+    expect(await herdr.control<string[]>("listedPanes")).toContain(paneId);
+  },
+  { timeoutMs: 120_000 },
+);
+
 // ---------------------------------------------------------------------------
 // What Keep talking refuses
 // ---------------------------------------------------------------------------
