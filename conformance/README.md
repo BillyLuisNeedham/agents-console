@@ -56,4 +56,4 @@ spawns, says so. The next takeover is then held to where it moved.
 `harness/takeover.ts` drives the legs and the comparison, and `cases/takeover.test.ts` holds the cases. A
 case that needs a fake herdr gets one process per world, kept alive across every leg, as a live daemon
 outlives a Restart. A stub launch that must stay open across legs is held with `world.stubs.hold(key)`
-until the case releases it, since `waitFor` gives up after ten seconds.
+until the case releases it or its pane is closed, since `waitFor` gives up after ten seconds.

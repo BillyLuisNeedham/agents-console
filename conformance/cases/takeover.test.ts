@@ -465,9 +465,8 @@ takeover<StubHold>("restart", "a live Conversation is re-adopted from its pane b
   async finish(leg) {
     const ended = await leg.server.http.post("/api/conversations/end", { id: "conv-1" });
     expect(ended.status).toBe(202);
+    // The End closes its pane, which takes the held stub with it: nothing is
+    // left to release.
     await snapshotUntil(leg, (snapshot) => conversationIn(snapshot).status === "ended", "the Conversation ended");
-    // The End closed its pane, and the fake herdr's close kills only the
-    // pane's shell: the held stub stays until it is released.
-    await leg.prepared.release();
   },
 });

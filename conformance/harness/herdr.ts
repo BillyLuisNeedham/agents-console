@@ -7,7 +7,7 @@
  */
 
 import { join } from "node:path";
-import type { ExecutingFakeHerdrOptions } from "../fixtures/herdr-executing-fake.ts";
+import { killPaneGroup, type ExecutingFakeHerdrOptions } from "../fixtures/herdr-executing-fake.ts";
 
 const PROCESS = join(import.meta.dir, "..", "fixtures", "herdr-process.ts");
 
@@ -56,11 +56,17 @@ export interface HerdrProcess {
    * otherwise beat the record of the herdr call it made on a loaded machine.
    */
   settle(): Promise<void>;
+  /**
+   * Close the fake and wait for it to exit, SIGKILLing it after 5 s. Its
+   * panes' processes go with it: the fake ends them as it closes, and when
+   * it could not (killed here, or by `kill`), they are killed here.
+   */
   stop(): Promise<void>;
   /**
    * SIGKILL the fake's process, a daemon that dies without closing anything:
    * the processes its panes run live on, and its socket file stays behind
-   * with nobody listening on it. `stop` after this has nothing to do.
+   * with nobody listening on it. `stop` after this only kills those
+   * processes.
    */
   kill(): Promise<void>;
 }
@@ -81,6 +87,9 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
     stderr: "pipe",
   });
   const calls: HerdrCall[] = [];
+  // The process groups of the fake's panes still running, for `stop` to end
+  // when the fake was killed before it could.
+  const panePids = new Set<number>();
   const replies = new Map<number, (reply: { ok: boolean; value?: unknown; error?: string }) => void>();
   const waiters = new Set<() => void>();
   let socketPath: string | null = null;
@@ -96,6 +105,10 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
     } else if (line.startsWith("REQUEST ")) {
       calls.push(JSON.parse(line.slice("REQUEST ".length)) as HerdrCall);
       for (const look of [...waiters]) look();
+    } else if (line.startsWith("PANE ")) {
+      panePids.add(Number(line.slice("PANE ".length)));
+    } else if (line.startsWith("PANE_EXITED ")) {
+      panePids.delete(Number(line.slice("PANE_EXITED ".length)));
     } else if (line.startsWith("REPLY ")) {
       const space = line.indexOf(" ", "REPLY ".length);
       const id = JSON.parse(line.slice("REPLY ".length, space)) as number;
@@ -103,7 +116,7 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
       replies.delete(id);
     }
   };
-  void (async () => {
+  const reading = (async () => {
     let pending = "";
     const decoder = new TextDecoder();
     for await (const chunk of proc.stdout) {
@@ -172,6 +185,12 @@ export async function startHerdr(env: Record<string, string>, options: HerdrOpti
         proc.kill("SIGKILL");
         await proc.exited;
       }
+      // Exit 0 is the fake's own close, which ended every pane's group
+      // first; any other end left them running. The last PANE lines are
+      // read once stdout closes.
+      await reading;
+      if (proc.exitCode !== 0) for (const pid of panePids) killPaneGroup(pid);
+      panePids.clear();
     },
     async kill() {
       proc.kill("SIGKILL");
