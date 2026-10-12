@@ -260,6 +260,23 @@ fn spawned_payload(
     payload
 }
 
+/// The enlisted Conversation's id, minted before the branch rule, because the branch it creates is named
+/// for it (as the Ticket arm's is for the enlist id), and reserved in the same job: the claim runs in a
+/// later one, and a start that landed in between would otherwise mint the same id. The TypeScript did
+/// the three with no await between them. Nothing is reserved when the branch rule refuses.
+fn mint_conversation_id(
+    session: &mut Session,
+    pane: &FoundPane,
+) -> Result<(String, BranchRule), EngineError> {
+    let existing = load_conversations(&Path::new(&session.pool_dir).join("conversations"))
+        .map_err(|error| refused(error.to_string()))?;
+    let reserved = crate::conversations::reserved_ids(session);
+    let id = next_conversation_id(&existing, |id| reserved.iter().any(|r| r == id));
+    let rule = apply_enlist_branch_rule(session, pane, &id)?;
+    crate::conversations::reserve(session, &id);
+    Ok((id, rule))
+}
+
 struct ConversationEnlist {
     title: String,
     steward: bool,
@@ -268,8 +285,8 @@ struct ConversationEnlist {
 
 /// `enlistConversation`: enlist a live herdr pane as a Conversation (issue #101): re-judge the picked
 /// pane, apply the branch rule, then let the Conversation module claim the pane and register the
-/// runtime the way `start` does after its launch, skipping the launch. The id is minted here (conv-N,
-/// as a started Conversation) before the branch rule names the pool branch, and passed through.
+/// runtime the way `start` does after its launch, skipping the launch. The id is minted and reserved here
+/// (conv-N, as a started Conversation) before the branch rule names the pool branch, and passed through.
 /// Nothing is written before the claim; a claim that fails unwinds the branch the engine may have
 /// created, so a failed enlist leaves no file and no branch.
 async fn enlist_conversation(
@@ -322,22 +339,14 @@ async fn enlist_conversation(
     };
     let pane = find_pane(&facts, &pane_id).await?;
 
-    // The Conversation id is minted before the branch rule, because the branch it creates is named for
-    // it (as the Ticket arm's is for the enlist id).
     let (id, rule) = {
         let pane = pane.clone();
         engine
-            .call(move |s| -> Result<(String, BranchRule), EngineError> {
-                let existing = load_conversations(&Path::new(&s.pool_dir).join("conversations"))
-                    .map_err(|error| refused(error.to_string()))?;
-                let reserved = crate::conversations::reserved_ids(s);
-                let id = next_conversation_id(&existing, |id| reserved.iter().any(|r| r == id));
-                let rule = apply_enlist_branch_rule(s, &pane, &id)?;
-                Ok((id, rule))
-            })
+            .call(move |s| mint_conversation_id(s, &pane))
             .await??
     };
 
+    // The claim releases the id reserved above whatever it answers.
     let claimed = crate::conversations::enlist(
         engine,
         EnlistConversationRegistration {
@@ -593,10 +602,8 @@ pub async fn enlist_ticket(
     // From here the runtime is live; every failure unwinds it completely.
     let ticket_id = id.clone();
     engine
-        .call(move |s| -> Result<(), EngineError> {
-            let mut restored_files: Vec<(std::path::PathBuf, String)> = Vec::new();
-            let mut restored_blockers: Vec<(String, Vec<String>)> = Vec::new();
-            let written = write_enlisted_ticket(
+        .call(move |s| {
+            write_enlisted_ticket_or_unwind(
                 s,
                 &ticket_id,
                 &title,
@@ -605,33 +612,56 @@ pub async fn enlist_ticket(
                 &pane,
                 &rule,
                 &blocks,
-                &mut restored_files,
-                &mut restored_blockers,
-            );
-            match written {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    unwind_enlist(
-                        s,
-                        &ticket_id,
-                        UnwindState {
-                            restored_files,
-                            restored_blockers,
-                            branch_created: rule.created,
-                            captured_target: rule.captured,
-                            directory: pane.directory.clone(),
-                            found_branch: pane.branch.clone(),
-                            pool_branch: rule.branch.clone(),
-                            pane_id: pane.pane_id.clone(),
-                            harness: pane.harness.clone(),
-                        },
-                    );
-                    Err(error)
-                }
-            }
+            )
         })
         .await??;
     Ok(EnlistResponse::Ticket(EnlistedTicket { ticket_id: id }))
+}
+
+// The writes of an enlist after the claim, unwound completely when one fails.
+#[allow(clippy::too_many_arguments)]
+fn write_enlisted_ticket_or_unwind(
+    s: &mut Session,
+    id: &str,
+    title: &str,
+    spec: &str,
+    issue_path: &str,
+    pane: &FoundPane,
+    rule: &BranchRule,
+    blocks: &[String],
+) -> Result<(), EngineError> {
+    let mut restored_files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut restored_blockers: Vec<(String, Vec<String>)> = Vec::new();
+    let written = write_enlisted_ticket(
+        s,
+        id,
+        title,
+        spec,
+        issue_path,
+        pane,
+        rule,
+        blocks,
+        &mut restored_files,
+        &mut restored_blockers,
+    );
+    if written.is_err() {
+        unwind_enlist(
+            s,
+            id,
+            UnwindState {
+                restored_files,
+                restored_blockers,
+                branch_created: rule.created,
+                captured_target: rule.captured,
+                directory: pane.directory.clone(),
+                found_branch: pane.branch.clone(),
+                pool_branch: rule.branch.clone(),
+                pane_id: pane.pane_id.clone(),
+                harness: pane.harness.clone(),
+            },
+        );
+    }
+    written
 }
 
 // The writes of an enlist after the claim; the caller unwinds when one fails.
@@ -679,10 +709,13 @@ fn write_enlisted_ticket(
     .map_err(|e| io(&e))?;
 
     for blocker in blocks {
-        let target = s
-            .marker(blocker)
-            .cloned()
-            .expect("every ticked ticket was validated before the claim");
+        // Validated before the claim, but the claim awaited the pane, so the Ticket may have left the
+        // pool since: an error here unwinds the enlist, where a panic would leave it half written.
+        let Some(target) = s.marker(blocker).cloned() else {
+            return Err(refused(format!(
+                "enlist: ticket {blocker} is not in the pool"
+            )));
+        };
         restored_files.push((
             target.file.clone(),
             js::read_text(&target.file).map_err(|e| io(&e))?,
@@ -1266,5 +1299,151 @@ mod tests {
             " The enlist created {created} in that checkout, and a re-run needs the branch free: check \
              another branch out there first, or the re-run waits as a checkpoint until you do."
         )));
+    }
+
+    fn found_pane(directory: &str, branch: &str) -> FoundPane {
+        FoundPane {
+            pane_id: "w1:p2".into(),
+            tab_id: None,
+            harness: "claude".into(),
+            session_id: None,
+            title: "a pane".into(),
+            directory: directory.into(),
+            branch: branch.into(),
+        }
+    }
+
+    #[test]
+    fn an_enlisted_conversation_id_is_reserved_in_the_job_that_mints_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (publisher, _snapshots) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.pool_dir = js::path_text(dir.path());
+        session.cwd = session.pool_dir.clone();
+        // A pane on a branch other than the merge target is used as found: nothing moves.
+        let pane = found_pane(&session.pool_dir, "feature/x");
+
+        let (id, rule) = mint_conversation_id(&mut session, &pane).unwrap();
+        assert_eq!(
+            (id.as_str(), rule.branch.as_str(), rule.created),
+            ("conv-1", "feature/x", false)
+        );
+        // The claim runs in a later job. A start landing in between mints from the reserved ids, as a
+        // second enlist does, so neither can take the id this one holds.
+        assert_eq!(
+            crate::conversations::reserved_ids(&session),
+            vec!["conv-1".to_owned()]
+        );
+        let reserved = crate::conversations::reserved_ids(&session);
+        assert_eq!(
+            next_conversation_id(&[], |id| reserved.iter().any(|r| r == id)),
+            "conv-2"
+        );
+        let (second, _) = mint_conversation_id(&mut session, &pane).unwrap();
+        assert_eq!(second, "conv-2");
+    }
+
+    #[test]
+    fn a_refused_branch_rule_reserves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (publisher, _snapshots) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.pool_dir = js::path_text(dir.path());
+        session.merge_target = Some("main".into());
+        // On the merge target in a directory that is no checkout: the pool branch cannot be created.
+        let pane = found_pane(&session.pool_dir, "main");
+
+        let refused = mint_conversation_id(&mut session, &pane).err().unwrap();
+        assert!(
+            refused.message().starts_with("enlist: could not create branch"),
+            "{}",
+            refused.message()
+        );
+        assert!(crate::conversations::reserved_ids(&session).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_claim_releases_the_id_the_enlist_reserved() {
+        let (publisher, snapshots) = tokio::sync::watch::channel(None);
+        let session = crate::testkit::bare_session(publisher);
+        let engine = Engine::spawn(session, snapshots, |s, engine| s.engine = Some(engine));
+        engine
+            .call(|s| crate::conversations::reserve(s, "conv-1"))
+            .await
+            .unwrap();
+
+        // The stand-in pool is not terminal-backed, so the claim refuses before it touches the pane.
+        let claimed = crate::conversations::enlist(
+            &engine,
+            EnlistConversationRegistration {
+                id: "conv-1".into(),
+                pane_id: "w1:p2".into(),
+                tab_id: None,
+                harness: "claude".into(),
+                title: "Enlisted".into(),
+                opening: None,
+                directory: "/w".into(),
+                branch: "feature/x".into(),
+                session_id: None,
+                steward: false,
+            },
+        )
+        .await;
+        assert_eq!(claimed.err().as_deref(), Some("the pool is not terminal-backed"));
+        assert!(
+            engine
+                .call(|s| crate::conversations::reserved_ids(s))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticked_ticket_gone_from_the_pool_by_the_write_unwinds_the_enlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = js::path_text(dir.path());
+        let (publisher, _snapshots) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.pool_dir = root.clone();
+        session.issues_dir = js::path_join(&[&root, "issues"]);
+        session.runs_dir = js::path_join(&[&root, "runs"]);
+        std::fs::create_dir_all(&session.issues_dir).unwrap();
+        std::fs::create_dir_all(&session.runs_dir).unwrap();
+        let ticked = dir.path().join("issues/02.md");
+        let original = crate::testkit::ticket_text("02", &[], "ready");
+        std::fs::write(&ticked, &original).unwrap();
+        session.markers = vec![TicketMarker {
+            file: ticked.clone(),
+            ..marker("02")
+        }];
+        let pane = found_pane(&root, "feature/x");
+        let rule = BranchRule {
+            branch: "feature/x".into(),
+            created: false,
+            captured: false,
+        };
+        let issue_path = js::path_join(&[&session.issues_dir, "enlist-1.md"]);
+
+        // 03 was ticked and validated, then left the pool while the claim awaited the pane.
+        let refused = write_enlisted_ticket_or_unwind(
+            &mut session,
+            "enlist-1",
+            "Enlisted",
+            "Do it.",
+            &issue_path,
+            &pane,
+            &rule,
+            &["02".to_owned(), "03".to_owned()],
+        )
+        .unwrap_err();
+        assert_eq!(refused.message(), "enlist: ticket 03 is not in the pool");
+
+        // Unwound, not left half written: no ticket file, no events, 02 as it was on disk and in memory.
+        assert!(!dir.path().join("issues/enlist-1.md").exists());
+        assert!(!dir.path().join("runs/enlist-1.events.jsonl").exists());
+        assert_eq!(std::fs::read_to_string(&ticked).unwrap(), original);
+        assert!(session.marker("02").unwrap().blocked_by.is_empty());
+        assert!(session.marker("enlist-1").is_none());
     }
 }
