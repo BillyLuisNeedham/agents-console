@@ -671,9 +671,11 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
   `script` writes its own start and done lines and BSD `script -q` writes none, as C08 found for Continued
   attempts.
 - **The reused-pid and gone-worktree orphan checks run on Linux only** (`children.test.ts:86`,
-  `engine.test.ts:13235`). The server reads a pid's working directory from `/proc` (`processCwd` in
-  `engine/children.ts`); with no procfs it trusts liveness alone, so on macOS these two cases are skipped, not
-  failed. See the first entry below.
+  `engine.test.ts:13235`). The TypeScript server read a pid's working directory from `/proc` (`processCwd` in
+  `engine/children.ts`) and with no procfs trusted liveness alone. The Rust server reads it on macOS too, with
+  `proc_pidinfo` (`process_cwd` in `crates/engine/src/children.rs`), but no Mac has run that yet, so on macOS
+  these two cases are still skipped, not failed. Un-skip them once they pass on a Mac. See the first entry
+  below.
 
 ### Pinned as the TypeScript server does it today, each worth a look before the port copies it
 

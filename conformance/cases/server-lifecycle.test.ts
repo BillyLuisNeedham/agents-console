@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
-import { freePort, launchServer, type LaunchedServer } from "../harness/server.ts";
+import { freePort, launchServer, portTaken, type LaunchedServer } from "../harness/server.ts";
 import type { World } from "../harness/world.ts";
 
 // engine/engine.ts REVIEW_TICKET_ID: the final review gate's Ticket id.
@@ -83,7 +83,11 @@ interface Rig {
   holdPort(port?: number): { port: number; release(): void };
 }
 
-function lifecycle(name: string, body: (t: Case, rig: Rig) => Promise<void>, options: { timeoutMs?: number } = {}): void {
+function lifecycle(
+  name: string,
+  body: (t: Case, rig: Rig) => Promise<void>,
+  options: { timeoutMs?: number; skip?: string } = {},
+): void {
   conformance(
     "server",
     name,
@@ -336,23 +340,21 @@ lifecycle("pinned pool ports › --port overrides the console.json pin for that 
 });
 
 // engine/server.test.ts:2466
-lifecycle("pinned pool ports › with no pin, binds the default port when it is free", async (t, rig) => {
-  // The default port is not settable (decided in the test inventory's open
-  // question 2), so this runs only when 8787 is free on the box.
-  let probe: { port: number; release(): void };
-  try {
-    probe = rig.holdPort(DEFAULT_PORT);
-  } catch {
-    console.warn(`port ${DEFAULT_PORT} is busy on this machine: the default-port case did not run`);
-    return;
-  }
-  probe.release();
-  const world = t.world({ tickets: [{ file: "01-a.md", marker: DONE }], config: CONFIG });
-  const server = rig.launch(world);
-  expect(await server.booted()).toBe(DEFAULT_PORT);
-  expect(registryEntries(homeRegistry(world)).map((entry) => entry.port)).toEqual([DEFAULT_PORT]);
-  await server.stop();
-});
+// The default port is not settable (decided in the test inventory's open
+// question 2), so this runs only when 8787 is free on the box: busy as the
+// file loads, the case is reported skipped; taken after that, it fails.
+lifecycle(
+  "pinned pool ports › with no pin, binds the default port when it is free",
+  async (t, rig) => {
+    rig.holdPort(DEFAULT_PORT).release();
+    const world = t.world({ tickets: [{ file: "01-a.md", marker: DONE }], config: CONFIG });
+    const server = rig.launch(world);
+    expect(await server.booted()).toBe(DEFAULT_PORT);
+    expect(registryEntries(homeRegistry(world)).map((entry) => entry.port)).toEqual([DEFAULT_PORT]);
+    await server.stop();
+  },
+  (await portTaken(DEFAULT_PORT)) ? { skip: `port ${DEFAULT_PORT} is busy on this machine` } : {},
+);
 
 // engine/server.test.ts:2474
 lifecycle("pinned pool ports › with no pin, hunts to the next free port when the default is busy", async (t, rig) => {
