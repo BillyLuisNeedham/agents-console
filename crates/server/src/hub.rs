@@ -156,7 +156,9 @@ pub(crate) struct HubState {
     watches: IndexMap<String, CardWatch>,
     dirty: IndexSet<String>,
     card_timer: Option<Timer>,
-    watchers: Vec<notify::RecommendedWatcher>,
+    /// The file watchers, held only for the drop that stops them: `notify` ones, or a stand-in a test
+    /// supplies.
+    pub watchers: Vec<Box<dyn Send>>,
     known_ids: Option<(u64, HashSet<String>)>,
     heartbeat: Option<Timer>,
     html: Option<(f64, String)>,
@@ -1318,17 +1320,8 @@ fn watch_files(server: &Server, inner: &mut Inner) {
     for (dir, runs) in [(&server.0.runs_dir, true), (&server.0.issues_dir, false)] {
         let watched = server.clone();
         let handler = move |event: notify::Result<notify::Event>| {
-            let Ok(event) = event else {
+            let Some(names) = event.ok().as_ref().and_then(changed_names) else {
                 return;
-            };
-            let names: Vec<Option<String>> = if event.paths.is_empty() {
-                vec![None]
-            } else {
-                event
-                    .paths
-                    .iter()
-                    .map(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .collect()
             };
             let mut inner = watched.lock();
             if inner.hub.closed {
@@ -1342,14 +1335,35 @@ fn watch_files(server: &Server, inner: &mut Inner) {
             continue;
         };
         use notify::Watcher;
-        // Not watchable here: the live check's stat still finds changes.
+        // Not watchable here: the live check's stat still finds changes. Dropping a watcher whose watch
+        // failed under the lock waits on nothing: FSEvents started no thread for it, and inotify's drop
+        // only signals its thread.
         if watcher
             .watch(dir, notify::RecursiveMode::NonRecursive)
             .is_ok()
         {
-            inner.hub.watchers.push(watcher);
+            inner.hub.watchers.push(Box::new(watcher));
         }
     }
+}
+
+// The file names an event changed, `None` among them for an event that names no file; nothing for an
+// open or a close, which inotify reports for every read, the hub's own included (a write also comes as a
+// modify).
+fn changed_names(event: &notify::Event) -> Option<Vec<Option<String>>> {
+    if event.kind.is_access() {
+        return None;
+    }
+    if event.paths.is_empty() {
+        return Some(vec![None]);
+    }
+    Some(
+        event
+            .paths
+            .iter()
+            .map(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect(),
+    )
 }
 
 fn on_file(server: &Server, inner: &mut Inner, runs: bool, name: Option<&str>) {
@@ -1369,8 +1383,19 @@ fn on_file(server: &Server, inner: &mut Inner, runs: bool, name: Option<&str>) {
     }
 }
 
-fn unwatch_files(hub: &mut HubState) {
-    hub.watchers.clear();
+/// Watchers taken out of the hub, to drop once the server lock is released. A watcher's drop can wait on
+/// the thread its handler runs on, and the handler takes that lock: macOS's FSEvents watcher joins its
+/// runloop thread, so one dropped under the lock with an event in flight deadlocks every route.
+#[must_use = "drop the watchers after the server lock is released"]
+#[derive(Default)]
+pub(crate) struct Unwatched {
+    _watchers: Vec<Box<dyn Send>>,
+}
+
+fn unwatch_files(hub: &mut HubState) -> Unwatched {
+    Unwatched {
+        _watchers: std::mem::take(&mut hub.watchers),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1587,16 +1612,16 @@ fn opened(server: &Server, inner: &mut Inner, socket: u64) -> Result<(), String>
     Ok(())
 }
 
-fn socket_closed(server: &Server, inner: &mut Inner, socket: u64) {
+fn socket_closed(server: &Server, inner: &mut Inner, socket: u64) -> Unwatched {
     let Some(entry) = inner.hub.sockets.get_mut(&socket) else {
-        return;
+        return Unwatched::default();
     };
     entry.open = false;
     let member = entry.member;
     let visible = entry.visible;
     if !member {
         inner.hub.sockets.shift_remove(&socket);
-        return;
+        return Unwatched::default();
     }
     let cards: Vec<String> = entry.cards.keys().cloned().collect();
     for id in cards {
@@ -1607,10 +1632,11 @@ fn socket_closed(server: &Server, inner: &mut Inner, socket: u64) {
         inner.hub.visible_count -= 1;
         visible_changed(server, inner);
     }
-    if !inner.hub.sockets.values().any(|e| e.member) {
-        cancel(&mut inner.hub.heartbeat);
-        unwatch_files(&mut inner.hub);
+    if inner.hub.sockets.values().any(|e| e.member) {
+        return Unwatched::default();
     }
+    cancel(&mut inner.hub.heartbeat);
+    unwatch_files(&mut inner.hub)
 }
 
 /// Serve one upgraded socket: register it, say hello, then read its frames until it closes, while a
@@ -1687,10 +1713,11 @@ pub(crate) async fn serve_socket(server: Server, socket: WebSocket) {
             },
         }
     }
-    {
+    let unwatched = {
         let mut inner = server.lock();
-        socket_closed(&server, &mut inner, id);
-    }
+        socket_closed(&server, &mut inner, id)
+    };
+    drop(unwatched);
     writer.abort();
 }
 
@@ -1735,8 +1762,8 @@ pub(crate) fn page(server: &Server, inner: &mut Inner) -> Option<String> {
     hub.made.as_ref().map(|(_, _, text)| text.clone())
 }
 
-/// Stop every timer and watch.
-pub(crate) fn dispose(inner: &mut Inner) {
+/// Stop every timer and take out every watcher, for the caller to drop once it lets go of the lock.
+pub(crate) fn dispose(inner: &mut Inner) -> Unwatched {
     let hub = &mut inner.hub;
     hub.closed = true;
     for timer in [
@@ -1749,13 +1776,14 @@ pub(crate) fn dispose(inner: &mut Inner) {
     ] {
         cancel(timer);
     }
-    unwatch_files(hub);
+    unwatch_files(hub)
 }
 
 /// The stop's farewell: flush, so the `stopped` delta goes, then close every socket with CLOSE_STOPPED.
-pub(crate) fn close_sockets(server: &Server, inner: &mut Inner) {
+/// The watchers come back as [`dispose`] hands them.
+pub(crate) fn close_sockets(server: &Server, inner: &mut Inner) -> Unwatched {
     flush_quietly(server, inner);
-    dispose(inner);
+    let unwatched = dispose(inner);
     let members: Vec<u64> = inner
         .hub
         .sockets
@@ -1766,6 +1794,7 @@ pub(crate) fn close_sockets(server: &Server, inner: &mut Inner) {
     for socket in members {
         inner.hub.close_socket(socket);
     }
+    unwatched
 }
 
 #[cfg(test)]
@@ -1816,6 +1845,29 @@ mod tests {
                 json!({ "type": "reply", "id": 5, "kind": "settings.get", "rev": 0, "ok": true, "result": {} }),
             ]
         );
+    }
+
+    #[test]
+    fn takes_a_read_for_no_change_and_names_what_an_event_changed() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, DataChange, ModifyKind};
+        use notify::{Event, EventKind};
+        let file = std::path::PathBuf::from("/pool/runs/01.events.jsonl");
+        for read in [
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Write),
+        ] {
+            let event = Event::new(EventKind::Access(read)).add_path(file.clone());
+            assert_eq!(changed_names(&event), None, "{read:?}");
+        }
+        let write =
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any))).add_path(file.clone());
+        assert_eq!(
+            changed_names(&write),
+            Some(vec![Some("01.events.jsonl".to_owned())])
+        );
+        let rescan = Event::new(EventKind::Create(CreateKind::Any));
+        assert_eq!(changed_names(&rescan), Some(vec![None]));
     }
 
     #[test]

@@ -1222,3 +1222,84 @@ async fn hands_each_pool_title_change_to_the_relabel_once_from_a_hand_edit_or_a_
         "an unchanged title is not handed on again"
     );
 }
+
+// A stand-in for macOS's FSEvents watcher, whose drop joins the thread its handler runs on (notify's
+// FsEventWatcher::drop): an event lands as it goes, the handler takes the server lock, and the drop
+// waits for it. Dropped while the lock is held, it never returns. `dropped` hears each drop that does.
+struct FsEventsStandIn {
+    server: Server,
+    dropped: std::sync::mpsc::Sender<()>,
+}
+
+impl Drop for FsEventsStandIn {
+    fn drop(&mut self) {
+        let server = self.server.clone();
+        std::thread::spawn(move || drop(server.lock()))
+            .join()
+            .unwrap();
+        let _ = self.dropped.send(());
+    }
+}
+
+// The hub lets its watchers go once the server lock is released. On a runtime of its own: a drop under
+// the lock leaves a worker stuck for good, so the runtime is let go in the background and the test fails
+// on the wait instead of hanging.
+fn check_watchers_go_outside_the_lock(
+    let_go: impl FnOnce(Server) -> futures::future::BoxFuture<'static, ()>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let rig = runtime.block_on(rig(RigOptions::default()));
+    let (dropped, heard) = std::sync::mpsc::channel();
+    rig.server
+        .lock()
+        .hub
+        .watchers
+        .push(Box::new(FsEventsStandIn {
+            server: rig.server.clone(),
+            dropped,
+        }));
+    runtime.spawn(let_go(rig.server.clone()));
+    let finished = heard.recv_timeout(Duration::from_secs(10));
+    runtime.shutdown_background();
+    assert!(
+        finished.is_ok(),
+        "the watcher was never let go, or its drop deadlocked under the server lock"
+    );
+}
+
+#[test]
+fn lets_its_watchers_go_outside_the_lock_when_the_last_socket_closes() {
+    check_watchers_go_outside_the_lock(|server| {
+        async move {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+                "ws://127.0.0.1:{}/api/ws",
+                server.port()
+            ))
+            .await
+            .unwrap();
+            // The snapshot frame comes once the open handler has made the socket a member.
+            while let Some(Ok(frame)) = ws.next().await {
+                if let Message::Text(text) = frame
+                    && serde_json::from_str::<Value>(text.as_str()).unwrap()["type"] == "snapshot"
+                {
+                    break;
+                }
+            }
+            ws.close(None).await.unwrap();
+        }
+        .boxed()
+    });
+}
+
+#[test]
+fn lets_its_watchers_go_outside_the_lock_on_a_stop() {
+    check_watchers_go_outside_the_lock(|server| async move { server.shutdown(None).await }.boxed());
+}
+
+#[test]
+fn lets_its_watchers_go_outside_the_lock_on_close() {
+    check_watchers_go_outside_the_lock(|server| async move { server.close().await }.boxed());
+}

@@ -528,6 +528,40 @@ conformance("protocol", "cards › sends a subscribed card whole in one frame, t
   expect(client.frames.slice(quietFrom).filter(isCard("01"))).toEqual([]);
 });
 
+// The file watch goes with the last socket and comes back with the next. Writes keep landing in runs/
+// through every close, so an event is in flight as the watch goes: on macOS the watcher's drop waits for
+// that event's handler, which takes the server's lock, so a watch let go under the lock hung every route.
+// Only a macOS run can show that hang (inotify's drop waits on nothing); elsewhere this shows the watch
+// coming back.
+conformance("protocol", "cards › lets the file watch go with the last socket and brings it back with the next, while runs/ keeps changing", async (t) => {
+  const { world, server } = await finishedPool(t);
+  const writer = setInterval(() => appendFileSync(join(world.pool, "runs", "noise.txt"), "x\n"), 2);
+  t.defer(() => clearInterval(writer));
+
+  for (let round = 1; round <= 10; round++) {
+    const client = await t.socket(server);
+    await client.sync();
+    const from = client.frames.length;
+    client.send({ type: "subscribe", card: { id: "01" } });
+    const card = await cardOf(client, "01", { from });
+    // This socket's watch finds the append long before the 2 s backstop.
+    const grownFrom = client.frames.length;
+    appendFileSync(logPath(world, card.log as LogPush), `round ${round}\n`);
+    const append = await cardOf(client, "01", {
+      from: grownFrom,
+      ms: 1_500,
+      what: `round ${round}'s append`,
+      has: (frame) => frame.log?.mode === "append",
+    });
+    expect(append.log).toMatchObject({ mode: "append", content: `round ${round}\n` });
+    client.close();
+    await client.closed;
+  }
+
+  clearInterval(writer);
+  expect((await server.http.get("/api/state")).status).toBe(200);
+});
+
 // engine/ws.test.ts:797
 conformance("protocol", "cards › answers a card the pool does not know with an error", async (t) => {
   const { world, server } = await finishedPool(t);

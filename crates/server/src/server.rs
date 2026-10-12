@@ -817,10 +817,11 @@ impl Server {
                     if let Some(engine) = server.engine() {
                         engine.shutdown(grace).await;
                     }
-                    {
+                    let unwatched = {
                         let mut inner = server.lock();
-                        hub::close_sockets(&server, &mut inner);
-                    }
+                        hub::close_sockets(&server, &mut inner)
+                    };
+                    drop(unwatched);
                     // A closed socket still has its last frames in flight: one short pause lets them
                     // flush before the connections are cut.
                     tokio::time::sleep(STREAM_DRAIN).await;
@@ -859,10 +860,11 @@ impl Server {
     /// Stop every timer and serving, and close the engine's store, without the farewell: what an
     /// in-process caller that owns the run does.
     pub async fn close(&self) {
-        {
+        let unwatched = {
             let mut inner = self.lock();
-            hub::dispose(&mut inner);
-        }
+            hub::dispose(&mut inner)
+        };
+        drop(unwatched);
         self.stop_serving().await;
         if let Some(engine) = self.engine() {
             engine.close().await;
