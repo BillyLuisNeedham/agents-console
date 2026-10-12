@@ -13,9 +13,12 @@
  * `agent-console` first on the server's PATH records too, so a hand-off that
  * went by PATH shows as one. Every other server runs from the runner's guard
  * checkout, laid out the same way, whose shim refuses (`guardCheckout`).
+ * The Boot and every server it starts run the checkout's copy, detached, so
+ * they outlive the server the case started; `stopStarted` ends them.
  *
- *   const recorder = bootRecorder(world);
+ *   const recorder = bootRecorder(world, { boot: true });
  *   const server = await t.start(world, recorder.start);
+ *   t.defer(() => recorder.stopStarted(server.pid));
  *   ...
  *   const [call] = await recorder.handOffs(1);
  */
@@ -45,6 +48,15 @@ export interface BootRecorder {
   calls(): BootHandOff[];
   /** Wait for `n` hand-offs, then half a second more for a stray one, and hand back all of them. */
   handOffs(n: number): Promise<BootHandOff[]>;
+  /**
+   * Stop every process running from the checkout but `except`, and wait for
+   * each to go: the shim and the Boot it execs are killed first, so none
+   * starts a server after the sweep, then each server gets SIGTERM, and
+   * SIGKILL if it is still up 15 seconds on. The sweep repeats until nothing
+   * is left, so a server a killed Boot was starting, before it claimed
+   * runs/server.pid, is stopped too.
+   */
+  stopStarted(except?: number): Promise<void>;
 }
 
 /**
@@ -132,6 +144,62 @@ export interface BootRecorderOptions {
   boot?: boolean;
 }
 
+/** A process running from a stand-in checkout, and whether it is a server rather than its shim or a Boot. */
+interface CheckoutProcess {
+  pid: number;
+  server: boolean;
+}
+
+/**
+ * Every live process whose argv names a file in `checkout`, by its path or
+ * its real path: the shim, run as `bash <checkout>/bin/agent-console`, the
+ * Boot it execs as the copy, and each server a Boot starts as its own
+ * executable. A zombie's argv is gone, so it does not count.
+ */
+function runningFrom(checkout: string): CheckoutProcess[] {
+  const roots = [...new Set([checkout, realpathSync(checkout)])].map((dir) => `${dir}/`);
+  const ps = Bun.spawnSync(["ps", "-axww", "-o", "pid=,args="], { stdout: "pipe", stderr: "pipe" });
+  if (ps.exitCode !== 0) throw new Error(`ps failed: ${ps.stderr.toString()}`);
+  const found: CheckoutProcess[] = [];
+  for (const line of ps.stdout.toString().split("\n")) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    const args = match[2]!;
+    const root = roots.find((dir) => args.includes(dir));
+    if (!root) continue;
+    const copy = `${root}target/release/agent-console`;
+    found.push({ pid: Number(match[1]), server: args.startsWith(`${copy} server `) });
+  }
+  return found;
+}
+
+function signal(pid: number, name: NodeJS.Signals): void {
+  try {
+    process.kill(pid, name);
+  } catch {
+    // Gone already.
+  }
+}
+
+async function stopRunningFrom(checkout: string, except?: number): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const left = runningFrom(checkout).filter((proc) => proc.pid !== except);
+    if (left.length === 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`processes from ${checkout} outlived their cleanup: ${left.map((proc) => proc.pid).join(", ")}`);
+    }
+    for (const proc of left) if (!proc.server) signal(proc.pid, "SIGKILL");
+    const servers = left.filter((proc) => proc.server).map((proc) => proc.pid);
+    for (const pid of servers) signal(pid, "SIGTERM");
+    const termDeadline = Date.now() + 15_000;
+    const up = () => runningFrom(checkout).filter((proc) => servers.includes(proc.pid));
+    while (up().length > 0 && Date.now() < termDeadline) await Bun.sleep(25);
+    for (const proc of up()) signal(proc.pid, "SIGKILL");
+    await Bun.sleep(100);
+  }
+}
+
 export function bootRecorder(world: World, options: BootRecorderOptions = {}): BootRecorder {
   const checkout = join(world.root, "boot-checkout");
   const decoy = join(world.root, "boot-bin");
@@ -151,5 +219,6 @@ export function bootRecorder(world: World, options: BootRecorderOptions = {}): B
       await Bun.sleep(500);
       return calls();
     },
+    stopStarted: (except) => stopRunningFrom(checkout, except),
   };
 }

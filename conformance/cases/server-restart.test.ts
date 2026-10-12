@@ -14,7 +14,8 @@
  * browser once its server answers, so the browser opener is a recorder first
  * on the server's PATH, inherited by the Boot it starts. The Boot and the
  * server it starts outlive the server the case started, so teardown stops
- * the server runs/server.pid names.
+ * every process running from the stand-in checkout, Boot first, whether the
+ * case passed or failed partway through the hand-off.
  */
 
 import { expect } from "bun:test";
@@ -56,16 +57,6 @@ function browserRecorder(world: World, path: string): string {
   return `${bin}:${path}`;
 }
 
-/** SIGTERM the server runs/server.pid names, unless it is `except`, and wait for it to go. */
-async function stopRelaunched(world: World, except: number): Promise<void> {
-  const pid = Number(readLock(world.pool)?.trim());
-  if (!Number.isInteger(pid) || pid <= 0 || pid === except || !alive(pid)) return;
-  process.kill(pid, "SIGTERM");
-  const deadline = Date.now() + 15_000;
-  while (alive(pid) && Date.now() < deadline) await Bun.sleep(25);
-  if (alive(pid)) process.kill(pid, "SIGKILL");
-}
-
 // The gap at engine/server.ts:2821.
 conformance(
   "server",
@@ -77,7 +68,7 @@ conformance(
       binary: recorder.start.binary,
       env: { PATH: browserRecorder(world, recorder.start.env.PATH!) },
     });
-    t.defer(() => stopRelaunched(world, server.pid));
+    t.defer(() => recorder.stopStarted(server.pid));
     await untilSnapshot(server, (snapshot) => snapshot.phase === "quiescent", "the pool to settle at its Review");
     const bootLog = join(world.pool, "runs", "boot.log");
     expect(existsSync(bootLog)).toBe(false);
