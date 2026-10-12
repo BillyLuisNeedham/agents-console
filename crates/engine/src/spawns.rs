@@ -390,6 +390,7 @@ pub fn take_spawn_proposals(
     let attempt = last_attempt(runs(session), parent_id);
     let mut log: Vec<String> = Vec::new();
     let mut taken: Vec<TakenProposal> = Vec::new();
+    // Room is counted in signed numbers, which a cap fits: `spawn_caps_of` holds one at `i64::MAX`.
     let mut attempt_room = caps.per_attempt as i64;
     // `None` is a Conversation's unbounded run room.
     let mut run_room: Option<i64> = match origin {
@@ -573,7 +574,7 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
 // and waits for the TUI, and this boundary is synchronous by ADR-0010's own contract. A launch failure
 // is logged on the proposing parent, the same disposition a malformed proposal gets. The id is
 // reserved with the Conversation module at once, so a second adoption before the record reaches disk
-// cannot mint it again.
+// cannot mint it again; the start gives it back once it resolves, refused or launched.
 fn land_spawn(
     session: &mut Session,
     parent_id: &str,

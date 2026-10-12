@@ -314,3 +314,20 @@ conformance("spawns", "holds every proposal when a cap is 0", async (t) => {
     await server.stop();
   }
 }, { timeoutMs: 90_000 });
+
+// A cap past what the server counts room in is no limit. The Rust port once wrapped such a cap negative,
+// which held every proposal as a cap of 0 does.
+conformance("spawns", "lands every proposal when a cap is too large to count", async (t) => {
+  for (const spawnCaps of [{ perAttempt: 2 ** 63 }, { perRun: 1e300 }]) {
+    const world = t.world({ tickets: [ticket("01")], config: withCaps(spawnCaps) });
+    world.stubs.script("01", { spawn: [proposal("A"), proposal("B")] });
+    const server = await t.start(world);
+    const done = await runAndApprove(server);
+
+    expect(hasTicket(world, "01-spawn-1.md")).toBe(true);
+    expect(hasTicket(world, "01-spawn-2.md")).toBe(true);
+    expect(done.heldSpawns).toEqual([]);
+    expect(done.pendingSpawns).toEqual([]);
+    await server.stop();
+  }
+}, { timeoutMs: 90_000 });

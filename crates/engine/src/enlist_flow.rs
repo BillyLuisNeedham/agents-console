@@ -1355,7 +1355,9 @@ mod tests {
 
         let refused = mint_conversation_id(&mut session, &pane).err().unwrap();
         assert!(
-            refused.message().starts_with("enlist: could not create branch"),
+            refused
+                .message()
+                .starts_with("enlist: could not create branch"),
             "{}",
             refused.message()
         );
@@ -1389,7 +1391,10 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(claimed.err().as_deref(), Some("the pool is not terminal-backed"));
+        assert_eq!(
+            claimed.err().as_deref(),
+            Some("the pool is not terminal-backed")
+        );
         assert!(
             engine
                 .call(|s| crate::conversations::reserved_ids(s))

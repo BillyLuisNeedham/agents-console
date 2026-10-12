@@ -109,8 +109,8 @@ fn resolve_start_assignment(
     .map_err(|err| refused(err.0))
 }
 
-// The refusals a start meets before it has an id: a pool that cannot host a Conversation, no title, a
-// second Steward.
+// The refusals a start meets before it mints or takes its id: a pool that cannot host a Conversation,
+// no title, a second Steward.
 fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), EngineError> {
     if !terminal_backed(s) {
         return Err(refused(

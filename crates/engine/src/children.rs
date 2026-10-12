@@ -130,13 +130,19 @@ pub async fn stop_all(host: &dyn AttemptHost, grace: Option<Duration>) {
     all_exited().await;
 }
 
+// The pid as a signal may name it. Only a pid above 1 is one: `killpg(0)` is the engine's own process
+// group and `killpg(1)` is `kill(-1)`, every process the user owns, so neither is ever a child or an
+// orphan. A pid past `pid_t` names nothing.
 fn pid_of(pid: u32) -> Option<Pid> {
-    i32::try_from(pid).ok().map(Pid::from_raw)
+    i32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 1)
+        .map(Pid::from_raw)
 }
 
 /// Signal a whole process group; a group already gone is not an error. A group we cannot signal
 /// (EPERM), or a pid that never led one, falls back to the process itself, so a harness that changed
-/// its own group still receives the stop.
+/// its own group still receives the stop. A pid that cannot name a child is ignored.
 pub fn signal_group(pid: u32, signal: Signal) {
     let Some(pid) = pid_of(pid) else {
         return;
@@ -149,7 +155,8 @@ pub fn signal_group(pid: u32, signal: Signal) {
     }
 }
 
-/// Whether a pid names a live process. EPERM means alive but not ours.
+/// Whether a pid names a live process. EPERM means alive but not ours. A pid that cannot name a child
+/// (0, 1, past `pid_t`) is not live.
 pub fn process_is_live(pid: u32) -> bool {
     let Some(pid) = pid_of(pid) else {
         return false;
@@ -164,6 +171,7 @@ pub fn process_is_live(pid: u32) -> bool {
 /// gone or not ours to read.
 #[cfg(not(target_os = "macos"))]
 pub fn process_cwd(pid: u32) -> Option<String> {
+    let pid = pid_of(pid)?;
     std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
         .map(|cwd| js::path_text(&cwd))
@@ -176,7 +184,7 @@ pub fn process_cwd(pid: u32) -> Option<String> {
 pub fn process_cwd(pid: u32) -> Option<String> {
     use std::ffi::{CStr, c_char, c_int, c_void};
 
-    let pid = c_int::try_from(pid).ok()?;
+    let pid = pid_of(pid)?.as_raw();
     let size = c_int::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()).ok()?;
     // SAFETY: `proc_vnodepathinfo` is plain data that `proc_pidinfo` fills; an all-zero value is valid.
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
@@ -372,6 +380,21 @@ mod tests {
         signal_group(orphan.pid, Signal::SIGKILL);
         assert_eq!(orphan.code.await.unwrap(), 137);
         assert!(!orphan_is_live(orphan.pid, &wt));
+    }
+
+    // `signal_group(0, ..)` would reach the test's own group and `signal_group(1, ..)` every process
+    // the user owns, so the guard is pinned where it is made and in the checks that share it, never by
+    // sending a signal. Init is live, and is still no pid to name.
+    #[test]
+    fn only_a_pid_above_1_within_pid_t_can_be_signalled() {
+        assert_eq!(pid_of(2), Some(Pid::from_raw(2)));
+        assert_eq!(pid_of(i32::MAX as u32), Some(Pid::from_raw(i32::MAX)));
+        for pid in [0, 1, i32::MAX as u32 + 1, u32::MAX] {
+            assert_eq!(pid_of(pid), None, "pid {pid}");
+            assert!(!process_is_live(pid), "pid {pid}");
+            assert_eq!(process_cwd(pid), None, "pid {pid}");
+            assert!(!orphan_is_live(pid, &here()), "pid {pid}");
+        }
     }
 
     #[tokio::test]

@@ -489,7 +489,7 @@ async fn watch_ending(runtime: Arc<EnlistedRuntime>, outcome_path: String, poll_
 }
 
 /// Stop the Turn tick and tell the engine how the attempt ended; false when the runtime was released
-/// first, so there is no ending to record. The release is checked inside the job that records the
+/// first, so there is no ending to record, or the engine has stopped. The release is checked inside the job that records the
 /// ending: `release` runs on the actor, so a release queued while the tick stopped is seen here rather
 /// than lost. The TypeScript stopped its tick synchronously, so it had no such gap.
 async fn report_ending(runtime: &Arc<EnlistedRuntime>, ending: EnlistedEnding) -> bool {
@@ -618,6 +618,14 @@ mod tests {
         }
     }
 
+    async fn registered(rig: &Rig) -> Arc<EnlistedRuntime> {
+        rig.engine
+            .call(|s| s.enlisted.runtimes.get("enlist-1").cloned())
+            .await
+            .unwrap()
+            .expect("the claim registered the runtime")
+    }
+
     async fn latest_read(engine: &Engine) -> Option<String> {
         engine
             .call(|s| s.pane_reads.latest("pane-op"))
@@ -706,12 +714,7 @@ mod tests {
             register_enlisted(&rig.engine, registration(&rig, None)).await,
             Ok(())
         );
-        let runtime = rig
-            .engine
-            .call(|s| s.enlisted.runtimes.get("enlist-1").cloned())
-            .await
-            .unwrap()
-            .expect("the claim registered the runtime");
+        let runtime = registered(&rig).await;
 
         // Hold the actor, and queue a release behind the hold: the watch's own check passes, since the
         // release has not run, and the release lands before the watch's next job.
@@ -743,12 +746,7 @@ mod tests {
             register_enlisted(&rig.engine, registration(&rig, None)).await,
             Ok(())
         );
-        let runtime = rig
-            .engine
-            .call(|s| s.enlisted.runtimes.get("enlist-1").cloned())
-            .await
-            .unwrap()
-            .expect("the claim registered the runtime");
+        let runtime = registered(&rig).await;
         assert!(report_ending(&runtime, EnlistedEnding::PaneGone).await);
         assert!(runtime.tick.is_cancelled());
         assert_eq!(latest_read(&rig.engine).await, None);

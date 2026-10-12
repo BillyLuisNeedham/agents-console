@@ -97,15 +97,13 @@ pub fn headless_orphans(session: &Session, ticket_id: &str) -> Vec<HeadlessOrpha
     found
 }
 
-// A JSON number that names a process: JavaScript's `typeof pid === "number"`.
+// A JSON number that names a process: JavaScript's `typeof pid === "number"`, narrowed to a whole
+// number a signal may be sent to. A pid of 1 or less would reach the engine's own process group or
+// every process the user owns, and one with a fraction or past `pid_t` names nothing, so none of them
+// is a pid.
 fn pid_of(value: &Value) -> Option<u32> {
-    if !value.is_number() {
-        return None;
-    }
-    let n = value
-        .as_u64()
-        .or_else(|| value.as_f64().map(|f| if f > 0.0 { f as u64 } else { 0 }))?;
-    Some(u32::try_from(n).unwrap_or(u32::MAX))
+    let n = js::number_of(value)?;
+    (n.fract() == 0.0 && n > 1.0 && n <= f64::from(i32::MAX)).then_some(n as u32)
 }
 
 // Whether an `exited` or `crash` event for the attempt follows event `index`.
@@ -1525,6 +1523,82 @@ mod tests {
             std::fs::read_to_string(&file).unwrap(),
             format!("{}{body}", engine_reset_note())
         );
+    }
+
+    #[test]
+    fn a_pid_is_a_whole_number_a_signal_may_name() {
+        for pid in [
+            serde_json::json!(2),
+            serde_json::json!(4242),
+            serde_json::json!(4242.0),
+            serde_json::json!(i32::MAX),
+        ] {
+            assert_eq!(
+                pid_of(&pid),
+                Some(pid.as_f64().unwrap() as u32),
+                "{pid} names a process"
+            );
+        }
+        // 0 and 1 and a negative would signal the engine's own group, every process the user owns or
+        // some other group; a fraction or a number past `pid_t` names nothing; a non-number is no pid.
+        for pid in [
+            serde_json::json!(0),
+            serde_json::json!(-0.0),
+            serde_json::json!(1),
+            serde_json::json!(1.0),
+            serde_json::json!(-1),
+            serde_json::json!(-4242),
+            serde_json::json!(1.5),
+            serde_json::json!(4242.5),
+            serde_json::json!(i64::from(i32::MAX) + 1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(1e300),
+            serde_json::json!("4242"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!([4242]),
+        ] {
+            assert_eq!(pid_of(&pid), None, "{pid} names no process");
+        }
+    }
+
+    // `headless_orphans` only finds; the stop is `reap_headless_orphans`, so a regression here fails
+    // this test without signalling anything.
+    #[test]
+    fn a_recorded_pid_that_names_no_process_is_never_an_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let cwd = ac_core::js::canonical_dir(&dir.path().to_string_lossy());
+        let live = sleeper(&cwd);
+        let pids = [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(live),
+        ];
+        std::fs::write(
+            runs.join("01.events.jsonl"),
+            pids.iter()
+                .zip(1..)
+                .map(|(pid, attempt)| {
+                    spawned_event(attempt, serde_json::json!({ "pid": pid, "cwd": cwd }))
+                })
+                .collect::<String>(),
+        )
+        .unwrap();
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.runs_dir = runs.to_string_lossy().into_owned();
+
+        let orphans = headless_orphans(&session, "01");
+
+        // Only the process that is really there, and the last attempt's.
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
+        assert_eq!((orphans[0].attempt, orphans[0].pid), (6, live));
+        crate::children::signal_group(live, nix::sys::signal::Signal::SIGKILL);
     }
 
     // A process in its own group, in `cwd`, reaped on a thread so a stop sees it gone.
