@@ -17,6 +17,9 @@
  *   REPLY <id> <json>            the answer to a control line:
  *                                {"ok": true, "value": ...} or
  *                                {"ok": false, "error": "..."}
+ *   PANE <pid>                   each pane command the fake starts, the
+ *                                leader of its own process group
+ *   PANE_EXITED <pid>            that pane command, once it has exited
  *
  * Each stdin line is a control: {"id": <n>, "call": <name>, "args": [...]},
  * naming one of the fake's controls below. The pane commands the fake runs
@@ -119,10 +122,14 @@ const fake: ExecutingFakeHerdr = await startExecutingFakeHerdr({
       fake.endPane(end.paneId);
     }
   },
+  onPaneProcess: (pid) => emit(`PANE ${pid}`),
+  onPaneExited: (pid) => emit(`PANE_EXITED ${pid}`),
 });
 
 let closing: Promise<void> | null = null;
 function shutdown(): Promise<void> {
+  // Exit 0 only once close has ended every pane's process group, which is
+  // what harness/herdr.ts reads it as.
   closing ??= fake.close().then(() => process.exit(0));
   return closing;
 }

@@ -93,7 +93,7 @@ done
 
 # A terminal-backed launch reads it from its pane instead, once the server
 # has typed it in and pressed Enter. It gives up early once the world is
-# deleted, so a launch the fake herdr's close left running ends with it.
+# deleted, so a launch a killed fake herdr left running ends with it.
 input="${FAKE_HERDR_PANE_INPUT:-}"
 if [ -z "$outcome" ] && [ -n "$input" ] && [ ! -d "$stubs/scripts/_$name" ]; then
   give_up=$(( SECONDS + 90 ))
@@ -159,9 +159,9 @@ if [ -p "$script/hold" ]; then
   # Opening the FIFO blocks until the release opens it to write, and bash
   # cannot bound an open. A watchdog of the launch's own ends it instead
   # once the world is deleted, or ten minutes on, so a case that fails or
-  # never releases it leaves nothing running: the fake herdr's close kills
-  # only the pane's shell. The watchdog leaves with the launch, or once the
-  # release comes.
+  # never releases it leaves nothing running, even when the fake herdr was
+  # killed before it could end the pane. The watchdog leaves with the
+  # launch, or once the release comes.
   (
     give_up=$(( SECONDS + 600 ))
     while [ "$SECONDS" -lt "$give_up" ] && [ -d "$stubs" ]; do
@@ -218,8 +218,8 @@ fi
 code="$(cat "$script/$k.exit")"
 if [ -f "$script/$k.hold" ]; then
   # SECONDS is bash's own clock. The teardown deletes the world, stubs
-  # directory included, and a held launch the fake herdr's close left
-  # running (the pane's bash dies, `script` and this do not) ends with it.
+  # directory included, and a held launch a killed fake herdr left
+  # running ends with it.
   hold_until=$(( SECONDS + $(cat "$script/$k.hold") ))
   while [ "$SECONDS" -lt "$hold_until" ] && [ -d "$stubs" ]; do
     sleep 0.1

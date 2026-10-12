@@ -109,6 +109,14 @@ export interface ExecutingFakeHerdrOptions {
    * tell one request per connection from several on one.
    */
   onRequest?: (method: string, params: Record<string, unknown>, connection: number) => void;
+  /**
+   * Called with the pid of each pane command the fake starts, which leads a
+   * process group of its own: the handle a harness kills the group by when
+   * the fake itself is killed and cannot end its panes.
+   */
+  onPaneProcess?: (pid: number) => void;
+  /** Called with that pid once the pane command has exited, its group no longer the fake's to end. */
+  onPaneExited?: (pid: number) => void;
   rendered?: string;
   dropInputs?: number;
   hideInputs?: number;
@@ -272,6 +280,27 @@ export interface ExecutingFakeHerdr {
   listedPanes: () => string[];
 }
 
+/**
+ * SIGKILL a pane command's process group, as a live pane's close does to
+ * what runs in it. The engine's wrapper runs `script` as a child of its
+ * bash, and `script` puts the harness in a session of its own behind a pty,
+ * so killing the bash alone leaves both running; killing the group takes
+ * `script`, and the pty's hangup takes the harness. One already gone is
+ * nothing to do.
+ */
+export function killPaneGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // No process is left in the group.
+  }
+}
+
+/** End a pane command's group unless its bash has exited, the group's pid then free to be reused. */
+function killPaneGroupIfLive(proc: ReturnType<typeof Bun.spawn> | undefined): void {
+  if (proc && proc.exitCode === null && proc.signalCode === null) killPaneGroup(proc.pid);
+}
+
 export async function startExecutingFakeHerdr(
   options?: ExecutingFakeHerdrOptions,
 ): Promise<ExecutingFakeHerdr> {
@@ -368,7 +397,7 @@ export async function startExecutingFakeHerdr(
     const pane = panes.get(paneId);
     if (pane) {
       pane.alive = false;
-      pane.proc?.kill();
+      killPaneGroupIfLive(pane.proc);
     }
     agents.delete(paneId);
     broadcast(event, { pane_id: paneId, workspace_id: "w1" });
@@ -380,7 +409,7 @@ export async function startExecutingFakeHerdr(
     for (const [paneId, pane] of panes.entries()) {
       if (pane.tabId !== tabId) continue;
       pane.alive = false;
-      pane.proc?.kill();
+      killPaneGroupIfLive(pane.proc);
       agents.delete(paneId);
     }
   };
@@ -705,10 +734,14 @@ export async function startExecutingFakeHerdr(
                 stdin: "ignore",
                 stdout: "ignore",
                 stderr: "ignore",
+                // Leading a process group of its own, for killPaneGroup to end.
+                detached: true,
               });
               pane.proc = proc;
               procs.push(proc);
+              options?.onPaneProcess?.(proc.pid);
               void proc.exited.then(() => {
+                options?.onPaneExited?.(proc.pid);
                 if (!holdPane) {
                   firePaneEnd(String(msg.params.pane_id), "pane_exited");
                 }
@@ -775,7 +808,7 @@ export async function startExecutingFakeHerdr(
     },
     close: () =>
       new Promise<void>((resolve) => {
-        for (const proc of procs) proc.kill();
+        for (const proc of procs) killPaneGroupIfLive(proc);
         for (const sub of subscribers) sub.destroy();
         // bun's server.close() waits for every connection to drain, and a
         // request/response connection whose client already destroyed its
