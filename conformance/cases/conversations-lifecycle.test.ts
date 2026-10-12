@@ -16,6 +16,7 @@
 
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import type { ConversationView, EnrichedSnapshot, PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
@@ -869,6 +870,43 @@ conformance("conversations", "End's answer and the socket both show the ending a
     () => socket.pushed?.snapshot.state.conversations.find((c) => c.id === "conv-1")?.status === "ended",
     { from, ms: 2_000, what: "a frame carrying conv-1 ended" },
   );
+});
+
+// Gap: engine/server.ts:2645-2647, found by the Rust port's review (issue
+// #162): Bun ran a request to its end whatever the client did, so an End
+// whose client hangs up while the tab's close is still unanswered ends the
+// Conversation all the same.
+conformance("conversations", "an End whose client hangs up part way still ends the Conversation", async (t) => {
+  const world = terminalWorld(t);
+  const { herdr, server } = await startTerminal(t, world);
+  await startConversation(server, { title: "Idle chat" });
+  await herdr.control("delay", "tab.close", 2_000);
+  const from = herdr.calls.length;
+
+  const client = connect(server.port, "localhost");
+  await new Promise<void>((resolve, reject) => {
+    client.once("connect", resolve);
+    client.once("error", reject);
+  });
+  const body = JSON.stringify({ id: "conv-1", closing: "all done here" });
+  client.write(
+    `POST /api/conversations/end HTTP/1.1\r\nHost: localhost:${server.port}\r\n` +
+      `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+  );
+  // The tab's close is asked for and not yet answered: the End is under way.
+  await herdr.waitForCall((call) => call.method === "tab.close", { from, ms: 8_000 });
+  client.destroy();
+
+  // The End publishes last, after its record and its events are written.
+  await until(
+    async () => (await state(server)).state.conversations.find((c) => c.id === "conv-1")?.status,
+    (status) => status === "ended",
+    { ms: 10_000, what: "conv-1 ended in the snapshot" },
+  );
+  expect(recordStatus(world, "conv-1")).toBe("ended");
+  const events = readEvents(world.pool, "conv-1");
+  expect(kinds(events)).toEqual(["spawned", "end-requested", "tab-closed", "ended"]);
+  expect(events[3]!.payload).toEqual({ closing: "all done here", by: "operator", merged: false });
 });
 
 // conversations.test.ts:563

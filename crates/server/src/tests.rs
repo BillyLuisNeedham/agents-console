@@ -10,7 +10,7 @@ use futures::{FutureExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use ac_core::machine_defaults::default_machine_defaults_paths;
@@ -94,6 +94,7 @@ struct RigOptions {
     coalesce: Duration,
     hand_off_stop: bool,
     start: bool,
+    start_gate: Option<StartGate>,
 }
 
 impl Default for RigOptions {
@@ -102,8 +103,16 @@ impl Default for RigOptions {
             coalesce: Duration::from_millis(50),
             hand_off_stop: false,
             start: true,
+            start_gate: None,
         }
     }
+}
+
+/// Holds the stand-in engine's start: `reached` once the start is waiting, and it goes on once `open`.
+#[derive(Clone, Default)]
+struct StartGate {
+    reached: Arc<Notify>,
+    open: Arc<Notify>,
 }
 
 async fn rig(options: RigOptions) -> Rig {
@@ -164,7 +173,12 @@ async fn rig(options: RigOptions) -> Rig {
         home: home.clone(),
         starter: Some(Arc::new(move |_options| {
             let slot = slot.clone();
+            let gate = options.start_gate.clone();
             async move {
+                if let Some(gate) = gate {
+                    gate.reached.notify_one();
+                    gate.open.notified().await;
+                }
                 let engine = fake_engine(snapshot(
                     0,
                     RunPhase::Quiescent,
@@ -981,6 +995,46 @@ async fn answers_before_the_pool_starts_without_tearing_anything_down() {
         rig.pool().join("runs/server.pid").exists(),
         "still serving, still locked"
     );
+}
+
+// Bun runs a request to its end whatever the client does: a start the client hangs up on part way
+// still starts the pool, where hyper alone would drop it at the engine's await.
+#[tokio::test]
+async fn finishes_a_start_whose_client_hangs_up_part_way() {
+    let gate = StartGate::default();
+    let rig = rig(RigOptions {
+        start: false,
+        start_gate: Some(gate.clone()),
+        ..RigOptions::default()
+    })
+    .await;
+    let mut client = tokio::net::TcpStream::connect(("127.0.0.1", rig.server.port()))
+        .await
+        .unwrap();
+    client
+        .write_all(b"POST /api/start HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.reached.notified())
+        .await
+        .expect("the start under way");
+    drop(client);
+    // The turns on which the server reads the hang-up and drops its wait for the answer.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    gate.open.notify_one();
+    let started = async {
+        loop {
+            let (_, state) = rig.json("GET", "/api/state", None).await;
+            if !state["snapshot"].is_null() {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let state = tokio::time::timeout(Duration::from_secs(5), started)
+        .await
+        .expect("the pool started");
+    assert_eq!(state["snapshot"]["phase"], "quiescent");
 }
 
 // server.test.ts:861: inside the window the route already serves the latest seq; the socket has not
