@@ -17,14 +17,10 @@
  */
 
 import {
-  applyDelta,
   CLOSE_RESYNC,
   CLOSE_STOPPED,
-  decodeServerMessage,
-  encodeMessage,
   HEARTBEAT_MS,
   PROTOCOL_VERSION,
-  ProtocolError,
   RECONNECT_DELAYS_MS,
   SILENCE_FACTOR,
   type CardSubscription,
@@ -40,7 +36,8 @@ import {
   type ServerMessage,
   type SnapshotDelta,
   type SocketLike,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
+import { applyDelta, decodeServerMessage, encodeMessage, ProtocolError } from "./protocol";
 
 /** A `live` frame: the activity, peeks and grades that moved. */
 export type LiveMessage = Extract<ServerMessage, { type: "live" }>;

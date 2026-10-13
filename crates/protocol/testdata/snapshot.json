@@ -1,0 +1,209 @@
+{
+  "seq": 42,
+  "phase": "running",
+  "poolName": "scratch/pool-a",
+  "poolTitle": "Rust port",
+  "poolDir": "/home/billy/repos/agent-console/.scratch/pool-a",
+  "finishedTerminals": 2,
+  "spawnUsage": { "spawnedThisRun": 3, "perAttempt": 5, "perRun": 20 },
+  "pendingSpawns": [
+    {
+      "id": "01-spawn-2",
+      "parentId": "01",
+      "origin": "ticket",
+      "kind": "ticket",
+      "title": "Tidy up",
+      "body": "Remove the dead code.",
+      "blockedBy": ["01"],
+      "blocks": null,
+      "overlaps": [],
+      "at": "2026-10-04T09:30:21.394Z"
+    }
+  ],
+  "heldSpawns": [
+    {
+      "id": "conv-1-spawn-3",
+      "parentId": "conv-1",
+      "origin": "conversation",
+      "kind": "conversation",
+      "title": "Plan the next wave",
+      "body": "Read the results and propose.",
+      "blockedBy": [],
+      "blocks": "all",
+      "overlaps": ["02", "x-9"],
+      "at": "2026-10-04T09:31:00.000Z",
+      "reason": "overlaps",
+      "unknownOverlaps": ["x-9"],
+      "adopting": false
+    },
+    {
+      "id": "01-spawn-3",
+      "parentId": "01",
+      "origin": "ticket",
+      "kind": "ticket",
+      "title": "Follow up",
+      "body": "More.",
+      "blockedBy": [],
+      "blocks": ["02", "03"],
+      "overlaps": [],
+      "at": "2026-10-04T09:32:00.000Z",
+      "reason": "refused",
+      "unknownOverlaps": [],
+      "adopting": true,
+      "adoptError": "blocker 07 is gone"
+    }
+  ],
+  "stewardBudget": { "budget": 5, "used": { "02": 1, "03": 2 } },
+  "state": {
+    "tickets": [
+      {
+        "id": "01",
+        "title": "Port the protocol",
+        "blockedBy": [],
+        "status": "in-progress",
+        "mergeState": null,
+        "assignment": { "harness": "claude", "model": "opus", "drivers": "implement" },
+        "liveAttempt": { "attempt": 2, "paneId": "p-7", "role": "agent", "startedAt": "2026-10-04T09:00:00.000Z" },
+        "heldPane": null,
+        "enlisted": false,
+        "reassign": {
+          "eligible": false,
+          "reason": "an Attempt is in flight",
+          "verify": null,
+          "sources": { "harness": "default", "model": "pinned", "effort": "unset", "drivers": "default" }
+        }
+      },
+      {
+        "id": "02",
+        "title": "",
+        "blockedBy": ["01"],
+        "status": "checkpoint",
+        "mergeState": null,
+        "assignment": {
+          "harness": "codex",
+          "model": "gpt-5",
+          "effort": "high",
+          "effortApplied": false,
+          "drivers": "implement"
+        },
+        "liveAttempt": null,
+        "heldPane": { "attempt": 1, "paneId": "p-3" },
+        "enlisted": true,
+        "reassign": {
+          "eligible": true,
+          "reason": null,
+          "verify": 2,
+          "sources": { "harness": "pinned", "model": "requested", "effort": "inherited", "drivers": "default" }
+        }
+      },
+      {
+        "id": "03",
+        "title": "Done one",
+        "blockedBy": [],
+        "status": "done",
+        "mergeState": "awaiting-approval",
+        "assignment": { "harness": null, "model": null, "drivers": "implement" },
+        "liveAttempt": { "attempt": 4, "paneId": null, "role": "resolver", "startedAt": "2026-10-04T09:10:00.000Z" },
+        "heldPane": null,
+        "enlisted": false,
+        "reassign": {
+          "eligible": false,
+          "reason": "done",
+          "verify": null,
+          "sources": { "harness": "unset", "model": "unset", "effort": "unset", "drivers": "unset" }
+        }
+      }
+    ],
+    "conversations": [
+      {
+        "id": "conv-1",
+        "title": "Steward",
+        "status": "live",
+        "spawnedBy": null,
+        "assignment": { "harness": "claude", "model": "haiku", "drivers": "implement" },
+        "paneId": "p-9",
+        "branch": "pool/abc/conv-1",
+        "turn": { "state": "waiting", "lastLine": "> ", "idleSince": "2026-10-04T09:20:00.000Z" },
+        "children": ["conv-1-spawn-3"],
+        "enlisted": false,
+        "ending": false,
+        "role": "steward",
+        "delivery": { "failingSince": "2026-10-04T09:21:00.000Z", "lastError": "pane is gone" }
+      },
+      {
+        "id": "02-spawn-1",
+        "title": "Talk it over",
+        "status": "ended",
+        "spawnedBy": "02",
+        "assignment": { "harness": "claude", "model": "opus", "effort": "max", "effortApplied": true, "drivers": "implement" },
+        "paneId": null,
+        "branch": null,
+        "turn": { "state": "working", "lastLine": "", "idleSince": null },
+        "children": [],
+        "enlisted": true,
+        "ending": true
+      }
+    ],
+    "log": ["[09:00:00] boot", "[09:00:01] 01 attempt 2 launched"],
+    "outcomes": {
+      "03": {
+        "status": "done",
+        "summary": "Ported.",
+        "commitSha": "0123abcd",
+        "spawn": [
+          {
+            "title": "Tidy up",
+            "body": "Remove the dead code.",
+            "blockedBy": ["03"],
+            "kind": "ticket",
+            "assign": { "harness": "claude", "model": "sonnet", "effort": "low", "drivers": "implement" },
+            "blocks": "all",
+            "overlaps": ["01"]
+          },
+          {
+            "title": "Talk",
+            "body": "Discuss.",
+            "kind": "conversation",
+            "verifyIgnored": true,
+            "blocks": ["04"]
+          }
+        ]
+      },
+      "02": { "status": "checkpoint", "summary": "Need a name.", "commitSha": null, "brief": "pick a name" }
+    },
+    "interrupts": [
+      { "ticketId": "02", "kind": "checkpoint", "body": "Need a name." },
+      {
+        "ticketId": "05",
+        "kind": "selection",
+        "body": "Pick the winner.",
+        "candidates": [1, 2],
+        "stewardNote": { "text": "Take 2.", "at": "2026-10-04T09:25:00.000Z", "conversation": "conv-1" }
+      }
+    ],
+    "mergeQueue": [
+      { "ticketId": "03", "state": "awaiting-approval" },
+      { "ticketId": "06", "state": "stalled" }
+    ],
+    "queuedAnswers": [
+      { "ticketId": "02", "kind": "checkpoint", "at": "2026-10-04T09:26:00.000Z", "seq": 1, "processedAt": null },
+      {
+        "ticketId": "05",
+        "kind": "selection",
+        "approve": true,
+        "action": "adopt",
+        "attempt": 2,
+        "note": "take two",
+        "by": "steward",
+        "at": "2026-10-04T09:27:00.000Z",
+        "seq": 2,
+        "processedAt": "2026-10-04T09:28:00.000Z"
+      }
+    ],
+    "config": {
+      "defaults": { "harness": "claude", "model": "opus" },
+      "terminal": "herdr",
+      "notes": ["kept as written", 1.5, null]
+    }
+  }
+}

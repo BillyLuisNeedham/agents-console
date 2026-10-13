@@ -24,7 +24,7 @@ import type {
   LogFollowResult,
   LogPush,
   LogReadRequest,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 
 /**
  * The most text the pane holds while it follows the tail: four of the

@@ -2,10 +2,11 @@
 # Boot (issue #121): start a Console for a pool from any project checkout.
 #
 # This is a shim and nothing more. It finds the agent-console checkout it was
-# installed from and hands its arguments to engine/boot-cli.ts, which does all
-# the work. It resolves its own real path first because the supported install
-# is a symlink in ~/.local/bin, and $0 there points at the link rather than at
-# the repository the engine lives in.
+# installed from, rebuilds what is out of date there, and hands its arguments
+# to the engine binary's `boot` subcommand, which does all the work (ADR-0036).
+# It resolves its own real path first because the supported install is a
+# symlink in ~/.local/bin, and $0 there points at the link rather than at the
+# repository the engine lives in.
 set -euo pipefail
 
 self="${BASH_SOURCE[0]}"
@@ -25,15 +26,55 @@ else
 fi
 
 ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+BIN="$ROOT/target/release/agent-console"
 
-bun="bun"
-if ! command -v bun >/dev/null 2>&1; then
-  if [ -x "$HOME/.bun/bin/bun" ]; then
-    bun="$HOME/.bun/bin/bun"
-  else
-    echo "agent-console: bun is not on PATH and ~/.bun/bin/bun is not there either" >&2
-    exit 1
+# Whether the stamp file is missing or anything under the given paths is newer
+# than it. Paths that are not there are skipped.
+stale() {
+  local stamp="$1" path
+  shift
+  [ -e "$stamp" ] || return 0
+  for path in "$@"; do
+    [ -e "$path" ] || continue
+    if [ -n "$(find "$path" -newer "$stamp" -print -quit)" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The Console is built with Bun, and the release binary embeds the result.
+# Build output goes to stderr so Boot's own output stays clean.
+if stale "$ROOT/ui/dist/index.html" "$ROOT/ui/src" "$ROOT/ui/index.html" "$ROOT/ui/package.json" \
+  "$ROOT/ui/bun.lock" "$ROOT/ui/vite.config.ts" "$ROOT/ui/tsconfig.json" "$ROOT/protocol"; then
+  bun="bun"
+  if ! command -v bun >/dev/null 2>&1; then
+    if [ -x "$HOME/.bun/bin/bun" ]; then
+      bun="$HOME/.bun/bin/bun"
+    else
+      echo "agent-console: the Console in $ROOT/ui needs building, but bun is not on PATH and ~/.bun/bin/bun is not there either" >&2
+      exit 1
+    fi
   fi
+  echo "agent-console: building the Console in $ROOT/ui" >&2
+  (cd "$ROOT/ui" && "$bun" install && "$bun" run build) >&2
 fi
 
-exec "$bun" run "$ROOT/engine/boot-cli.ts" "$@"
+if stale "$BIN" "$ROOT/crates" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/ui/dist"; then
+  cargo="cargo"
+  if ! command -v cargo >/dev/null 2>&1; then
+    if [ -x "$HOME/.cargo/bin/cargo" ]; then
+      cargo="$HOME/.cargo/bin/cargo"
+    else
+      echo "agent-console: the engine needs building, but cargo is not on PATH and ~/.cargo/bin/cargo is not there either; install Rust from https://rustup.rs" >&2
+      exit 1
+    fi
+  fi
+  echo "agent-console: building the engine in $ROOT" >&2
+  "$cargo" build --release --bin agent-console --manifest-path "$ROOT/Cargo.toml" --target-dir "$ROOT/target" >&2
+  # Cargo leaves the binary alone when nothing it is built from changed (a
+  # test, test data), so mark it current or every start would ask again.
+  touch "$BIN"
+fi
+
+exec "$BIN" boot "$@"

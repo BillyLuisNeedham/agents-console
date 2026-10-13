@@ -12,7 +12,7 @@
  * server that has not started the pool is asked to start it.
  */
 
-import type { EmbeddedBoot, SocketLike } from "../../engine/protocol.ts";
+import type { EmbeddedBoot, SocketLike } from "../../protocol/protocol.ts";
 import { nextFrame, RenderLoop, type FrameRequest } from "./frame";
 import {
   adoptingSpawn,

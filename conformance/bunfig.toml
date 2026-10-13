@@ -1,0 +1,6 @@
+# The conformance suite's own test config (ADR-0036). `bun run conformance`
+# runs `bun test` from this directory, so this file stands in for the root
+# one: the engine's test preload has no place in a suite that drives the
+# server only from outside.
+[test]
+preload = ["./preload.ts"]

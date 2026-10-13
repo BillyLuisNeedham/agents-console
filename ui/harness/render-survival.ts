@@ -25,7 +25,7 @@ import type {
   TicketEventsResponse,
   TicketLogResponse,
 } from "../src/project";
-import type { LogPush } from "../../engine/protocol.ts";
+import type { LogPush } from "../../protocol/protocol.ts";
 import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------

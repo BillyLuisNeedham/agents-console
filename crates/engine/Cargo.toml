@@ -1,0 +1,30 @@
+[package]
+name = "ac-engine"
+description = "The pool engine: one task owns pool state; Attempts, merges, Spawns, Conversations, the Steward and verify"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+ac-protocol.workspace = true
+ac-core.workspace = true
+ac-io.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+futures.workspace = true
+regex.workspace = true
+chrono.workspace = true
+libc.workspace = true
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# The fake herdr daemon the launch and ending tests run against.
+ac-io = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }

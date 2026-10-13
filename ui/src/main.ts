@@ -1,5 +1,5 @@
 /**
- * Console: the pool rendered as node cards on a canvas. One Bun server per
+ * Console: the pool rendered as node cards on a canvas. One server per
  * pool serves the built SPA with the first snapshot embedded in it, and one
  * WebSocket over which it pushes every change and answers every request
  * (issue #161, ADR-0032). The UI renders from that snapshot only; ticket
@@ -9,11 +9,8 @@
  */
 
 import "./styles.css";
-import {
-  EMBED_ELEMENT_ID,
-  readEmbeddedBoot,
-  WS_PATH,
-} from "../../engine/protocol.ts";
+import { EMBED_ELEMENT_ID, WS_PATH } from "../../protocol/protocol.ts";
+import { readEmbeddedBoot } from "./protocol";
 import { createConsole } from "./console";
 import { POOL_TAB_COLORS, poolTabTitle } from "./project";
 import type { ConsoleSession } from "./session";

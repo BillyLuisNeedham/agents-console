@@ -23,7 +23,7 @@ import {
   type RequestPayload,
   type RequestResult,
   type SnapshotDelta,
-} from "../../engine/protocol.ts";
+} from "../../protocol/protocol.ts";
 import { LogPane, type LogPaneState } from "./log-pane";
 import { answered, applyOverlays, type Overlay } from "./optimistic";
 import {
@@ -64,7 +64,7 @@ import {
   type VitalsState,
 } from "./project";
 import type { CardMessage, ConnectionChange, LiveMessage } from "./socket";
-import type { PeekFailure } from "../../engine/protocol.ts";
+import type { PeekFailure } from "../../protocol/protocol.ts";
 import type { AppModel, StopState } from "./view";
 
 /** The vitals store, as the session consumes it. */
@@ -1023,14 +1023,14 @@ export class ConsoleSession {
       stop: {
         // Offered only on a done pool over a live socket (issue #97): there
         // is nothing to interrupt, and a request down a dead socket would go
-        // nowhere. The relaunch command is the pool directory verbatim, as
-        // the snapshot carries it.
+        // nowhere. The relaunch command is Boot on the pool directory
+        // verbatim, as the snapshot carries it.
         offered: this.view?.phase === "done" && this.connected,
         state: this.stopState,
         failure: this.stopFailure,
         stoppedFromHere: this.stoppedFromHere,
         relaunch: this.snapshot
-          ? `bun run engine/server.ts --pool ${this.snapshot.poolDir}`
+          ? `agent-console ${this.snapshot.poolDir}`
           : null,
       },
       restart: {
