@@ -187,6 +187,8 @@ pub fn ready_set(
         .iter()
         .filter(|marker| {
             engine_ticket_build_id(&marker.id).is_none()
+                // The Finish checkpoint is answered by the operator, never run (ADR-0037).
+                && marker.station != Some(ac_protocol::Station::Finish)
                 && tickets.get(&marker.id) == Some(&TicketStatus::Ready)
                 && marker
                     .blocked_by
@@ -220,6 +222,9 @@ pub async fn super_step_boundary(engine: &Engine) -> anyhow::Result<Option<Super
                             crate::answers::drain_answers(s)?;
                             // A Close the drain just applied leaves its dependents unable to run.
                             crate::interrupts::reconcile_deadlocks(s)?;
+                            // The Line routes its ended Station (ADR-0037) after the answers, so a
+                            // Close or a Resume of the Finish this drain applied routes now.
+                            crate::line::route_line(s)?;
                             // Spawn adoption (ADR-0010) rides the same boundary.
                             crate::spawns::adopt_spawn_proposals(s)?;
                             let markers = s.markers.clone();

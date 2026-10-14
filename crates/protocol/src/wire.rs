@@ -338,6 +338,11 @@ wire_struct! {
         /// well-formed proposals riding to the boundary.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn: Option<Vec<SpawnProposal>>,
+        /// A Station Ticket's typed verdict on a Line (ADR-0037), kept as the
+        /// agent wrote it: Prove's ProveVerdict, Review's ReviewVerdict or
+        /// Decide's DecideVerdict. Absent when the Outcome carried none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub verdict: Option<Value>,
     }
 }
 
@@ -670,6 +675,9 @@ wire_enum! {
         Overlaps = "overlaps",
         Operator = "operator",
         Refused = "refused",
+        /// Proposed from inside a Line (ADR-0037): anything that lands merges
+        /// into the Line's branch, so only the operator lands it.
+        Line = "line",
     }
 }
 
@@ -1415,6 +1423,10 @@ wire_struct! {
         /// at once rather than at the next boundary; an in-flight ticket keeps
         /// the engine's frozen record.
         pub reassign: TicketReassignView,
+        /// The Station of a Line's Ticket (ADR-0037), from the marker's durable
+        /// `station` field; absent on every other Ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub station: Option<Station>,
     }
 }
 
@@ -1709,5 +1721,261 @@ wire_struct! {
         pub ticket: String,
         pub pane_id: String,
         pub text: String,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Factory's Line (issue #187, ADR-0037): POST /api/line/start, GET /api/line, line.json
+// ---------------------------------------------------------------------------
+
+wire_enum! {
+    /// The kind of work a Station Ticket does on a Line. `finish` tags the Finish
+    /// checkpoint: an engine-written Ticket no agent runs, which waits for the
+    /// operator's approval at the end of the Line.
+    pub enum Station {
+        Implement = "implement",
+        Prove = "prove",
+        Review = "review",
+        Decide = "decide",
+        Finish = "finish",
+    }
+}
+
+wire_enum! {
+    /// Prove's verdict: the merged work runs end to end, or it does not.
+    pub enum ProveResult {
+        Pass = "pass",
+        Fail = "fail",
+    }
+}
+
+wire_struct! {
+    /// The `verdict` a Prove Station's Outcome carries.
+    pub struct ProveVerdict {
+        pub prove: ProveResult,
+        /// Where the evidence is: a path the operator can open.
+        pub evidence: String,
+    }
+}
+
+wire_enum! {
+    /// How much a Review finding matters. Decide must account for every must.
+    pub enum FindingSeverity {
+        Must = "must",
+        Should = "should",
+        Nit = "nit",
+    }
+}
+
+wire_struct! {
+    /// One Review finding.
+    pub struct ReviewFinding {
+        pub severity: FindingSeverity,
+        pub title: String,
+        pub detail: String,
+    }
+}
+
+wire_struct! {
+    /// The `verdict` a Review Station's Outcome carries: its findings, possibly none.
+    pub struct ReviewVerdict {
+        pub findings: Vec<ReviewFinding>,
+    }
+}
+
+wire_enum! {
+    /// Decide's choice: another Round, or the Finish.
+    pub enum DecideChoice {
+        Round = "round",
+        Finish = "finish",
+    }
+}
+
+wire_struct! {
+    /// One finding Decide fixes in the next Round or drops, and why.
+    pub struct DecideItem {
+        pub title: String,
+        pub reason: String,
+    }
+}
+
+wire_struct! {
+    /// The `verdict` a Decide Station's Outcome carries. Every must finding is in
+    /// `fixes` (only on a Round) or in `dropped`.
+    pub struct DecideVerdict {
+        pub decide: DecideChoice,
+        #[serde(default)]
+        pub fixes: Vec<DecideItem>,
+        #[serde(default)]
+        pub dropped: Vec<DecideItem>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// A Station's Assignment fields, each optional.
+    #[serde(deny_unknown_fields)]
+    pub struct StationAssign {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub harness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub effort: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One Station's settings, each field optional and falling through on its own.
+    #[serde(deny_unknown_fields)]
+    pub struct StationSettings {
+        /// Only Prove and Review may be switched off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub enabled: Option<bool>,
+        /// The Station's skills: the driver first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub drivers: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub assign: Option<StationAssign>,
+        /// An extra instruction the engine writes into every Ticket of the Station.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// The settings of each Station.
+    #[serde(deny_unknown_fields)]
+    pub struct FactoryStations {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub implement: Option<StationSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub prove: Option<StationSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub review: Option<StationSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub decide: Option<StationSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub grill: Option<StationSettings>,
+    }
+}
+
+wire_struct! {
+    /// The Line's two limits.
+    #[serde(deny_unknown_fields)]
+    pub struct FactoryLimits {
+        /// Prove failures a Round takes before the Line checkpoints (default 2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub prove_fails_per_round: Option<u64>,
+        /// Rounds Decide may start after the first (default 1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub extra_rounds: Option<u64>,
+    }
+}
+
+wire_struct! {
+    /// The Factory settings, a layer of them: every field optional.
+    #[serde(deny_unknown_fields)]
+    pub struct FactorySettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub stations: Option<FactoryStations>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub limits: Option<FactoryLimits>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub finish: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// The Line brief: the spec's path in the pool checkout, the Finish, and the
+    /// settings this Line overrides.
+    #[serde(deny_unknown_fields)]
+    pub struct LineBrief {
+        pub spec: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub finish: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub factory: Option<FactorySettings>,
+    }
+}
+
+wire_enum! {
+    /// Where a Line stands: running its Stations, waiting at the Finish
+    /// checkpoint, approved, or closed at its Finish checkpoint.
+    pub enum LineStatus {
+        Running = "running",
+        Finish = "finish",
+        Done = "done",
+        Closed = "closed",
+    }
+}
+
+wire_struct! {
+    /// One Prove run of a Round.
+    pub struct LineProve {
+        pub ticket: String,
+        pub prove: ProveResult,
+        pub evidence: String,
+    }
+}
+
+wire_struct! {
+    /// What one Round did, kept for the Decide Station and the report.
+    pub struct LineRound {
+        pub round: u64,
+        pub proves: Vec<LineProve>,
+        pub findings: Vec<ReviewFinding>,
+        pub decide: Option<DecideVerdict>,
+    }
+}
+
+wire_struct! {
+    /// The Line's state (`line.json` in the pool directory): what the engine
+    /// routes from, re-read at every boot.
+    pub struct LineState {
+        pub brief: LineBrief,
+        /// Where the brief was read from, relative to the pool checkout.
+        pub brief_path: String,
+        pub status: LineStatus,
+        pub round: u64,
+        /// The current Station and its Ticket.
+        pub station: Station,
+        pub ticket: String,
+        /// Prove failures in this Round.
+        pub prove_fails: u64,
+        /// Fixes past the Prove limit that Resume bought in this Round.
+        pub fixes_bought: u64,
+        /// The current Ticket is a fix the Prove limit checkpointed.
+        pub gated: bool,
+        /// Rounds Decide has started past the first.
+        pub extra_rounds: u64,
+        /// Why the Line halted (a Close of a Station Ticket); null while it runs.
+        pub halted: Option<String>,
+        pub rounds: Vec<LineRound>,
+    }
+}
+
+wire_struct! {
+    /// POST /api/line/start's body: start the Line from its brief. `brief` is the
+    /// brief's path in the pool checkout; absent, the one `docs/specs/*.brief.json`
+    /// there. Answers 202 with the first Ticket, or the 409 `reason` envelope when
+    /// the brief is missing or invalid or the Line has already started.
+    pub struct LineStartRequest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub brief: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// The Line just started: its first Ticket.
+    pub struct LineStartResponse {
+        pub ticket_id: String,
+    }
+}
+
+wire_struct! {
+    /// GET /api/line: the pool's Line, null when none has started.
+    pub struct LineResponse {
+        pub line: Option<LineState>,
     }
 }

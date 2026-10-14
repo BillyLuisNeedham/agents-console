@@ -307,6 +307,12 @@ export interface Outcome {
    * well-formed proposals riding to the boundary.
    */
   spawn?: SpawnProposal[];
+  /**
+   * A Station Ticket's typed verdict on a Line (ADR-0037), kept as the
+   * agent wrote it: Prove's ProveVerdict, Review's ReviewVerdict or
+   * Decide's DecideVerdict. Absent when the Outcome carried none.
+   */
+  verdict?: unknown;
 }
 
 /**
@@ -529,7 +535,17 @@ export interface HeldPaneRecord {
  * spawn, or a Pending spawn the boundary refused to land because the pool
  * moved after it was taken (the reason rides as `adoptError`).
  */
-export type HeldSpawnReason = "per-attempt" | "per-run" | "overlaps" | "operator" | "refused";
+export type HeldSpawnReason =
+  | "per-attempt"
+  | "per-run"
+  | "overlaps"
+  | "operator"
+  | "refused"
+  /**
+   * Proposed from inside a Line (ADR-0037): anything that lands merges
+   * into the Line's branch, so only the operator lands it.
+   */
+  | "line";
 
 /**
  * One Pending spawn as the Console shows it: a proposal within the caps that
@@ -1089,6 +1105,11 @@ export interface EnrichedTicketState {
    * the engine's frozen record.
    */
   reassign: TicketReassignView;
+  /**
+   * The Station of a Line's Ticket (ADR-0037), from the marker's durable
+   * `station` field; absent on every other Ticket.
+   */
+  station?: Station;
 }
 
 /** The pool's state as the Console sees it: the engine's snapshot enriched by the server. */
@@ -1348,4 +1369,171 @@ export interface TerminalPeekResponse {
   ticket: string;
   paneId: string;
   text: string;
+}
+
+// ---------------------------------------------------------------------------
+// The Factory's Line (POST /api/line/start, GET /api/line, line.json)
+// ---------------------------------------------------------------------------
+
+/**
+ * The kind of work a Station Ticket does on a Line. `finish` tags the Finish
+ * checkpoint: an engine-written Ticket no agent runs, which waits for the
+ * operator's approval at the end of the Line.
+ */
+export type Station = "implement" | "prove" | "review" | "decide" | "finish";
+
+/** Prove's verdict: the merged work runs end to end, or it does not. */
+export type ProveResult = "pass" | "fail";
+
+/** The `verdict` a Prove Station's Outcome carries. */
+export interface ProveVerdict {
+  prove: ProveResult;
+  /** Where the evidence is: a path the operator can open. */
+  evidence: string;
+}
+
+/** How much a Review finding matters. Decide must account for every must. */
+export type FindingSeverity = "must" | "should" | "nit";
+
+/** One Review finding. */
+export interface ReviewFinding {
+  severity: FindingSeverity;
+  title: string;
+  detail: string;
+}
+
+/** The `verdict` a Review Station's Outcome carries: its findings, possibly none. */
+export interface ReviewVerdict {
+  findings: ReviewFinding[];
+}
+
+/** Decide's choice: another Round, or the Finish. */
+export type DecideChoice = "round" | "finish";
+
+/** One finding Decide fixes in the next Round or drops, and why. */
+export interface DecideItem {
+  title: string;
+  reason: string;
+}
+
+/**
+ * The `verdict` a Decide Station's Outcome carries. Every must finding is in
+ * `fixes` (only on a Round) or in `dropped`.
+ */
+export interface DecideVerdict {
+  decide: DecideChoice;
+  fixes: DecideItem[];
+  dropped: DecideItem[];
+}
+
+/** One Station's settings, each field optional and falling through on its own. */
+export interface StationSettings {
+  /** Only Prove and Review may be switched off. */
+  enabled?: boolean;
+  /** The Station's skills: the driver first. */
+  drivers?: string;
+  assign?: { harness?: string; model?: string; effort?: string };
+  /** An extra instruction the engine writes into every Ticket of the Station. */
+  note?: string;
+}
+
+/** The settings of each Station. */
+export interface FactoryStations {
+  implement?: StationSettings;
+  prove?: StationSettings;
+  review?: StationSettings;
+  decide?: StationSettings;
+  grill?: StationSettings;
+}
+
+/** The Line's two limits. */
+export interface FactoryLimits {
+  /** Prove failures a Round takes before the Line checkpoints (default 2). */
+  proveFailsPerRound?: number;
+  /** Rounds Decide may start after the first (default 1). */
+  extraRounds?: number;
+}
+
+/** The Factory settings, a layer of them: every field optional. */
+export interface FactorySettings {
+  stations?: FactoryStations;
+  limits?: FactoryLimits;
+  finish?: string;
+}
+
+/**
+ * The Line brief: the spec's path in the pool checkout, the Finish, and the
+ * settings this Line overrides.
+ */
+export interface LineBrief {
+  spec: string;
+  finish?: string;
+  factory?: FactorySettings;
+}
+
+/**
+ * Where a Line stands: running its Stations, waiting at the Finish
+ * checkpoint, approved, or closed at its Finish checkpoint.
+ */
+export type LineStatus = "running" | "finish" | "done" | "closed";
+
+/** One Prove run of a Round. */
+export interface LineProve {
+  ticket: string;
+  prove: ProveResult;
+  evidence: string;
+}
+
+/** What one Round did, kept for the Decide Station and the report. */
+export interface LineRound {
+  round: number;
+  proves: LineProve[];
+  findings: ReviewFinding[];
+  decide: DecideVerdict | null;
+}
+
+/**
+ * The Line's state (`line.json` in the pool directory): what the engine
+ * routes from, re-read at every boot.
+ */
+export interface LineState {
+  brief: LineBrief;
+  /** Where the brief was read from, relative to the pool checkout. */
+  briefPath: string;
+  status: LineStatus;
+  round: number;
+  /** The current Station and its Ticket. */
+  station: Station;
+  ticket: string;
+  /** Prove failures in this Round. */
+  proveFails: number;
+  /** Fixes past the Prove limit that Resume bought in this Round. */
+  fixesBought: number;
+  /** The current Ticket is a fix the Prove limit checkpointed. */
+  gated: boolean;
+  /** Rounds Decide has started past the first. */
+  extraRounds: number;
+  /** Why the Line halted (a Close of a Station Ticket); null while it runs. */
+  halted: string | null;
+  rounds: LineRound[];
+}
+
+/**
+ * POST /api/line/start's body: start the Line from its brief. `brief` is the
+ * brief's path in the pool checkout; absent, the one `docs/specs/*.brief.json`
+ * there. Answers 202 with the first Ticket, or the 409 `reason` envelope when
+ * the brief is missing or invalid or the Line has already started.
+ */
+export interface LineStartRequest {
+  brief?: string;
+}
+
+/** The Line just started: its first Ticket. */
+export interface LineStartResponse {
+  ticketId: string;
+}
+
+/** GET /api/line: the pool's Line, null when none has started. */
+export interface LineResponse {
+  line: LineState | null;
 }

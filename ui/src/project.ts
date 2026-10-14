@@ -1954,6 +1954,8 @@ export function heldReasonCopy(
       return "held by operator";
     case "refused":
       return refusal ? `refused at landing: ${refusal}` : "refused at landing";
+    case "line":
+      return "proposed inside the Line";
   }
 }
 
@@ -1967,6 +1969,7 @@ const HELD_SPAWN_REASONS: readonly string[] = [
   "overlaps",
   "operator",
   "refused",
+  "line",
 ];
 
 function isHeldSpawnReason(value: unknown): value is HeldSpawnReason {

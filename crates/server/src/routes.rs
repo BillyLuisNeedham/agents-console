@@ -18,7 +18,8 @@ use ac_io::herdr::PaneReadSource;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction, RunPhase, StartConversationRequest,
+    LineResponse, LineStartResponse, LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction,
+    RunPhase, StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
@@ -519,6 +520,35 @@ pub async fn enlist_request(server: &Server, body: Body) -> Answer {
     match engine.enlist(request).await {
         Ok(response) => Answer::ok(201, &response),
         Err(err) => Answer::refused(409, Field::Reason, err.message()),
+    }
+}
+
+/// POST /api/line/start (ADR-0037): start the pool's Line from its brief. 202 with the first Ticket;
+/// a missing or invalid brief, or a Line already started, is the 409 `reason` envelope.
+pub async fn start_line_request(server: &Server, body: Body) -> Answer {
+    let Ok(body) = body else {
+        return Answer::refused(400, Field::Reason, "invalid JSON body");
+    };
+    let body = or_empty(body);
+    let brief = match body.get("brief") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) => Some(path.clone()),
+        Some(_) => return Answer::refused(400, Field::Reason, "brief must be a path string"),
+    };
+    let Some(engine) = server.engine() else {
+        return Answer::refused(409, Field::Reason, "pool not started");
+    };
+    match engine.start_line(brief).await {
+        Ok(ticket_id) => Answer::ok(202, &LineStartResponse { ticket_id }),
+        Err(err) => Answer::refused(409, Field::Reason, err.message()),
+    }
+}
+
+/// GET /api/line: the pool's Line as `line.json` holds it, null before Start the Line.
+pub fn line_request(server: &Server) -> Answer {
+    match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
+        Ok(line) => Answer::ok(200, &LineResponse { line }),
+        Err(err) => Answer::refused(500, Field::Reason, err.to_string()),
     }
 }
 

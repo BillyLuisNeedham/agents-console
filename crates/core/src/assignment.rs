@@ -507,10 +507,13 @@ pub fn resolve_ticket_assignment(
 ) -> Result<Assignment, ConfigError> {
     let request = assign_request(config, marker.id());
     let defaults = defaults_layer(config);
+    // A Line's Station Ticket carries its Station's Assignment the way a spawned ticket carries its
+    // request (ADR-0037), ranking under the operator's assign entry for the id.
+    let requested = marker.spawn_assign().map(AssignmentLayer::from);
     resolve_assignment(ResolveAssignmentParams {
         subject: &ticket_subject(marker.id()),
         request: Some(&request),
-        requested: None,
+        requested: requested.as_ref(),
         inherited: None,
         defaults: Some(&defaults),
         strict: false,
@@ -785,9 +788,15 @@ fn resolve_one<M: AssignmentMarker>(
     let resolved = resolve_ticket_assignment(marker, config, harnesses)?;
     assignments.insert(id.to_owned(), resolved);
     if let Some(sources) = sources {
+        let requested = marker.spawn_assign().map(AssignmentLayer::from);
         sources.insert(
             id.to_owned(),
-            resolve_assignment_sources(Some(&request.layer), None, None, Some(&defaults)),
+            resolve_assignment_sources(
+                Some(&request.layer),
+                requested.as_ref(),
+                None,
+                Some(&defaults),
+            ),
         );
     }
     Ok(true)

@@ -147,6 +147,7 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     session.conversation_poll_ms = options.conversation_poll_ms;
     session.pane_survey_ms = options.pane_survey_ms;
     session.console_url = options.console_url.clone();
+    session.line = ac_core::line::load_line(Path::new(&session.pool_dir))?;
     seed_enlisted_work(&mut session)?;
     rehydrate(&mut session)?;
     crate::spawns::recover_truncated_spawns(&mut session)?;

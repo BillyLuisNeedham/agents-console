@@ -916,5 +916,6 @@ pub(crate) fn marker_of_conversation(id: &str, file: &Path) -> TicketMarker {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
+        station: None,
     }
 }

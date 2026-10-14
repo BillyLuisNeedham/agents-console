@@ -62,6 +62,9 @@ pub struct TicketPlan {
     /// True when the attempt is one candidate of a verify fan-out: it runs on its own attempt branch
     /// and its exit never writes the ticket's status.
     pub verify: bool,
+    /// A Line's Station Ticket's verdict check (ADR-0037), fixed at the plan: its Outcome without a
+    /// valid verdict is the no-verdict checkpoint.
+    pub verdict: Option<ac_core::line::VerdictCheck>,
 }
 
 /// One attempt's ending as the drive joins it.
@@ -287,6 +290,7 @@ pub fn plan_ticket(
             worktree: None,
             attempt,
             verify,
+            verdict: crate::line::verdict_check_for(session, marker),
         });
     }
     if !verify
@@ -302,6 +306,7 @@ pub fn plan_ticket(
             worktree: None,
             attempt,
             verify,
+            verdict: crate::line::verdict_check_for(session, marker),
         });
     }
     let worktree = git::prepare_worktree(
@@ -329,6 +334,7 @@ pub fn plan_ticket(
         worktree: Some(worktree),
         attempt,
         verify,
+        verdict: crate::line::verdict_check_for(session, marker),
     })
 }
 
@@ -407,7 +413,7 @@ pub async fn run_ticket(
         String::new()
     };
     let ledger = js::path_text(&spawn_ledger_path(Path::new(&env.attempt.runs_dir)));
-    let prompt = build_prompt(&PromptParts {
+    let mut prompt = build_prompt(&PromptParts {
         chain: &chain,
         agent_md: &agent_md,
         upstream: &upstream,
@@ -415,6 +421,11 @@ pub async fn run_ticket(
         spawn_caps: spawn_caps_of(&snapshot.config),
         ledger_path: &ledger,
     });
+    // A Station of a Line is taught its verdict (ADR-0037).
+    if let Some(teaching) = marker.station.and_then(ac_core::line::verdict_teaching) {
+        prompt.push_str(&format!("\n\n---\n\n{teaching}\n"));
+    }
+    let check = plan.verdict.clone();
     let run = run_attempt(
         &env.attempt,
         AttemptSpec {
@@ -443,7 +454,9 @@ pub async fn run_ticket(
                 result_events: Some(spawn_rejection_events),
             },
         },
-        validate_outcome,
+        move |parsed: &Value| {
+            validate_outcome(parsed).map(|valid| crate::line::checked(check.as_ref(), valid))
+        },
     )
     .await?;
     let verify = plan.verify;

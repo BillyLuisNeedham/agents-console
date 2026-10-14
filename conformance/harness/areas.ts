@@ -26,6 +26,7 @@ export const AREAS = {
   server: "the server process: startup, the pool lock, ports, fleet registration, Stop, shutdown, runtime refusals",
   interrupts: "Interrupts and answers: /api/resume, Close, Keep talking, Queued answers",
   enlist: "enlisting a live herdr pane as a Ticket or a Conversation, and the enlisted Ticket's lifecycle",
+  factory: "the Factory's Line: Start the Line, Station Tickets, verdicts, routing and its counters, the Line's checkpoints, line.json",
 } as const;
 
 export type Area = keyof typeof AREAS;

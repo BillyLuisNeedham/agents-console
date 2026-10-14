@@ -571,6 +571,7 @@ fn spawned_ticket(id: &str, title: &str, parent: &str) -> ac_core::pool::TicketM
         spawned_by: Some(parent.to_owned()),
         enlisted_from: None,
         spawn_assign: None,
+        station: None,
     }
 }
 

@@ -281,6 +281,32 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
             "Terminal peek (GET /api/terminal/peek)",
             vec![exported::<TerminalPeekResponse>()],
         ),
+        (
+            "The Factory's Line (POST /api/line/start, GET /api/line, line.json)",
+            vec![
+                exported::<Station>(),
+                exported::<ProveResult>(),
+                exported::<ProveVerdict>(),
+                exported::<FindingSeverity>(),
+                exported::<ReviewFinding>(),
+                exported::<ReviewVerdict>(),
+                exported::<DecideChoice>(),
+                exported::<DecideItem>(),
+                exported::<DecideVerdict>(),
+                exported::<StationSettings>(),
+                exported::<FactoryStations>(),
+                exported::<FactoryLimits>(),
+                exported::<FactorySettings>(),
+                exported::<LineBrief>(),
+                exported::<LineStatus>(),
+                exported::<LineProve>(),
+                exported::<LineRound>(),
+                exported::<LineState>(),
+                exported::<LineStartRequest>(),
+                exported::<LineStartResponse>(),
+                exported::<LineResponse>(),
+            ],
+        ),
     ]
 }
 

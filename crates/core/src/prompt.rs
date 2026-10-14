@@ -575,6 +575,7 @@ mod tests {
             commit_sha: None,
             brief: None,
             spawn: None,
+            verdict: None,
         };
         let upstream = [Upstream {
             id: "00",

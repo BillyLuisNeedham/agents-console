@@ -75,6 +75,7 @@ pub fn held_reason_text(
             text
         }
         HeldSpawnReason::Operator => "held by operator".to_owned(),
+        HeldSpawnReason::Line => "proposed inside the Line".to_owned(),
         HeldSpawnReason::Refused => match refusal {
             Some(refusal) if !refusal.is_empty() => format!("refused at landing: {refusal}"),
             _ => "refused at landing".to_owned(),

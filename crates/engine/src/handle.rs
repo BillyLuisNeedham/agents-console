@@ -173,6 +173,12 @@ impl Engine {
             .await;
     }
 
+    /// Start the Line (ADR-0037): the first Station Ticket's id, or the refusal's reason.
+    pub async fn start_line(&self, brief: Option<String>) -> Result<String, EngineError> {
+        self.call(move |s| crate::line::start_line(s, brief))
+            .await?
+    }
+
     /// `adoptHeldSpawn` (ADR-0029).
     pub async fn adopt_held_spawn(&self, id: String) -> Result<(), EngineError> {
         self.call(move |s| crate::spawns::adopt_held_spawn(s, &id))

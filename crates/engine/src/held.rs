@@ -757,6 +757,7 @@ mod tests {
                 spawned_by: None,
                 enlisted_from: None,
                 spawn_assign: None,
+                station: None,
             }
         }
 
