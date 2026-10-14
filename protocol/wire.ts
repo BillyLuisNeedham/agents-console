@@ -442,6 +442,12 @@ export interface PoolConfig {
    * Steward's Assignment, ahead of the pool defaults.
    */
   steward?: StewardConfig;
+  /**
+   * The Factory settings (issue #187, ADR-0037): this pool's layer, over the
+   * Machine defaults' and under a Line brief's, each field falling through
+   * on its own. Reloaded at the super-step boundary.
+   */
+  factory?: FactorySettings;
 }
 
 /** The pool defaults' Assignment fields: console.json `defaults`. */
@@ -908,6 +914,11 @@ export interface MachineDefaults {
   engine?: string;
   /** Terminal backing every new pool starts with; the only legal value is "herdr". */
   terminal?: "herdr";
+  /**
+   * The machine's layer of the Factory settings (issue #187), under every
+   * pool's; the engine reads it afresh at each super-step boundary.
+   */
+  factory?: FactorySettings;
 }
 
 /**

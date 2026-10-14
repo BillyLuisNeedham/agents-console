@@ -13,9 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use ac_protocol::{
-    DecideChoice, DecideItem, DecideVerdict, FactorySettings, FindingSeverity, LineBrief,
-    LineProve, LineRound, LineState, LineStatus, Outcome, OutcomeStatus, ProveResult, ProveVerdict,
-    ReviewVerdict, SpawnAssignRequest, Station, StationSettings,
+    DecideChoice, DecideItem, DecideVerdict, FactorySettings, FactoryStations, FindingSeverity,
+    LineBrief, LineProve, LineRound, LineState, LineStatus, Outcome, OutcomeStatus, ProveResult,
+    ProveVerdict, ReviewVerdict, SpawnAssignRequest, Station, StationAssign, StationSettings,
 };
 use serde_json::Value;
 
@@ -64,13 +64,15 @@ impl ResolvedStation {
     }
 }
 
-/// The Factory settings a Line runs on: the built-in defaults under the Line brief's overrides.
+/// The Factory settings a Line runs on: the built-in defaults under the Machine defaults' layer, the
+/// Pool settings' and the Line brief's, each field falling through on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFactory {
     pub implement: ResolvedStation,
     pub prove: ResolvedStation,
     pub review: ResolvedStation,
     pub decide: ResolvedStation,
+    pub grill: ResolvedStation,
     pub prove_fails_per_round: u64,
     pub extra_rounds: u64,
     pub finish: String,
@@ -94,45 +96,46 @@ pub fn default_factory() -> ResolvedFactory {
         prove: station_default("my-verify", "medium"),
         review: station_default("code-review", "high"),
         decide: station_default("html", "medium"),
+        grill: station_default("my-grill-with-docs show-me", "high"),
         prove_fails_per_round: 2,
         extra_rounds: 1,
         finish: "none".to_owned(),
     }
 }
 
-fn overlay_station(base: &mut ResolvedStation, layer: Option<&StationSettings>) {
+// One string field of a layer: set and not blank, or it falls through.
+fn take(base: &mut String, field: Option<&String>) {
+    if let Some(value) = field.map(|v| js::trim(v)).filter(|v| !v.is_empty()) {
+        value.clone_into(base);
+    }
+}
+
+// `enabled` reaches only a Station that can be switched off (Prove, Review): a layer that switches off
+// Implement or Decide is refused where it is written, and never obeyed here.
+fn overlay_station(base: &mut ResolvedStation, layer: Option<&StationSettings>, switchable: bool) {
     let Some(layer) = layer else {
         return;
     };
-    if let Some(enabled) = layer.enabled {
+    if let Some(enabled) = layer.enabled.filter(|_| switchable) {
         base.enabled = enabled;
     }
-    if let Some(drivers) = &layer.drivers {
-        base.drivers = drivers.clone();
-    }
-    if let Some(note) = &layer.note {
-        base.note = note.clone();
-    }
+    take(&mut base.drivers, layer.drivers.as_ref());
+    take(&mut base.note, layer.note.as_ref());
     if let Some(assign) = &layer.assign {
-        if let Some(harness) = &assign.harness {
-            base.harness = harness.clone();
-        }
-        if let Some(model) = &assign.model {
-            base.model = model.clone();
-        }
-        if let Some(effort) = &assign.effort {
-            base.effort = effort.clone();
-        }
+        take(&mut base.harness, assign.harness.as_ref());
+        take(&mut base.model, assign.model.as_ref());
+        take(&mut base.effort, assign.effort.as_ref());
     }
 }
 
 /// One settings layer over `base`, each field falling through on its own.
 pub fn overlay_factory(base: &mut ResolvedFactory, layer: &FactorySettings) {
     if let Some(stations) = &layer.stations {
-        overlay_station(&mut base.implement, stations.implement.as_ref());
-        overlay_station(&mut base.prove, stations.prove.as_ref());
-        overlay_station(&mut base.review, stations.review.as_ref());
-        overlay_station(&mut base.decide, stations.decide.as_ref());
+        overlay_station(&mut base.implement, stations.implement.as_ref(), false);
+        overlay_station(&mut base.prove, stations.prove.as_ref(), true);
+        overlay_station(&mut base.review, stations.review.as_ref(), true);
+        overlay_station(&mut base.decide, stations.decide.as_ref(), false);
+        overlay_station(&mut base.grill, stations.grill.as_ref(), false);
     }
     if let Some(limits) = &layer.limits {
         if let Some(fails) = limits.prove_fails_per_round {
@@ -142,21 +145,160 @@ pub fn overlay_factory(base: &mut ResolvedFactory, layer: &FactorySettings) {
             base.extra_rounds = extra;
         }
     }
-    if let Some(finish) = &layer.finish {
-        base.finish = finish.clone();
-    }
+    take(&mut base.finish, layer.finish.as_ref());
 }
 
-/// The settings a Line runs on: the built-in defaults, then the brief's `factory`, then its `finish`.
-pub fn resolve_factory(brief: &LineBrief) -> ResolvedFactory {
+/// The two settings layers under a Line brief: the Machine defaults' `factory` and the Pool settings'.
+/// The engine reads both afresh at each super-step boundary (ADR-0018), so a change reaches the next
+/// Station Ticket it writes and never one already written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FactoryLayers {
+    pub machine: Option<FactorySettings>,
+    pub pool: Option<FactorySettings>,
+}
+
+/// The settings a Line runs on: the built-in defaults, the Machine defaults, the Pool settings, then
+/// the brief's `factory` and its `finish`, each field falling through on its own.
+pub fn resolve_factory(layers: &FactoryLayers, brief: &LineBrief) -> ResolvedFactory {
     let mut factory = default_factory();
-    if let Some(layer) = &brief.factory {
+    for layer in [&layers.machine, &layers.pool, &brief.factory]
+        .into_iter()
+        .flatten()
+    {
         overlay_factory(&mut factory, layer);
     }
     if let Some(finish) = brief.finish.as_deref().filter(|f| !js::trim(f).is_empty()) {
-        finish.clone_into(&mut factory.finish);
+        js::trim(finish).clone_into(&mut factory.finish);
     }
     factory
+}
+
+const STATION_KEYS: [&str; 5] = ["implement", "prove", "review", "decide", "grill"];
+
+fn station_layer<'a>(stations: &'a FactoryStations, key: &str) -> Option<&'a StationSettings> {
+    match key {
+        "implement" => stations.implement.as_ref(),
+        "prove" => stations.prove.as_ref(),
+        "review" => stations.review.as_ref(),
+        "decide" => stations.decide.as_ref(),
+        _ => stations.grill.as_ref(),
+    }
+}
+
+/// What every layer of Factory settings must hold to: only Prove and Review switch off, and a Station's
+/// drivers, when a layer names them, are not blank. The reason names the field.
+pub fn check_factory_layer(layer: &FactorySettings) -> Result<(), String> {
+    let Some(stations) = &layer.stations else {
+        return Ok(());
+    };
+    for key in STATION_KEYS {
+        let Some(station) = station_layer(stations, key) else {
+            continue;
+        };
+        if station.enabled == Some(false) && !matches!(key, "prove" | "review") {
+            return Err(format!(
+                "factory.stations.{key}.enabled is false: only Prove and Review can be switched off"
+            ));
+        }
+        if station.drivers.as_deref().is_some_and(blank) {
+            return Err(format!("factory.stations.{key}.drivers is blank"));
+        }
+    }
+    Ok(())
+}
+
+// A field's text trimmed, `None` when it is blank.
+fn tidy(text: Option<String>) -> Option<String> {
+    text.map(|t| js::trim(&t).to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+fn tidy_station(station: Option<StationSettings>) -> Option<StationSettings> {
+    let station = station?;
+    let assign = station.assign.and_then(|assign| {
+        let assign = StationAssign {
+            harness: tidy(assign.harness),
+            model: tidy(assign.model),
+            effort: tidy(assign.effort),
+        };
+        (assign.harness.is_some() || assign.model.is_some() || assign.effort.is_some())
+            .then_some(assign)
+    });
+    let station = StationSettings {
+        enabled: station.enabled,
+        drivers: tidy(station.drivers),
+        assign,
+        note: tidy(station.note),
+    };
+    let empty = station.enabled.is_none()
+        && station.drivers.is_none()
+        && station.assign.is_none()
+        && station.note.is_none();
+    (!empty).then_some(station)
+}
+
+// A limit the Settings pane's text input sent as digits is read as its number; "" is no value.
+fn limits_as_numbers(value: &mut Value) {
+    let Some(limits) = value.get_mut("limits").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for limit in limits.values_mut() {
+        if let Value::String(text) = limit {
+            let trimmed = js::trim(text);
+            *limit = if trimmed.is_empty() {
+                Value::Null
+            } else if let Ok(n) = trimmed.parse::<u64>() {
+                Value::from(n)
+            } else {
+                continue;
+            };
+        }
+    }
+}
+
+/// A layer of Factory settings as the Settings pane or a file writes it, checked and tidied: strings
+/// trimmed, blank fields and empty objects dropped, `None` when nothing is left. The reason, prefixed
+/// with `subject`, names the field that is wrong.
+pub fn normalise_factory(value: &Value, subject: &str) -> Result<Option<FactorySettings>, String> {
+    if !value.is_object() {
+        return Err(format!("{subject} must be an object"));
+    }
+    let mut value = value.clone();
+    limits_as_numbers(&mut value);
+    let layer: FactorySettings =
+        serde_json::from_value(value).map_err(|e| format!("{subject}: {e}"))?;
+    let stations = layer.stations.and_then(|stations| {
+        let stations = FactoryStations {
+            implement: tidy_station(stations.implement),
+            prove: tidy_station(stations.prove),
+            review: tidy_station(stations.review),
+            decide: tidy_station(stations.decide),
+            grill: tidy_station(stations.grill),
+        };
+        let empty = stations.implement.is_none()
+            && stations.prove.is_none()
+            && stations.review.is_none()
+            && stations.decide.is_none()
+            && stations.grill.is_none();
+        (!empty).then_some(stations)
+    });
+    let limits = layer
+        .limits
+        .filter(|limits| limits.prove_fails_per_round.is_some() || limits.extra_rounds.is_some());
+    let layer = FactorySettings {
+        stations,
+        limits,
+        finish: tidy(layer.finish),
+    };
+    check_factory_layer(&layer).map_err(|reason| format!("{subject}: {reason}"))?;
+    let empty = layer.stations.is_none() && layer.limits.is_none() && layer.finish.is_none();
+    Ok((!empty).then_some(layer))
+}
+
+/// A layer read where a bad one must not stop anything (a hand-edited Machine defaults file): the
+/// layer when it is valid, otherwise none.
+pub fn factory_layer_of(value: Option<&Value>) -> Option<FactorySettings> {
+    normalise_factory(value?, "factory").ok().flatten()
 }
 
 impl ResolvedFactory {
@@ -191,25 +333,8 @@ pub fn parse_brief(text: &str) -> Result<LineBrief, String> {
     {
         return Err("finish is blank: leave it out for the default, or name the Finish".into());
     }
-    for (name, station) in [
-        ("implement", resolve_factory(&brief).implement),
-        ("decide", resolve_factory(&brief).decide),
-    ] {
-        if !station.enabled {
-            return Err(format!(
-                "factory.stations.{name}.enabled is false: only Prove and Review can be switched off"
-            ));
-        }
-    }
-    for station in [
-        Station::Implement,
-        Station::Prove,
-        Station::Review,
-        Station::Decide,
-    ] {
-        if js::trim(&resolve_factory(&brief).station(station).drivers).is_empty() {
-            return Err(format!("factory.stations.{station}.drivers is blank"));
-        }
+    if let Some(layer) = &brief.factory {
+        check_factory_layer(layer)?;
     }
     Ok(brief)
 }
@@ -609,6 +734,7 @@ pub fn route(
                 .get_or_insert_with(|| format!("{from} was closed"));
             finish_ticket(
                 line,
+                factory,
                 None,
                 "Decide was closed, so there is no report from it.",
             )
@@ -647,10 +773,11 @@ pub fn route(
             let verdict = decide_verdict(outcome.verdict.as_ref(), &musts_of(line))?;
             round_of(line).decide = Some(verdict.clone());
             if line.halted.is_some() || verdict.decide == DecideChoice::Finish {
-                finish_ticket(line, Some(&from), "")
+                finish_ticket(line, factory, Some(&from), "")
             } else if line.extra_rounds >= factory.extra_rounds {
                 finish_ticket(
                     line,
+                    factory,
                     Some(&from),
                     &format!(
                         "Decide chose another Round, but the Line has started its {} extra \
@@ -1016,7 +1143,12 @@ fn decide_ticket(line: &LineState, factory: &ResolvedFactory, from: Option<&str>
     )
 }
 
-fn finish_ticket(line: &LineState, from: Option<&str>, why: &str) -> NewTicket {
+fn finish_ticket(
+    line: &LineState,
+    factory: &ResolvedFactory,
+    from: Option<&str>,
+    why: &str,
+) -> NewTicket {
     let n = line.round;
     let halted = line
         .halted
@@ -1038,7 +1170,7 @@ fn finish_ticket(line: &LineState, from: Option<&str>, why: &str) -> NewTicket {
             "{}\n\n## The Finish checkpoint\n\nNo agent runs this Ticket: it is where the operator \
              approves the Line. Finish: `{}`.",
             spec_section(line),
-            js::trim(line.brief.finish.as_deref().unwrap_or("none"))
+            js::trim(&factory.finish)
         ),
         blocked_by: from.map(str::to_owned),
         assign: None,

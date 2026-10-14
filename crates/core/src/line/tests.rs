@@ -44,7 +44,7 @@ fn next(routed: Result<Routed, String>) -> NewTicket {
 }
 
 fn started() -> (LineState, ResolvedFactory) {
-    let factory = resolve_factory(&brief());
+    let factory = resolve_factory(&FactoryLayers::default(), &brief());
     let (line, first) = start_line(brief(), "docs/specs/x.brief.json", &factory);
     assert_eq!(first.id, "r1-implement");
     (line, factory)
@@ -78,12 +78,15 @@ fn the_built_in_settings_are_the_specs() {
     assert_eq!(factory.review.drivers, "code-review");
     assert_eq!(factory.decide.drivers, "html");
     assert_eq!(factory.decide.effort, "medium");
+    assert_eq!(factory.grill.drivers, "my-grill-with-docs show-me");
+    assert_eq!(factory.grill.effort, "high");
     assert!(
         [
             &factory.implement,
             &factory.prove,
             &factory.review,
-            &factory.decide
+            &factory.decide,
+            &factory.grill
         ]
         .iter()
         .all(|s| s.harness == "claude" && s.model == "opus" && s.enabled)
@@ -103,7 +106,7 @@ fn a_brief_overrides_field_by_field() {
             "limits": {"extraRounds": 0}}}"#,
     )
     .unwrap();
-    let factory = resolve_factory(&brief);
+    let factory = resolve_factory(&FactoryLayers::default(), &brief);
     assert_eq!(factory.prove.model, "sonnet");
     assert_eq!(factory.prove.effort, "medium");
     assert_eq!(factory.prove.drivers, "my-verify");
@@ -491,16 +494,210 @@ fn closing_decide_goes_straight_to_the_finish() {
     assert_eq!(line.halted.as_deref(), Some("r1-decide was closed"));
 }
 
+// A Line whose pool layer switches off the Stations named, walked from Implement's done.
+fn walk_switched_off(off: &[&str], ends: &[StationEnd<'_>]) -> Vec<String> {
+    let stations: serde_json::Map<String, Value> = off
+        .iter()
+        .map(|key| ((*key).to_owned(), json!({"enabled": false})))
+        .collect();
+    let layers = FactoryLayers {
+        machine: None,
+        pool: layer(json!({ "stations": stations })),
+    };
+    let factory = resolve_factory(&layers, &brief());
+    let (mut line, _) = start_line(brief(), "b.json", &factory);
+    walk(&mut line, &factory, ends)
+}
+
 #[test]
 fn switched_off_stations_are_skipped() {
+    let done = outcome(None);
+    let pass = passed();
+    let none = findings(json!([]));
+    // Prove off: Implement routes to Review.
+    assert_eq!(
+        walk_switched_off(
+            &["prove"],
+            &[StationEnd::Done(&done), StationEnd::Done(&none)]
+        ),
+        ["r1-review", "r1-decide"]
+    );
+    // Review off: Prove's pass routes to Decide.
+    assert_eq!(
+        walk_switched_off(
+            &["review"],
+            &[StationEnd::Done(&done), StationEnd::Done(&pass)]
+        ),
+        ["r1-prove", "r1-decide"]
+    );
+    // Both off: Implement routes to Decide, which has no findings to account for.
     let brief = parse_brief(
         r#"{"spec": "s.md", "factory": {"stations": {"prove": {"enabled": false}, "review": {"enabled": false}}}}"#,
     )
     .unwrap();
-    let factory = resolve_factory(&brief);
+    let factory = resolve_factory(&FactoryLayers::default(), &brief);
     let (mut line, _) = start_line(brief, "b.json", &factory);
     let decide_ticket = next(route(&mut line, &factory, StationEnd::Done(&outcome(None))));
     assert_eq!(decide_ticket.id, "r1-decide");
+    assert!(
+        decide_ticket
+            .body
+            .contains("## Review findings\n\n_(none)_")
+    );
+    assert!(musts_of(&line).is_empty());
+}
+
+fn layer(value: Value) -> Option<FactorySettings> {
+    normalise_factory(&value, "test").expect("a valid layer")
+}
+
+#[test]
+fn each_layer_overrides_its_own_fields_and_the_rest_fall_through() {
+    let layers = FactoryLayers {
+        machine: layer(json!({
+            "stations": {"implement": {"assign": {"model": "machine-model"}, "note": "machine note"}},
+            "limits": {"proveFailsPerRound": 5},
+            "finish": "draft-pr"
+        })),
+        pool: layer(json!({
+            "stations": {"implement": {"assign": {"effort": "low"}}, "review": {"enabled": false}},
+            "limits": {"extraRounds": 3}
+        })),
+    };
+    let brief = parse_brief(
+        r#"{"spec": "s.md", "factory": {"stations": {"implement": {"drivers": "tdd implement"}}}}"#,
+    )
+    .unwrap();
+    let factory = resolve_factory(&layers, &brief);
+    // The machine's model, the pool's effort, the brief's drivers, the built-in harness.
+    assert_eq!(factory.implement.model, "machine-model");
+    assert_eq!(factory.implement.effort, "low");
+    assert_eq!(factory.implement.drivers, "tdd implement");
+    assert_eq!(factory.implement.harness, "claude");
+    assert_eq!(factory.implement.note, "machine note");
+    assert!(!factory.review.enabled);
+    assert!(factory.prove.enabled);
+    assert_eq!(factory.prove, default_factory().prove);
+    assert_eq!(
+        (factory.prove_fails_per_round, factory.extra_rounds),
+        (5, 3)
+    );
+    assert_eq!(factory.finish, "draft-pr");
+
+    // A later layer wins the field it sets, and only that field.
+    let pool_wins = FactoryLayers {
+        pool: layer(
+            json!({"stations": {"implement": {"assign": {"model": "pool-model"}}}, "finish": "pr"}),
+        ),
+        ..layers.clone()
+    };
+    let factory = resolve_factory(&pool_wins, &brief);
+    assert_eq!(factory.implement.model, "pool-model");
+    assert_eq!(factory.implement.note, "machine note");
+    assert_eq!(factory.finish, "pr");
+    assert!(factory.review.enabled);
+    let brief_wins = parse_brief(
+        r#"{"spec": "s.md", "finish": "none", "factory": {"stations": {"implement": {"assign": {"model": "brief-model"}}}}}"#,
+    )
+    .unwrap();
+    let factory = resolve_factory(&pool_wins, &brief_wins);
+    assert_eq!(factory.implement.model, "brief-model");
+    assert_eq!(factory.implement.effort, "high");
+    assert_eq!(factory.finish, "none");
+}
+
+#[test]
+fn a_layer_cannot_switch_off_implement_or_decide() {
+    // Refused where a layer is written…
+    assert_eq!(
+        normalise_factory(
+            &json!({"stations": {"decide": {"enabled": false}}}),
+            "pool settings: factory"
+        )
+        .unwrap_err(),
+        "pool settings: factory: factory.stations.decide.enabled is false: only Prove and Review can be switched off"
+    );
+    // …and never obeyed when one reaches the resolution anyway.
+    let mut factory = default_factory();
+    overlay_factory(
+        &mut factory,
+        &serde_json::from_value(json!({"stations": {"implement": {"enabled": false}}})).unwrap(),
+    );
+    assert!(factory.implement.enabled);
+}
+
+#[test]
+fn a_layer_is_tidied_to_what_it_sets() {
+    assert_eq!(
+        normalise_factory(
+            &json!({
+                "stations": {
+                    "implement": {"drivers": " implement ", "assign": {"harness": "", "model": " m "}, "note": " "},
+                    "prove": {"assign": {"effort": ""}}
+                },
+                "limits": {"proveFailsPerRound": "3", "extraRounds": ""},
+                "finish": "  "
+            }),
+            "f"
+        )
+        .unwrap(),
+        layer(json!({
+            "stations": {"implement": {"drivers": "implement", "assign": {"model": "m"}}},
+            "limits": {"proveFailsPerRound": 3}
+        }))
+    );
+    assert_eq!(
+        normalise_factory(&json!({"stations": {"review": {}}, "limits": {}}), "f").unwrap(),
+        None
+    );
+    assert!(
+        normalise_factory(&json!({"stations": {"build": {}}}), "pool config: factory")
+            .unwrap_err()
+            .starts_with("pool config: factory: unknown field `build`")
+    );
+    assert_eq!(
+        normalise_factory(&json!("on"), "pool config: factory").unwrap_err(),
+        "pool config: factory must be an object"
+    );
+    assert!(normalise_factory(&json!({"limits": {"extraRounds": -1}}), "f").is_err());
+    assert_eq!(factory_layer_of(Some(&json!({"finish": 3}))), None);
+}
+
+#[test]
+fn the_resolved_finish_reaches_decide_and_the_finish_checkpoint() {
+    let layers = FactoryLayers {
+        machine: None,
+        pool: layer(
+            json!({"finish": "draft-pr", "stations": {"decide": {"note": "keep the report short"}}}),
+        ),
+    };
+    let brief = parse_brief(r#"{"spec": "docs/specs/x.md"}"#).unwrap();
+    let factory = resolve_factory(&layers, &brief);
+    let (mut line, _) = start_line(brief, "b.json", &factory);
+    let done = outcome(None);
+    let pass = passed();
+    let none = findings(json!([]));
+    let mut ids = walk(
+        &mut line,
+        &factory,
+        &[StationEnd::Done(&done), StationEnd::Done(&pass)],
+    );
+    let decide_ticket = next(route(&mut line, &factory, StationEnd::Done(&none)));
+    ids.push(decide_ticket.id.clone());
+    assert_eq!(ids, ["r1-prove", "r1-review", "r1-decide"]);
+    assert!(
+        decide_ticket
+            .body
+            .contains("carry out the Finish before you record it: `draft-pr`")
+    );
+    assert!(
+        decide_ticket
+            .body
+            .contains("## Note for this Station\n\nkeep the report short")
+    );
+    let finish = decide(json!({"decide": "finish"}));
+    let finish_ticket = next(route(&mut line, &factory, StationEnd::Done(&finish)));
+    assert!(finish_ticket.body.contains("Finish: `draft-pr`."));
 }
 
 #[test]

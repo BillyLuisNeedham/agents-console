@@ -14,6 +14,7 @@ import type {
   EnlistPane,
   EnrichedSnapshot,
   EnrichedTicketState,
+  FactorySettings,
   Grade,
   HeldPaneRecord,
   HeldSpawnReason,
@@ -58,6 +59,7 @@ export type {
   EnlistResponse,
   EnrichedSnapshot,
   EnrichedTicketState,
+  FactorySettings,
   Grade,
   HeldPaneRecord,
   HeldSpawnReason,
@@ -84,6 +86,7 @@ export type {
   RunPhase,
   SettingsResponse,
   StartConversationRequest,
+  StationSettings,
   StewardAssign,
   StewardBudgetView,
   StewardConfig,
@@ -2362,6 +2365,9 @@ export interface PoolConfigPatch {
     assign: { harness: string; model: string; effort: string; drivers: string };
     mayClose?: boolean;
   };
+  /** The Factory settings (issue #187), replaced whole: an empty field falls
+   *  to the Machine defaults' layer, and null removes the key. */
+  factory?: FactorySettings | null;
 }
 
 /**

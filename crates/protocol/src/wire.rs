@@ -508,6 +508,11 @@ wire_struct! {
         /// Steward's Assignment, ahead of the pool defaults.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward: Option<StewardConfig>,
+        /// The Factory settings (issue #187, ADR-0037): this pool's layer, over the
+        /// Machine defaults' and under a Line brief's, each field falling through
+        /// on its own. Reloaded at the super-step boundary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub factory: Option<Box<FactorySettings>>,
     }
 }
 
@@ -1196,6 +1201,10 @@ wire_struct! {
         /// Terminal backing every new pool starts with; the only legal value is "herdr".
         #[serde(skip_serializing_if = "Option::is_none")]
         pub terminal: Option<TerminalKind>,
+        /// The machine's layer of the Factory settings (issue #187), under every
+        /// pool's; the engine reads it afresh at each super-step boundary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub factory: Option<Box<FactorySettings>>,
     }
 }
 
@@ -1894,7 +1903,7 @@ wire_struct! {
         pub spec: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub finish: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub factory: Option<FactorySettings>,
     }
 }

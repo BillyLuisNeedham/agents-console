@@ -33,9 +33,10 @@ export function lineWorld(
   t: Case,
   brief: unknown = { spec: SPEC, finish: "none" },
   repoFiles: Record<string, string> = {},
+  config: PoolConfig = CONFIG,
 ): World {
   const world = t.world({
-    config: CONFIG,
+    config,
     repoFiles: {
       [SPEC]: "# The spec\n\nBuild the thing.\n",
       ...(brief === null ? {} : { [BRIEF]: typeof brief === "string" ? brief : JSON.stringify(brief) }),

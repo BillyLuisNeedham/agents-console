@@ -15,10 +15,11 @@ use ac_core::assignment::resolve_unseen_assignments;
 use ac_core::events::last_attempt;
 use ac_core::js;
 use ac_core::line::{
-    NewTicket, Routed, StationEnd, VerdictCheck, approves, check_station_outcome, find_brief,
-    no_verdict_brief, read_brief, resolve_factory, route, save_line, start_line as begin_line,
-    station_ticket_text, verdict_check,
+    FactoryLayers, NewTicket, Routed, StationEnd, VerdictCheck, approves, check_station_outcome,
+    factory_layer_of, find_brief, no_verdict_brief, read_brief, resolve_factory, route, save_line,
+    start_line as begin_line, station_ticket_text, verdict_check,
 };
+use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::outcome::ValidOutcome;
 use ac_core::pool::{TicketMarker, load_pool_tickets, write_marker_status};
 use ac_protocol::{InterruptKind, LineStatus, Station, TicketStatus};
@@ -48,6 +49,19 @@ pub fn checked(check: Option<&VerdictCheck>, valid: ValidOutcome) -> ValidOutcom
     }
 }
 
+/// The Factory settings layers under the Line brief, read afresh: the Machine defaults' file and the
+/// Pool settings as the last Config reload committed them. Routing reads them at the super-step
+/// boundary, after the reload (ADR-0018), so a change reaches the next Station Ticket written and never
+/// one already written, whose Assignment and note its file carries.
+pub fn factory_layers(session: &Session) -> FactoryLayers {
+    FactoryLayers {
+        machine: read_machine_defaults(&session.machine_defaults)
+            .factory
+            .map(|layer| *layer),
+        pool: factory_layer_of(session.state.config.get("factory")),
+    }
+}
+
 /// Start the Line (ADR-0037): read the brief, write the Line's state and Round 1's Implement Ticket,
 /// and kick the drive. Refused, with the reason, when the brief is missing or invalid or a Line has
 /// already started.
@@ -61,7 +75,7 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     let checkout = Path::new(&session.cwd).to_path_buf();
     let path = find_brief(&checkout, brief.as_deref()).map_err(EngineError::refused)?;
     let brief = read_brief(&checkout, &path).map_err(EngineError::refused)?;
-    let factory = resolve_factory(&brief);
+    let factory = resolve_factory(&factory_layers(session), &brief);
     let (line, first) = begin_line(brief, &path, &factory);
     if session.marker(&first.id).is_some() {
         return Err(EngineError::refused(format!(
@@ -178,7 +192,7 @@ fn route_once(session: &mut Session) -> anyhow::Result<bool> {
         },
         _ => return Ok(false),
     };
-    let factory = resolve_factory(&line.brief);
+    let factory = resolve_factory(&factory_layers(session), &line.brief);
     let mut next_line = line.clone();
     let routed = match route(&mut next_line, &factory, end) {
         Ok(routed) => routed,
