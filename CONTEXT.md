@@ -340,3 +340,33 @@ _Avoid_: ground truth, actual, evidence (Evidence is the whole object handed to 
 **Judgement**:
 One typed answer from Jev to one question: a Choice (one label, with a probability per label and a confidence), a Noul (a probability that a condition holds), or a Jev Score (an expected position on an ordered rubric, with probabilities and a confidence). Every question over the same Evidence is asked in one request.
 _Avoid_: verdict (that's head-to-head grading), guess, prediction, score (say Jev Score; a Grade has a score too)
+
+## Factory
+
+**Factory**:
+The engine-owned recipe that carries one piece of work from its Grill to the operator's approval through a fixed run of Stations, routing each Station's Outcome to the next. Its settings live in the Machine defaults and the Pool settings.
+_Avoid_: pipeline, workflow, chain (all too generic), recipe (the plain-English gloss, not the name)
+
+**Line**:
+One piece of work's pass through the Factory: its Grill, then Rounds until the Decide Station finishes it. A Factory pool runs exactly one Line, on its own branch.
+_Avoid_: task, job, run (a run is one Console boot)
+
+**Station**:
+The kind of work one Pool citizen does on a Line: the Grill, a Conversation; or Implement, Prove, Review or Decide, each a Ticket. Each Station has its own skills and Assignment.
+_Avoid_: stage, step (both collide with Node), phase
+
+**Round**:
+One Implement → Prove → Review → Decide pass on a Line. A Prove that fails sends the Round back to Implement without starting a new Round; only Decide starts another.
+_Avoid_: iteration, cycle, loop
+
+**Prove**:
+The Station that runs the change end to end after Implement merges and gathers evidence it works, failing the Round back to Implement when it does not. It checks the merged work; it is not Verify, which grades Candidate Attempts before they merge.
+_Avoid_: verify (that's the Candidate-grading machinery), test, QA
+
+**Line brief**:
+What the Grill hands its Line when the operator presses Start the Line: the path of the spec, the Finish, and any Station settings the Grill overrides for this one Line. Without it a Line cannot start.
+_Avoid_: handoff, packet (the Packet is the graph's Grill prose; this is the Factory's), ticket
+
+**Finish**:
+What the Decide Station does when it ends a Line instead of starting another Round, chosen once at the Grill: by default only the report and a checkpoint for the operator; otherwise also a draft PR, a PR, or some other named act.
+_Avoid_: final action, deliver, ship
