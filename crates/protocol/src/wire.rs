@@ -143,8 +143,11 @@ wire_enum! {
 
 wire_enum! {
     /// The roles a Conversation may carry. Absent is an ordinary Conversation.
+    /// The Grill (ADR-0037) is the Factory Line's first Station, the one
+    /// Start the Line hands off from.
     pub enum ConversationRole {
         Steward = "steward",
+        Grill = "grill",
     }
 }
 

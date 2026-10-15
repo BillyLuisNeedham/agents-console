@@ -3359,6 +3359,8 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
+      grill: false,
+      lineStart: { starting: false, failure: null },
       delivery: null,
     });
   });

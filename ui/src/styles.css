@@ -3211,6 +3211,30 @@ textarea.conversations-field {
   border-left: 3px solid var(--steward);
 }
 
+/* A Factory Line's Grill (ADR-0037): the Steward's badge and stripe in the
+   Factory's hue, so the Conversation that Start the Line hands on from is
+   told from an ordinary one. */
+.grill-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--accent-purple);
+  border-radius: 3px;
+  color: var(--accent-purple);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-card-grill {
+  border-left: 3px solid var(--accent-purple);
+}
+
+.conversation-start-line-failure {
+  margin-top: 4px;
+  font-size: 10px;
+}
+
 /* The Conversations tray's Steward box: pinned at the top of the tray as it
    scrolls, in the Steward's hue while one is on duty, dashed while none is. */
 .steward-box {

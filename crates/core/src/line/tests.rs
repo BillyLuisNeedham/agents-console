@@ -743,3 +743,65 @@ fn a_brief_or_spec_path_must_stay_in_the_checkout() {
     assert!(read_brief(&dir, "./b.json").is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// A place a test fills: file names under docs/specs and the texts at their paths.
+struct Branch(Vec<(&'static str, &'static str)>);
+
+impl BriefPlace for Branch {
+    fn name(&self) -> String {
+        "the Grill's committed branch pool/p/conv-1".to_owned()
+    }
+    fn names_in(&self, dir: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter_map(|(path, _)| path.strip_prefix(&format!("{dir}/")))
+            .map(str::to_owned)
+            .collect()
+    }
+    fn read(&self, path: &str) -> Option<Result<String, String>> {
+        self.0
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, text)| Ok((*text).to_owned()))
+    }
+}
+
+#[test]
+fn a_brief_is_found_and_read_in_any_place_its_reasons_naming_the_place() {
+    let empty = Branch(vec![]);
+    assert_eq!(
+        find_brief_in(&empty, None).unwrap_err(),
+        "no Line brief: docs/specs/ in the Grill's committed branch pool/p/conv-1 holds no *.brief.json"
+    );
+    let no_spec = Branch(vec![("docs/specs/x.brief.json", r#"{"spec": "docs/specs/x.md"}"#)]);
+    let path = find_brief_in(&no_spec, None).unwrap();
+    assert_eq!(path, "docs/specs/x.brief.json");
+    assert_eq!(
+        read_brief_in(&no_spec, &path).unwrap_err(),
+        "Line brief docs/specs/x.brief.json: its spec docs/specs/x.md is not in the Grill's committed branch pool/p/conv-1"
+    );
+    let ready = Branch(vec![
+        ("docs/specs/x.brief.json", r#"{"spec": "docs/specs/x.md", "finish": "draft-pr"}"#),
+        ("docs/specs/x.md", "# X\n"),
+    ]);
+    let brief = read_brief_in(&ready, &path).unwrap();
+    assert_eq!(brief.finish.as_deref(), Some("draft-pr"));
+}
+
+#[test]
+fn a_line_is_named_after_its_branch() {
+    assert_eq!(line_name_of("line/186"), "186");
+    assert_eq!(line_name_of("line/a/b"), "a-b");
+    assert_eq!(line_name_of("feature/x"), "feature-x");
+    assert_eq!(line_name_of("line/"), "line");
+}
+
+#[test]
+fn the_grill_is_taught_its_skills_the_two_files_and_the_operators_start() {
+    let teaching = grill_teaching("186", "my-grill-with-docs show-me");
+    assert!(teaching.contains("Use these skills, in this order: my-grill-with-docs, show-me."));
+    assert!(teaching.contains("the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.brief.json`"));
+    assert!(teaching.contains(r#"{"spec": "docs/specs/186.md", "finish": "none", "factory": {}}"#));
+    assert!(teaching.contains("The operator then presses Start the Line"));
+    assert!(!grill_teaching("x", "").contains("Use these skills"));
+}

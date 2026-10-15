@@ -164,6 +164,7 @@ function mountCanvas(
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
+    onStartLine: () => {},
     onArmStop: () => {},
     onCancelStop: () => {},
     onConfirmStop: () => {},
@@ -724,6 +725,91 @@ describe("the Steward on the canvas (ADR-0030)", () => {
   });
 });
 
+
+describe("a Grill on the canvas (ADR-0037)", () => {
+  function grillPool(
+    overrides: { ending?: boolean } = {},
+    lineStart: { starting: boolean; failure: string | null } = { starting: false, failure: null },
+    role: "grill" | "steward" = "grill",
+  ): CanvasModel {
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "running",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
+      heldSpawns: [],
+      state: {
+        tickets: [],
+        conversations: [
+          {
+            id: "conv-2",
+            title: "grill the next feature",
+            status: "live",
+            spawnedBy: null,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            paneId: null,
+            branch: null,
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+            children: [],
+            enlisted: false,
+            ending: overrides.ending ?? false,
+            role,
+          },
+        ],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: {},
+      },
+    };
+    const lineStarts = { "conv-2": lineStart };
+    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), {}, {}, lineStarts).cards });
+  }
+
+  it("marks a Grill's card and offers Start the Line on it", () => {
+    const starts: string[] = [];
+    const { root, commit } = mountCanvas(grillPool(), {
+      onStartLine: (grillId) => starts.push(grillId),
+    });
+    commit();
+    const card = root.querySelector('[data-conversation-id="conv-2"]')!;
+    expect(card.classList.contains("conversation-card-grill")).toBe(true);
+    expect(card.querySelector(".grill-badge")?.textContent).toBe("Grill");
+    const start = card.querySelector<HTMLButtonElement>(".conversation-start-line")!;
+    expect(start.textContent).toBe("Start the Line");
+    expect(start.disabled).toBe(false);
+    start.click();
+    expect(starts).toEqual(["conv-2"]);
+  });
+
+  it("disables Start the Line in flight and shows its refusal", () => {
+    const busy = mountCanvas(grillPool({}, { starting: true, failure: null }));
+    busy.commit();
+    const button = busy.root.querySelector<HTMLButtonElement>(".conversation-start-line")!;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("starting...");
+
+    const refused = mountCanvas(grillPool({}, { starting: false, failure: "the Line has already started" }));
+    refused.commit();
+    expect(refused.root.querySelector(".conversation-start-line-failure")?.textContent).toBe(
+      "the Line has already started",
+    );
+  });
+
+  it("offers no Start the Line on a Grill that is ending, or on a Conversation that is not a Grill", () => {
+    for (const pool of [grillPool({ ending: true }), grillPool({}, undefined, "steward")]) {
+      const { root, commit } = mountCanvas(pool);
+      commit();
+      expect(root.querySelector(".conversation-start-line")).toBeNull();
+    }
+  });
+});
 describe("Notices not landing on the canvas", () => {
   it("warns on the card, the error on hover", () => {
     const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };

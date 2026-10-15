@@ -105,6 +105,42 @@ asks only for what is left, starts the server and opens the browser. It takes
 `[pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]`.
 `skills/link.sh` puts it on PATH; from this checkout it is `bun run boot -- <dir>`.
 
+### Factory mode
+
+`agent-console --factory` boots a Factory pool, which runs one Line
+(`docs/adr/0037-the-factory-is-an-engine-owned-recipe.md`). Boot cuts
+`line/<slug>` from `main` into a worktree of its own at
+`.scratch/lines/<slug>`, so the checkout it runs from keeps its branch, and
+makes the pool inside that worktree at `<worktree>/.scratch/<name>`: the pool's
+target branch is the Line's, never a shared one (ADR-0038). A Factory pool is
+terminal-backed (`"terminal": "herdr"`).
+
+- `--work <issue number or text>`, or the question Boot asks without it: Boot
+  opens the Grill, a Conversation on the Grill Station's skills with the work as
+  its first Turn. The Grill writes `docs/specs/<slug>.md` and
+  `docs/specs/<slug>.brief.json` on its branch, and the operator presses Start
+  the Line on it, which merges that branch and starts Round 1.
+- `--brief <path>`: a ready Line brief and the spec it names (found from the
+  working directory first, then beside the brief). No Grill: Boot commits both
+  onto the Line branch as `docs/specs/<slug>.md` and `docs/specs/<slug>.brief.json`
+  and starts Round 1 at once. It implies `--factory` and `--yes`, so nothing is
+  asked.
+- `--line <slug>` names the Line (default: the issue number, the brief's file
+  name, or the work's first words); a slug already taken gets `-2`, `-3`, ….
+  `--name <dir>` names the pool directory, `--title <title>` titles the pool, and
+  `--config <json file>` lays its keys over the new pool's `console.json` before
+  the server starts (a `steward` block, say).
+
+Unattended, for example:
+
+```sh
+agent-console --brief .scratch/pilots/186.brief.json --title "Pilot #186" \
+  --config steward.json --port 8792 --no-open
+```
+
+When the Line is done, stop its pool and remove the worktree with
+`git worktree remove .scratch/lines/<slug>` (and `git branch -D line/<slug>`).
+
 `agent-console` is a shim (`bin/agent-console`) in front of the binary. Before it
 hands its arguments to `target/release/agent-console boot`, it rebuilds what is
 stale: the UI with Bun when `ui/dist` is missing or older than the UI's sources

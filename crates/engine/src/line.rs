@@ -15,14 +15,18 @@ use ac_core::assignment::resolve_unseen_assignments;
 use ac_core::events::last_attempt;
 use ac_core::js;
 use ac_core::line::{
-    FactoryLayers, NewTicket, Routed, StationEnd, VerdictCheck, approves, check_station_outcome,
-    factory_layer_of, find_brief, no_verdict_brief, read_brief, resolve_factory, route, save_line,
-    start_line as begin_line, station_ticket_text, verdict_check,
+    BriefPlace, FactoryLayers, NewTicket, Routed, StationEnd, VerdictCheck, approves,
+    check_station_outcome, factory_layer_of, find_brief, find_brief_in, no_verdict_brief,
+    read_brief, read_brief_in, resolve_factory, route, save_line, start_line as begin_line,
+    station_ticket_text, verdict_check,
 };
 use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::outcome::ValidOutcome;
 use ac_core::pool::{TicketMarker, load_pool_tickets, write_marker_status};
-use ac_protocol::{InterruptKind, LineStatus, Station, TicketStatus};
+use ac_io::git;
+use ac_protocol::{
+    ConversationRole, ConversationStatus, InterruptKind, LineStatus, Station, TicketStatus,
+};
 
 use crate::error::EngineError;
 use crate::session::{PoolUpdate, Session};
@@ -121,6 +125,103 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))?;
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(id)
+}
+
+// The Grill's branch's committed tree (Start the Line reads the brief there before merging anything):
+// work the Grill has not committed never merges, so it never counts.
+struct GrillBranch<'a> {
+    cwd: &'a str,
+    branch: &'a str,
+}
+
+impl BriefPlace for GrillBranch<'_> {
+    fn name(&self) -> String {
+        format!("the Grill's committed branch {}", self.branch)
+    }
+    fn names_in(&self, dir: &str) -> Vec<String> {
+        let tree = format!("{}:{dir}", self.branch);
+        let probe = git::git(self.cwd, ["ls-tree", "--name-only", tree.as_str()]);
+        if !probe.ok {
+            return Vec::new();
+        }
+        probe.out.lines().map(str::to_owned).collect()
+    }
+    fn read(&self, path: &str) -> Option<Result<String, String>> {
+        let object = format!("{}:{path}", self.branch);
+        let kind = git::git(self.cwd, ["cat-file", "-t", object.as_str()]);
+        if !kind.ok || kind.out.trim() != "blob" {
+            return None;
+        }
+        let shown = git::run_git(Some(Path::new(self.cwd)), ["show", object.as_str()]);
+        Some(if shown.code == Some(0) {
+            Ok(String::from_utf8_lossy(&shown.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&shown.stderr).trim().to_owned())
+        })
+    }
+}
+
+/// Start the Line on the Grill (ADR-0037), the operator's act: check the Line brief on the Grill's
+/// committed branch, merge that branch into the Line's, and start the Line from the merged brief, in
+/// one stretch so nothing lands between the merge and Round 1's Implement. The caller ends the Grill
+/// after, with nothing left to merge. Refused, with the reason and nothing changed, when the Line has
+/// started, the id is no live Grill, the brief is missing or invalid, or the merge does not land.
+pub fn start_line_from_grill(session: &mut Session, grill: &str) -> Result<String, EngineError> {
+    if let Some(line) = &session.line {
+        return Err(EngineError::refused(format!(
+            "the Line has already started: Round {}, {} ({})",
+            line.round, line.ticket, line.status
+        )));
+    }
+    let Some(record) = crate::conversations::load(session)
+        .into_iter()
+        .find(|rec| rec.id == grill)
+    else {
+        return Err(EngineError::refused(format!("no Conversation {grill}")));
+    };
+    if record.role != Some(ConversationRole::Grill) {
+        return Err(EngineError::refused(format!(
+            "{grill} is not the Grill: the Line starts only from its Grill"
+        )));
+    }
+    let (branch, ending) = crate::conversations::branch_and_ending(session, grill);
+    if record.status != ConversationStatus::Live || ending {
+        return Err(EngineError::refused(format!(
+            "the Grill {grill} has ended; the Line starts only from a live Grill"
+        )));
+    }
+    let place = GrillBranch {
+        cwd: &session.cwd,
+        branch: &branch,
+    };
+    let path = find_brief_in(&place, None).map_err(EngineError::refused)?;
+    read_brief_in(&place, &path).map_err(EngineError::refused)?;
+    if crate::checkout_gate::pool_checkout_held(session) {
+        return Err(EngineError::refused(
+            "a Continued attempt holds the pool checkout; Start the Line once it ends",
+        ));
+    }
+    let hold = crate::checkout_gate::hold_pool_checkout(
+        session,
+        "Start the Line is merging the Grill's branch",
+    );
+    let merged = crate::conversations::merge_into_target(session, &branch);
+    crate::checkout_gate::release_pool_checkout(session, hold);
+    if !merged.ok {
+        return Err(EngineError::refused(format!(
+            "the Grill's branch {branch} did not merge into the Line's branch, so the Line has not \
+             started and the Grill goes on: {}",
+            if merged.detail.is_empty() {
+                merged.conflicted.join(", ")
+            } else {
+                merged.detail.clone()
+            }
+        )));
+    }
+    session.log(format!(
+        "line: Start the Line merged the Grill {grill}'s branch {branch}"
+    ));
+    start_line(session, Some(path))
 }
 
 // The last Resume note on a Ticket file: the operator's (or the Steward's) answer on the Finish

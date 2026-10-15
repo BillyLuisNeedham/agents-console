@@ -339,26 +339,62 @@ pub fn parse_brief(text: &str) -> Result<LineBrief, String> {
     Ok(brief)
 }
 
+/// Where a Line brief and the spec it names are read: the pool checkout on disk, or the committed tree
+/// of the Grill's branch (Start the Line on the Grill reads there before it merges anything).
+pub trait BriefPlace {
+    /// How a reason names the place: "the pool checkout".
+    fn name(&self) -> String;
+    /// The file names directly under `dir`, a path relative to the place.
+    fn names_in(&self, dir: &str) -> Vec<String>;
+    /// The text of the file at `path`: `None` when there is no file there.
+    fn read(&self, path: &str) -> Option<Result<String, String>>;
+}
+
+/// The pool checkout on disk.
+pub struct CheckoutPlace<'a>(pub &'a Path);
+
+impl BriefPlace for CheckoutPlace<'_> {
+    fn name(&self) -> String {
+        "the pool checkout".to_owned()
+    }
+    fn names_in(&self, dir: &str) -> Vec<String> {
+        std::fs::read_dir(self.0.join(dir))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn read(&self, path: &str) -> Option<Result<String, String>> {
+        let file = self.0.join(path);
+        file.is_file()
+            .then(|| js::read_text(&file).map_err(|e| e.to_string()))
+    }
+}
+
 /// Where Start the Line reads its brief: the named path in the pool checkout, or else the one
 /// `docs/specs/*.brief.json` there. The path comes back relative to the checkout.
 pub fn find_brief(checkout: &Path, named: Option<&str>) -> Result<String, String> {
+    find_brief_in(&CheckoutPlace(checkout), named)
+}
+
+/// [`find_brief`] in any [`BriefPlace`].
+pub fn find_brief_in(place: &dyn BriefPlace, named: Option<&str>) -> Result<String, String> {
     if let Some(named) = named.map(js::trim).filter(|n| !n.is_empty()) {
         return Ok(named.to_owned());
     }
-    let dir = checkout.join(BRIEF_DIR);
-    let mut found: Vec<String> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| name.ends_with(BRIEF_SUFFIX))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut found: Vec<String> = place
+        .names_in(BRIEF_DIR)
+        .into_iter()
+        .filter(|name| name.ends_with(BRIEF_SUFFIX))
+        .collect();
     found.sort();
     match found.as_slice() {
         [] => Err(format!(
-            "no Line brief: {BRIEF_DIR}/ in the pool checkout holds no *{BRIEF_SUFFIX}"
+            "no Line brief: {BRIEF_DIR}/ in {} holds no *{BRIEF_SUFFIX}",
+            place.name()
         )),
         [one] => Ok(format!("{BRIEF_DIR}/{one}")),
         many => Err(format!(
@@ -383,28 +419,30 @@ fn in_checkout(path: &str) -> bool {
 /// Read and check the Line brief at `path` (relative to the checkout), and that the spec it names is
 /// there. Every reason names the brief.
 pub fn read_brief(checkout: &Path, path: &str) -> Result<LineBrief, String> {
+    read_brief_in(&CheckoutPlace(checkout), path)
+}
+
+/// [`read_brief`] in any [`BriefPlace`].
+pub fn read_brief_in(place: &dyn BriefPlace, path: &str) -> Result<LineBrief, String> {
+    let name = place.name();
     if !in_checkout(path) {
         return Err(format!(
-            "the Line brief's path {path} must be relative to the pool checkout and stay inside it"
+            "the Line brief's path {path} must be relative to {name} and stay inside it"
         ));
     }
-    let file = checkout.join(path);
-    if !file.is_file() {
-        return Err(format!("no Line brief at {path} in the pool checkout"));
-    }
-    let text = js::read_text(&file).map_err(|e| format!("Line brief {path}: {e}"))?;
+    let Some(text) = place.read(path) else {
+        return Err(format!("no Line brief at {path} in {name}"));
+    };
+    let text = text.map_err(|e| format!("Line brief {path}: {e}"))?;
     let brief = parse_brief(&text).map_err(|reason| format!("Line brief {path}: {reason}"))?;
-    if !in_checkout(&brief.spec) {
+    let spec = js::trim(&brief.spec);
+    if !in_checkout(spec) {
         return Err(format!(
-            "Line brief {path}: its spec {} must be relative to the pool checkout and stay inside it",
-            js::trim(&brief.spec)
+            "Line brief {path}: its spec {spec} must be relative to {name} and stay inside it"
         ));
     }
-    if !checkout.join(js::trim(&brief.spec)).is_file() {
-        return Err(format!(
-            "Line brief {path}: its spec {} is not in the pool checkout",
-            js::trim(&brief.spec)
-        ));
+    if place.read(spec).is_none() {
+        return Err(format!("Line brief {path}: its spec {spec} is not in {name}"));
     }
     Ok(brief)
 }
@@ -1202,6 +1240,44 @@ pub fn station_ticket_text(ticket: &NewTicket) -> String {
         station_name(ticket.station),
         ticket.round,
         ticket.body
+    )
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The Grill
+// ---------------------------------------------------------------------------------------------------
+
+/// The prefix of every Line branch Boot cuts (ADR-0038).
+pub const LINE_BRANCH_PREFIX: &str = "line/";
+
+/// The Line's name, as its spec and brief are named in `docs/specs/`: the Line branch without its
+/// `line/` prefix, or any other branch with its slashes made dashes.
+pub fn line_name_of(branch: &str) -> String {
+    let name = branch.strip_prefix(LINE_BRANCH_PREFIX).unwrap_or(branch);
+    let name = name.replace('/', "-");
+    if name.is_empty() { "line".to_owned() } else { name }
+}
+
+/// What the Grill is taught beside the Conversation teaching: its skills, the spec and the Line brief it
+/// writes and where, and that only the operator's Start the Line hands off.
+pub fn grill_teaching(line: &str, drivers: &str) -> String {
+    let skills: Vec<&str> = drivers.split_whitespace().collect();
+    let skills = if skills.is_empty() {
+        String::new()
+    } else {
+        format!(" Use these skills, in this order: {}.", skills.join(", "))
+    };
+    format!(
+        "You are the Grill of this pool's Line (the Factory, ADR-0037): the Conversation that \
+         sharpens one piece of work with the operator before any Station runs.{skills} When the \
+         operator agrees the plan, write the spec at `{BRIEF_DIR}/{line}.md` and the Line brief at \
+         `{BRIEF_DIR}/{line}{BRIEF_SUFFIX}`, and commit both on your branch. The brief is JSON: \
+         {{\"spec\": \"{BRIEF_DIR}/{line}.md\", \"finish\": \"none\", \"factory\": {{}}}}, where finish \
+         is none, draft-pr, pr, or a sentence naming another act the Decide Station carries out, \
+         and factory holds only the Station settings this Line overrides. The operator then \
+         presses Start the Line: the engine merges your branch into the Line's branch, ends this \
+         Conversation and starts Round 1. Never start or propose a Station yourself: the engine \
+         routes the Line."
     )
 }
 

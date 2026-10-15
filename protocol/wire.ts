@@ -158,8 +158,12 @@ export type ConversationStatus = "live" | "ended" | "crashed";
 /** Which side of its Turn a Conversation is on. */
 export type TurnSide = "working" | "waiting";
 
-/** The roles a Conversation may carry. Absent is an ordinary Conversation. */
-export type ConversationRole = "steward";
+/**
+ * The roles a Conversation may carry. Absent is an ordinary Conversation.
+ * The Grill (ADR-0037) is the Factory Line's first Station, the one
+ * Start the Line hands off from.
+ */
+export type ConversationRole = "steward" | "grill";
 
 /** A Conversation as the snapshot carries it (conversations.ts's viewOf). */
 export interface ConversationView {

@@ -393,6 +393,7 @@ const view = new ConsoleView({
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
+  onStartLine: () => Promise.resolve(),
 });
 
 const handlers: Handlers = {

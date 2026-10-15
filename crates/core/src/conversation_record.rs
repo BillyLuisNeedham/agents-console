@@ -141,7 +141,11 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<ConversationRecord> {
         effort,
         drivers: decode(field(&fields, "drivers").unwrap_or(""))?,
         enlisted,
-        role: (field(&fields, "role") == Some("steward")).then_some(ConversationRole::Steward),
+        role: match field(&fields, "role") {
+            Some("steward") => Some(ConversationRole::Steward),
+            Some("grill") => Some(ConversationRole::Grill),
+            _ => None,
+        },
     })
 }
 
