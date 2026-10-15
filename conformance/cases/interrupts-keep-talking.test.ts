@@ -343,6 +343,55 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
+// Issue #186: a Continued attempt's checkpoint takes its Outcome's Spawn proposals, as its done does
+// and as a launched attempt's checkpoint does; they land at the next boundary while the run pauses.
+conformance(
+  "interrupts",
+  "a Continued attempt's checkpoint Outcome takes its spawn proposals",
+  async (t) => {
+    const { world, server, paneId } = await checkpointed(t);
+    await expectContinued(server, "01", 2);
+    writeOutcome(world, "01", {
+      status: "checkpoint",
+      summary: "pause",
+      commitSha: null,
+      brief: "do the follow-up first",
+      spawn: [{ title: "Follow-up", body: "A body long enough to stand as a ticket.", blockedBy: [] }],
+    });
+
+    const held = await untilHeld(server, "01", 2);
+    expect(held.paneId).toBe(paneId);
+    const interrupt = await untilInterrupt(server, "01", "checkpoint");
+    expect(interrupt.body).toBe("do the follow-up first");
+    expect(readStateLine(world.pool, "01.md").status).toBe("checkpoint");
+    expectParsedEqual(
+      // The boundary may already have landed the proposal: its spawn-adopted is pinned below.
+      readEvents(world.pool, "01")
+        .filter((e) => e.attempt === 2 && e.kind !== "spawned" && e.kind !== "spawn-adopted")
+        .map((e) => [e.kind, e.payload]),
+      [
+        ["spawn-pending", { pending: [{ id: "proposal-1", title: "Follow-up" }] }],
+        ["exited", { code: 0, status: "checkpoint", logTail: [], outcomeExists: true }],
+        ["checkpoint", {}],
+      ],
+      "attempt 2's events",
+    );
+
+    await until(
+      () => existsSync(join(world.pool, "issues", "01-spawn-1.md")),
+      (landed) => landed,
+      { what: "01-spawn-1 to land", ms: 30_000 },
+    );
+    const adopted = await until(
+      () => readEvents(world.pool, "01").find((e) => e.kind === "spawn-adopted"),
+      (event) => event !== undefined,
+      { what: "01's spawn-adopted event", ms: 30_000 },
+    );
+    expectParsedEqual(adopted!.payload, { adopted: ["01-spawn-1"], fromPending: ["proposal-1"] }, "the spawn-adopted payload");
+  },
+  { timeoutMs: 120_000 },
+);
+
 // ---------------------------------------------------------------------------
 // How a Continued attempt ends without an Outcome
 // ---------------------------------------------------------------------------

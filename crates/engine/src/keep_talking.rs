@@ -579,10 +579,12 @@ enum Observed {
 /// `endContinuedAttempt`: record a Continued attempt's ending (issue #139). A solo ticket's is exactly
 /// an adopted attempt's (`record_adopted_exit`): done writes the status and chains the ordinary merge,
 /// checkpoint raises a fresh Interrupt over the same pane (so it can be continued again), anything else
-/// is a crash. A pane that went with no Outcome is a crash, as it is for any terminal attempt. A verify
-/// ticket's attempt is graded as a lone attempt: a checkpoint pauses the ticket as the lone path does,
-/// and done waits for the drive to grade it. An untaught attempt pauses at a checkpoint of the engine's
-/// own. A released one records nothing: whoever released it owns the ticket.
+/// is a crash. A valid Outcome's Spawn proposals are taken whether it is done or checkpoint, as a
+/// launched attempt's are (issue #186). A pane that went with no Outcome is a crash, as it is for any
+/// terminal attempt. A verify ticket's attempt is graded as a lone attempt: a checkpoint pauses the
+/// ticket as the lone path does, and done waits for the drive to grade it. An untaught attempt pauses
+/// at a checkpoint of the engine's own. A released one records nothing: whoever released it owns the
+/// ticket.
 fn end_continued_attempt(
     session: &mut Session,
     ticket_id: &str,
@@ -756,7 +758,6 @@ fn end_continued_attempt(
         if !work.numbered
             && decision.crash_reason.is_none()
             && let Ok(valid) = &read
-            && valid.outcome.status == OutcomeStatus::Done
             && let Some(proposals) = valid.outcome.spawn.as_ref().filter(|p| !p.is_empty())
         {
             take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
@@ -1394,6 +1395,108 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [("01", InterruptKind::Crash)],
                 "{file}"
+            );
+        }
+    }
+
+    /// `continuing`, with a working spawn store: proposals are settled under the temp dir's runs. Its
+    /// attempt 2 has the `spawned` event a Continued attempt starts with, so a proposal's events are
+    /// attempt 2's.
+    fn continuing_with_spawns(dir: &Path, outcome: &str) -> Session {
+        let mut s = continuing(dir, Some(outcome), false);
+        let Value::Object(spawned) = serde_json::json!({"pane_id": "p1", "cwd": "/w",
+            "continued": true, "numbered": false, "continues": 1, "work_attempt": 1})
+        else {
+            unreachable!()
+        };
+        append_event(
+            &dir.join("runs"),
+            "01",
+            &event_now(2, TicketEventKind::Spawned, spawned),
+        )
+        .unwrap();
+        s.pool_dir = js::path_text(dir);
+        s.issues_dir = js::path_text(&dir.join("issues"));
+        s.spawn_proposals =
+            ac_core::spawn_proposals::load_spawn_proposals(&dir.join("runs")).unwrap();
+        s
+    }
+
+    const PROPOSAL: &str = r#"[{"title": "Follow-up", "body": "A body long enough to stand as a ticket.", "blockedBy": []}]"#;
+
+    // Issue #186: a solo ticket's Continued attempt takes its valid Outcome's proposals whether it is
+    // done or checkpoint, as a launched attempt's ending does.
+    #[tokio::test]
+    async fn a_continued_attempt_takes_its_spawn_proposals_on_a_checkpoint_as_on_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = format!(
+            r#"{{"status": "checkpoint", "summary": "pause", "commitSha": null,
+                "brief": "do the follow-up first", "spawn": {PROPOSAL}}}"#
+        );
+        let mut s = continuing_with_spawns(dir.path(), &outcome);
+        end_continued_attempt(&mut s, "01", 2, ContinuedEnding::Outcome).unwrap();
+        let events: Vec<_> = attempt_two(&s)
+            .into_iter()
+            .filter(|(kind, _)| *kind != TicketEventKind::Spawned)
+            .collect();
+        assert_eq!(
+            events.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            [
+                TicketEventKind::SpawnPending,
+                TicketEventKind::Exited,
+                TicketEventKind::Checkpoint
+            ]
+        );
+        assert_eq!(events[0].1["pending"][0]["title"], "Follow-up");
+        assert_eq!(events[1].1["status"], "checkpoint");
+        let pending = s.spawn_proposals.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].parent_id, "01");
+        assert_eq!(s.state.tickets["01"], TicketStatus::Checkpoint);
+        assert_eq!(
+            s.state
+                .interrupts
+                .iter()
+                .map(|i| (i.ticket_id.as_str(), i.kind))
+                .collect::<Vec<_>>(),
+            [("01", InterruptKind::Checkpoint)]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = format!(
+            r#"{{"status": "done", "summary": "s", "commitSha": null, "spawn": {PROPOSAL}}}"#
+        );
+        let mut s = continuing_with_spawns(dir.path(), &outcome);
+        end_continued_attempt(&mut s, "01", 2, ContinuedEnding::Outcome).unwrap();
+        let pending = s.spawn_proposals.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].parent_id, "01");
+        assert_eq!(s.state.tickets["01"], TicketStatus::Done);
+    }
+
+    // A crash ending takes nothing, whatever its Outcome proposes: a pane gone before a valid Outcome
+    // could not be one here, so the crash is an Outcome that fails validation, under every ending.
+    #[tokio::test]
+    async fn a_continued_attempt_that_crashes_takes_no_spawn_proposals() {
+        let outcome = format!(
+            r#"{{"status": "finished", "summary": "pause", "commitSha": null,
+                "brief": "do the follow-up first", "spawn": {PROPOSAL}}}"#
+        );
+        for ending in endings() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = continuing_with_spawns(dir.path(), &outcome);
+            end_continued_attempt(&mut s, "01", 2, ending.clone()).unwrap();
+            assert!(s.spawn_proposals.pending().is_empty(), "{ending:?}");
+            assert!(
+                !attempt_two(&s)
+                    .iter()
+                    .any(|(kind, _)| *kind == TicketEventKind::SpawnPending),
+                "{ending:?}"
+            );
+            assert_eq!(
+                s.state.tickets["01"],
+                TicketStatus::InProgress,
+                "{ending:?}"
             );
         }
     }
