@@ -61,8 +61,9 @@ target branch the Line's. The Line's branch never tracks the branch it was cut f
                          the brief): no Grill, the spec and brief committed onto the Line
                          branch, Round 1 started at once; implies --factory and --yes
   --from <branch>        the Line base: the branch to cut the Line from instead of the
-                         current one; a local branch, else a remote-tracking one as written
-                         (origin/x), else origin's; never a tag or a commit, never fetched
+                         current one; a local branch, else origin's as written (origin/x),
+                         else origin's by name; never another remote's, HEAD, a tag or a
+                         commit, never fetched
   --line <slug>          the Line's slug (default: the issue number, the brief's file name,
                          or the work's first words); a taken one gets -2, -3, ...
   --name <dir>           the pool directory's name (default: the Line's slug)

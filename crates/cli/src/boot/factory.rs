@@ -18,7 +18,7 @@ use ac_protocol::LineBase;
 use serde_json::{Map, Value};
 
 use ac_core::js;
-use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, LINE_BRANCH_PREFIX, parse_brief};
+use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX, parse_brief};
 use ac_core::pool_title::normalise_title;
 
 use super::BootIo;
@@ -190,47 +190,75 @@ pub fn free_line_slug(slug: &str, taken: impl Fn(&str) -> bool) -> String {
         .unwrap_or_else(|| slug.to_owned())
 }
 
-/// The branch `--from` names, as a full ref: a local branch, else a remote-tracking one as written
-/// (`origin/x`), else origin's. Branches only: a tag, a commit or anything else is refused, naming what
-/// was tried. Nothing is fetched; the refs are taken as they are.
-pub fn resolve_from(name: &str, exists: impl Fn(&str) -> bool) -> Result<String, String> {
+/// The branch `--from` names: a local branch, else origin's as written (`origin/x`), else origin's by
+/// its name there. Branches only, and only local or origin's (ADR-0038, the Finish knows no other
+/// remote): another remote's branch, a symbolic `HEAD`, a tag, a commit or anything else is refused,
+/// naming why. Nothing is fetched; the refs are taken as they are.
+pub fn resolve_from(name: &str, exists: impl Fn(&str) -> bool) -> Result<BaseBranch, String> {
+    if js::trim(name).is_empty() {
+        return Err("--from needs a branch name".to_owned());
+    }
+    if name == "HEAD" || name.ends_with("/HEAD") {
+        return Err(format!(
+            "--from {name}: HEAD is a symbolic ref, not a branch; name the branch it points at"
+        ));
+    }
     let tried = [
         format!("refs/heads/{name}"),
         format!("refs/remotes/{name}"),
         format!("refs/remotes/origin/{name}"),
     ];
-    tried
-        .iter()
-        .find(|full| exists(full))
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "--from {name}: no branch {}, {} or {}; --from takes a branch (local or \
-                 remote-tracking), never a tag or a commit",
-                tried[0], tried[1], tried[2]
-            )
-        })
+    if exists(&tried[0]) {
+        return local_base(name);
+    }
+    if exists(&tried[1]) {
+        return match name.strip_prefix("origin/") {
+            Some(on_origin) => Ok(BaseBranch::Origin(on_origin.to_owned())),
+            None => Err(format!(
+                "--from {name}: {} is another remote's branch; a Line base is a local branch or \
+                 origin's, since the Finish opens its PR on origin",
+                tried[1]
+            )),
+        };
+    }
+    if exists(&tried[2]) {
+        return Ok(BaseBranch::Origin(name.to_owned()));
+    }
+    Err(format!(
+        "--from {name}: no branch {}, {} or {}; --from takes a branch (local or origin's), never a \
+         tag or a commit",
+        tried[0], tried[1], tried[2]
+    ))
 }
 
-/// A full branch ref as the Line base names it: `experiment/x`, or `origin/experiment/x`.
-pub fn short_ref(full: &str) -> &str {
-    full.strip_prefix("refs/heads/")
-        .or_else(|| full.strip_prefix("refs/remotes/"))
-        .unwrap_or(full)
+// A local branch as a Line base. One named `origin/...` would read back from lineBase as origin's, and
+// the Finish would open its PR against the wrong branch.
+fn local_base(name: &str) -> Result<BaseBranch, String> {
+    if name.starts_with("origin/") {
+        return Err(format!(
+            "refs/heads/{name} is a local branch named like origin's, which the Line base would \
+             read as origin's {}: rename it, or cut from another branch",
+            BaseBranch::of(name).name()
+        ));
+    }
+    Ok(BaseBranch::Local(name.to_owned()))
 }
 
-// The full ref the Line is cut from: `--from`'s branch, else the branch the checkout has out.
-fn base_ref(top: &str, from: Option<&str>) -> Result<String, String> {
+// The Line base's branch: `--from`'s, else the branch the checkout has out.
+fn base_branch(top: &str, from: Option<&str>) -> Result<BaseBranch, String> {
     match from {
         Some(name) => resolve_from(name, |full| {
             git_ok(top, &["show-ref", "--verify", "--quiet", full]).is_ok()
         }),
-        None => git_line(top, &["symbolic-ref", "--quiet", "HEAD"]).ok_or_else(|| {
-            format!(
-                "{top} has a detached HEAD, so there is no current branch to cut the Line from: \
-                 check out a branch, or pass --from <branch>"
-            )
-        }),
+        None => {
+            let head = git_line(top, &["symbolic-ref", "--quiet", "HEAD"]).ok_or_else(|| {
+                format!(
+                    "{top} has a detached HEAD, so there is no current branch to cut the Line \
+                     from: check out a branch, or pass --from <branch>"
+                )
+            })?;
+            local_base(head.strip_prefix("refs/heads/").unwrap_or(&head))
+        }
     }
 }
 
@@ -266,7 +294,7 @@ pub fn cut_line(
     from: Option<&str>,
     io: &mut dyn BootIo,
 ) -> Result<CutLine, String> {
-    let from = base_ref(top, from)?;
+    let from = base_branch(top, from)?;
     let lines = js::path_join(&[top, ".scratch", LINES_DIR]);
     let slug = free_line_slug(slug, |candidate| {
         let branch = format!("refs/heads/{LINE_BRANCH_PREFIX}{candidate}");
@@ -293,7 +321,7 @@ pub fn cut_line(
             "-b",
             &branch,
             &worktree,
-            &from,
+            &from.full_ref(),
         ],
     )?;
     // The commit the new branch points at is the cut, whatever the base does afterwards.
@@ -312,7 +340,7 @@ pub fn cut_line(
         branch,
         worktree,
         base: LineBase {
-            base_ref: short_ref(&from).to_owned(),
+            base_ref: from.base_ref(),
             commit,
         },
     })
@@ -440,42 +468,78 @@ mod tests {
     }
 
     #[test]
-    fn from_resolves_a_local_branch_then_a_remote_tracking_one_then_origins() {
+    fn from_resolves_a_local_branch_then_origins_as_written_then_origins_by_name() {
         let refs = [
             "refs/heads/experiment/x",
+            "refs/heads/origin/mistake",
+            "refs/remotes/origin/HEAD",
             "refs/remotes/origin/experiment/x",
             "refs/remotes/origin/only-remote",
             "refs/remotes/upstream/y",
         ];
         let exists = |full: &str| refs.contains(&full);
+        let local = |name: &str| BaseBranch::Local(name.to_owned());
+        let origin = |name: &str| BaseBranch::Origin(name.to_owned());
         assert_eq!(
-            resolve_from("experiment/x", exists).unwrap(),
-            "refs/heads/experiment/x"
+            resolve_from("experiment/x", exists),
+            Ok(local("experiment/x"))
         );
         assert_eq!(
-            resolve_from("origin/experiment/x", exists).unwrap(),
-            "refs/remotes/origin/experiment/x"
+            resolve_from("origin/experiment/x", exists),
+            Ok(origin("experiment/x"))
         );
         assert_eq!(
-            resolve_from("only-remote", exists).unwrap(),
-            "refs/remotes/origin/only-remote"
-        );
-        assert_eq!(
-            resolve_from("upstream/y", exists).unwrap(),
-            "refs/remotes/upstream/y"
+            resolve_from("only-remote", exists),
+            Ok(origin("only-remote"))
         );
         assert_eq!(
             resolve_from("v1.0", exists).unwrap_err(),
             "--from v1.0: no branch refs/heads/v1.0, refs/remotes/v1.0 or refs/remotes/origin/v1.0; \
-             --from takes a branch (local or remote-tracking), never a tag or a commit"
+             --from takes a branch (local or origin's), never a tag or a commit"
         );
-        assert_eq!(short_ref("refs/heads/experiment/x"), "experiment/x");
+        // Origin only: the Finish knows no other remote.
         assert_eq!(
-            short_ref("refs/remotes/origin/experiment/x"),
-            "origin/experiment/x"
+            resolve_from("upstream/y", exists).unwrap_err(),
+            "--from upstream/y: refs/remotes/upstream/y is another remote's branch; a Line base is \
+             a local branch or origin's, since the Finish opens its PR on origin"
+        );
+        // A symbolic HEAD is no branch, whichever rule would have matched it.
+        for name in ["origin/HEAD", "HEAD"] {
+            assert_eq!(
+                resolve_from(name, exists).unwrap_err(),
+                format!(
+                    "--from {name}: HEAD is a symbolic ref, not a branch; name the branch it \
+                     points at"
+                )
+            );
+        }
+        for name in ["", "  "] {
+            assert_eq!(
+                resolve_from(name, exists).unwrap_err(),
+                "--from needs a branch name"
+            );
+        }
+        // A local branch named like origin's would read back from lineBase as origin's.
+        assert_eq!(
+            resolve_from("origin/mistake", exists).unwrap_err(),
+            "refs/heads/origin/mistake is a local branch named like origin's, which the Line base \
+             would read as origin's mistake: rename it, or cut from another branch"
         );
         assert_eq!(short_commit("abc1234def"), "abc1234");
         assert_eq!(short_commit("abc"), "abc");
+    }
+
+    #[test]
+    fn a_base_branch_writes_and_reads_back_as_line_base_writes_it() {
+        let local = BaseBranch::Local("experiment/x".to_owned());
+        assert_eq!(local.base_ref(), "experiment/x");
+        assert_eq!(local.full_ref(), "refs/heads/experiment/x");
+        assert_eq!(BaseBranch::of(&local.base_ref()), local);
+        let origin = BaseBranch::Origin("experiment/x".to_owned());
+        assert_eq!(origin.base_ref(), "origin/experiment/x");
+        assert_eq!(origin.full_ref(), "refs/remotes/origin/experiment/x");
+        assert_eq!(BaseBranch::of(&origin.base_ref()), origin);
+        assert_eq!(origin.name(), "experiment/x");
     }
 
     #[test]

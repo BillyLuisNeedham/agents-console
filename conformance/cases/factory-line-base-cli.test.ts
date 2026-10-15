@@ -1,9 +1,9 @@
 /**
  * The Line base at Boot (issue #193), run as a process: Boot's Factory mode
  * cuts `line/<slug>` from the branch the checkout has out, or from the
- * branch `--from` names (a local branch, else a remote-tracking one as
- * written, else origin's), never from a tag or a commit and never from a
- * detached HEAD. The Line's branch never tracks its base. Boot says what it
+ * branch `--from` names (a local branch, else origin's as written, else
+ * origin's by its name there), never from another remote's branch, a
+ * symbolic HEAD, a tag or a commit, and never from a detached HEAD. The Line's branch never tracks its base. Boot says what it
  * cut from and at which commit, writes both into console.json as
  * `lineBase`, and the Grill's first Turn names them.
  *
@@ -160,7 +160,7 @@ conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, an
   const sha = gitIn(w, repo, ["rev-parse", "HEAD"]);
   const refusal = (name: string): string =>
     `--from ${name}: no branch refs/heads/${name}, refs/remotes/${name} or refs/remotes/origin/${name}; ` +
-    "--from takes a branch (local or remote-tracking), never a tag or a commit\n";
+    "--from takes a branch (local or origin's), never a tag or a commit\n";
 
   for (const name of ["v1.0", sha, "nope"]) {
     const run = await w.run("boot", ["--factory", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
@@ -173,6 +173,50 @@ conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, an
   const plain = await w.run("boot", ["--from", "develop", "--yes", "--no-open"], { cwd: repo });
   expect(plain.code).toBe(1);
   expect(plain.stderr.split("\n", 1)[0]).toBe("--from is for Factory mode: add --factory");
+
+  expect(existsSync(join(repo, ".scratch"))).toBe(false);
+  expect(gitIn(w, repo, ["branch", "--list", "line/*"])).toBe("");
+  expect(gitIn(w, repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree "))).toEqual([
+    `worktree ${repo}`,
+  ]);
+});
+
+conformance("cli", "Boot --from refuses another remote's branch, origin's HEAD, an empty name and a local branch named like origin's, before cutting anything", async (t) => {
+  const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
+  const repo = w.repo("repo", { branch: "develop", origin: true });
+  // origin/HEAD, as a clone has it: a symbolic ref that show-ref still verifies.
+  gitIn(w, repo, ["remote", "set-head", "origin", "develop"]);
+  expect(git(w, repo, ["show-ref", "--verify", "--quiet", "refs/remotes/origin/HEAD"]).code).toBe(0);
+  // A second throwaway bare remote, upstream, with a branch y fetched from it.
+  const upstream = w.dir("upstream.git");
+  gitIn(w, upstream, ["init", "-q", "--bare", "-b", "develop"]);
+  gitIn(w, repo, ["remote", "add", "upstream", upstream]);
+  gitIn(w, repo, ["push", "-q", "upstream", "develop:y"]);
+  gitIn(w, repo, ["fetch", "-q", "upstream"]);
+  expect(git(w, repo, ["show-ref", "--verify", "--quiet", "refs/remotes/upstream/y"]).code).toBe(0);
+  // A local branch whose name lineBase would read back as origin's.
+  gitIn(w, repo, ["branch", "origin/mistake"]);
+
+  const refusals: [string, string][] = [
+    [
+      "upstream/y",
+      "--from upstream/y: refs/remotes/upstream/y is another remote's branch; a Line base is a local branch or origin's, since the Finish opens its PR on origin",
+    ],
+    ["origin/HEAD", "--from origin/HEAD: HEAD is a symbolic ref, not a branch; name the branch it points at"],
+    ["HEAD", "--from HEAD: HEAD is a symbolic ref, not a branch; name the branch it points at"],
+    ["", "--from needs a branch name"],
+    [
+      "origin/mistake",
+      "refs/heads/origin/mistake is a local branch named like origin's, which the Line base would read as origin's mistake: rename it, or cut from another branch",
+    ],
+  ];
+  for (const [name, message] of refusals) {
+    const run = await w.run("boot", ["--factory", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
+      cwd: repo,
+    });
+    expect(run.code, `--from ${name}: ${run.stdout}`).toBe(1);
+    expect(run.stderr).toBe(`${message}\n`);
+  }
 
   expect(existsSync(join(repo, ".scratch"))).toBe(false);
   expect(gitIn(w, repo, ["branch", "--list", "line/*"])).toBe("");

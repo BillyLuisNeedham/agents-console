@@ -533,6 +533,7 @@ wire_struct! {
     /// The Line base (issue #193): the branch a Line was cut from, as Boot
     /// resolved it (`experiment/x` or `origin/experiment/x`), and the full SHA
     /// of the commit it was cut at. Chosen once, it never changes.
+    #[derive(Eq)]
     pub struct LineBase {
         #[serde(rename = "ref")]
         pub base_ref: String,

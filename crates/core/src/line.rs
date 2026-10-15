@@ -803,7 +803,7 @@ fn begin_round(line: &mut LineState, round: u64) {
 
 /// Where a Line lives beside its brief: its branch, the Line base it was cut from, and the path of its
 /// report.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinePlaces {
     pub branch: String,
     pub base: Option<LineBase>,
@@ -1332,7 +1332,7 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
     };
     let target = pr_base(line);
     let pr = |draft: bool| {
-        let open = format!(
+        format!(
             "open a {}PR for the Line. First delete the Line's spec and brief (`{BRIEF_DIR}/{name}*`) \
              and any `{VERIFY_DIR}/` directory committed on the Line's branch (Prove's evidence \
              belongs in the pool, never in the PR), in one final commit on your branch. Then push \
@@ -1343,15 +1343,9 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
             js::trim(&line.branch),
             if draft { " --draft" } else { "" },
             js::trim(&line.branch),
-        );
-        match &line.base {
-            Some(base) => format!("{open}\n\n{}", base_on_origin(base, line.brief.push_base)),
-            None => open,
-        }
+        )
     };
-    // A Line runs on its own branch, cut from its Line base (ADR-0038); a pool on any other branch
-    // opens no PR from it, so nothing pushes a shared branch.
-    let on_line = js::trim(&line.branch).starts_with(LINE_BRANCH_PREFIX);
+    let on_line = on_line_branch(line);
     let not_line = |kind: &str| {
         format!(
             "`{kind}`: but the pool's branch {branch} is not a Line branch ({LINE_BRANCH_PREFIX}...), so \
@@ -1371,30 +1365,96 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
     }
 }
 
-/// The branch on origin a Line's PR targets: its Line base's name there, `main` for a Line with none.
-pub fn pr_base(line: &LineState) -> String {
-    match &line.base {
-        Some(base) => base_name_on_origin(&base.base_ref).to_owned(),
-        None => "main".to_owned(),
+// A Line runs on its own branch, cut from its Line base (ADR-0038); a pool on any other branch opens
+// no PR from it, so nothing pushes a shared branch.
+fn on_line_branch(line: &LineState) -> bool {
+    js::trim(&line.branch).starts_with(LINE_BRANCH_PREFIX)
+}
+
+/// What a `pr` or `draft-pr` Finish does about the Line base on origin before it pushes anything:
+/// `None` for any other Finish, a pool off a Line branch, or a Line with no base.
+pub fn finish_base(finish: &str, line: &LineState) -> Option<String> {
+    let base = line.base.as_ref()?;
+    let opens_pr = matches!(js::trim(finish), "pr" | "draft-pr");
+    (opens_pr && on_line_branch(line)).then(|| base_on_origin(base, line.brief.push_base))
+}
+
+/// A Line base's branch: a local one, or origin's, never another remote's (ADR-0038). `lineBase.ref`
+/// writes it `x` or `origin/x`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseBranch {
+    Local(String),
+    Origin(String),
+}
+
+impl BaseBranch {
+    /// A Line base's ref as `lineBase` writes it: `origin/x` is origin's `x`, anything else local.
+    pub fn of(base_ref: &str) -> Self {
+        match base_ref.strip_prefix("origin/") {
+            Some(name) => BaseBranch::Origin(name.to_owned()),
+            None => BaseBranch::Local(base_ref.to_owned()),
+        }
+    }
+
+    /// The branch's name, which is its name on origin too, where the Line's PR targets it.
+    pub fn name(&self) -> &str {
+        match self {
+            BaseBranch::Local(name) | BaseBranch::Origin(name) => name,
+        }
+    }
+
+    /// The ref as `lineBase` writes it: `x`, or `origin/x`.
+    pub fn base_ref(&self) -> String {
+        match self {
+            BaseBranch::Local(name) => name.clone(),
+            BaseBranch::Origin(name) => format!("origin/{name}"),
+        }
+    }
+
+    /// The full ref git cuts from: `refs/heads/x`, or `refs/remotes/origin/x`.
+    pub fn full_ref(&self) -> String {
+        match self {
+            BaseBranch::Local(name) => format!("refs/heads/{name}"),
+            BaseBranch::Origin(name) => format!("refs/remotes/origin/{name}"),
+        }
     }
 }
 
-fn base_name_on_origin(base_ref: &str) -> &str {
-    base_ref.strip_prefix("origin/").unwrap_or(base_ref)
+/// A Line base as console.json's `lineBase` holds it, checked: `{ ref, commit }` with neither blank,
+/// naming a branch. A malformed one is refused rather than read as main, since a Line read as cut from
+/// main opens its PR against main (ADR-0038).
+pub fn line_base_of(value: &Value) -> Result<LineBase, String> {
+    let base: LineBase = serde_json::from_value(value.clone()).map_err(|err| err.to_string())?;
+    if blank(BaseBranch::of(&base.base_ref).name()) {
+        return Err(format!("its ref {:?} names no branch", base.base_ref));
+    }
+    if blank(&base.commit) {
+        return Err("its commit is blank".to_owned());
+    }
+    Ok(base)
+}
+
+/// The branch on origin a Line's PR targets: its Line base's name there, `main` for a Line with none.
+pub fn pr_base(line: &LineState) -> String {
+    match &line.base {
+        Some(base) => BaseBranch::of(&base.base_ref).name().to_owned(),
+        None => "main".to_owned(),
+    }
 }
 
 // What Decide does about the Line base on origin before it pushes anything (ADR-0038): checked when
 // the Finish runs, never inferred. The only branch besides its own a Factory pool may push is its Line
 // base, and only under the brief's pushBase grant, creating or fast-forwarding it, never forcing.
 fn base_on_origin(base: &LineBase, push_base: bool) -> String {
-    let name = base_name_on_origin(&base.base_ref);
+    let branch = BaseBranch::of(&base.base_ref);
+    let name = branch.name();
     let no_pr = "push nothing and open no PR, and say in the report and your Outcome's summary that \
                  the Finish was not carried out, and why";
     let check = format!(
         "Before you push anything, check the Line base on origin with `git ls-remote --heads \
          origin {name}` (origin only, never another remote)"
     );
-    if base.base_ref.starts_with("origin/") {
+    if let BaseBranch::Origin(_) = branch {
         // Cut from origin's branch: there is no local base to push, so origin's state is all there is.
         return format!(
             "The Line was cut from `{}`, so origin already had its Line base and there is no local \
@@ -1447,18 +1507,28 @@ fn finish_section(line: &LineState, factory: &ResolvedFactory) -> String {
     } else {
         format!("`{}`", line.report)
     };
+    let act = finish_act(&factory.finish, line);
+    // The base's checks and rows are a section of their own after the list, which item 1 points at.
+    let (act, base) = match finish_base(&factory.finish, line) {
+        Some(base) => (
+            format!(
+                "{act} Before you push anything, check the Line base on origin as the section below says."
+            ),
+            format!("### The Line base on origin\n\n{base}\n\n"),
+        ),
+        None => (act, String::new()),
+    };
     format!(
         "## The Finish\n\nWhen you end the Line (\"finish\", or any verdict on a halted Line), do \
          these in order before you record your Outcome:\n\n\
-         1. Carry out the Finish. {}\n\
+         1. Carry out the Finish. {act}\n\
          2. Write the report with /html to {report}: every Round's Prove evidence, linked at its \
          path in the pool's runs directory beside the report (`<prove ticket>{EVIDENCE_SUFFIX}/`, \
          so a relative link works), every Review finding and what happened to it (fixed in a \
          later Round, or dropped and why), and the Finish's result (the PR's link, say). It is the one file you write outside your working \
          directory besides your Outcome. Without it the Ticket checkpoints with \"{NO_VERDICT}\".\n\n\
-         The operator approves the Line from the report at the Finish checkpoint the engine raises \
-         next.",
-        finish_act(&factory.finish, line)
+         {base}The operator approves the Line from the report at the Finish checkpoint the engine \
+         raises next."
     )
 }
 

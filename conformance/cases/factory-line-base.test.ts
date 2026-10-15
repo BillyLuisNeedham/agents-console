@@ -12,7 +12,7 @@
  */
 
 import { expect } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LineBase, LineBrief, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case } from "../harness/case.ts";
@@ -81,6 +81,17 @@ conformance("factory", "Start the Line copies lineBase into line.json's base, Re
     "- the local `experiment/x` is ahead of origin's: open the PR, and note in the report that it carries the base's unpushed commits.",
   );
   expect(decide).not.toContain("git push origin refs/heads/experiment/x");
+  // The base's checks stand in a section after the Finish's numbered list, which item 1 points at.
+  expect(decide).toContain(
+    "The PR's link is the Finish's result. Before you push anything, check the Line base on origin as the section below says.\n2. Write the report with /html to ",
+  );
+  expect(decide).toContain(
+    "\n\n### The Line base on origin\n\nThe Line brief does not grant `pushBase`: never push the Line base `experiment/x` to origin.",
+  );
+  expect(decide).toContain(
+    "- they have diverged, so it would take a force-push: push nothing and open no PR, and say in the report and your Outcome's summary that the Finish was not carried out, and why.\n\nThe operator approves the Line",
+  );
+  expect(decide.indexOf("### The Line base on origin")).toBeGreaterThan(decide.indexOf("\n2. Write the report"));
 
   // The next server re-reads console.json and line.json: the base is where it was.
   const before = await lineOf(first);
@@ -144,4 +155,30 @@ conformance("factory", "a draft-pr Finish on a Line cut from origin's branch tar
   // A grant means nothing with no local base to push.
   expect(decide).not.toContain("The Line brief grants `pushBase`");
   expect(decide).not.toContain("git push origin refs/heads/");
+});
+
+conformance("factory", "a malformed lineBase in console.json refuses Start the Line, writing nothing, rather than read as a Line cut from main", async (t) => {
+  const malformed: [unknown, string][] = [
+    ["experiment/x", "invalid type: string"],
+    [{ ref: "experiment/x" }, "missing field `commit`"],
+    [{ ref: "origin/", commit: "0123456789abcdef0123456789abcdef01234567" }, 'its ref "origin/" names no branch'],
+  ];
+  for (const [lineBase, why] of malformed) {
+    const world = lineWorld(t, { spec: SPEC, finish: "draft-pr" });
+    writeFileSync(join(world.pool, "console.json"), `${JSON.stringify({ ...CONFIG, factoryPool: true, lineBase }, null, 2)}\n`);
+    world.git(["checkout", "-q", "-b", "line/x"]);
+    const server = await t.start(world);
+
+    const refused = await startLine(server);
+    expect(refused.status).toBe(409);
+    expect(reason(refused)).toStartWith("the Line cannot start: console.json's lineBase is malformed (");
+    expect(reason(refused)).toEndWith(
+      "), and a Line read as cut from main would open its PR against main. Fix it to the { ref, commit } Boot wrote, or remove it for a Line cut from main",
+    );
+    expect(reason(refused)).toContain(why);
+    expect(await lineOf(server)).toBeNull();
+    expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+    expect(existsSync(join(world.pool, "issues", "r1-implement.md"))).toBe(false);
+    await server.stop();
+  }
 });

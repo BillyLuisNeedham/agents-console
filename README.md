@@ -178,9 +178,10 @@ through on its own, and the Settings pane edits both layers. A Line brief's
   and starts Round 1 at once. It implies `--factory` and `--yes`, so nothing is
   asked.
 - `--from <branch>` cuts the Line from that branch instead of the current one:
-  a local branch, else a remote-tracking one as written (`origin/x`), else
-  origin's. Tags and commits are refused. The branch may be checked out in
-  another worktree. The Line's branch never tracks it.
+  a local branch, else origin's as written (`origin/x`), else origin's by its
+  name there. Another remote's branch, `HEAD`, tags and commits are refused. The
+  branch may be checked out in another worktree. The Line's branch never tracks
+  it.
 - `--line <slug>` names the Line (default: the issue number, the brief's file
   name, or the work's first words); a slug already taken gets `-2`, `-3`, ….
   `--name <dir>` names the pool directory, `--title <title>` titles the pool, and

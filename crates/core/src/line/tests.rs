@@ -1173,8 +1173,16 @@ fn a_pr_targets_the_line_bases_name_on_origin() {
         "{remote}"
     );
     assert!(!remote.contains("--draft"));
-    // Every Finish checks origin as it runs, never another remote.
+    // The act is the act alone: what it checks of the base on origin is a section of its own.
     for text in [&local, &remote] {
+        assert!(
+            !text.contains("ls-remote") && !text.contains("pushBase"),
+            "{text}"
+        );
+    }
+    // Every Finish that opens a PR checks origin as it runs, never another remote.
+    for (finish, base_ref) in [("draft-pr", "experiment/x"), ("pr", "origin/experiment/x")] {
+        let text = finish_base(finish, &based(dir.path(), finish, base_ref, false)).unwrap();
         assert!(
             text.contains("`git ls-remote --heads origin experiment/x`"),
             "{text}"
@@ -1183,18 +1191,115 @@ fn a_pr_targets_the_line_bases_name_on_origin() {
     }
     // A Line with no base targets main and says nothing of one.
     let (old, _) = placed(dir.path(), "draft-pr");
-    let old = finish_act("draft-pr", &old);
-    assert!(old.contains("gh pr create --draft --base main --head line/186"));
-    assert!(!old.contains("ls-remote") && !old.contains("pushBase"));
+    assert!(
+        finish_act("draft-pr", &old).contains("gh pr create --draft --base main --head line/186")
+    );
+    assert_eq!(finish_base("draft-pr", &old), None);
+    // No PR, no base to check: another Finish, or a pool off a Line branch.
+    let mut shared = based(dir.path(), "pr", "experiment/x", true);
+    assert_eq!(finish_base("none", &shared), None);
+    assert_eq!(finish_base("tag a release", &shared), None);
+    shared.branch = "experiment/x".into();
+    assert_eq!(finish_base("pr", &shared), None);
+}
+
+fn decide_body(line: &mut LineState) -> String {
+    let factory = resolve_factory(&FactoryLayers::default(), &line.brief);
+    let done = outcome(None);
+    let pass = passed();
+    let none = findings(json!([]));
+    walk(
+        line,
+        &factory,
+        &[StationEnd::Done(&done), StationEnd::Done(&pass)],
+    );
+    next(route(line, &factory, StationEnd::Done(&none))).body
+}
+
+#[test]
+fn the_line_base_on_origin_is_a_section_after_the_finish_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut line = based(dir.path(), "draft-pr", "experiment/x", false);
+    let body = decide_body(&mut line);
+    let base = finish_base("draft-pr", &line).unwrap();
+    // Item 1 points at the section, and item 2 follows it on the next line.
+    let first = body
+        .find("\n1. Carry out the Finish. `draft-pr`: ")
+        .expect("item 1");
+    let second = body
+        .find("\n2. Write the report with /html to ")
+        .expect("item 2");
+    let item_1 = &body[first + 1..second];
+    assert!(
+        item_1.ends_with(
+            "The PR's link is the Finish's result. Before you push anything, check the Line base \
+             on origin as the section below says."
+        ),
+        "{item_1}"
+    );
+    assert!(!item_1.contains('\n'), "{item_1}");
+    // The section stands after the list, set off by blank lines, before the operator's approval.
+    let section =
+        format!("### The Line base on origin\n\n{base}\n\nThe operator approves the Line");
+    let at = body.find(&section).unwrap_or_else(|| panic!("{body}"));
+    assert!(at > second);
+    assert!(body[..at].ends_with(".\n\n"), "{body}");
+    assert!(base.ends_with("the Finish was not carried out, and why."));
+
+    // No base, no section and no pointer: the list is as it was.
+    let (mut old, _) = placed(dir.path(), "draft-pr");
+    let body = decide_body(&mut old);
+    assert!(!body.contains("### The Line base on origin"), "{body}");
+    assert!(!body.contains("check the Line base on origin"));
+    assert!(body.contains(
+        "\n\nThe operator approves the Line from the report at the Finish checkpoint the engine \
+         raises next."
+    ));
+}
+
+#[test]
+fn a_malformed_line_base_is_refused_never_read_as_main() {
+    let good = json!({"ref": "experiment/x", "commit": CUT});
+    assert_eq!(
+        line_base_of(&good),
+        Ok(LineBase {
+            base_ref: "experiment/x".into(),
+            commit: CUT.into(),
+        })
+    );
+    for (bad, why) in [
+        (
+            json!("experiment/x"),
+            "invalid type: string \"experiment/x\", expected",
+        ),
+        (json!(null), "invalid type: null"),
+        (json!({"ref": "experiment/x"}), "missing field `commit`"),
+        (
+            json!({"ref": "", "commit": CUT}),
+            "its ref \"\" names no branch",
+        ),
+        (
+            json!({"ref": "origin/", "commit": CUT}),
+            "its ref \"origin/\" names no branch",
+        ),
+        (
+            json!({"ref": "experiment/x", "commit": " "}),
+            "its commit is blank",
+        ),
+    ] {
+        let err = line_base_of(&bad).unwrap_err();
+        assert!(err.contains(why), "{bad}: {err}");
+    }
 }
 
 #[test]
 fn the_push_grant_rows_say_what_decide_does_on_origin() {
     let dir = tempfile::tempdir().unwrap();
-    let granted = finish_act(
+    let granted = finish_base(
         "draft-pr",
         &based(dir.path(), "draft-pr", "experiment/x", true),
-    );
+    )
+    .unwrap();
     assert!(
         granted.contains(
             "The Line brief grants `pushBase`: you may push the Line base `experiment/x` to \
@@ -1216,7 +1321,7 @@ fn the_push_grant_rows_say_what_decide_does_on_origin() {
     }
     assert!(!granted.contains("--force"));
 
-    let refused = finish_act("pr", &based(dir.path(), "pr", "experiment/x", false));
+    let refused = finish_base("pr", &based(dir.path(), "pr", "experiment/x", false)).unwrap();
     assert!(
         refused.contains(
             "The Line brief does not grant `pushBase`: never push the Line base `experiment/x` \
@@ -1239,7 +1344,7 @@ fn the_push_grant_rows_say_what_decide_does_on_origin() {
     assert!(!refused.contains("refs/heads/experiment/x:"));
 
     // Cut from origin's branch there is no local base: origin already has it, so the PR, or none.
-    let remote = finish_act("pr", &based(dir.path(), "pr", "origin/experiment/x", true));
+    let remote = finish_base("pr", &based(dir.path(), "pr", "origin/experiment/x", true)).unwrap();
     assert!(
         remote.contains(
             "The Line was cut from `origin/experiment/x`, so origin already had its Line base and \
