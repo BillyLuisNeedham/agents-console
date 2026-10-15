@@ -24,8 +24,8 @@ import { expectSameBytes, expectSameFile } from "../harness/equal.ts";
 import { callsOf, type HerdrOptions, type HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";
 import { freePort, serverArgv, serverChoice } from "../harness/server.ts";
-import { HARNESS_NOT_FOUND, shimClaude } from "./attempts-terminal-support.ts";
 import type { TicketSeed, World, WorldSpec } from "../harness/world.ts";
+import { HARNESS_NOT_FOUND, shimClaude } from "./attempts-terminal-support.ts";
 
 // ---------------------------------------------------------------------------
 // The world a Conversation runs in.

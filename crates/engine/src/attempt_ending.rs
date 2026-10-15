@@ -385,6 +385,10 @@ pub const SPAWN_INTERACTIVE_PROMPT_FAILED: i64 = -4;
 /// the wrapper was sent (issue #102's botched launch).
 pub const SPAWN_INTERACTIVE_WRAPPER_LOST: i64 = -5;
 
+/// The crash reason for [`SPAWN_INTERACTIVE_WRAPPER_LOST`], and the `launch-retried` reason for a try
+/// whose wrapper never ran.
+pub const LAUNCH_NEVER_RAN: &str = "launch command never ran";
+
 /// The crash reason for a non-zero exit, whose causes want different words. A real code came from the
 /// harness; [`EXIT_CODE_UNREADABLE`] points at the pane wrapper; [`EXIT_CODE_PANE_GONE`] names the
 /// pane; the botched-spawn codes are the engine's own. `pane_id` is `None` for a headless attempt.
@@ -397,7 +401,7 @@ pub fn exit_crash_reason(
     match code {
         SPAWN_INTERACTIVE_READY_FAILED => "TUI never became ready".into(),
         SPAWN_INTERACTIVE_PROMPT_FAILED => "prompt never landed".into(),
-        SPAWN_INTERACTIVE_WRAPPER_LOST => "launch command never ran".into(),
+        SPAWN_INTERACTIVE_WRAPPER_LOST => LAUNCH_NEVER_RAN.into(),
         EXIT_CODE_UNREADABLE => format!(
             "{subject} exit code unreadable: the pane wrapper never wrote a usable {exit_code_path}"
         ),

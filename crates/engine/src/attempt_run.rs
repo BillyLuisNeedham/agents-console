@@ -53,9 +53,10 @@ use ac_protocol::{AttemptRole, TicketEvent, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
 use crate::attempt_ending::{
-    AttemptEndingWait, AttemptWatch, PANE_TAIL_POLL_MS, SPAWN_INTERACTIVE_PROMPT_FAILED,
-    SPAWN_INTERACTIVE_READY_FAILED, SPAWN_INTERACTIVE_WRAPPER_LOST, exit_crash_reason,
-    read_attempt_result, read_exit_code, wait_for_attempt_ending,
+    AttemptEndingWait, AttemptWatch, LAUNCH_NEVER_RAN, PANE_TAIL_POLL_MS,
+    SPAWN_INTERACTIVE_PROMPT_FAILED, SPAWN_INTERACTIVE_READY_FAILED,
+    SPAWN_INTERACTIVE_WRAPPER_LOST, exit_crash_reason, read_attempt_result, read_exit_code,
+    wait_for_attempt_ending,
 };
 use crate::children::{ChildTracker, signal_group};
 use crate::claude_trust::{FolderTrustSeed, default_claude_config_path, seed_claude_folder_trust};
@@ -417,7 +418,7 @@ pub fn launch_crash_reason(
     let command = interactive_harness_command(&env.harnesses, &ctx.harness)
         .and_then(|command| command.argv(ctx).into_iter().next())
         .unwrap_or_else(|| ctx.harness.clone());
-    format!("harness \"{command}\" was not found on the pane's PATH (exit 127)")
+    format!("harness \"{command}\" was not found on the pane's PATH (exit {HARNESS_NOT_FOUND})")
 }
 
 /// A crash reason with what the launch saw appended (issue #127): "TUI never became ready: workspace
@@ -542,7 +543,8 @@ pub async fn launch_attempt<R>(
     // harness the pane's shell could not find, exit 127 inside the exit probe (issue #179, as when
     // claude's auto-updater is replacing its binary), is retried after a backoff of minutes, up to
     // NOT_FOUND_TRIES tries; the last one goes on as an ordinary exit before readiness, so the launch
-    // ends with the 127 and its pane kept. A shutdown cuts the backoff short.
+    // ends with the 127 and its pane kept. A shutdown before the backoff makes this try the last; one
+    // during it stops the next tab opening.
     let cadence = env.launch_cadence.unwrap_or_default();
     let interactive_argv = interactive_harness_command(&env.harnesses, &spec.harness)
         .map(|command| command.argv(&launch.ctx))
@@ -614,7 +616,7 @@ pub async fn launch_attempt<R>(
             if never_ran_tries >= LAUNCH_TRIES {
                 break (terminal, false);
             }
-            ("launch command never ran", None)
+            (LAUNCH_NEVER_RAN, None)
         };
         let mut payload = Map::new();
         payload.insert("try".into(), Value::from(try_number));
