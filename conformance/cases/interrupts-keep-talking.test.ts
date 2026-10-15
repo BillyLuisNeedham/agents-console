@@ -343,6 +343,54 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
+// Issue #186: a valid checkpoint Outcome's proposals are taken as a done one's are.
+conformance(
+  "interrupts",
+  "a Continued attempt's checkpoint Outcome takes its spawn proposals",
+  async (t) => {
+    const { world, server } = await checkpointed(t);
+    await expectContinued(server, "01", 2);
+    writeOutcome(world, "01", {
+      status: "checkpoint",
+      summary: "pause",
+      commitSha: null,
+      brief: "do the follow-up first",
+      spawn: [{ title: "Follow-up", body: "A body long enough to stand as a ticket.", blockedBy: [] }],
+    });
+
+    await untilHeld(server, "01", 2);
+    const interrupt = await untilInterrupt(server, "01", "checkpoint");
+    expect(interrupt.body).toBe("do the follow-up first");
+    expect(readStateLine(world.pool, "01.md").status).toBe("checkpoint");
+    // The boundary may land the proposal before this reads the log; its spawn-adopted is pinned below.
+    expectParsedEqual(
+      readEvents(world.pool, "01")
+        .filter((e) => e.attempt === 2 && e.kind !== "spawned" && e.kind !== "spawn-adopted")
+        .map((e) => e.kind),
+      ["spawn-pending", "exited", "checkpoint"],
+      "attempt 2's events",
+    );
+    expectParsedEqual(
+      readEvents(world.pool, "01").find((e) => e.kind === "spawn-pending")?.payload,
+      { pending: [{ id: "proposal-1", title: "Follow-up" }] },
+      "the spawn-pending payload",
+    );
+
+    await until(
+      () => existsSync(join(world.pool, "issues", "01-spawn-1.md")),
+      (landed) => landed,
+      { what: "01-spawn-1 to land", ms: 30_000 },
+    );
+    const adopted = await until(
+      () => readEvents(world.pool, "01").find((e) => e.kind === "spawn-adopted"),
+      (event) => event !== undefined,
+      { what: "01's spawn-adopted event", ms: 30_000 },
+    );
+    expectParsedEqual(adopted!.payload, { adopted: ["01-spawn-1"], fromPending: ["proposal-1"] }, "the spawn-adopted payload");
+  },
+  { timeoutMs: 120_000 },
+);
+
 // ---------------------------------------------------------------------------
 // How a Continued attempt ends without an Outcome
 // ---------------------------------------------------------------------------
