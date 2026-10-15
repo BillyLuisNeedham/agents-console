@@ -384,7 +384,10 @@ fn decide_round_starts_the_next_round_with_its_fixes_up_to_the_limit() {
         ],
     );
     assert_eq!(ids, ["r1-prove", "r1-review", "r1-decide"]);
-    assert_eq!(verdict_check(&line, Station::Decide).musts, ["Leak"]);
+    assert_eq!(
+        verdict_check(&line, &factory, Station::Decide).musts,
+        ["Leak"]
+    );
     let r2 = next(route(&mut line, &factory, StationEnd::Done(&again)));
     assert_eq!(r2.id, "r2-implement");
     assert!(
@@ -866,7 +869,7 @@ fn a_decide_that_finishes_must_have_written_the_report() {
             .body
             .contains("`none`: nothing beyond the report.")
     );
-    let check = verdict_check(&line, Station::Decide);
+    let check = verdict_check(&line, &factory, Station::Decide);
     let finish = json!({"decide": "finish"});
     let problem = verdict_problem(&check, Some(&finish)).unwrap();
     assert!(problem.starts_with("the report is not at "), "{problem}");
@@ -889,16 +892,35 @@ fn a_decide_that_finishes_must_have_written_the_report() {
 }
 
 #[test]
-fn a_round_needs_no_report_but_a_halted_line_does() {
+fn a_round_needs_no_report_but_a_halted_or_spent_line_does() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut line, _) = placed(dir.path(), "none");
+    let (mut line, factory) = placed(dir.path(), "none");
     let round = json!({"decide": "round", "fixes": [{"title": "t", "reason": "r"}]});
     assert_eq!(
-        verdict_problem(&verdict_check(&line, Station::Decide), Some(&round)),
+        verdict_problem(
+            &verdict_check(&line, &factory, Station::Decide),
+            Some(&round)
+        ),
         None
     );
+    // With every extra Round spent a `round` goes to the Finish, so it needs the report too.
+    line.extra_rounds = factory.extra_rounds;
+    assert!(
+        verdict_problem(
+            &verdict_check(&line, &factory, Station::Decide),
+            Some(&round)
+        )
+        .is_some()
+    );
+    line.extra_rounds = 0;
     line.halted = Some("r1-prove was closed".into());
-    assert!(verdict_problem(&verdict_check(&line, Station::Decide), Some(&round)).is_some());
+    assert!(
+        verdict_problem(
+            &verdict_check(&line, &factory, Station::Decide),
+            Some(&round)
+        )
+        .is_some()
+    );
 }
 
 #[test]
@@ -966,4 +988,20 @@ fn decide_hears_what_earlier_rounds_did() {
             .contains("- [must] **Leak**: closes nothing")
     );
     assert!(decide_ticket.body.contains("  - fixed: Leak: real"));
+}
+
+#[test]
+fn a_switched_on_station_on_an_unknown_harness_cannot_launch() {
+    let (_, mut factory) = started();
+    let harnesses = Harnesses::defaults();
+    assert_eq!(factory.unknown_harness(&harnesses), None);
+    factory.prove.harness = "nope".into();
+    let problem = factory.unknown_harness(&harnesses).unwrap();
+    assert!(
+        problem.starts_with("the Prove Station names unknown harness 'nope'. Known: "),
+        "{problem}"
+    );
+    // A Station switched off never launches, so its harness is never asked for.
+    factory.prove.enabled = false;
+    assert_eq!(factory.unknown_harness(&harnesses), None);
 }

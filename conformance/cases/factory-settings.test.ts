@@ -10,10 +10,11 @@
  */
 
 import { expect } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FactorySettings, PoolConfig } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
+import { answer } from "../harness/pool-run.ts";
 import { readStateLine } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
@@ -39,6 +40,7 @@ import {
   SPEC,
   atCheckpoint,
   launches,
+  lineOf,
   lineWorld,
   started,
 } from "./factory-line-support.ts";
@@ -198,6 +200,34 @@ conformance("factory", "a Factory settings change lands at the next boundary: th
   expect(ticketOf(atFinish, "r1-review").assignment).toMatchObject({ drivers: "review-b" });
 });
 
+conformance("factory", "a Machine defaults hand edit naming an unknown harness mid-Line checkpoints the ended Station instead of writing the next", async (t) => {
+  const world = lineWorld(t);
+  world.stubs.script("r1-implement", { waitFor: holdFile(world, "r1-implement") });
+  world.stubs.script("r1-prove", PASS);
+  world.stubs.script("r1-review", NO_FINDINGS);
+  world.stubs.script("r1-decide", FINISH);
+  const server = await t.start(world);
+  await started(server);
+  await untilLaunched(world, "r1-implement");
+
+  // By hand, past the Settings pane's check: the next Station names a harness the pool cannot launch.
+  writeMachine(world, { factory: { stations: { prove: { assign: { harness: "nope" } } } } });
+  release(world, "r1-implement");
+
+  const stuck = await atCheckpoint(server, "r1-implement");
+  const body = stuck.state.interrupts.find((i) => i.ticketId === "r1-implement")?.body ?? "";
+  expect(body).toContain("The Line cannot route to r1-prove: it names unknown harness 'nope'. Known: ");
+  expect(existsSync(join(world.pool, "issues", "r1-prove.md"))).toBe(false);
+  expect(await lineOf(server)).toMatchObject({ ticket: "r1-implement", station: "implement" });
+
+  // Fixed, and resumed: the Station runs again and routes on the fixed settings.
+  writeMachine(world, {});
+  release(world, "r1-implement");
+  await answer(server, { ticketId: "r1-implement" });
+  await atCheckpoint(server, "r1-finish");
+  expect(launches(world)).toEqual(["r1-implement", "r1-implement", "r1-prove", "r1-review", "r1-decide"]);
+});
+
 conformance("config", "the Settings routes read, write and refuse the factory block at both the machine and the pool level", async (t) => {
   const world = lineWorld(t);
   const server = await t.start(world);
@@ -252,6 +282,13 @@ conformance("config", "the Settings routes read, write and refuse the factory bl
   expect(refusedMachine.status, refusedMachine.text).toBe(400);
   expect(errorOf(refusedMachine)).toBe(
     "machine defaults: factory: factory.stations.decide.enabled is false: only Prove and Review can be switched off",
+  );
+  const unknownMachine = await server.http.put("/api/settings/machine", {
+    defaults: { factory: { stations: { prove: { assign: { harness: "nope" } } } } },
+  });
+  expect(unknownMachine.status, unknownMachine.text).toBe(400);
+  expect(errorOf(unknownMachine)).toStartWith(
+    "machine defaults: factory.stations.prove.assign.harness names unknown harness 'nope'. Known: ",
   );
   expect(JSON.parse(readFileSync(defaultsFile(world), "utf8"))).toEqual(own);
 

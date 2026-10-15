@@ -907,7 +907,7 @@ async fn decide_round(
 /// `closeDrive`: the Review gate, the phase decision, the final persist and the settle.
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     // A closed ticket (issue #154) is finished too.
-    let (pending, closed_ids, raised) = engine
+    let (pending, closed_ids, raised, merging_at_gate) = engine
         .call(|s| {
             let pending: Vec<String> = s
                 .markers
@@ -926,16 +926,17 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             // A merge still in flight off the drive (an adopted or Continued attempt's ending) holds
             // the gate too: in the TypeScript it lands synchronously before any drive sees its ending.
             // In a Factory pool approving the Finish checkpoint is the Review (ADR-0037).
+            let merging = s.merge_line.unsettled();
             let raise = pending.is_empty()
                 && !crate::line::is_factory_pool(s)
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
-                && s.merge_line.unsettled().is_empty();
+                && merging.is_empty();
             if raise {
                 let review = crate::interrupts::review_interrupt(s);
                 raise_interrupt(s, review);
             }
-            (pending, closed, raise)
+            (pending, closed, raise, merging)
         })
         .await?;
     if raised {
@@ -947,8 +948,15 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             let pending = pending_c;
             // Tickets whose Attempt runs outside the drive (issue #139) end on their own.
             // So does a ticket whose merge is still in flight off the drive: its ending already
-            // landed, its merge has not (see the closing gate above).
-            let merging = s.merge_line.unsettled();
+            // landed, its merge has not (see the closing gate above). One the gate saw in flight
+            // counts even if it settled since: the gate held the Review for it, and the ending's
+            // finalize starts the drive that raises it, so this one must not close the store first.
+            let mut merging = s.merge_line.unsettled();
+            for id in merging_at_gate {
+                if !merging.contains(&id) {
+                    merging.push(id);
+                }
+            }
             let mut outside: Vec<&String> = pending
                 .iter()
                 .filter(|id| s.live_attempts.is_live(id))

@@ -49,6 +49,11 @@ conformance("factory", "Start the Line refuses a missing or invalid brief with t
     "Line brief docs/specs/line.brief.json: factory.stations.decide.enabled is false: only Prove and Review can be switched off",
   );
 
+  writeFileSync(brief, JSON.stringify({ spec: SPEC, factory: { stations: { prove: { assign: { harness: "nope" } } } } }));
+  expect(reason(await startLine(server))).toStartWith(
+    "the Line cannot start: the Prove Station names unknown harness 'nope'. Known: ",
+  );
+
   const named = await startLine(server, { brief: "docs/specs/other.brief.json" });
   expect(named.status).toBe(409);
   expect(reason(named)).toBe("no Line brief at docs/specs/other.brief.json in the pool checkout");

@@ -10,8 +10,9 @@ use serde_json::{Map, Value, json};
 
 use ac_core::config::read_config;
 use ac_core::js;
+use ac_core::line::normalise_factory;
 use ac_core::machine_defaults::write_machine_defaults;
-use ac_core::pool_settings::{relaunch_port, write_pool_settings};
+use ac_core::pool_settings::{relaunch_port, require_known_station_harnesses, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
 use ac_io::herdr::PaneReadSource;
@@ -289,6 +290,20 @@ pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
         let Some(defaults @ Value::Object(_)) = field_of(&body, "defaults") else {
             return Err("settings: defaults must be an object".to_owned());
         };
+        // The machine's Factory layer names Station harnesses as the pool's does: each must be one
+        // this pool knows, or the Line would write a Station Ticket it cannot launch.
+        if let Some(Ok(Some(layer))) = defaults
+            .get("factory")
+            .filter(|factory| !factory.is_null())
+            .map(|factory| normalise_factory(factory, "machine defaults: factory"))
+        {
+            require_known_station_harnesses(
+                &layer,
+                "machine defaults",
+                &server.0.harnesses.names(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
         write_machine_defaults(defaults, &server.0.machine_paths.file)
             .map_err(|err| err.to_string())?;
         Ok(())

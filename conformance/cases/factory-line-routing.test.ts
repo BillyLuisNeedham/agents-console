@@ -155,19 +155,26 @@ conformance("factory", "the third Prove fail in a Round checkpoints the next fix
 conformance("factory", "Decide's round starts the next Round with its fixes, up to the extra-Rounds limit; notes on the Finish start one past it", async (t) => {
   const world = lineWorld(t);
   const leak = verdict({ findings: [{ severity: "must", title: "Leak", detail: "the pane leaks" }] });
-  const again = verdict({ decide: "round", fixes: [{ title: "Leak", reason: "a must" }] });
+  const round = { decide: "round", fixes: [{ title: "Leak", reason: "a must" }] };
+  const again = verdict(round);
   for (const n of [1, 2, 3]) {
     world.stubs.script(`r${n}-prove`, PASS);
     world.stubs.script(`r${n}-review`, n === 3 ? NO_FINDINGS : leak);
     world.stubs.script(`r${n}-decide`, n === 3 ? FINISH : again);
   }
+  // With the extra Round spent, Decide's round ends the Line all the same: without the report it is
+  // the no-verdict checkpoint, and once the report is written it goes to the Finish.
+  world.stubs.launches("r2-decide", [again, finishing(round)]);
   const server = await t.start(world);
   await started(server);
 
+  const unreported = await atCheckpoint(server, "r2-decide");
+  expect(interruptOn(unreported, "r2-decide")).toContain(`the report is not at `);
+  await answer(server, { ticketId: "r2-decide", note: "write the report" });
   const limit = await atCheckpoint(server, "r2-finish");
   expect(launches(world)).toEqual([
     "r1-implement", "r1-prove", "r1-review", "r1-decide",
-    "r2-implement", "r2-prove", "r2-review", "r2-decide",
+    "r2-implement", "r2-prove", "r2-review", "r2-decide", "r2-decide",
   ]);
   expect(issue(world, "r2-implement")).toContain("- **Leak**: a must\n  the pane leaks (must)");
   expect(readStateLine(world.pool, "r2-implement.md").line).toContain("blocked-by=r1-decide");
@@ -178,7 +185,7 @@ conformance("factory", "Decide's round starts the next Round with its fixes, up 
 
   await answer(server, { ticketId: "r2-finish", note: "rename the flag to --pool" });
   await atCheckpoint(server, "r3-finish");
-  expect(launches(world).slice(8)).toEqual(["r3-implement", "r3-prove", "r3-review", "r3-decide"]);
+  expect(launches(world).slice(9)).toEqual(["r3-implement", "r3-prove", "r3-review", "r3-decide"]);
   expect(issue(world, "r3-implement")).toContain("## The operator's notes\n\nrename the flag to --pool");
   const done = await approveFinish(server, "r3-finish");
   expect(statuses(done)["r2-finish"]).toBe("done");

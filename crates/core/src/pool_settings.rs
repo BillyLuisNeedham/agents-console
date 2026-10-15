@@ -11,7 +11,8 @@
 
 use ac_protocol::json::{True, Unchecked};
 use ac_protocol::{
-    EffectiveSettings, MachineDefaultsView, PoolSettingsView, RestartResponse, SettingsResponse,
+    EffectiveSettings, FactorySettings, MachineDefaultsView, PoolSettingsView, RestartResponse,
+    SettingsResponse,
 };
 use serde_json::{Map, Value};
 
@@ -204,10 +205,6 @@ fn is_digits(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-// The Steward entry (ADR-0030) is replaced whole: a field the operator emptied goes back to its default
-// (a budget of 5, the pool defaults). The budget is a text input, so a numeric string is a budget. A
-// named harness must be one the pool knows. "Steward may Close checkpoints" (issue #154) is a checkbox:
-// true is kept, false or absent leaves it out, since off is the default.
 // The Factory settings (issue #187): the pool's layer, replaced whole, its blank fields dropped and
 // every Station's harness one the pool knows.
 fn normalise_factory_settings(
@@ -217,32 +214,16 @@ fn normalise_factory_settings(
     let Some(layer) = normalise_factory(value, "pool settings: factory").map_err(refused)? else {
         return Ok(None);
     };
-    if let Some(stations) = &layer.stations {
-        for (key, station) in [
-            ("implement", &stations.implement),
-            ("prove", &stations.prove),
-            ("review", &stations.review),
-            ("decide", &stations.decide),
-            ("grill", &stations.grill),
-        ] {
-            if let Some(harness) = station
-                .as_ref()
-                .and_then(|s| s.assign.as_ref())
-                .and_then(|a| a.harness.as_deref())
-            {
-                require_known_harness(
-                    &format!("pool settings: factory.stations.{key}.assign.harness"),
-                    harness,
-                    harnesses,
-                )?;
-            }
-        }
-    }
+    require_known_station_harnesses(&layer, "pool settings", harnesses)?;
     Ok(Some(
         serde_json::to_value(layer).map_err(|e| refused(e.to_string()))?,
     ))
 }
 
+// The Steward entry (ADR-0030) is replaced whole: a field the operator emptied goes back to its default
+// (a budget of 5, the pool defaults). The budget is a text input, so a numeric string is a budget. A
+// named harness must be one the pool knows. "Steward may Close checkpoints" (issue #154) is a checkbox:
+// true is kept, false or absent leaves it out, since off is the default.
 fn normalise_steward(value: &Value, harnesses: &[String]) -> Result<Option<Value>, ConfigError> {
     let Value::Object(raw) = value else {
         return Err(refused("pool settings: steward must be an object".into()));
@@ -438,6 +419,39 @@ fn normalise_choice(
 /// `defaults.harness`, resolver and Steward harness and by Reassign's per-ticket harness (issue #126).
 /// `subject` is the whole prefix the message opens with ("pool settings: defaults.harness", "reassign:
 /// harness"). An empty table skips the check.
+/// Every harness a layer of the Factory settings names for a Station must be one the pool knows: the
+/// Pool settings' layer and the Machine defaults' alike, so a Station Ticket is never written naming one
+/// the pool cannot launch.
+pub fn require_known_station_harnesses(
+    layer: &FactorySettings,
+    subject: &str,
+    harnesses: &[String],
+) -> Result<(), ConfigError> {
+    let Some(stations) = &layer.stations else {
+        return Ok(());
+    };
+    for (key, station) in [
+        ("implement", &stations.implement),
+        ("prove", &stations.prove),
+        ("review", &stations.review),
+        ("decide", &stations.decide),
+        ("grill", &stations.grill),
+    ] {
+        if let Some(harness) = station
+            .as_ref()
+            .and_then(|s| s.assign.as_ref())
+            .and_then(|a| a.harness.as_deref())
+        {
+            require_known_harness(
+                &format!("{subject}: factory.stations.{key}.assign.harness"),
+                harness,
+                harnesses,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn require_known_harness(
     subject: &str,
     harness: &str,

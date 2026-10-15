@@ -58,7 +58,13 @@ pub fn line_ended(session: &Session) -> bool {
 pub fn verdict_check_for(session: &Session, marker: &TicketMarker) -> Option<VerdictCheck> {
     let station = marker.station?;
     Some(match &session.line {
-        Some(line) => verdict_check(line, station),
+        Some(line) => {
+            let factory = session
+                .line_factory
+                .clone()
+                .unwrap_or_else(|| resolve_factory(&factory_layers(session), &line.brief));
+            verdict_check(line, &factory, station)
+        }
         None => VerdictCheck::of(station),
     })
 }
@@ -117,28 +123,19 @@ pub fn line_view(session: &mut Session) -> Option<LineView> {
 /// and kick the drive. Refused, with the reason, when the brief is missing or invalid or a Line has
 /// already started.
 pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String, EngineError> {
-    if let Some(line) = &session.line {
-        return Err(EngineError::refused(format!(
-            "the Line has already started: Round {}, {} ({})",
-            line.round, line.ticket, line.status
-        )));
-    }
+    refuse_if_started(session)?;
     let checkout = Path::new(&session.cwd).to_path_buf();
     let path = find_brief(&checkout, brief.as_deref()).map_err(EngineError::refused)?;
     let brief = read_brief(&checkout, &path).map_err(EngineError::refused)?;
     let factory = resolve_factory(&factory_layers(session), &brief);
+    refuse_if_unlaunchable(session, &factory)?;
     session.line_factory = Some(factory.clone());
     let places = LinePlaces {
         branch: target_branch(session),
         report: js::path_text(&Path::new(&session.runs_dir).join(report_file_name(&path))),
     };
     let (line, first) = begin_line(brief, &path, &factory, places);
-    if session.marker(&first.id).is_some() {
-        return Err(EngineError::refused(format!(
-            "ticket {} is already in the pool: a Factory pool runs one Line",
-            first.id
-        )));
-    }
+    refuse_if_taken(session, &first)?;
     let id = first.id.clone();
     write_station_ticket(session, &first).map_err(|e| EngineError::refused(e.to_string()))?;
     if let Err(error) = save_line(Path::new(&session.pool_dir), &line) {
@@ -177,6 +174,35 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))?;
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(id)
+}
+
+fn refuse_if_started(session: &Session) -> Result<(), EngineError> {
+    match &session.line {
+        Some(line) => Err(EngineError::refused(format!(
+            "the Line has already started: Round {}, {} ({})",
+            line.round, line.ticket, line.status
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn refuse_if_unlaunchable(session: &Session, factory: &ResolvedFactory) -> Result<(), EngineError> {
+    match factory.unknown_harness(&session.harnesses) {
+        Some(problem) => Err(EngineError::refused(format!(
+            "the Line cannot start: {problem}. Fix the Line brief or the Factory settings"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn refuse_if_taken(session: &Session, first: &NewTicket) -> Result<(), EngineError> {
+    match session.marker(&first.id) {
+        Some(_) => Err(EngineError::refused(format!(
+            "ticket {} is already in the pool: a Factory pool runs one Line",
+            first.id
+        ))),
+        None => Ok(()),
+    }
 }
 
 // The branch the pool merges into: the one an enlist captured, else the pool checkout's own.
@@ -224,14 +250,11 @@ impl BriefPlace for GrillBranch<'_> {
 /// committed branch, merge that branch into the Line's, and start the Line from the merged brief, in
 /// one stretch so nothing lands between the merge and Round 1's Implement. The caller ends the Grill
 /// after, with nothing left to merge. Refused, with the reason and nothing changed, when the Line has
-/// started, the id is no live Grill, the brief is missing or invalid, or the merge does not land.
+/// started, the id is no live Grill, the brief is missing or invalid, a Station names a harness the
+/// pool does not know, its first Ticket is already in the pool, or the merge does not land. Only a failed write of the first Ticket or `line.json` after
+/// the merge refuses with the merge landed; Start the Line can then be tried again.
 pub fn start_line_from_grill(session: &mut Session, grill: &str) -> Result<String, EngineError> {
-    if let Some(line) = &session.line {
-        return Err(EngineError::refused(format!(
-            "the Line has already started: Round {}, {} ({})",
-            line.round, line.ticket, line.status
-        )));
-    }
+    refuse_if_started(session)?;
     let Some(record) = crate::conversations::load(session)
         .into_iter()
         .find(|rec| rec.id == grill)
@@ -254,7 +277,13 @@ pub fn start_line_from_grill(session: &mut Session, grill: &str) -> Result<Strin
         branch: &branch,
     };
     let path = find_brief_in(&place, None).map_err(EngineError::refused)?;
-    read_brief_in(&place, &path).map_err(EngineError::refused)?;
+    let brief = read_brief_in(&place, &path).map_err(EngineError::refused)?;
+    // Every refusal Start the Line can make on the brief comes before the merge, so a refused start
+    // leaves the Line's branch as it was.
+    let factory = resolve_factory(&factory_layers(session), &brief);
+    refuse_if_unlaunchable(session, &factory)?;
+    let (_, first) = begin_line(brief, &path, &factory, LinePlaces::default());
+    refuse_if_taken(session, &first)?;
     if crate::checkout_gate::pool_checkout_held(session) {
         return Err(EngineError::refused(
             "a Continued attempt holds the pool checkout; Start the Line once it ends",
@@ -380,6 +409,33 @@ fn route_once(session: &mut Session) -> anyhow::Result<bool> {
             return Ok(false);
         }
     };
+    if let Routed::Next(next) = &routed
+        && let Some(problem) = unknown_harness_of(session, next)
+    {
+        // A settings layer changed under the Line to a harness the pool does not know. The next
+        // Ticket is never written (its marker would fail every Assignment resolution, a boot's too):
+        // the ended Station checkpoints instead, and once resumed it runs again and routes on the
+        // fixed settings.
+        let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
+        crate::verify::checkpoint_ticket_by_engine(
+            session,
+            &marker,
+            attempt,
+            Some(&format!(
+                "The Line cannot route to {}: {problem}. Fix the Factory settings (the Pool \
+                 settings or the Machine defaults), then Resume: this Station runs again and its \
+                 Outcome routes on the fixed settings.",
+                next.id
+            )),
+            format!(
+                "line: {} not written ({problem}); {} checkpointed",
+                next.id, marker.id
+            ),
+            false,
+            None,
+        )?;
+        return Ok(false);
+    }
     if line.station == Station::Finish && status != TicketStatus::Done {
         // The Finish checkpoint is the operator's: resumed, it is answered, never run.
         write_marker_status(&marker.file, TicketStatus::Done)?;
@@ -407,6 +463,17 @@ fn route_once(session: &mut Session) -> anyhow::Result<bool> {
     session.line = Some(next_line);
     session.log(line_text);
     Ok(matches!(routed, Routed::Next(_)))
+}
+
+// The harness a Station Ticket would run on, when the pool does not know it.
+fn unknown_harness_of(session: &Session, ticket: &NewTicket) -> Option<String> {
+    let harness = ticket.assign.as_ref()?.harness.as_deref()?;
+    (!session.harnesses.contains(harness)).then(|| {
+        format!(
+            "it names unknown harness '{harness}'. Known: {}",
+            session.harnesses.known()
+        )
+    })
 }
 
 // Write one Station Ticket into the pool and fold it in as answer processing brings a hand-written

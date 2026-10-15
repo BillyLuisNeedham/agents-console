@@ -19,6 +19,7 @@ use ac_protocol::{
 };
 use serde_json::Value;
 
+use crate::harness::Harnesses;
 use crate::js;
 use crate::outcome::ValidOutcome;
 use crate::pool::encode_spawn_assign;
@@ -333,6 +334,29 @@ pub fn factory_layer_of(value: Option<&Value>) -> Option<FactorySettings> {
 }
 
 impl ResolvedFactory {
+    /// Why a Station the Line runs could not launch: the first switched-on Station whose resolved
+    /// harness the pool does not know, or `None` when every one is known. Start the Line refuses on it
+    /// and routing checks it again, since a settings layer may change under a running Line.
+    pub fn unknown_harness(&self, harnesses: &Harnesses) -> Option<String> {
+        [
+            Station::Implement,
+            Station::Prove,
+            Station::Review,
+            Station::Decide,
+        ]
+        .into_iter()
+        .map(|station| (station, self.station(station)))
+        .find(|(_, settings)| settings.enabled && !harnesses.contains(&settings.harness))
+        .map(|(station, settings)| {
+            format!(
+                "the {} Station names unknown harness '{}'. Known: {}",
+                station_name(station),
+                settings.harness,
+                harnesses.known()
+            )
+        })
+    }
+
     pub fn station(&self, station: Station) -> &ResolvedStation {
         match station {
             Station::Implement | Station::Finish => &self.implement,
@@ -524,11 +548,12 @@ pub fn save_line(pool_dir: &Path, line: &LineState) -> anyhow::Result<()> {
 pub struct VerdictCheck {
     pub station: Station,
     pub musts: Vec<String>,
-    /// Decide's report path: a Decide that ends the Line (a finish, or any verdict on a halted Line)
-    /// must have written it. Blank checks nothing.
+    /// Decide's report path: a Decide that ends the Line (a finish, or any verdict on a Line that
+    /// starts no further Round) must have written it. Blank checks nothing.
     pub report: String,
-    /// The Line was halted, so Decide's verdict ends it whatever it chose.
-    pub halted: bool,
+    /// Decide's verdict ends the Line whatever it chose: the Line was halted, or it has no extra Round
+    /// left.
+    pub ends: bool,
 }
 
 fn verdict_of<T: serde::de::DeserializeOwned>(verdict: Option<&Value>) -> Result<T, String> {
@@ -609,15 +634,16 @@ impl VerdictCheck {
             station,
             musts: Vec::new(),
             report: String::new(),
-            halted: false,
+            ends: false,
         }
     }
 }
 
-/// A Decide that ends the Line (a finish, or any verdict on a halted Line) must have written the report
-/// first: the Finish checkpoint links it, and the operator approves the Line from it.
-pub fn report_problem(verdict: &DecideVerdict, report: &str, halted: bool) -> Option<String> {
-    let ends = halted || verdict.decide == DecideChoice::Finish;
+/// A Decide that ends the Line (a finish, or any verdict when `ends`: a halted Line, or one with no
+/// extra Round left) must have written the report first: the Finish checkpoint links it, and the
+/// operator approves the Line from it.
+pub fn report_problem(verdict: &DecideVerdict, report: &str, ends: bool) -> Option<String> {
+    let ends = ends || verdict.decide == DecideChoice::Finish;
     (ends && !blank(report) && !Path::new(report).is_file()).then(|| {
         format!(
             "the report is not at {report}: carry out the Finish, write the report there, then \
@@ -633,7 +659,7 @@ pub fn verdict_problem(check: &VerdictCheck, verdict: Option<&Value>) -> Option<
         Station::Prove => prove_verdict(verdict).err(),
         Station::Review => review_verdict(verdict).err(),
         Station::Decide => match decide_verdict(verdict, &check.musts) {
-            Ok(decide) => report_problem(&decide, &check.report, check.halted),
+            Ok(decide) => report_problem(&decide, &check.report, check.ends),
             Err(problem) => Some(problem),
         },
     }
@@ -884,7 +910,9 @@ pub fn route(
         }
         (Station::Decide, StationEnd::Done(outcome)) => {
             let verdict = decide_verdict(outcome.verdict.as_ref(), &musts_of(line))?;
-            if let Some(problem) = report_problem(&verdict, &line.report, line.halted.is_some()) {
+            if let Some(problem) =
+                report_problem(&verdict, &line.report, decide_ends(line, factory))
+            {
                 return Err(problem);
             }
             round_of(line).decide = Some(verdict.clone());
@@ -930,8 +958,13 @@ pub fn musts_of(line: &LineState) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The verdict check for a Ticket of this Line's: its Station, and for Decide this Round's musts.
-pub fn verdict_check(line: &LineState, station: Station) -> VerdictCheck {
+/// The verdict check for a Ticket of this Line's: its Station, and for Decide this Round's musts and
+/// whether its verdict ends the Line.
+pub fn verdict_check(
+    line: &LineState,
+    factory: &ResolvedFactory,
+    station: Station,
+) -> VerdictCheck {
     if station != Station::Decide {
         return VerdictCheck::of(station);
     }
@@ -939,8 +972,14 @@ pub fn verdict_check(line: &LineState, station: Station) -> VerdictCheck {
         station,
         musts: musts_of(line),
         report: line.report.clone(),
-        halted: line.halted.is_some(),
+        ends: decide_ends(line, factory),
     }
+}
+
+/// Whether Decide's verdict ends the Line whatever it chose: the Line was halted, or its extra Rounds
+/// are spent (a `round` then goes to the Finish, so the report must be written all the same).
+pub fn decide_ends(line: &LineState, factory: &ResolvedFactory) -> bool {
+    line.halted.is_some() || line.extra_rounds >= factory.extra_rounds
 }
 
 fn after_implement(line: &mut LineState, factory: &ResolvedFactory, from: &str) -> NewTicket {

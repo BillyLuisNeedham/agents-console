@@ -7,7 +7,8 @@
  * changes nothing when it is not there, and otherwise merges that branch
  * into the pool checkout, writes line.json and r1-implement and ends the
  * Grill. Only the operator's routes reach it: the Steward's have no such
- * verb.
+ * verb. A spawn the Grill proposes is inside the Line, so it is held for the
+ * operator.
  *
  * The Grill runs in a pane of the fake herdr, on a stub that holds the pane
  * the way a TUI does; a case plays the Grill by committing files on its
@@ -21,7 +22,9 @@ import type { ConversationView, LineStartResponse, PoolConfig } from "../../prot
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import type { HerdrProcess } from "../harness/herdr.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
+import { snapshot } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
+import { BODY, proposeSpawns } from "./conversations-support.ts";
 import { lineOf, startLine } from "./factory-line-support.ts";
 
 /** Every known harness's ready pattern and claude's idle prompt. */
@@ -174,6 +177,32 @@ conformance("factory", "Start the Line on the Grill refuses without a committed 
   expect(recordLine(world, grill.id)).toContain("status=live");
 });
 
+conformance("factory", "Start the Line on the Grill refuses before merging when its first Ticket is already in the pool", async (t) => {
+  const world = t.world({
+    config: CONFIG,
+    tickets: [{ file: "r1-implement.md", marker: "<!-- state: id=r1-implement blocked-by=none status=done -->" }],
+  });
+  mkdirSync(join(world.pool, "conversations"), { recursive: true });
+  for (const key of ["_claude", "_opencode"]) world.stubs.script(key, { hold: 150 });
+  const { server } = await serve(t, world);
+  const grill = await startGrill(server);
+  grillWrites(world, grill, {
+    "docs/specs/186.md": "# Fix it\n\nThe spec.\n",
+    "docs/specs/186.brief.json": JSON.stringify({ spec: "docs/specs/186.md", finish: "draft-pr" }),
+  });
+  const before = world.git(["rev-parse", "main"]);
+
+  const taken = await startLine(server, { grill: grill.id });
+  expect(taken.status).toBe(409);
+  expect(reason(taken)).toBe("ticket r1-implement is already in the pool: a Factory pool runs one Line");
+
+  // Refused before the merge: the Line's branch is as it was and the Grill goes on.
+  expect(world.git(["rev-parse", "main"])).toBe(before);
+  expect(existsSync(join(world.repo, "docs", "specs", "186.brief.json"))).toBe(false);
+  expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+  expect(recordLine(world, grill.id)).toContain("status=live");
+});
+
 conformance("factory", "Start the Line on the Grill merges its branch, writes line.json and r1-implement, and ends the Grill", async (t) => {
   const world = grillWorld(t);
   const { server } = await serve(t, world);
@@ -210,4 +239,27 @@ conformance("factory", "Start the Line on the Grill merges its branch, writes li
   const late = await server.http.post("/api/conversations", { role: "grill", opening: ISSUE });
   expect(late.status).toBe(409);
   expect(reason(late)).toBe("grill start: the Line has already started (Round 1, r1-implement)");
+});
+
+conformance("factory", "a spawn the Grill proposes is held for the operator, as anything proposed inside the Line is", async (t) => {
+  const world = grillWorld(t);
+  const { server } = await serve(t, world);
+  const grill = await startGrill(server);
+
+  proposeSpawns(world, grill.id, [{ title: "Tidy the brief", body: BODY }]);
+  const held = await until(
+    () => snapshot(server),
+    (snap) => snap.heldSpawns.length > 0,
+    { what: "the Grill's proposal to be held" },
+  );
+  expect(held.heldSpawns.map((h) => [h.id, h.parentId, h.reason, h.title])).toEqual([
+    ["proposal-1", grill.id, "line", "Tidy the brief"],
+  ]);
+  expect(held.pendingSpawns).toEqual([]);
+  expect(held.state.tickets.map((ticket) => ticket.id)).toEqual([]);
+  expect(held.state.conversations.map((c) => c.id)).toEqual([grill.id]);
+  expect(held.state.log).toContain(
+    `ticket ${grill.id}: 1 proposal held for the operator: proposed inside the Line (ADR-0037): proposal-1`,
+  );
+  expect(existsSync(join(world.pool, "runs", `${grill.id}.spawn.json`))).toBe(false);
 });
