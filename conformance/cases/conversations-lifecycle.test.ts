@@ -25,6 +25,7 @@ import { callsOf, type HerdrOptions, type HerdrProcess } from "../harness/herdr.
 import { readEvents, readMarkers, until } from "../harness/pool-files.ts";
 import { freePort, serverArgv, serverChoice } from "../harness/server.ts";
 import type { TicketSeed, World, WorldSpec } from "../harness/world.ts";
+import { missingHarness } from "./attempts-terminal-support.ts";
 
 // ---------------------------------------------------------------------------
 // The world a Conversation runs in.
@@ -765,6 +766,48 @@ conformance(
     });
     expect(events[1]!.payload.tab_id).toBe("w1:t2");
     expect(callsOf(herdr, "tab.create")).toHaveLength(2);
+    expect(callsOf(herdr, "tab.close").map((call) => call.params.tab_id)).toEqual(["w1:t1"]);
+  },
+  { slow: true },
+);
+
+// Issue #179: a harness not found at launch is retried after a backoff, the worktree kept meanwhile
+conformance(
+  "conversations",
+  "a launch whose harness is not found (exit 127) is retried in a fresh tab after the backoff and goes live there (slow: the 15 s backoff)",
+  async (t) => {
+    const world = terminalWorld(t);
+    // claude is gone from the pane's PATH until the first retry is recorded.
+    const restore = missingHarness(world, "claude");
+    const { herdr, server } = await startTerminal(t, world);
+
+    // The start answers only once the launch is over, retries and all.
+    const starting = startConversation(server, { title: "Found again", opening: "hello" });
+    const retried = await until(
+      () => readEvents(world.pool, "conv-1"),
+      (read) => kinds(read).includes("launch-retried"),
+      { what: "conv-1's launch-retried event" },
+    );
+    restore();
+    const view = await starting;
+
+    expect(view.status).toBe("live");
+    expect(view.paneId).toBe("w1:p2");
+    const events = readEvents(world.pool, "conv-1");
+    expect(kinds(events)).toEqual(["launch-retried", "spawned"]);
+    expect(retried[0]!.payload).toEqual({
+      try: 1,
+      pane_id: "w1:p1",
+      tab_id: "w1:t1",
+      reason: "harness not found (exit 127)",
+    });
+    expect(events[1]!.payload.tab_id).toBe("w1:t2");
+    const branch = expectPoolBranch(view.branch, "conv-1");
+    expect(branches(world)).toContain(branch);
+    expect(existsSync(worktreeOf(world, branch))).toBe(true);
+    const tabs = callsOf(herdr, "tab.create");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[1]!.at - Date.parse(events[0]!.at)).toBeGreaterThanOrEqual(15_000);
     expect(callsOf(herdr, "tab.close").map((call) => call.params.tab_id)).toEqual(["w1:t1"]);
   },
   { slow: true },

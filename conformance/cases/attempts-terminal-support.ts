@@ -7,7 +7,7 @@
  * files, never the engine.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { CaseServer } from "../harness/case.ts";
@@ -128,6 +128,22 @@ export function wrapperFor(world: World, id: string, argv: string[]): string {
       ? `script -eqF ${stream} sh -c ${shellQuote(RESIZE_RELAY)} sh "$(tty)" ${command}`
       : `script -eqfc ${shellQuote(command)} ${stream}`;
   return `${record}; echo $? > ${shellQuote(runsFile(world, `${id}.exitcode`))}`;
+}
+
+/**
+ * Stand in for a harness the pane's shell cannot find (issue #179): the stub
+ * `binary` on the world's PATH replaced by a script that exits `code`, after
+ * `delaySeconds` when given, the way a shell exits 127 for a command it has
+ * no file for. The stub is overwritten in place, still executable, never
+ * deleted: the world's PATH also holds /usr/bin, where a real claude may
+ * live. The function handed back puts the stub back as it was.
+ */
+export function missingHarness(world: World, binary: string, code = 127, delaySeconds = 0): () => void {
+  const path = join(world.stubs.bin, binary);
+  const stub = readFileSync(path, "utf8");
+  const wait = delaySeconds > 0 ? `sleep ${delaySeconds}\n` : "";
+  writeFileSync(path, `#!/usr/bin/env bash\n${wait}exit ${code}\n`);
+  return () => writeFileSync(path, stub);
 }
 
 /** Every `pane.send_input` the server has sent so far. */
