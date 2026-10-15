@@ -54,7 +54,7 @@ use ac_protocol::{AttemptRole, TicketEvent, TicketEventKind, TicketStatus};
 use crate::actor::Engine;
 use crate::attempt_ending::{
     AttemptEndingWait, AttemptWatch, PANE_TAIL_POLL_MS, SPAWN_INTERACTIVE_PROMPT_FAILED,
-    SPAWN_INTERACTIVE_READY_FAILED, SPAWN_INTERACTIVE_WRAPPER_LOST, attempt_crash_reason,
+    SPAWN_INTERACTIVE_READY_FAILED, SPAWN_INTERACTIVE_WRAPPER_LOST, exit_crash_reason,
     read_attempt_result, read_exit_code, wait_for_attempt_ending,
 };
 use crate::children::{ChildTracker, signal_group};
@@ -62,8 +62,9 @@ use crate::claude_trust::{FolderTrustSeed, default_claude_config_path, seed_clau
 use crate::live_attempts::{LiveAttemptEntry, LiveAttempts};
 use crate::lock;
 use crate::pane_session::{
-    LaunchCadence, Readiness, WrapperContext, close_pane_in_background, send_wrapper_to_pane,
-    type_verified, wait_for_readiness, wait_for_shell_settled, wait_for_wrapper_landed,
+    LaunchCadence, Readiness, WrapperContext, close_pane_in_background, probe_early_exit,
+    send_wrapper_to_pane, type_verified, wait_for_readiness, wait_for_shell_settled,
+    wait_for_wrapper_landed,
 };
 
 pub use ac_core::streamlog::rotate_attempt_log;
@@ -170,6 +171,17 @@ pub struct AttemptEnv {
 /// How many times a terminal-backed launch opens a fresh tab before giving up on a wrapper that never
 /// runs (issue #102).
 pub const LAUNCH_TRIES: u32 = 3;
+
+/// How many times a terminal-backed launch opens a fresh tab for a harness the pane's shell could not
+/// find (issue #179). With the default backoff of 15 s doubling, the tries span about 7 min 45 s, longer
+/// than the 6 min 10 s an auto-update of claude was seen to take.
+pub const NOT_FOUND_TRIES: u32 = 6;
+
+/// The shell's exit status for a command it could not find.
+pub const HARNESS_NOT_FOUND: i64 = 127;
+
+/// The `launch-retried` reason for a harness the pane's shell could not find.
+pub const LAUNCH_RETRIED_NOT_FOUND: &str = "harness not found (exit 127)";
 
 /// The free variables of the attempt's file names (events module).
 pub type AttemptNaming = AttemptLogName;
@@ -387,6 +399,27 @@ pub fn read_log_tail(log_path: &str) -> Vec<String> {
         .collect()
 }
 
+/// The crash reason for a launch that ended before its harness went live, with `code` its ending
+/// (issue #179). A 127 there is a harness the pane's shell could not find, named by the first word of
+/// its interactive command and always called the harness, whoever launched it; every other code reads
+/// as [`exit_crash_reason`] has it. A Ticket's ending and a Conversation's start both take it from
+/// here, so the two cannot drift.
+pub fn launch_crash_reason(
+    env: &AttemptEnv,
+    ctx: &SpawnContext,
+    code: i64,
+    subject: &str,
+    pane_id: Option<&str>,
+) -> String {
+    if code != HARNESS_NOT_FOUND {
+        return exit_crash_reason(code, &ctx.exit_code_path, subject, pane_id);
+    }
+    let command = interactive_harness_command(&env.harnesses, &ctx.harness)
+        .and_then(|command| command.argv(ctx).into_iter().next())
+        .unwrap_or_else(|| ctx.harness.clone());
+    format!("harness \"{command}\" was not found on the pane's PATH (exit 127)")
+}
+
 /// A crash reason with what the launch saw appended (issue #127): "TUI never became ready: workspace
 /// trust dialog was on screen".
 pub fn with_launch_detail(reason: String, handle: &AttemptHandle) -> String {
@@ -502,10 +535,14 @@ pub async fn launch_attempt<R>(
     }
     // A terminal-backed attempt opens its own named herdr tab before the spawn is recorded, so the
     // spawned event can carry the pane id; the event is recorded once the wrapper send's outcome is
-    // known. The launch is tried into up to LAUNCH_TRIES fresh tabs (issue #96, #102): a wrapper that
-    // never ran is a Botched launch, retried into a new tab with the botched one closed and a
+    // known. A Botched launch is retried into a fresh tab with the botched one closed and a
     // `launch-retried` event recording it; the `spawned` event names only the tab the launch ended up
-    // in. The tries exhausted, the launch ends with the engine's own code.
+    // in. Each reason keeps its own budget. A wrapper that never ran (issue #96, #102) is retried at
+    // once, up to LAUNCH_TRIES tries; those exhausted, the launch ends with the engine's own code. A
+    // harness the pane's shell could not find, exit 127 inside the exit probe (issue #179, as when
+    // claude's auto-updater is replacing its binary), is retried after a backoff of minutes, up to
+    // NOT_FOUND_TRIES tries; the last one goes on as an ordinary exit before readiness, so the launch
+    // ends with the 127 and its pane kept. A shutdown cuts the backoff short.
     let cadence = env.launch_cadence.unwrap_or_default();
     let interactive_argv = interactive_harness_command(&env.harnesses, &spec.harness)
         .map(|command| command.argv(&launch.ctx))
@@ -517,6 +554,8 @@ pub async fn launch_attempt<R>(
         .then(|| seed_claude_folder_trust(&spec.cwd, &claude_config_path_of(env)));
     let herdr = Herdr::new(&env.herdr_socket);
     let mut try_number = 1;
+    let mut never_ran_tries = 0;
+    let mut not_found_tries = 0;
     let (terminal, landed) = loop {
         let opened = open_attempt_terminal(env, id, &spec.title, &spec.cwd).await;
         let (Some(pane_id), Some(tab_id)) = (opened.pane_id.clone(), opened.tab_id.clone()) else {
@@ -558,17 +597,30 @@ pub async fn launch_attempt<R>(
             }
             None => true,
         };
-        if landed || try_number >= LAUNCH_TRIES {
-            break (terminal, landed);
-        }
+        let (reason, backoff_ms) = if landed {
+            if probe_early_exit(&launch.ctx.exit_code_path, &cadence).await
+                != Some(HARNESS_NOT_FOUND)
+            {
+                break (terminal, true);
+            }
+            not_found_tries += 1;
+            if not_found_tries >= NOT_FOUND_TRIES || launch.stopping().await {
+                break (terminal, true);
+            }
+            let backoff_ms = cadence.not_found_backoff_ms << (not_found_tries - 1);
+            (LAUNCH_RETRIED_NOT_FOUND, Some(backoff_ms))
+        } else {
+            never_ran_tries += 1;
+            if never_ran_tries >= LAUNCH_TRIES {
+                break (terminal, false);
+            }
+            ("launch command never ran", None)
+        };
         let mut payload = Map::new();
         payload.insert("try".into(), Value::from(try_number));
         payload.insert("pane_id".into(), Value::String(pane_id));
         payload.insert("tab_id".into(), Value::String(tab_id.clone()));
-        payload.insert(
-            "reason".into(),
-            Value::String("launch command never ran".into()),
-        );
+        payload.insert("reason".into(), Value::String(reason.into()));
         launch
             .append(event_now(
                 spec.attempt,
@@ -576,10 +628,16 @@ pub async fn launch_attempt<R>(
                 payload,
             ))
             .await?;
-        let herdr = herdr.clone();
+        let closer = herdr.clone();
         tokio::spawn(async move {
-            let _ = herdr.close_tab(&tab_id).await;
+            let _ = closer.close_tab(&tab_id).await;
         });
+        if let Some(backoff_ms) = backoff_ms {
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            if launch.stopping().await {
+                return Err(engine_gone());
+            }
+        }
         try_number += 1;
     };
     let pane_id = terminal.pane_id.clone().unwrap_or_default();
@@ -686,6 +744,13 @@ impl<R> Launch<'_, R> {
             tab_id,
             state,
         }
+    }
+
+    // Whether the engine is shutting down, read on the host; a session already gone counts as one.
+    async fn stopping(&self) -> bool {
+        on_registries(self.env.host.as_ref(), |_, children| children.stopping)
+            .await
+            .unwrap_or(true)
     }
 
     // One event on the Ticket log, appended on the host, as every events-file write of an Attempt is.
@@ -873,10 +938,10 @@ where
         AttemptHandleState::Ended { code, detail } => {
             let result = read_attempt_result(&ctx.outcome_path, &validate);
             let crash_reason = if code != 0 {
-                let reason = attempt_crash_reason(
-                    false,
+                let reason = launch_crash_reason(
+                    &env,
+                    &ctx,
                     code,
-                    &ctx.exit_code_path,
                     crash_subject.as_str(),
                     pane_id.as_deref(),
                 );

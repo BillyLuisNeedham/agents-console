@@ -7,7 +7,7 @@
  * files, never the engine.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolConfig, TicketEvent } from "../../protocol/wire.ts";
 import type { CaseServer } from "../harness/case.ts";
@@ -141,6 +141,24 @@ export function keySends(herdr: HerdrProcess): string[][] {
     .slice(1)
     .map((call) => (Array.isArray(call.params.keys) ? (call.params.keys as string[]) : []))
     .filter((keys) => keys.length > 0);
+}
+
+/** The reason a `launch-retried` event gives for a harness the pane's shell could not find (issue #179). */
+export const HARNESS_NOT_FOUND = "harness not found (exit 127)";
+
+/** The crash reason of a launch that ended on claude's 127 before its TUI came up (issue #179). */
+export const CLAUDE_NOT_FOUND = 'harness "claude" was not found on the pane\'s PATH (exit 127)';
+
+/**
+ * Put a bash shim running `body` in place of the world's stub claude, and
+ * hand back what puts the stub back. Never a deletion: the world's PATH also
+ * holds /usr/bin, where a real claude could be found.
+ */
+export function shimClaude(world: World, body: string): () => void {
+  const bin = join(world.stubs.bin, "claude");
+  const original = readFileSync(bin, "utf8");
+  writeFileSync(bin, `#!/usr/bin/env bash\n${body}\n`);
+  return () => writeFileSync(bin, original);
 }
 
 /** Wait until `runs/<id>.events.jsonl` holds an event of `kind`; the first one. */

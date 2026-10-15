@@ -3,7 +3,9 @@
  * server (ADR-0036): a fresh tab whose shell has not drawn its prompt yet,
  * a wrapper the shell swallowed (a Botched launch, issue #102) retried into
  * a fresh tab, and claude's Blocking dialogs (issue #127), the workspace
- * trust dialog answered by name and the ones only the operator may answer.
+ * trust dialog answered by name and the ones only the operator may answer,
+ * and a harness the pane's shell could not find (exit 127, issue #179)
+ * retried into a fresh tab after a backoff.
  * Rows of the `attempts` area the Rust port inventory gives ticket C12
  * (docs/research/rust-port/test-inventory.md), and that area's gaps on
  * the dialogs and the readiness bound.
@@ -16,7 +18,10 @@ import { spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr
 import { readEvents, until } from "../harness/pool-files.ts";
 import {
   BYPASS_WARNING,
+  CLAUDE_NOT_FOUND,
   CLAUDE_READY,
+  eventsOf,
+  HARNESS_NOT_FOUND,
   interactiveArgv,
   keySends,
   logTailOf,
@@ -26,6 +31,7 @@ import {
   READY,
   runsFile,
   sends,
+  shimClaude,
   terminalConfig,
   ticket,
   trustDialog,
@@ -115,6 +121,64 @@ conformance(
   },
   { slow: true },
 );
+
+// Issue #179: a harness the pane's shell could not find
+conformance(
+  "attempts",
+  "a harness not found (exit 127) is retried in a fresh tab after a backoff of at least 15 s (slow: the backoff)",
+  async (t) => {
+    const world = t.world({ tickets: [ticket("01", "Not found once")], config: terminalConfig() });
+    const restore = shimClaude(world, "exit 127");
+    const herdr = await t.herdr(world, { rendered: READY.claude });
+    await t.start(world, { herdr });
+    const retried = await untilEvent(world, "01", "launch-retried");
+    restore();
+    await untilTicketStatus(world, "01", "done", 60_000);
+
+    const events = readEvents(world.pool, "01");
+    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited"]);
+    expect(retried.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: HARNESS_NOT_FOUND });
+    expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2" });
+    expect(events[3]!.payload).toMatchObject({ code: 0, status: "done" });
+    // The second tab opened only once the backoff had passed.
+    const creates = callsOf(herdr, "tab.create");
+    expect(creates).toHaveLength(2);
+    expect(creates[1]!.at - Date.parse(retried.at)).toBeGreaterThanOrEqual(15_000);
+    await herdr.waitForCall((call) => call.method === "tab.close");
+    await herdr.settle();
+    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }]);
+  },
+  { slow: true },
+);
+
+// Issue #179: only a 127 is a harness not found
+conformance("attempts", "a harness that exits 126 before its TUI is not retried as not found", async (t) => {
+  const world = t.world({ tickets: [ticket("01", "Not executable")], config: terminalConfig() });
+  shimClaude(world, "exit 126");
+  // No ready frame: the readiness wait sees the exit code first.
+  const herdr = await t.herdr(world, { rendered: "" });
+  await t.start(world, { herdr });
+
+  const crash = await untilEvent(world, "01", "crash");
+  expect(crash.payload).toMatchObject({ code: 126, reason: "harness exited 126" });
+  expect(eventsOf(world, "01", "launch-retried")).toEqual([]);
+  expect(callsOf(herdr, "tab.create")).toHaveLength(1);
+});
+
+// Issue #179: a 127 after the exit probe's window
+conformance("attempts", "a 127 after the exit probe but before the TUI is not retried, and the crash says not found", async (t) => {
+  const world = t.world({ tickets: [ticket("01", "Not found late")], config: terminalConfig() });
+  shimClaude(world, "sleep 3\nexit 127");
+  const herdr = await t.herdr(world, { rendered: "" });
+  await t.start(world, { herdr });
+
+  const crash = await untilEvent(world, "01", "crash");
+  expect(crash.payload).toMatchObject({ code: 127, reason: CLAUDE_NOT_FOUND });
+  expect(eventsOf(world, "01", "launch-retried")).toEqual([]);
+  expect(callsOf(herdr, "tab.create")).toHaveLength(1);
+  const spawned = eventsOf(world, "01", "spawned")[0]!;
+  expect(Date.parse(crash.at) - Date.parse(spawned.at)).toBeGreaterThanOrEqual(1_000);
+});
 
 // attempt-run.test.ts:1565 Botched launch (issue #102)
 conformance("attempts", "the wrapper waits for a fresh tab's shell to draw its prompt", async (t) => {

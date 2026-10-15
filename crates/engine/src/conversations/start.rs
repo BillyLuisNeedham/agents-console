@@ -25,7 +25,7 @@ use super::*;
 use crate::actor::Engine;
 use crate::attempt_run::{
     AttemptEvents, AttemptHandle, AttemptHandleState, AttemptNaming, AttemptSpec, CrashSubject,
-    Fallback, PromptDelivery, Rotate, launch_attempt, with_launch_detail,
+    Fallback, PromptDelivery, Rotate, launch_attempt, launch_crash_reason, with_launch_detail,
 };
 use crate::error::EngineError;
 use crate::tickets::attempt_env_of;
@@ -312,7 +312,8 @@ fn after_launch(
     write_conversation(&conversations_dir(s), &record).map_err(|err| refused(err.to_string()))?;
     let id = p.id.clone();
     if let AttemptHandleState::Ended { code, .. } = &handle.state {
-        // The harness died before its TUI came up (its own exit code, ADR-0016), or the launch command
+        // The harness died before its TUI came up (its own exit code, ADR-0016; a harness the pane could
+        // not find only once the launch spent its not-found tries, issue #179), or the launch command
         // never ran, the TUI never became ready, or the opening Turn never landed (the engine's codes):
         // the launch is over. The record stays, marked crashed, so the event trail is kept and the id is
         // never reused, but the worktree and branch go (issue #102, ADR-0018's amendment): the
@@ -327,9 +328,10 @@ fn after_launch(
             ConversationStatus::Crashed,
         );
         let reason = with_launch_detail(
-            crate::attempt_ending::exit_crash_reason(
+            launch_crash_reason(
+                &handle.env,
+                &handle.ctx,
                 code,
-                &handle.ctx.exit_code_path,
                 "harness",
                 handle.pane_id.as_deref(),
             ),

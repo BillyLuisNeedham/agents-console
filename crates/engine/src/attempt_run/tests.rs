@@ -193,6 +193,8 @@ fn fast_cadence() -> LaunchCadence {
         settle_timeout_ms: 1_000,
         landed_timeout_ms: 200,
         landed_poll_ms: 20,
+        exit_probe_ms: 100,
+        not_found_backoff_ms: 50,
         dialog_settle_ms: 20,
         dialog_key_gap_ms: 20,
         dialog_confirm_ms: 20,
@@ -972,4 +974,311 @@ async fn the_pane_tailer_reads_from_an_offset_and_reassembles_split_writes() {
     file.write_all(b"2mgreen\x1b[0m\r\ntail").unwrap();
     tailer.finish().await.unwrap();
     assert_eq!(js::read_text(&log).unwrap(), "half a line égreen\ntail\n");
+}
+
+// ---------------------------------------------------------------------------
+// A harness the pane cannot find (issue #179)
+// ---------------------------------------------------------------------------
+
+/// What the wrapper does in one try's pane: never run, run on, run and write a done Outcome, or run and
+/// exit with a code at once or after a delay, as `script` would leave the exit-code file.
+#[derive(Debug, Clone, Copy)]
+enum Try {
+    NeverRan,
+    Runs,
+    Done,
+    Exits(i64),
+    ExitsAfter(i64, u64),
+}
+
+/// A fake daemon whose panes play `tries` in order, the last repeating, and answer every read with
+/// `$ `, which no TUI's ready frame matches.
+async fn trying_daemon(rig: &Rig, tries: Vec<Try>) -> Daemon {
+    let stream_path = format!("{}/01.stream.jsonl", rig.runs);
+    let exit_code_path = format!("{}/01.exitcode", rig.runs);
+    let outcome_path = format!("{}/01.outcome.json", rig.runs);
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fake = FakeHerdr::start(Options {
+        workspaces: vec![json!({ "workspace_id": "w1" })],
+        script: Some(Arc::new(move |method: &str, params: &Value| match method {
+            "pane.send_input" => {
+                let wrapper = params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with("script -eq"));
+                if wrapper {
+                    let n = sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let this = tries[n.min(tries.len() - 1)];
+                    if !matches!(this, Try::NeverRan) {
+                        std::fs::write(&stream_path, "").unwrap();
+                    }
+                    match this {
+                        Try::Exits(code) => {
+                            std::fs::write(&exit_code_path, format!("{code}\n")).unwrap();
+                        }
+                        Try::ExitsAfter(code, ms) => {
+                            let exit_code_path = exit_code_path.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_millis(ms));
+                                std::fs::write(&exit_code_path, format!("{code}\n")).unwrap();
+                            });
+                        }
+                        Try::Done => {
+                            std::fs::write(&outcome_path, r#"{"status":"done"}"#).unwrap();
+                        }
+                        Try::NeverRan | Try::Runs => {}
+                    }
+                }
+                None
+            }
+            "pane.read" => Some(Reply::Line(
+                json!({ "id": "1", "result": { "read": { "text": "$ " } } }).to_string(),
+            )),
+            _ => None,
+        })),
+        ..Options::default()
+    })
+    .await;
+    Daemon { fake }
+}
+
+/// A terminal env whose `name` harness runs `claude --flag`, so a harness named claude reads its
+/// descriptor's readiness and the not-found reason names claude.
+fn claude_terminal_env(rig: &Rig, socket: &str, name: &str) -> AttemptEnv {
+    let mut harnesses = Harnesses::defaults();
+    harnesses.insert_command(
+        name,
+        Arc::new(|_: &SpawnContext| vec!["claude".to_owned(), "--flag".to_owned()]),
+    );
+    rig.env(harnesses, socket, true)
+}
+
+const NOT_FOUND_REASON: &str = "harness \"claude\" was not found on the pane's PATH (exit 127)";
+
+fn retried(rig: &Rig) -> Vec<Map<String, Value>> {
+    rig.events()
+        .into_iter()
+        .filter(|event| event.kind == TicketEventKind::LaunchRetried)
+        .map(|event| event.payload)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_harness_not_found_is_retried_into_a_fresh_tab_after_the_backoff() {
+    let rig = rig();
+    let d = trying_daemon(&rig, vec![Try::Exits(127), Try::Done]).await;
+    let env = claude_terminal_env(&rig, &d.socket(), "custom");
+    let started = std::time::Instant::now();
+    let run = run_attempt(&env, rig.spec("custom"), validate)
+        .await
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(fast_cadence().not_found_backoff_ms));
+    assert!(run.ok());
+    assert_eq!(run.pane_id.as_deref(), Some("w1:p2"));
+    assert_eq!(d.calls("tab.create").len(), 2);
+    until("the botched tab closed", || d.calls("tab.close").len() == 1).await;
+    assert_eq!(d.calls("tab.close"), [json!({ "tab_id": "w1:t1" })]);
+    let events = rig.events();
+    assert_eq!(
+        events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        [
+            TicketEventKind::LaunchRetried,
+            TicketEventKind::Spawned,
+            TicketEventKind::Exited,
+        ]
+    );
+    assert_eq!(
+        events[0].payload,
+        json!({ "try": 1, "pane_id": "w1:p1", "tab_id": "w1:t1", "reason": "harness not found (exit 127)" })
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+    assert_eq!(events[1].payload["tab_id"], json!("w1:t2"));
+    assert_eq!(events[2].payload["status"], json!("done"));
+}
+
+#[tokio::test]
+async fn a_harness_never_found_spends_its_tries_then_crashes_naming_the_command() {
+    let rig = rig();
+    let d = trying_daemon(&rig, vec![Try::Exits(127)]).await;
+    let env = claude_terminal_env(&rig, &d.socket(), "claude");
+    let started = std::time::Instant::now();
+    let run = run_attempt(&env, rig.spec("claude"), validate)
+        .await
+        .unwrap();
+    // 50 + 100 + 200 + 400 + 800 ms of backoff, each doubling the last.
+    let backoff = fast_cadence().not_found_backoff_ms;
+    assert!(started.elapsed() >= Duration::from_millis(backoff * 31));
+    assert_eq!(run.code, 127);
+    assert_eq!(run.crash_reason.as_deref(), Some(NOT_FOUND_REASON));
+    assert_eq!(run.pane_id.as_deref(), Some("w1:p6"));
+    assert_eq!(d.calls("tab.create").len(), NOT_FOUND_TRIES as usize);
+    let events = rig.events();
+    assert_eq!(
+        events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        [
+            [TicketEventKind::LaunchRetried; 5].as_slice(),
+            &[
+                TicketEventKind::Spawned,
+                TicketEventKind::Exited,
+                TicketEventKind::Crash
+            ],
+        ]
+        .concat()
+    );
+    let tries: Vec<Value> = retried(&rig).iter().map(|p| p["try"].clone()).collect();
+    assert_eq!(tries, [1, 2, 3, 4, 5].map(Value::from));
+    assert!(
+        retried(&rig)
+            .iter()
+            .all(|payload| payload["reason"] == json!("harness not found (exit 127)"))
+    );
+    assert_eq!(events[5].payload["tab_id"], json!("w1:t6"));
+    assert_eq!(events[6].payload["code"], json!(127));
+    assert_eq!(events[7].payload["code"], json!(127));
+    assert_eq!(events[7].payload["reason"], json!(NOT_FOUND_REASON));
+    // The last pane is kept, as any harness that died on its own keeps its pane.
+    until("the botched tabs closed", || {
+        d.calls("tab.close").len() == 5
+    })
+    .await;
+    assert!(d.calls("pane.close").is_empty());
+}
+
+#[tokio::test]
+async fn an_exit_126_before_readiness_is_not_retried() {
+    for code in [126, 3] {
+        let rig = rig();
+        let d = trying_daemon(&rig, vec![Try::Exits(code)]).await;
+        let env = claude_terminal_env(&rig, &d.socket(), "claude");
+        let run = run_attempt(&env, rig.spec("claude"), validate)
+            .await
+            .unwrap();
+        assert_eq!(run.code, code);
+        assert_eq!(run.crash_reason, Some(format!("harness exited {code}")));
+        assert!(retried(&rig).is_empty());
+        assert_eq!(d.calls("tab.create").len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_127_after_the_probe_window_is_not_retried_but_named_not_found() {
+    let rig = rig();
+    let late = fast_cadence().exit_probe_ms + 200;
+    let d = trying_daemon(&rig, vec![Try::ExitsAfter(127, late)]).await;
+    let env = claude_terminal_env(&rig, &d.socket(), "claude");
+    let run = run_attempt(&env, rig.spec("claude"), validate)
+        .await
+        .unwrap();
+    assert_eq!(run.code, 127);
+    assert_eq!(run.crash_reason.as_deref(), Some(NOT_FOUND_REASON));
+    assert!(retried(&rig).is_empty());
+    assert_eq!(d.calls("tab.create").len(), 1);
+}
+
+#[tokio::test]
+async fn each_botched_reason_counts_against_its_own_budget() {
+    let rig = rig();
+    let d = trying_daemon(
+        &rig,
+        vec![
+            Try::NeverRan,
+            Try::Exits(127),
+            Try::NeverRan,
+            Try::Exits(127),
+            Try::Runs,
+        ],
+    )
+    .await;
+    let env = claude_terminal_env(&rig, &d.socket(), "custom");
+    let handle = launch_attempt(&env, &rig.spec("custom")).await.unwrap();
+    // Two never-ran tries are under LAUNCH_TRIES, so the fifth try still opens.
+    assert_eq!(handle.pane_id.as_deref(), Some("w1:p5"));
+    let reasons: Vec<(Value, Value)> = retried(&rig)
+        .iter()
+        .map(|payload| (payload["try"].clone(), payload["reason"].clone()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            (json!(1), json!("launch command never ran")),
+            (json!(2), json!("harness not found (exit 127)")),
+            (json!(3), json!("launch command never ran")),
+            (json!(4), json!("harness not found (exit 127)")),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_shutdown_during_the_backoff_opens_no_further_tab() {
+    let rig = rig();
+    let d = trying_daemon(&rig, vec![Try::Exits(127), Try::Runs]).await;
+    let mut env = claude_terminal_env(&rig, &d.socket(), "custom");
+    env.launch_cadence = Some(LaunchCadence {
+        not_found_backoff_ms: 1_000,
+        ..fast_cadence()
+    });
+    let launch = tokio::spawn({
+        let spec = rig.spec("custom");
+        async move { launch_attempt(&env, &spec).await.map(|_| ()) }
+    });
+    until("the first try's retry", || rig.kinds().len() == 1).await;
+    rig.host.children(|children| children.stopping = true);
+    let err = launch.await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "the pool engine has stopped");
+    assert_eq!(d.calls("tab.create").len(), 1);
+    assert_eq!(rig.kinds(), [TicketEventKind::LaunchRetried]);
+}
+
+#[tokio::test]
+async fn a_shutdown_before_the_backoff_makes_the_try_the_last() {
+    let rig = rig();
+    rig.host.children(|children| children.stopping = true);
+    let d = trying_daemon(&rig, vec![Try::Exits(127), Try::Runs]).await;
+    let env = claude_terminal_env(&rig, &d.socket(), "claude");
+    let run = run_attempt(&env, rig.spec("claude"), validate)
+        .await
+        .unwrap();
+    assert_eq!(run.code, 127);
+    assert_eq!(run.crash_reason.as_deref(), Some(NOT_FOUND_REASON));
+    assert!(retried(&rig).is_empty());
+    assert_eq!(d.calls("tab.create").len(), 1);
+}
+
+#[test]
+fn the_launch_crash_reason_names_a_missing_harness_and_leaves_every_other_code_alone() {
+    let rig = rig();
+    let env = claude_terminal_env(&rig, "/nowhere.sock", "claude");
+    let ctx = SpawnContext {
+        harness: "claude".into(),
+        exit_code_path: "/r/01.exitcode".into(),
+        ..SpawnContext::default()
+    };
+    assert_eq!(
+        launch_crash_reason(&env, &ctx, 127, "harness", Some("p1")),
+        NOT_FOUND_REASON
+    );
+    // Always the harness, whoever launched it.
+    assert_eq!(
+        launch_crash_reason(&env, &ctx, 127, "resolver", None),
+        NOT_FOUND_REASON
+    );
+    assert_eq!(
+        launch_crash_reason(&env, &ctx, 126, "resolver", None),
+        "resolver exited 126"
+    );
+    assert_eq!(
+        launch_crash_reason(&env, &ctx, SPAWN_INTERACTIVE_WRAPPER_LOST, "harness", None),
+        "launch command never ran"
+    );
+    // A harness the table does not know is named by its own name.
+    let ctx = SpawnContext {
+        harness: "ghost".into(),
+        ..ctx
+    };
+    assert_eq!(
+        launch_crash_reason(&env, &ctx, 127, "harness", None),
+        "harness \"ghost\" was not found on the pane's PATH (exit 127)"
+    );
 }

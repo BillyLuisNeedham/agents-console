@@ -28,8 +28,14 @@ pub struct LaunchCadence {
     pub settle_timeout_ms: u64,
     /// How long the Stream file has to appear before the launch is botched.
     pub landed_timeout_ms: u64,
-    /// Between Stream-file probes.
+    /// Between Stream-file probes, and between exit-code reads in the exit probe.
     pub landed_poll_ms: u64,
+    /// How long after the wrapper landed the exit probe watches for an exit code (issue #179): a 127
+    /// inside it is a harness the pane's shell could not find.
+    pub exit_probe_ms: u64,
+    /// The wait before the first retry of a harness not found, doubled for each one after it (issue
+    /// #179).
+    pub not_found_backoff_ms: u64,
     /// How long the dialog is given to render its controls before the first key.
     pub dialog_settle_ms: u64,
     /// The gap between moving the highlight and confirming.
@@ -52,6 +58,8 @@ impl Default for LaunchCadence {
             settle_timeout_ms: 10_000,
             landed_timeout_ms: 10_000,
             landed_poll_ms: 50,
+            exit_probe_ms: 1_000,
+            not_found_backoff_ms: 15_000,
             dialog_settle_ms: 1_500,
             dialog_key_gap_ms: 800,
             dialog_confirm_ms: 2_000,
@@ -279,6 +287,26 @@ pub async fn wait_for_wrapper_landed(
         sleep_ms(cadence.landed_poll_ms).await;
     }
     landed()
+}
+
+/// The exit probe (issue #179): once the wrapper landed, watch the exit-code file for
+/// `exit_probe_ms`, reading it every `landed_poll_ms`. The code the harness exited with when one was
+/// written inside the window, `None` when the window passed without one. Nothing else ends the probe
+/// early, so a healthy launch spends the whole window here.
+pub async fn probe_early_exit(exit_code_path: &str, cadence: &LaunchCadence) -> Option<i64> {
+    let read = || {
+        js::read_text(exit_code_path)
+            .ok()
+            .and_then(|text| js::trim(&text).parse::<i64>().ok())
+    };
+    let deadline = Instant::now() + Duration::from_millis(cadence.exit_probe_ms);
+    while Instant::now() < deadline {
+        if let Some(code) = read() {
+            return Some(code);
+        }
+        sleep_ms(cadence.landed_poll_ms).await;
+    }
+    read()
 }
 
 /// Send the session's wrapper to its pane (ADR-0014): text and Enter in one `pane.send_input` call,
@@ -644,6 +672,8 @@ mod tests {
             settle_timeout_ms: 1_000,
             landed_timeout_ms: 300,
             landed_poll_ms: 20,
+            exit_probe_ms: 100,
+            not_found_backoff_ms: 50,
             dialog_settle_ms: 20,
             dialog_key_gap_ms: 20,
             dialog_confirm_ms: 20,

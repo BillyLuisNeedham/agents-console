@@ -748,3 +748,114 @@ async fn a_refused_start_gives_back_the_id_reserved_for_it() {
     let reserved = engine.call(|s| reserved_ids(s)).await.unwrap();
     assert!(reserved.is_empty(), "still reserved: {reserved:?}");
 }
+
+// A Conversation whose harness the pane's shell never finds (issue #179) spends every not-found try
+// before it crashes: its worktree and branch outlive the first retry and go only after the last one,
+// and the crash names the missing command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_whose_harness_is_never_found_crashes_only_after_every_try() {
+    let pool = Pool::git(&[]);
+    std::fs::write(
+        pool.file("console.json"),
+        r#"{"defaults": {"harness": "claude", "model": "m"}, "terminal": "herdr"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(pool.file("conversations")).unwrap();
+    let runs = pool.file("runs");
+    let stream_path = runs.join("conv-1.stream.jsonl");
+    let exit_code_path = runs.join("conv-1.exitcode");
+    // Every wrapper runs, and the shell finds no harness: script's Stream file, then a 127.
+    let fake = FakeHerdr::start(Options {
+        script: Some(Arc::new(move |method: &str, params: &Value| {
+            let wrapper = method == "pane.send_input"
+                && params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with("script -eq"));
+            if wrapper {
+                std::fs::write(&stream_path, "").unwrap();
+                std::fs::write(&exit_code_path, "127\n").unwrap();
+            }
+            match method {
+                "pane.read" => reply(json!({ "read": { "text": "$ " } })),
+                _ => None,
+            }
+        })),
+        ..Options::default()
+    })
+    .await;
+    let mut options = pool.options();
+    options.harnesses = Some(ac_core::harness::Harnesses::defaults());
+    options.herdr_socket = Some(ac_core::js::path_text(fake.herdr().socket_path()));
+    options.conversation_poll_ms = Some(3_600_000);
+    options.launch_cadence = Some(crate::pane_session::LaunchCadence {
+        settle_poll_ms: 10,
+        settle_confirmations: 2,
+        settle_timeout_ms: 500,
+        landed_timeout_ms: 200,
+        landed_poll_ms: 20,
+        exit_probe_ms: 100,
+        not_found_backoff_ms: 50,
+        dialog_settle_ms: 20,
+        dialog_key_gap_ms: 20,
+        dialog_confirm_ms: 20,
+        readiness_poll_ms: 20,
+        readiness_timeout_ms: 1_000,
+    });
+    let engine = crate::boot::start_pool(options).await.unwrap();
+    let starting = tokio::spawn({
+        let engine = engine.clone();
+        async move {
+            start(
+                &engine,
+                ac_protocol::StartConversationRequest {
+                    title: "Talk".into(),
+                    opening: Some("hello".into()),
+                    role: None,
+                    assign: None,
+                    spawned_by: None,
+                    id: None,
+                },
+            )
+            .await
+        }
+    });
+    wait_until(|| {
+        pool.kinds("conv-1")
+            .contains(&TicketEventKind::LaunchRetried)
+    })
+    .await;
+    let worktree = git::worktree_path_for(&pool.path, "conv-1", None);
+    assert!(git::branch_exists(&pool.path, "conv-1", None));
+    assert!(std::path::Path::new(&worktree).exists());
+
+    let view = starting.await.unwrap().unwrap();
+    assert_eq!(view.status, ConversationStatus::Crashed);
+    let events = pool.events("conv-1");
+    let retried: Vec<&ac_protocol::TicketEvent> = events
+        .iter()
+        .filter(|event| event.kind == TicketEventKind::LaunchRetried)
+        .collect();
+    assert_eq!(
+        retried.len(),
+        crate::attempt_run::NOT_FOUND_TRIES as usize - 1
+    );
+    assert_eq!(
+        retried
+            .iter()
+            .map(|e| e.payload["try"].clone())
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5].map(Value::from)
+    );
+    let crash = events
+        .iter()
+        .find(|event| event.kind == TicketEventKind::Crash)
+        .unwrap();
+    assert_eq!(crash.payload["code"], json!(127));
+    assert_eq!(
+        crash.payload["reason"],
+        json!("harness \"claude\" was not found on the pane's PATH (exit 127)")
+    );
+    assert!(!git::branch_exists(&pool.path, "conv-1", None));
+    assert!(!std::path::Path::new(&worktree).exists());
+}
