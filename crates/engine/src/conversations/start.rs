@@ -25,7 +25,7 @@ use super::*;
 use crate::actor::Engine;
 use crate::attempt_run::{
     AttemptEvents, AttemptHandle, AttemptHandleState, AttemptNaming, AttemptSpec, CrashSubject,
-    Fallback, PromptDelivery, Rotate, launch_attempt, with_launch_detail,
+    Fallback, PromptDelivery, Rotate, launch_attempt, launch_crash_reason,
 };
 use crate::error::EngineError;
 use crate::tickets::attempt_env_of;
@@ -326,15 +326,7 @@ fn after_launch(
             &p.file,
             ConversationStatus::Crashed,
         );
-        let reason = with_launch_detail(
-            crate::attempt_ending::exit_crash_reason(
-                code,
-                &handle.ctx.exit_code_path,
-                "harness",
-                handle.pane_id.as_deref(),
-            ),
-            &handle,
-        );
+        let reason = launch_crash_reason(&handle, code);
         event1(
             s,
             &id,

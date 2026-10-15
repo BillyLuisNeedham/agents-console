@@ -41,6 +41,10 @@ pub struct LaunchCadence {
     pub readiness_poll_ms: u64,
     /// The readiness bound ([`READINESS_TIMEOUT_MS`]), fixed in the TypeScript, a test seam here too.
     pub readiness_timeout_ms: u64,
+    /// How long a landed wrapper is watched for an exit-code file reading 127 (issue #179).
+    pub exit_probe_ms: u64,
+    /// The first wait before a harness-not-found try is retried; it doubles with each such retry.
+    pub not_found_backoff_ms: u64,
 }
 
 /// `DEFAULT_LAUNCH_CADENCE`.
@@ -57,6 +61,8 @@ impl Default for LaunchCadence {
             dialog_confirm_ms: 2_000,
             readiness_poll_ms: READINESS_POLL_MS,
             readiness_timeout_ms: READINESS_TIMEOUT_MS,
+            exit_probe_ms: 1_000,
+            not_found_backoff_ms: 15_000,
         }
     }
 }
@@ -279,6 +285,30 @@ pub async fn wait_for_wrapper_landed(
         sleep_ms(cadence.landed_poll_ms).await;
     }
     landed()
+}
+
+/// The code a shell exits with when it cannot find the command: the pane's PATH has no harness.
+pub const HARNESS_NOT_FOUND_EXIT: i64 = 127;
+
+/// The exit probe (issue #179): whether a landed wrapper's harness was not found on the pane's PATH,
+/// its exit-code file reading 127 within the probe window. The file is read every `landed_poll_ms`
+/// until it holds a code; a harness still running writes none, so the probe waits the whole window.
+pub async fn probe_harness_not_found(exit_code_path: &str, cadence: &LaunchCadence) -> bool {
+    let code = || {
+        js::read_text(exit_code_path)
+            .ok()
+            .and_then(|text| js::trim(&text).parse::<i64>().ok())
+    };
+    let deadline = Instant::now() + Duration::from_millis(cadence.exit_probe_ms);
+    loop {
+        if let Some(code) = code() {
+            return code == HARNESS_NOT_FOUND_EXIT;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep_ms(cadence.landed_poll_ms).await;
+    }
 }
 
 /// Send the session's wrapper to its pane (ADR-0014): text and Enter in one `pane.send_input` call,
@@ -649,6 +679,8 @@ mod tests {
             dialog_confirm_ms: 20,
             readiness_poll_ms: 20,
             readiness_timeout_ms: 1_000,
+            exit_probe_ms: 50,
+            not_found_backoff_ms: 20,
         }
     }
 

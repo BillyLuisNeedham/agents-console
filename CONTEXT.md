@@ -175,7 +175,7 @@ Starting an Attempt's harness: headless, spawning the child; Terminal-backed, op
 _Avoid_: spawn (that's a proposed follow-up ticket), start (the operator starts a Conversation; the engine launches its Attempt), boot (the pool's)
 
 **Botched launch**:
-A Launch whose wrapper command never ran, so no harness ever started: the pane's shell was still starting when the command was typed and swallowed part of it. Retried into a fresh tab a bounded number of times before it counts as the Attempt's crash; never graded, and a Conversation it fails leaves no worktree or branch behind, since nothing ever ran in them. Distinct from a harness that ran and died, whose own exit code is the ending.
+A Launch whose wrapper command never ran, so no harness ever started: the pane's shell was still starting when the command was typed and swallowed part of it. Retried into a fresh tab a bounded number of times before it counts as the Attempt's crash; never graded, and a Conversation it fails leaves no worktree or branch behind, since nothing ever ran in them. Also a Launch whose harness command the pane's shell could not find, the wrapper having run but exited 127 within moments (claude's auto-updater replacing its binary, issue #179): that one is retried with a backoff of minutes, not at once, on its own budget, and its last try ends as the harness's own exit. Distinct from a harness that ran and died, whose own exit code is the ending.
 _Avoid_: spawn race (the mechanism, not the thing), dead on arrival, readiness timeout (a launch whose harness ran but never painted; that one is not retried)
 
 **Folder trust**:

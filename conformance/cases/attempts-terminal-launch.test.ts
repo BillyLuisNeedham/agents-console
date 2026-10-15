@@ -2,7 +2,9 @@
  * A terminal-backed launch that does not go to plan, seen from outside the
  * server (ADR-0036): a fresh tab whose shell has not drawn its prompt yet,
  * a wrapper the shell swallowed (a Botched launch, issue #102) retried into
- * a fresh tab, and claude's Blocking dialogs (issue #127), the workspace
+ * a fresh tab, a harness the pane's shell could not find (exit 127, issue
+ * #179) retried into one after a backoff, and claude's Blocking dialogs
+ * (issue #127), the workspace
  * trust dialog answered by name and the ones only the operator may answer.
  * Rows of the `attempts` area the Rust port inventory gives ticket C12
  * (docs/research/rust-port/test-inventory.md), and that area's gaps on
@@ -21,6 +23,7 @@ import {
   keySends,
   logTailOf,
   MANAGED_SETTINGS,
+  missingHarness,
   paneFrameLog,
   promptFor,
   READY,
@@ -35,6 +38,11 @@ import {
 import { callsOf } from "../harness/herdr.ts";
 
 const LAUNCH_NEVER_RAN = "launch command never ran";
+
+const HARNESS_NOT_FOUND = "harness not found (exit 127)";
+
+/** The first wait before a not-found try is retried, with the default cadence. */
+const NOT_FOUND_BACKOFF_MS = 15_000;
 
 /** What claude shows once it has left the dialog but before it is up: neither a dialog nor its ready frame. */
 const STARTING = "starting the session\nplease wait";
@@ -133,6 +141,78 @@ conformance("attempts", "the wrapper waits for a fresh tab's shell to draw its p
   expect(wrapper.at - tab.at).toBeGreaterThanOrEqual(300);
   expect(callsOf(herdr, "tab.create")).toHaveLength(1);
   expect(readEvents(world.pool, "01").map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited"]);
+});
+
+// Issue #179: a harness not found at launch is a Botched launch, retried after a backoff
+conformance(
+  "attempts",
+  "a launch whose harness is not found (exit 127) is retried in a fresh tab after the backoff, and only that tab is spawned (slow: the 15 s backoff)",
+  async (t) => {
+    const world = t.world({ tickets: [ticket("01", "Not found once")], config: terminalConfig() });
+    // claude is gone from the pane's PATH, as while its auto-updater replaces it, until the first retry.
+    const restore = missingHarness(world, "claude");
+    const herdr = await t.herdr(world, { rendered: READY.claude });
+    await t.start(world, { herdr });
+    const retried = await untilEvent(world, "01", "launch-retried");
+    restore();
+    await untilTicketStatus(world, "01", "done", 60_000);
+
+    const events = readEvents(world.pool, "01");
+    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited"]);
+    expect(retried.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: HARNESS_NOT_FOUND });
+    expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2", terminal_id: "term-2" });
+    // The botched tab is closed; the one the launch ended up in is not.
+    await herdr.waitForCall((call) => call.method === "tab.close");
+    await herdr.settle();
+    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }]);
+    // The second tab opened only once the backoff had passed.
+    const tabs = callsOf(herdr, "tab.create");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[1]!.at - Date.parse(retried.at)).toBeGreaterThanOrEqual(NOT_FOUND_BACKOFF_MS);
+    // Each try's wrapper went as one send, and the prompt into the live pane only.
+    const wrapper = wrapperFor(world, "01", interactiveArgv("claude"));
+    expect(wrapperSends(herdr).map((call) => call.params)).toEqual([
+      { pane_id: "w1:p1", text: wrapper, keys: ["enter"] },
+      { pane_id: "w1:p2", text: wrapper, keys: ["enter"] },
+    ]);
+    expect(await herdr.control<string[]>("submitted")).toEqual([promptFor(world, "01")]);
+  },
+  { slow: true },
+);
+
+// Issue #179: only a harness not found is retried; 126 (found, not runnable) is not
+conformance("attempts", "a harness that exits 126 before its TUI is up is not retried and crashes with its own code", async (t) => {
+  const world = t.world({ tickets: [ticket("01", "Not runnable")], config: terminalConfig() });
+  missingHarness(world, "claude", 126);
+  // No ready frame: the readiness wait sees the exit code first.
+  const herdr = await t.herdr(world, { rendered: "" });
+  await t.start(world, { herdr });
+
+  const crash = await untilEvent(world, "01", "crash");
+  expect(readEvents(world.pool, "01").map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited", "crash"]);
+  expect(crash.payload).toMatchObject({ code: 126, reason: "harness exited 126" });
+  expect(spawnedPayloads(world, "01")[0]).toMatchObject({ pane_id: "w1:p1", tab_id: "w1:t1" });
+  expect(callsOf(herdr, "tab.create")).toHaveLength(1);
+  expect(wrapperSends(herdr)).toHaveLength(1);
+});
+
+// Issue #179: a 127 after the exit probe's window is not retried, but its crash names the harness not found
+conformance("attempts", "a harness not found (exit 127) only after the exit probe is not retried, and the crash names it", async (t) => {
+  const world = t.world({ tickets: [ticket("01", "Not found late")], config: terminalConfig() });
+  // The 127 lands three seconds in, past the probe's one second and before any ready frame.
+  missingHarness(world, "claude", 127, 3);
+  const herdr = await t.herdr(world, { rendered: "" });
+  await t.start(world, { herdr });
+
+  const crash = await untilEvent(world, "01", "crash");
+  expect(readEvents(world.pool, "01").map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited", "crash"]);
+  expect(crash.payload).toMatchObject({
+    code: 127,
+    reason: 'harness "claude" was not found on the pane\'s PATH (exit 127)',
+  });
+  expect(spawnedPayloads(world, "01")[0]).toMatchObject({ pane_id: "w1:p1", tab_id: "w1:t1" });
+  expect(callsOf(herdr, "tab.create")).toHaveLength(1);
+  expect(wrapperSends(herdr)).toHaveLength(1);
 });
 
 // attempt-run.test.ts:1634 claude's Blocking dialogs on launch (issue #127)
