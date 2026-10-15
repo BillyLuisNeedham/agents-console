@@ -1,8 +1,0 @@
-{"at":"2026-10-15T04:24:55.649Z","attempt":1,"kind":"scheduled","payload":{}}
-{"at":"2026-10-15T04:24:56.106Z","attempt":1,"kind":"spawned","payload":{"argv":["claude","--model","m","--permission-mode","auto"],"cwd":"/tmp/cf-yZvUBp/conformance-qTIrnf/repo","branch":null,"commitSha":"1e7321bb63c1404b69477320ff71637b24327d98","env":{"PWD":"/tmp/cf-yZvUBp/conformance-qTIrnf/repo"},"harness":"claude","model":"m","pane_id":"w1:p1","tab_id":"w1:t1","terminal_id":"term-1"}}
-{"at":"2026-10-15T04:24:57.366Z","attempt":1,"kind":"exited","payload":{"code":0,"status":"checkpoint","logTail":[],"outcomeExists":true}}
-{"at":"2026-10-15T04:24:57.366Z","attempt":1,"kind":"checkpoint","payload":{}}
-{"at":"2026-10-15T04:24:57.387Z","attempt":1,"kind":"answered","payload":{"kind":"checkpoint","action":"keep-talking"}}
-{"at":"2026-10-15T04:24:57.387Z","attempt":2,"kind":"spawned","payload":{"argv":[],"cwd":"/tmp/cf-yZvUBp/conformance-qTIrnf/repo","branch":null,"commitSha":"1e7321bb63c1404b69477320ff71637b24327d98","env":{"PWD":"/tmp/cf-yZvUBp/conformance-qTIrnf/repo"},"harness":"claude","model":"m","pane_id":"w1:p1","tab_id":"w1:t1","terminal_id":"term-1","continued":true,"continues":1,"work_attempt":1,"numbered":false,"stream":"/tmp/cf-yZvUBp/conformance-qTIrnf/repo/.scratch/pool/runs/01.attempt-1.stream.jsonl","stream_offset":0,"wrapped":true}}
-{"at":"2026-10-15T04:24:57.392Z","attempt":2,"kind":"exited","payload":{"code":0,"status":"checkpoint","logTail":[],"outcomeExists":true}}
-{"at":"2026-10-15T04:24:57.392Z","attempt":2,"kind":"checkpoint","payload":{}}
