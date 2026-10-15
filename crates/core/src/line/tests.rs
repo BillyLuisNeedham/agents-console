@@ -815,6 +815,9 @@ fn the_grill_is_taught_its_skills_the_two_files_and_the_operators_start() {
     ));
     assert!(teaching.contains(r#"{"spec": "docs/specs/186.md", "finish": "none", "factory": {}}"#));
     assert!(teaching.contains("The operator then presses Start the Line"));
+    assert!(
+        teaching.contains("Ask the operator about pushBase only when the finish is pr or draft-pr")
+    );
     assert!(!grill_teaching("x", "").contains("Use these skills"));
 }
 
@@ -827,6 +830,7 @@ fn placed(dir: &Path, finish: &str) -> (LineState, ResolvedFactory) {
     let factory = resolve_factory(&FactoryLayers::default(), &brief);
     let places = LinePlaces {
         branch: "line/186".into(),
+        base: None,
         report: js::path_text(&dir.join(report_file_name("docs/specs/186.brief.json"))),
     };
     let (line, _) = start_line(brief, "docs/specs/186.brief.json", &factory, places);
@@ -1081,4 +1085,181 @@ fn a_switched_on_station_on_an_unknown_harness_cannot_launch() {
     // A Station switched off never launches, so its harness is never asked for.
     factory.prove.enabled = false;
     assert_eq!(factory.unknown_harness(&harnesses), None);
+}
+
+const CUT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+// A Line cut from `base_ref` at CUT, its brief granting pushBase or not.
+fn based(dir: &Path, finish: &str, base_ref: &str, push_base: bool) -> LineState {
+    let (mut line, _) = placed(dir, finish);
+    line.base = Some(LineBase {
+        base_ref: base_ref.into(),
+        commit: CUT.into(),
+    });
+    line.brief.push_base = push_base;
+    line
+}
+
+#[test]
+fn start_line_carries_the_line_base_it_was_given() {
+    let brief = brief();
+    let factory = resolve_factory(&FactoryLayers::default(), &brief);
+    let base = LineBase {
+        base_ref: "experiment/x".into(),
+        commit: CUT.into(),
+    };
+    let places = LinePlaces {
+        branch: "line/186".into(),
+        base: Some(base.clone()),
+        report: String::new(),
+    };
+    let (line, _) = start_line(brief, "b.json", &factory, places);
+    assert_eq!(line.base, Some(base));
+    let saved = serde_json::to_value(&line).unwrap();
+    assert_eq!(saved["base"], json!({"ref": "experiment/x", "commit": CUT}));
+    // A Line from before the Line base reads as one with none, and writes none back.
+    let mut old = saved.clone();
+    old.as_object_mut().unwrap().remove("base");
+    let read: LineState = serde_json::from_value(old).unwrap();
+    assert_eq!(read.base, None);
+    assert!(serde_json::to_value(&read).unwrap().get("base").is_none());
+}
+
+fn review_body(line: &mut LineState) -> String {
+    let factory = resolve_factory(&FactoryLayers::default(), &line.brief);
+    let done = outcome(None);
+    let pass = passed();
+    walk(line, &factory, &[StationEnd::Done(&done)]);
+    next(route(line, &factory, StationEnd::Done(&pass))).body
+}
+
+#[test]
+fn review_diffs_from_the_cut_commit_and_a_line_with_no_base_from_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut line = based(dir.path(), "none", "experiment/x", false);
+    let body = review_body(&mut line);
+    assert!(
+        body.contains(&format!(
+            "Review the work on the Line's branch (the changes since it left `experiment/x` at \
+             `{CUT}`: `git diff {CUT}..HEAD`) against the spec"
+        )),
+        "{body}"
+    );
+    let (mut old, _) = placed(dir.path(), "none");
+    let body = review_body(&mut old);
+    assert!(
+        body.contains(
+            "Review the work on the Line's branch (the changes since it left main) against the spec"
+        ),
+        "{body}"
+    );
+}
+
+#[test]
+fn a_pr_targets_the_line_bases_name_on_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = finish_act(
+        "draft-pr",
+        &based(dir.path(), "draft-pr", "experiment/x", false),
+    );
+    assert!(
+        local.contains("gh pr create --draft --base experiment/x --head line/186"),
+        "{local}"
+    );
+    assert!(local.contains("open the PR from `line/186` against `experiment/x`"));
+    let remote = finish_act("pr", &based(dir.path(), "pr", "origin/experiment/x", false));
+    assert!(
+        remote.contains("gh pr create --base experiment/x --head line/186"),
+        "{remote}"
+    );
+    assert!(!remote.contains("--draft"));
+    // Every Finish checks origin as it runs, never another remote.
+    for text in [&local, &remote] {
+        assert!(
+            text.contains("`git ls-remote --heads origin experiment/x`"),
+            "{text}"
+        );
+        assert!(text.contains("origin only, never another remote"));
+    }
+    // A Line with no base targets main and says nothing of one.
+    let (old, _) = placed(dir.path(), "draft-pr");
+    let old = finish_act("draft-pr", &old);
+    assert!(old.contains("gh pr create --draft --base main --head line/186"));
+    assert!(!old.contains("ls-remote") && !old.contains("pushBase"));
+}
+
+#[test]
+fn the_push_grant_rows_say_what_decide_does_on_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let granted = finish_act(
+        "draft-pr",
+        &based(dir.path(), "draft-pr", "experiment/x", true),
+    );
+    assert!(
+        granted.contains(
+            "The Line brief grants `pushBase`: you may push the Line base `experiment/x` to \
+             origin, but only to create it or to fast-forward it. Never force-push it."
+        ),
+        "{granted}"
+    );
+    for row in [
+        "- origin has no `experiment/x`: push the local base to create it (`git push origin \
+         refs/heads/experiment/x:refs/heads/experiment/x`), then open the PR.",
+        "- origin's `experiment/x` is the local `experiment/x`: open the PR.",
+        "- the local `experiment/x` is ahead of origin's (a fast-forward): push it (`git push \
+         origin refs/heads/experiment/x:refs/heads/experiment/x`), then open the PR.",
+        "- they have diverged, so it would take a force-push: push nothing and open no PR, and \
+         say in the report and your Outcome's summary that the Finish was not carried out, and \
+         why.",
+    ] {
+        assert!(granted.contains(row), "{row}\n\n{granted}");
+    }
+    assert!(!granted.contains("--force"));
+
+    let refused = finish_act("pr", &based(dir.path(), "pr", "experiment/x", false));
+    assert!(
+        refused.contains(
+            "The Line brief does not grant `pushBase`: never push the Line base `experiment/x` \
+             to origin."
+        ),
+        "{refused}"
+    );
+    for row in [
+        "- origin has no `experiment/x`: push nothing and open no PR, and say in the report and \
+         your Outcome's summary that the Finish was not carried out, and why.",
+        "- origin's `experiment/x` is the local `experiment/x`: open the PR.",
+        "- the local `experiment/x` is ahead of origin's: open the PR, and note in the report \
+         that it carries the base's unpushed commits.",
+        "- they have diverged, so it would take a force-push: push nothing and open no PR, and \
+         say in the report and your Outcome's summary that the Finish was not carried out, and \
+         why.",
+    ] {
+        assert!(refused.contains(row), "{row}\n\n{refused}");
+    }
+    assert!(!refused.contains("refs/heads/experiment/x:"));
+
+    // Cut from origin's branch there is no local base: origin already has it, so the PR, or none.
+    let remote = finish_act("pr", &based(dir.path(), "pr", "origin/experiment/x", true));
+    assert!(
+        remote.contains(
+            "The Line was cut from `origin/experiment/x`, so origin already had its Line base and \
+             there is no local base to push: never push `experiment/x`."
+        ),
+        "{remote}"
+    );
+    assert!(remote.contains("If origin still has `experiment/x`, open the PR."));
+    assert!(remote.contains("If it no longer does, push nothing and open no PR"));
+    assert!(!remote.contains("refs/heads/experiment/x:"));
+}
+
+#[test]
+fn a_brief_takes_push_base_and_still_refuses_an_unknown_field() {
+    let granted = parse_brief(r#"{"spec": "s.md", "finish": "pr", "pushBase": true}"#).unwrap();
+    assert!(granted.push_base);
+    assert!(!parse_brief(r#"{"spec": "s.md"}"#).unwrap().push_base);
+    assert!(
+        parse_brief(r#"{"spec": "s.md", "pushbase": true}"#)
+            .unwrap_err()
+            .contains("unknown field `pushbase`")
+    );
 }

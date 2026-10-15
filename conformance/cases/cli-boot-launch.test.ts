@@ -27,7 +27,7 @@ const SAVE_SETUP = "save this Setup as (blank to skip)";
 function expectUsage(lines: (string | undefined)[]): void {
   expect(lines[0]).toMatch(/^usage: agent-console( boot)? \[pool-dir\] \[--yes\] \[--relaunch\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/);
   expect(lines[1]).toMatch(
-    /^ {7}agent-console( boot)? --factory \[--work <issue number or text> \| --brief <path>\] \[--line <slug>\] \[--name <dir>\] \[--title <title>\] \[--config <json file>\] \[--no-steward\] \[--yes\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/,
+    /^ {7}agent-console( boot)? --factory \[--work <issue number or text> \| --brief <path>\] \[--from <branch>\] \[--line <slug>\] \[--name <dir>\] \[--title <title>\] \[--config <json file>\] \[--no-steward\] \[--yes\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/,
   );
 }
 
@@ -321,7 +321,10 @@ conformance("cli", "Boot prints its usage on --help and refuses bad flags and ar
   expect(help.code).toBe(0);
   expect(help.stdout.endsWith("\n")).toBe(true);
   expectUsage(help.stdout.split("\n").slice(0, 2));
-  expect(help.stdout).toContain("\nFactory mode (ADR-0037) cuts line/<slug> from main");
+  expect(help.stdout).toContain(
+    "\nFactory mode (ADR-0037) cuts line/<slug> from the branch this checkout has out (or from\n--from's)",
+  );
+  expect(help.stdout).toContain("\n  --from <branch>        the Line base: the branch to cut the Line from");
   expect(help.stdout).toContain("\n  --brief <path>         a ready Line brief");
   const nope = await w.run("boot", ["--nope"], { cwd });
   const two = await w.run("boot", ["a", "b"], { cwd });

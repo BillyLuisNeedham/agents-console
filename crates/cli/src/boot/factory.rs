@@ -1,6 +1,7 @@
 //! Boot's Factory mode (issue #187, ADR-0037, ADR-0038): a Factory pool runs one Line on a branch of its
-//! own, so Boot cuts `line/<slug>` from main before there is any pool, and the pool lives inside that
-//! branch's checkout.
+//! own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s) before there
+//! is any pool, and the pool lives inside that branch's checkout. The base goes into the pool's
+//! console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
 //!
 //! The engine finds a pool's checkout from the pool directory (the git toplevel above it) and merges
 //! into whatever that checkout has out. So Boot gives the Line branch a worktree of its own, at
@@ -13,6 +14,7 @@
 //! the Line hands off from it. Given a ready brief (`--brief`), Boot commits the brief and its spec onto
 //! the Line branch and starts Round 1 at once, with no Grill and no question asked.
 
+use ac_protocol::LineBase;
 use serde_json::{Map, Value};
 
 use ac_core::js;
@@ -151,15 +153,29 @@ its Stations moving through the checkpoints that are yours to answer. The Finish
 operator's: when the Line waits there, say in your pane where the Line stands and wait. End yourself \
 once the Line is done.";
 
-/// The Grill's first Turn: the work as the operator gave it, an issue number spelled out.
-pub fn grill_opening(work: &str) -> String {
+/// The Grill's first Turn: the work as the operator gave it, an issue number spelled out, and the Line
+/// base it was cut from.
+pub fn grill_opening(work: &str, base: &LineBase) -> String {
+    let cut = format!(
+        "This Line was cut from `{}` at `{}`.",
+        base.base_ref,
+        short_commit(&base.commit)
+    );
     match issue_number(work) {
         Some(number) => format!(
             "The piece of work for this Line is issue #{number}. Read it (gh issue view {number}) \
-             and grill me on it."
+             and grill me on it. {cut}"
         ),
-        None => format!("The piece of work for this Line:\n\n{}", js::trim(work)),
+        None => format!(
+            "The piece of work for this Line:\n\n{}\n\n{cut}",
+            js::trim(work)
+        ),
     }
+}
+
+/// A commit as Boot shows it: its first seven characters.
+pub fn short_commit(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
 }
 
 /// A slug whose `line/<slug>` branch and worktree directory are both free: the slug itself, else the
@@ -174,13 +190,48 @@ pub fn free_line_slug(slug: &str, taken: impl Fn(&str) -> bool) -> String {
         .unwrap_or_else(|| slug.to_owned())
 }
 
-/// The ref a Line is cut from: the local main, else the remote's.
-fn main_ref(top: &str) -> Option<String> {
-    ["refs/heads/main", "refs/remotes/origin/main"]
-        .into_iter()
-        .find(|name| git_line(top, &["rev-parse", "--verify", "--quiet", name]).is_some())
-        .map(|name| name.trim_start_matches("refs/heads/").to_owned())
-        .map(|name| name.trim_start_matches("refs/remotes/").to_owned())
+/// The branch `--from` names, as a full ref: a local branch, else a remote-tracking one as written
+/// (`origin/x`), else origin's. Branches only: a tag, a commit or anything else is refused, naming what
+/// was tried. Nothing is fetched; the refs are taken as they are.
+pub fn resolve_from(name: &str, exists: impl Fn(&str) -> bool) -> Result<String, String> {
+    let tried = [
+        format!("refs/heads/{name}"),
+        format!("refs/remotes/{name}"),
+        format!("refs/remotes/origin/{name}"),
+    ];
+    tried
+        .iter()
+        .find(|full| exists(full))
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "--from {name}: no branch {}, {} or {}; --from takes a branch (local or \
+                 remote-tracking), never a tag or a commit",
+                tried[0], tried[1], tried[2]
+            )
+        })
+}
+
+/// A full branch ref as the Line base names it: `experiment/x`, or `origin/experiment/x`.
+pub fn short_ref(full: &str) -> &str {
+    full.strip_prefix("refs/heads/")
+        .or_else(|| full.strip_prefix("refs/remotes/"))
+        .unwrap_or(full)
+}
+
+// The full ref the Line is cut from: `--from`'s branch, else the branch the checkout has out.
+fn base_ref(top: &str, from: Option<&str>) -> Result<String, String> {
+    match from {
+        Some(name) => resolve_from(name, |full| {
+            git_ok(top, &["show-ref", "--verify", "--quiet", full]).is_ok()
+        }),
+        None => git_line(top, &["symbolic-ref", "--quiet", "HEAD"]).ok_or_else(|| {
+            format!(
+                "{top} has a detached HEAD, so there is no current branch to cut the Line from: \
+                 check out a branch, or pass --from <branch>"
+            )
+        }),
+    }
 }
 
 fn git_ok(cwd: &str, args: &[&str]) -> Result<(), String> {
@@ -202,15 +253,20 @@ pub struct CutLine {
     pub slug: String,
     pub branch: String,
     pub worktree: String,
-    pub from: String,
+    /// The Line base: the branch it was cut from and the commit it was cut at.
+    pub base: LineBase,
 }
 
-/// Cut `line/<slug>` from main into its own worktree under `<top>/.scratch/lines/`, keeping
-/// `.scratch/` out of the history the worktree shares.
-pub fn cut_line(top: &str, slug: &str, io: &mut dyn BootIo) -> Result<CutLine, String> {
-    let from = main_ref(top).ok_or_else(|| {
-        format!("{top} has no main branch (local or origin/main) to cut the Line's branch from")
-    })?;
+/// Cut `line/<slug>` from its Line base (`from`, else the current branch) into its own worktree under
+/// `<top>/.scratch/lines/`, keeping `.scratch/` out of the history the worktree shares. The Line branch
+/// never tracks its base, so a bare `git push` of it can never land there.
+pub fn cut_line(
+    top: &str,
+    slug: &str,
+    from: Option<&str>,
+    io: &mut dyn BootIo,
+) -> Result<CutLine, String> {
+    let from = base_ref(top, from)?;
     let lines = js::path_join(&[top, ".scratch", LINES_DIR]);
     let slug = free_line_slug(slug, |candidate| {
         let branch = format!("refs/heads/{LINE_BRANCH_PREFIX}{candidate}");
@@ -229,13 +285,36 @@ pub fn cut_line(top: &str, slug: &str, io: &mut dyn BootIo) -> Result<CutLine, S
     }
     git_ok(
         top,
-        &["worktree", "add", "-q", "-b", &branch, &worktree, &from],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--no-track",
+            "-b",
+            &branch,
+            &worktree,
+            &from,
+        ],
     )?;
+    // The commit the new branch points at is the cut, whatever the base does afterwards.
+    let commit = git_line(
+        top,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+    )
+    .ok_or_else(|| format!("{branch} was cut but has no commit"))?;
     Ok(CutLine {
         slug,
         branch,
         worktree,
-        from,
+        base: LineBase {
+            base_ref: short_ref(&from).to_owned(),
+            commit,
+        },
     })
 }
 
@@ -345,14 +424,58 @@ mod tests {
     }
 
     #[test]
-    fn the_grill_opening_spells_out_an_issue_and_keeps_free_text() {
-        assert!(
-            grill_opening("#186").starts_with("The piece of work for this Line is issue #186.")
+    fn the_grill_opening_spells_out_an_issue_keeps_free_text_and_names_the_base() {
+        let base = LineBase {
+            base_ref: "experiment/x".to_owned(),
+            commit: "abc1234def5678".to_owned(),
+        };
+        let issue = grill_opening("#186", &base);
+        assert!(issue.starts_with("The piece of work for this Line is issue #186."));
+        assert!(issue.ends_with("This Line was cut from `experiment/x` at `abc1234`."));
+        assert_eq!(
+            grill_opening("  tidy the header  ", &base),
+            "The piece of work for this Line:\n\ntidy the header\n\nThis Line was cut from \
+             `experiment/x` at `abc1234`."
+        );
+    }
+
+    #[test]
+    fn from_resolves_a_local_branch_then_a_remote_tracking_one_then_origins() {
+        let refs = [
+            "refs/heads/experiment/x",
+            "refs/remotes/origin/experiment/x",
+            "refs/remotes/origin/only-remote",
+            "refs/remotes/upstream/y",
+        ];
+        let exists = |full: &str| refs.contains(&full);
+        assert_eq!(
+            resolve_from("experiment/x", exists).unwrap(),
+            "refs/heads/experiment/x"
         );
         assert_eq!(
-            grill_opening("  tidy the header  "),
-            "The piece of work for this Line:\n\ntidy the header"
+            resolve_from("origin/experiment/x", exists).unwrap(),
+            "refs/remotes/origin/experiment/x"
         );
+        assert_eq!(
+            resolve_from("only-remote", exists).unwrap(),
+            "refs/remotes/origin/only-remote"
+        );
+        assert_eq!(
+            resolve_from("upstream/y", exists).unwrap(),
+            "refs/remotes/upstream/y"
+        );
+        assert_eq!(
+            resolve_from("v1.0", exists).unwrap_err(),
+            "--from v1.0: no branch refs/heads/v1.0, refs/remotes/v1.0 or refs/remotes/origin/v1.0; \
+             --from takes a branch (local or remote-tracking), never a tag or a commit"
+        );
+        assert_eq!(short_ref("refs/heads/experiment/x"), "experiment/x");
+        assert_eq!(
+            short_ref("refs/remotes/origin/experiment/x"),
+            "origin/experiment/x"
+        );
+        assert_eq!(short_commit("abc1234def"), "abc1234");
+        assert_eq!(short_commit("abc"), "abc");
     }
 
     #[test]

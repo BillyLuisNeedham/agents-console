@@ -121,6 +121,7 @@ fn grill_layer(s: &Session, req: &StartConversationRequest) -> Option<Assignment
             spec: String::new(),
             finish: None,
             factory: None,
+            push_base: false,
         },
     );
     let grill = &factory.grill;

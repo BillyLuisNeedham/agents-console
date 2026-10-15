@@ -61,6 +61,13 @@ export interface RepoSpec {
   subjects?: string[];
   /** Files committed with the first commit, by path in the repository. */
   files?: Record<string, string>;
+  /**
+   * A throwaway bare repository at `<path>.origin.git` under the root, added
+   * as `origin`, with the checked-out branch pushed to it, so
+   * `refs/remotes/origin/<branch>` exists. Never a real remote. A case
+   * pushes and fetches further branches with git in the repository.
+   */
+  origin?: boolean;
 }
 
 export interface RunOptions {
@@ -99,7 +106,7 @@ export interface CliWorld {
   dir(path: string): string;
   /** A file under the root, its directories made. */
   write(path: string, content: string | Buffer): string;
-  /** A git repository at `path` under the root, committed as the spec says. */
+  /** A git repository at `path` under the root, committed as the spec says, with a bare origin when asked. */
   repo(path: string, spec?: RepoSpec): string;
   /** Run a command line and wait for it. */
   run(command: Command, args: string[], options?: RunOptions): Promise<CliRun>;
@@ -254,6 +261,19 @@ export function cliWorld(t: Case, spec: CliSpec = {}): CliWorld {
         if (index === 0) git(["add", "-A"]);
         git(["commit", "-q", "--allow-empty", "-m", subject]);
       });
+      if (repoSpec.origin) {
+        const bare = world.dir(`${path}.origin.git`);
+        const init = Bun.spawnSync(["git", "init", "-q", "--bare", "-b", repoSpec.branch ?? "main"], {
+          cwd: bare,
+          env: env(),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (init.exitCode !== 0) throw new Error(`git init --bare failed: ${init.stderr.toString()}`);
+        git(["remote", "add", "origin", bare]);
+        git(["push", "-q", "origin", "HEAD"]);
+        git(["fetch", "-q", "origin"]);
+      }
       return repo;
     },
     async run(command, args, options = {}) {

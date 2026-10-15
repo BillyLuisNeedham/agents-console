@@ -132,6 +132,7 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     session.line_factory = Some(factory.clone());
     let places = LinePlaces {
         branch: target_branch(session),
+        base: line_base(session),
         report: js::path_text(&Path::new(&session.runs_dir).join(report_file_name(&path))),
     };
     let (line, first) = begin_line(brief, &path, &factory, places);
@@ -203,6 +204,13 @@ fn refuse_if_taken(session: &Session, first: &NewTicket) -> Result<(), EngineErr
         ))),
         None => Ok(()),
     }
+}
+
+// The Line base Boot's Factory mode wrote into console.json (issue #193): none in a pool Boot did not
+// cut, whose Line reads as cut from main.
+fn line_base(session: &Session) -> Option<ac_protocol::LineBase> {
+    let value = session.state.config.get("lineBase")?;
+    serde_json::from_value(value.clone()).ok()
 }
 
 // The branch the pool merges into: the one an enlist captured, else the pool checkout's own.

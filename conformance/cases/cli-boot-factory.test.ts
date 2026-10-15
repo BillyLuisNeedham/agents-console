@@ -1,9 +1,10 @@
 /**
  * Boot's Factory mode (issue #187, ADR-0037, ADR-0038), run as a process:
- * it cuts `line/<slug>` from main into a worktree of its own under
- * `.scratch/lines/`, leaving the branch the operator's checkout has out
- * alone, and makes the Factory pool inside that worktree, so the pool's
- * target branch is the Line's. Given a ready brief it commits the brief and
+ * it cuts `line/<slug>` from its Line base (issue #193: the branch the
+ * operator's checkout has out, unless --from names another) into a worktree
+ * of its own under `.scratch/lines/`, leaving that checkout's branch alone,
+ * and makes the Factory pool inside that worktree, so the pool's target
+ * branch is the Line's. Given a ready brief it commits the brief and
  * its spec onto the Line branch and starts Round 1 at once, asking nothing;
  * asked for the work, it opens the Grill with the work as its first Turn.
  */
@@ -20,12 +21,16 @@ const MACHINE = { harness: "claude", model: "m", drivers: "implement" };
 const SPEC = "# A Continued attempt's checkpoint drops its spawns (issue #186)\n\nThe spec.\n";
 const BRIEF = { spec: "pilots/186.md", finish: "draft-pr", factory: {} };
 
-/** A checkout on main with a feature branch out, and the pilot's brief and spec beside it, uncommitted. */
+/**
+ * A checkout with a feature branch out, one commit ahead of main, and the pilot's brief and spec beside
+ * it, uncommitted.
+ */
 function checkout(w: CliWorld): string {
   const repo = w.repo("repo");
   const git = (args: string[]): string =>
     Bun.spawnSync(["git", ...args], { cwd: repo, env: w.env(), stdout: "pipe" }).stdout.toString().trim();
   git(["checkout", "-q", "-b", "feature/x"]);
+  git(["commit", "-q", "--allow-empty", "-m", "feature work"]);
   w.write("repo/pilots/186.md", SPEC);
   w.write("repo/pilots/186.brief.json", JSON.stringify(BRIEF));
   return repo;
@@ -38,7 +43,7 @@ function gitIn(w: CliWorld, dir: string, args: string[]): string {
 
 const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
 
-conformance("cli", "Boot --brief cuts the Line from main into its own worktree, commits the spec and brief there and starts Round 1, asking nothing", async (t) => {
+conformance("cli", "Boot --brief cuts the Line from the current branch into its own worktree, commits the spec and brief there and starts Round 1, asking nothing", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
   w.write("repo/steward.json", JSON.stringify({ steward: { budget: 10, mayAdoptLineSpawns: true } }));
@@ -51,7 +56,8 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
   expect(run.code, run.stderr).toBe(0);
   expect(run.prompts).toEqual([]);
   const tree = join(repo, ".scratch", "lines", "186");
-  expect(run.stdout).toContain(`line: cut line/186 from main at ${tree}\n`);
+  const base = gitIn(w, repo, ["rev-parse", "feature/x"]);
+  expect(run.stdout).toContain(`line: cut line/186 from feature/x (${base.slice(0, 7)}) at ${tree}\n`);
   expect(run.stdout).toContain("line: committed docs/specs/186.brief.json and its spec onto line/186\n");
   expect(run.stdout).toContain("line: started; Round 1's r1-implement is written\n");
 
@@ -59,7 +65,7 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
   expect(gitIn(w, tree, ["branch", "--show-current"])).toBe("line/186");
   expect(gitIn(w, tree, ["log", "-1", "--format=%s"])).toBe("Write down the spec and the Line brief for line/186");
-  expect(gitIn(w, repo, ["rev-parse", "line/186~1"])).toBe(gitIn(w, repo, ["rev-parse", "main"]));
+  expect(gitIn(w, repo, ["rev-parse", "line/186~1"])).toBe(base);
   expect(JSON.parse(gitIn(w, repo, ["show", "line/186:docs/specs/186.brief.json"]))).toEqual({
     ...BRIEF,
     spec: "docs/specs/186.md",
@@ -74,6 +80,8 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
     steward: { budget: 10, mayAdoptLineSpawns: true },
     // Marked a Factory pool: it raises no run-wide Review (ADR-0037).
     factoryPool: true,
+    // The Line base, chosen once: the branch it was cut from and the commit it was cut at.
+    lineBase: { ref: "feature/x", commit: base },
   });
   expect(readJson(join(pool, "line.json"))).toMatchObject({
     briefPath: "docs/specs/186.brief.json",
@@ -81,6 +89,8 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
     round: 1,
     station: "implement",
     ticket: "r1-implement",
+    branch: "line/186",
+    base: { ref: "feature/x", commit: base },
   });
   expect(readFileSync(join(pool, "issues", "r1-implement.md"), "utf8").split("\n", 1)[0]).toContain(
     "id=r1-implement blocked-by=none",
@@ -94,7 +104,7 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
   expect(again.code, again.stderr).toBe(0);
   // --no-steward: Boot starts none and says nothing of one.
   expect(`${again.stdout}${again.stderr}`).not.toContain("steward");
-  expect(again.stdout).toContain("line: cut line/186-2 from main");
+  expect(again.stdout).toContain(`line: cut line/186-2 from feature/x (${base.slice(0, 7)}) at `);
   expect(readJson(join(repo, ".scratch", "lines", "186-2", ".scratch", "186-2", "console.json"))).toMatchObject({
     title: "A Continued attempt's checkpoint drops its spawns (issue #186)",
   });
@@ -119,14 +129,20 @@ conformance("cli", "Boot --factory asks for the work, cuts the Line and opens th
   expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
   expect(run.prompts[0]).toBe("the piece of work (an issue number or free text)");
   expect(run.prompts[1]).toBe("title for the Line's pool [Issue #186]");
-  expect(run.stdout).toContain("line: cut line/186 from main");
+  const base = gitIn(w, repo, ["rev-parse", "feature/x"]);
+  expect(run.stdout).toContain(`line: cut line/186 from feature/x (${base.slice(0, 7)}) at `);
   expect(run.stdout).toContain("grill: conv-1 opened with the work as its first Turn");
   // The Steward is on by default in a Factory pool, started after the Grill.
   expect(run.stdout).toContain("steward: conv-2 on duty; it never answers the Finish checkpoint\n");
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 
   const pool = join(repo, ".scratch", "lines", "186", ".scratch", "186");
-  expect(readJson(join(pool, "console.json"))).toMatchObject({ title: "Issue #186", terminal: "herdr", factoryPool: true });
+  expect(readJson(join(pool, "console.json"))).toMatchObject({
+    title: "Issue #186",
+    terminal: "herdr",
+    factoryPool: true,
+    lineBase: { ref: "feature/x", commit: base },
+  });
   expect(existsSync(join(pool, "line.json"))).toBe(false);
   const steward = readFileSync(join(pool, "conversations", "conv-2.md"), "utf8");
   expect(steward.split("\n", 1)[0]).toContain(" role=steward ");
@@ -140,10 +156,12 @@ conformance("cli", "Boot --factory asks for the work, cuts the Line and opens th
     { what: "the Grill's first Turn" },
   );
   expect(typed[0]!.startsWith("The piece of work for this Line is issue #186.")).toBe(true);
+  // The Grill hears the Line base it was cut from.
+  expect(typed[0]).toContain(`This Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`);
   expect(typed[0]).toContain("the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.brief.json`");
 });
 
-conformance("cli", "Boot's Factory mode refuses no work unattended, a checkout with no main, and a brief whose spec is nowhere, before cutting anything", async (t) => {
+conformance("cli", "Boot's Factory mode refuses no work unattended and a brief whose spec is nowhere, before cutting anything", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
 
@@ -157,11 +175,6 @@ conformance("cli", "Boot's Factory mode refuses no work unattended, a checkout w
   expect(lost.stderr).toBe(
     `--brief pilots/lost.brief.json: its spec nowhere.md is neither under ${repo} nor beside the brief\n`,
   );
-
-  const trunk = w.repo("trunk", { branch: "trunk" });
-  const noMain = await w.run("boot", ["--factory", "--work", "tidy the header", "--yes", "--no-open"], { cwd: trunk });
-  expect(noMain.code).toBe(1);
-  expect(noMain.stderr).toBe(`${trunk} has no main branch (local or origin/main) to cut the Line's branch from\n`);
 
   expect(existsSync(join(repo, ".scratch", "lines"))).toBe(false);
   expect(gitIn(w, repo, ["branch", "--list", "line/*"])).toBe("");
