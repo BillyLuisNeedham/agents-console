@@ -45,7 +45,12 @@ fn next(routed: Result<Routed, String>) -> NewTicket {
 
 fn started() -> (LineState, ResolvedFactory) {
     let factory = resolve_factory(&FactoryLayers::default(), &brief());
-    let (line, first) = start_line(brief(), "docs/specs/x.brief.json", &factory);
+    let (line, first) = start_line(
+        brief(),
+        "docs/specs/x.brief.json",
+        &factory,
+        LinePlaces::default(),
+    );
     assert_eq!(first.id, "r1-implement");
     (line, factory)
 }
@@ -140,10 +145,7 @@ fn an_invalid_brief_says_why() {
 
 #[test]
 fn prove_needs_pass_or_fail_and_evidence() {
-    let check = VerdictCheck {
-        station: Station::Prove,
-        musts: vec![],
-    };
+    let check = VerdictCheck::of(Station::Prove);
     assert_eq!(
         verdict_problem(&check, Some(&json!({"prove": "pass", "evidence": "e"}))),
         None
@@ -225,10 +227,7 @@ fn decide_accounts_for_every_must() {
 
 #[test]
 fn a_done_outcome_without_a_verdict_becomes_the_no_verdict_checkpoint() {
-    let check = VerdictCheck {
-        station: Station::Review,
-        musts: vec![],
-    };
+    let check = VerdictCheck::of(Station::Review);
     let valid = |o: Outcome| ValidOutcome {
         outcome: o,
         spawn_rejections: vec![],
@@ -241,10 +240,7 @@ fn a_done_outcome_without_a_verdict_becomes_the_no_verdict_checkpoint() {
     let fine = check_station_outcome(&check, valid(findings(json!([]))));
     assert_eq!(fine.outcome.status, OutcomeStatus::Done);
     // Implement needs no verdict.
-    let implement = VerdictCheck {
-        station: Station::Implement,
-        musts: vec![],
-    };
+    let implement = VerdictCheck::of(Station::Implement);
     assert_eq!(
         check_station_outcome(&implement, valid(outcome(None)))
             .outcome
@@ -505,7 +501,7 @@ fn walk_switched_off(off: &[&str], ends: &[StationEnd<'_>]) -> Vec<String> {
         pool: layer(json!({ "stations": stations })),
     };
     let factory = resolve_factory(&layers, &brief());
-    let (mut line, _) = start_line(brief(), "b.json", &factory);
+    let (mut line, _) = start_line(brief(), "b.json", &factory, LinePlaces::default());
     walk(&mut line, &factory, ends)
 }
 
@@ -536,7 +532,7 @@ fn switched_off_stations_are_skipped() {
     )
     .unwrap();
     let factory = resolve_factory(&FactoryLayers::default(), &brief);
-    let (mut line, _) = start_line(brief, "b.json", &factory);
+    let (mut line, _) = start_line(brief, "b.json", &factory, LinePlaces::default());
     let decide_ticket = next(route(&mut line, &factory, StationEnd::Done(&outcome(None))));
     assert_eq!(decide_ticket.id, "r1-decide");
     assert!(
@@ -673,7 +669,7 @@ fn the_resolved_finish_reaches_decide_and_the_finish_checkpoint() {
     };
     let brief = parse_brief(r#"{"spec": "docs/specs/x.md"}"#).unwrap();
     let factory = resolve_factory(&layers, &brief);
-    let (mut line, _) = start_line(brief, "b.json", &factory);
+    let (mut line, _) = start_line(brief, "b.json", &factory, LinePlaces::default());
     let done = outcome(None);
     let pass = passed();
     let none = findings(json!([]));
@@ -688,7 +684,7 @@ fn the_resolved_finish_reaches_decide_and_the_finish_checkpoint() {
     assert!(
         decide_ticket
             .body
-            .contains("carry out the Finish before you record it: `draft-pr`")
+            .contains("1. Carry out the Finish. `draft-pr`:")
     );
     assert!(
         decide_ticket
@@ -711,7 +707,12 @@ fn approval_is_no_note_or_approved() {
 #[test]
 fn a_station_ticket_carries_its_station_and_assignment_on_the_state_line() {
     let (_, factory) = started();
-    let (_, first) = start_line(brief(), "docs/specs/x.brief.json", &factory);
+    let (_, first) = start_line(
+        brief(),
+        "docs/specs/x.brief.json",
+        &factory,
+        LinePlaces::default(),
+    );
     let text = station_ticket_text(&first);
     let line_one = text.lines().next().unwrap();
     assert_eq!(
@@ -773,7 +774,10 @@ fn a_brief_is_found_and_read_in_any_place_its_reasons_naming_the_place() {
         find_brief_in(&empty, None).unwrap_err(),
         "no Line brief: docs/specs/ in the Grill's committed branch pool/p/conv-1 holds no *.brief.json"
     );
-    let no_spec = Branch(vec![("docs/specs/x.brief.json", r#"{"spec": "docs/specs/x.md"}"#)]);
+    let no_spec = Branch(vec![(
+        "docs/specs/x.brief.json",
+        r#"{"spec": "docs/specs/x.md"}"#,
+    )]);
     let path = find_brief_in(&no_spec, None).unwrap();
     assert_eq!(path, "docs/specs/x.brief.json");
     assert_eq!(
@@ -781,7 +785,10 @@ fn a_brief_is_found_and_read_in_any_place_its_reasons_naming_the_place() {
         "Line brief docs/specs/x.brief.json: its spec docs/specs/x.md is not in the Grill's committed branch pool/p/conv-1"
     );
     let ready = Branch(vec![
-        ("docs/specs/x.brief.json", r#"{"spec": "docs/specs/x.md", "finish": "draft-pr"}"#),
+        (
+            "docs/specs/x.brief.json",
+            r#"{"spec": "docs/specs/x.md", "finish": "draft-pr"}"#,
+        ),
         ("docs/specs/x.md", "# X\n"),
     ]);
     let brief = read_brief_in(&ready, &path).unwrap();
@@ -800,8 +807,163 @@ fn a_line_is_named_after_its_branch() {
 fn the_grill_is_taught_its_skills_the_two_files_and_the_operators_start() {
     let teaching = grill_teaching("186", "my-grill-with-docs show-me");
     assert!(teaching.contains("Use these skills, in this order: my-grill-with-docs, show-me."));
-    assert!(teaching.contains("the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.brief.json`"));
+    assert!(teaching.contains(
+        "the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.brief.json`"
+    ));
     assert!(teaching.contains(r#"{"spec": "docs/specs/186.md", "finish": "none", "factory": {}}"#));
     assert!(teaching.contains("The operator then presses Start the Line"));
     assert!(!grill_teaching("x", "").contains("Use these skills"));
+}
+
+// A Line started with its places: a branch, and a report path under a scratch directory.
+fn placed(dir: &Path, finish: &str) -> (LineState, ResolvedFactory) {
+    let brief = parse_brief(&format!(
+        r#"{{"spec": "docs/specs/186.md", "finish": "{finish}"}}"#
+    ))
+    .unwrap();
+    let factory = resolve_factory(&FactoryLayers::default(), &brief);
+    let places = LinePlaces {
+        branch: "line/186".into(),
+        report: js::path_text(&dir.join(report_file_name("docs/specs/186.brief.json"))),
+    };
+    let (line, _) = start_line(brief, "docs/specs/186.brief.json", &factory, places);
+    (line, factory)
+}
+
+#[test]
+fn the_report_is_named_after_the_brief() {
+    assert_eq!(line_name_of_brief("docs/specs/186.brief.json"), "186");
+    assert_eq!(line_name_of_brief("docs/specs/line.json"), "line");
+    assert_eq!(line_name_of_brief(""), "line");
+    assert_eq!(
+        report_file_name("docs/specs/186.brief.json"),
+        "186-report.html"
+    );
+}
+
+#[test]
+fn a_decide_that_finishes_must_have_written_the_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut line, factory) = placed(dir.path(), "none");
+    let done = outcome(None);
+    let pass = passed();
+    let none = findings(json!([]));
+    let decide_ticket = {
+        walk(
+            &mut line,
+            &factory,
+            &[StationEnd::Done(&done), StationEnd::Done(&pass)],
+        );
+        next(route(&mut line, &factory, StationEnd::Done(&none)))
+    };
+    assert!(
+        decide_ticket
+            .body
+            .contains(&format!("Write the report with /html to `{}`", line.report))
+    );
+    assert!(
+        decide_ticket
+            .body
+            .contains("`none`: nothing beyond the report.")
+    );
+    let check = verdict_check(&line, Station::Decide);
+    let finish = json!({"decide": "finish"});
+    let problem = verdict_problem(&check, Some(&finish)).unwrap();
+    assert!(problem.starts_with("the report is not at "), "{problem}");
+    // Without the report the routing refuses too: the engine turns it into the no-verdict checkpoint.
+    let finish_outcome = decide(finish.clone());
+    let mut copy = line.clone();
+    assert!(route(&mut copy, &factory, StationEnd::Done(&finish_outcome)).is_err());
+    std::fs::write(&line.report, "<html></html>").unwrap();
+    assert_eq!(verdict_problem(&check, Some(&finish)), None);
+    let finish_ticket = next(route(
+        &mut line,
+        &factory,
+        StationEnd::Done(&finish_outcome),
+    ));
+    let brief = finish_ticket.checkpoint.unwrap();
+    assert!(
+        brief.contains(&format!("The report: {} ", line.report)),
+        "{brief}"
+    );
+}
+
+#[test]
+fn a_round_needs_no_report_but_a_halted_line_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut line, _) = placed(dir.path(), "none");
+    let round = json!({"decide": "round", "fixes": [{"title": "t", "reason": "r"}]});
+    assert_eq!(
+        verdict_problem(&verdict_check(&line, Station::Decide), Some(&round)),
+        None
+    );
+    line.halted = Some("r1-prove was closed".into());
+    assert!(verdict_problem(&verdict_check(&line, Station::Decide), Some(&round)).is_some());
+}
+
+#[test]
+fn the_finish_act_says_what_decide_does_for_each_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (line, _) = placed(dir.path(), "none");
+    assert_eq!(
+        finish_act("none", &line),
+        "`none`: nothing beyond the report."
+    );
+    let draft = finish_act("draft-pr", &line);
+    assert!(
+        draft.contains("delete the Line's spec and brief (`docs/specs/186*`)"),
+        "{draft}"
+    );
+    assert!(draft.contains("git push origin HEAD:line/186"));
+    assert!(draft.contains("gh pr create --draft --base main --head line/186"));
+    let pr = finish_act("pr", &line);
+    assert!(pr.contains("gh pr create --base main --head line/186") && !pr.contains("draft"));
+    let mut shared = line.clone();
+    shared.branch = "main".into();
+    let refused = finish_act("draft-pr", &shared);
+    assert!(
+        refused.contains("is not a Line branch (line/...), so push nothing and open no PR"),
+        "{refused}"
+    );
+    assert!(!refused.contains("git push"));
+    assert_eq!(
+        finish_act("tag a release", &line),
+        "carry this out as written, and say in the report what came of it: tag a release"
+    );
+}
+
+#[test]
+fn decide_hears_what_earlier_rounds_did() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut line, factory) = placed(dir.path(), "none");
+    let done = outcome(None);
+    let pass = passed();
+    let must = findings(json!([{"severity": "must", "title": "Leak", "detail": "closes nothing"}]));
+    let round = decide(json!({"decide": "round", "fixes": [{"title": "Leak", "reason": "real"}]}));
+    walk(
+        &mut line,
+        &factory,
+        &[
+            StationEnd::Done(&done),
+            StationEnd::Done(&pass),
+            StationEnd::Done(&must),
+            StationEnd::Done(&round),
+            StationEnd::Done(&done),
+            StationEnd::Done(&pass),
+        ],
+    );
+    let none = findings(json!([]));
+    let decide_ticket = next(route(&mut line, &factory, StationEnd::Done(&none)));
+    assert_eq!(decide_ticket.id, "r2-decide");
+    assert!(
+        decide_ticket
+            .body
+            .contains("## Earlier Rounds\n\n### Round 1\n- Prove r1-prove: pass")
+    );
+    assert!(
+        decide_ticket
+            .body
+            .contains("- [must] **Leak**: closes nothing")
+    );
+    assert!(decide_ticket.body.contains("  - fixed: Leak: real"));
 }

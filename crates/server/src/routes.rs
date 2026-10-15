@@ -577,6 +577,25 @@ pub fn line_request(server: &Server) -> Answer {
     }
 }
 
+/// GET /api/line/report: the report Decide wrote at the Line's Finish (ADR-0037), as the HTML it is, for
+/// the Finish checkpoint's Detail and Open in browser. 404 with the `reason` envelope before Start the
+/// Line or while no report is written.
+pub fn line_report(server: &Server) -> Result<Vec<u8>, Answer> {
+    let line = match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
+        Ok(Some(line)) => line,
+        Ok(None) => return Err(Answer::refused(404, Field::Reason, "no Line has started")),
+        Err(err) => return Err(Answer::refused(500, Field::Reason, err.to_string())),
+    };
+    let Some(path) = ac_core::line::written_report(&line) else {
+        return Err(Answer::refused(
+            404,
+            Field::Reason,
+            "no report yet: Decide writes it when it ends the Line",
+        ));
+    };
+    std::fs::read(path).map_err(|err| Answer::refused(500, Field::Reason, err.to_string()))
+}
+
 /// Keep talking (issue #139): continue a ticket's checkpointed Attempt in its Held pane. Never queued,
 /// so it answers once the pane is claimed.
 pub async fn keep_talking_request(server: &Server, body: Body) -> Answer {

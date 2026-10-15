@@ -65,7 +65,10 @@ pub fn read_ready_brief(path: &str, cwd: &str) -> Result<ReadyBrief, String> {
     let candidates = if std::path::Path::new(&spec).is_absolute() {
         vec![spec.clone()]
     } else {
-        vec![js::path_join(&[cwd, &spec]), js::path_join(&[&beside, &spec])]
+        vec![
+            js::path_join(&[cwd, &spec]),
+            js::path_join(&[&beside, &spec]),
+        ]
     };
     let Some(found) = candidates
         .iter()
@@ -113,11 +116,19 @@ pub fn derived_slug(work: &LineWork) -> String {
             None => {
                 let words: Vec<&str> = work.split_whitespace().take(6).collect();
                 let slug = slugify(&words.join(" "));
-                slug.chars().take(40).collect::<String>().trim_end_matches('-').to_owned()
+                slug.chars()
+                    .take(40)
+                    .collect::<String>()
+                    .trim_end_matches('-')
+                    .to_owned()
             }
         },
     };
-    if slug.is_empty() { "line".to_owned() } else { slug }
+    if slug.is_empty() {
+        "line".to_owned()
+    } else {
+        slug
+    }
 }
 
 /// The pool's title when `--title` gives none: the issue, the spec's heading, or the work itself.
@@ -133,6 +144,12 @@ pub fn derived_title(work: &LineWork, slug: &str) -> Option<String> {
         },
     }
 }
+
+/// The standing orders of the Steward a Factory pool starts with (ADR-0037).
+pub const STEWARD_ORDERS: &str = "Steward this Factory pool's Line while the operator is away: keep \
+its Stations moving through the checkpoints that are yours to answer. The Finish checkpoint is the \
+operator's: when the Line waits there, say in your pane where the Line stands and wait. End yourself \
+once the Line is done.";
 
 /// The Grill's first Turn: the work as the operator gave it, an issue number spelled out.
 pub fn grill_opening(work: &str) -> String {
@@ -210,7 +227,10 @@ pub fn cut_line(top: &str, slug: &str, io: &mut dyn BootIo) -> Result<CutLine, S
     {
         io.log(&format!("added .scratch/ to {common}/info/exclude"));
     }
-    git_ok(top, &["worktree", "add", "-q", "-b", &branch, &worktree, &from])?;
+    git_ok(
+        top,
+        &["worktree", "add", "-q", "-b", &branch, &worktree, &from],
+    )?;
     Ok(CutLine {
         slug,
         branch,
@@ -228,9 +248,13 @@ pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, 
     let mut brief = ready.brief.clone();
     brief.insert("spec".to_owned(), Value::String(spec_path.clone()));
     js::mkdir_all(js::path_join(&[&line.worktree, BRIEF_DIR])).map_err(|err| err.to_string())?;
-    js::write_file(js::path_join(&[&line.worktree, &spec_path]), &ready.spec_text)
-        .map_err(|err| err.to_string())?;
-    let text = serde_json::to_string_pretty(&Value::Object(brief)).map_err(|err| err.to_string())?;
+    js::write_file(
+        js::path_join(&[&line.worktree, &spec_path]),
+        &ready.spec_text,
+    )
+    .map_err(|err| err.to_string())?;
+    let text =
+        serde_json::to_string_pretty(&Value::Object(brief)).map_err(|err| err.to_string())?;
     js::write_file(
         js::path_join(&[&line.worktree, &brief_path]),
         &format!("{text}\n"),
@@ -254,7 +278,11 @@ pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, 
 }
 
 /// Lay `--config`'s keys over the pool's config, each top-level key replacing the one there.
-pub fn overlay_config(config: &mut Map<String, Value>, path: &str, cwd: &str) -> Result<(), String> {
+pub fn overlay_config(
+    config: &mut Map<String, Value>,
+    path: &str,
+    cwd: &str,
+) -> Result<(), String> {
     let file = if std::path::Path::new(path).is_absolute() {
         path.to_owned()
     } else {
@@ -289,7 +317,9 @@ mod tests {
         };
         assert_eq!(derived_slug(&grill("#186")), "186");
         assert_eq!(
-            derived_slug(&grill("Make the header strip show the Round and the Station too")),
+            derived_slug(&grill(
+                "Make the header strip show the Round and the Station too"
+            )),
             "make-the-header-strip-show-the"
         );
         assert_eq!(derived_slug(&grill("!!!")), "line");
@@ -301,7 +331,10 @@ mod tests {
         }));
         assert_eq!(derived_slug(&ready), "186");
         assert_eq!(derived_title(&ready, "186"), Some("Line 186".to_owned()));
-        assert_eq!(derived_title(&grill("#186"), "186"), Some("Issue #186".to_owned()));
+        assert_eq!(
+            derived_title(&grill("#186"), "186"),
+            Some("Issue #186".to_owned())
+        );
     }
 
     #[test]
@@ -313,7 +346,9 @@ mod tests {
 
     #[test]
     fn the_grill_opening_spells_out_an_issue_and_keeps_free_text() {
-        assert!(grill_opening("#186").starts_with("The piece of work for this Line is issue #186."));
+        assert!(
+            grill_opening("#186").starts_with("The piece of work for this Line is issue #186.")
+        );
         assert_eq!(
             grill_opening("  tidy the header  "),
             "The piece of work for this Line:\n\ntidy the header"
@@ -349,7 +384,10 @@ mod tests {
         let ready = read_ready_brief("pilots/186.brief.json", &dir).unwrap();
         assert_eq!(ready.stem, "186");
         assert_eq!(ready.heading.as_deref(), Some("Fix it"));
-        assert_eq!(ready.brief.get("finish"), Some(&Value::String("draft-pr".into())));
+        assert_eq!(
+            ready.brief.get("finish"),
+            Some(&Value::String("draft-pr".into()))
+        );
         assert_eq!(
             read_ready_brief("pilots/beside.brief.json", &dir)
                 .unwrap()

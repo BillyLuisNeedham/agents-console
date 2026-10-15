@@ -36,6 +36,37 @@ pub const NO_VERDICT: &str = "no verdict";
 /// What the operator answers on the Finish checkpoint to end the Line.
 pub const APPROVED: &str = "approved";
 
+/// The report's file name in the pool's runs directory follows the Line's name: `<line>-report.html`.
+pub const REPORT_SUFFIX: &str = "-report.html";
+
+/// The Line's name, as its spec and brief are named in `docs/specs/`: the brief's file name without
+/// `.brief.json` (or without its extension, for a brief named otherwise).
+pub fn line_name_of_brief(brief_path: &str) -> String {
+    let file = Path::new(js::trim(brief_path))
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = file
+        .strip_suffix(BRIEF_SUFFIX)
+        .map(str::to_owned)
+        .or_else(|| {
+            Path::new(&file)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default();
+    if name.is_empty() {
+        "line".to_owned()
+    } else {
+        name
+    }
+}
+
+/// The report's file name in the pool's runs directory: `<line>-report.html`.
+pub fn report_file_name(brief_path: &str) -> String {
+    format!("{}{REPORT_SUFFIX}", line_name_of_brief(brief_path))
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------------------------------
@@ -442,7 +473,9 @@ pub fn read_brief_in(place: &dyn BriefPlace, path: &str) -> Result<LineBrief, St
         ));
     }
     if place.read(spec).is_none() {
-        return Err(format!("Line brief {path}: its spec {spec} is not in {name}"));
+        return Err(format!(
+            "Line brief {path}: its spec {spec} is not in {name}"
+        ));
     }
     Ok(brief)
 }
@@ -486,11 +519,16 @@ pub fn save_line(pool_dir: &Path, line: &LineState) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------------------------------
 
 /// What a Station's verdict is checked against: the Station, and for Decide the titles of the must
-/// findings it has to account for.
+/// findings it has to account for and the report it writes when it ends the Line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictCheck {
     pub station: Station,
     pub musts: Vec<String>,
+    /// Decide's report path: a Decide that ends the Line (a finish, or any verdict on a halted Line)
+    /// must have written it. Blank checks nothing.
+    pub report: String,
+    /// The Line was halted, so Decide's verdict ends it whatever it chose.
+    pub halted: bool,
 }
 
 fn verdict_of<T: serde::de::DeserializeOwned>(verdict: Option<&Value>) -> Result<T, String> {
@@ -564,13 +602,40 @@ pub fn decide_verdict(verdict: Option<&Value>, musts: &[String]) -> Result<Decid
     Ok(decide)
 }
 
+impl VerdictCheck {
+    /// The check of a Station with nothing to account for.
+    pub fn of(station: Station) -> Self {
+        VerdictCheck {
+            station,
+            musts: Vec::new(),
+            report: String::new(),
+            halted: false,
+        }
+    }
+}
+
+/// A Decide that ends the Line (a finish, or any verdict on a halted Line) must have written the report
+/// first: the Finish checkpoint links it, and the operator approves the Line from it.
+pub fn report_problem(verdict: &DecideVerdict, report: &str, halted: bool) -> Option<String> {
+    let ends = halted || verdict.decide == DecideChoice::Finish;
+    (ends && !blank(report) && !Path::new(report).is_file()).then(|| {
+        format!(
+            "the report is not at {report}: carry out the Finish, write the report there, then \
+             record the verdict"
+        )
+    })
+}
+
 /// Why a Station's verdict is not valid, or `None` when it is (Implement and Finish need none).
 pub fn verdict_problem(check: &VerdictCheck, verdict: Option<&Value>) -> Option<String> {
     match check.station {
         Station::Implement | Station::Finish => None,
         Station::Prove => prove_verdict(verdict).err(),
         Station::Review => review_verdict(verdict).err(),
-        Station::Decide => decide_verdict(verdict, &check.musts).err(),
+        Station::Decide => match decide_verdict(verdict, &check.musts) {
+            Ok(decide) => report_problem(&decide, &check.report, check.halted),
+            Err(problem) => Some(problem),
+        },
     }
 }
 
@@ -703,13 +768,23 @@ fn begin_round(line: &mut LineState, round: u64) {
     round_of(line);
 }
 
+/// Where a Line lives beside its brief: its branch and the path of its report.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinePlaces {
+    pub branch: String,
+    pub report: String,
+}
+
 /// The Line as it starts, and its first Ticket.
 pub fn start_line(
     brief: LineBrief,
     brief_path: &str,
     factory: &ResolvedFactory,
+    places: LinePlaces,
 ) -> (LineState, NewTicket) {
     let mut line = LineState {
+        branch: places.branch,
+        report: places.report,
         brief,
         brief_path: brief_path.to_owned(),
         status: LineStatus::Running,
@@ -809,6 +884,9 @@ pub fn route(
         }
         (Station::Decide, StationEnd::Done(outcome)) => {
             let verdict = decide_verdict(outcome.verdict.as_ref(), &musts_of(line))?;
+            if let Some(problem) = report_problem(&verdict, &line.report, line.halted.is_some()) {
+                return Err(problem);
+            }
             round_of(line).decide = Some(verdict.clone());
             if line.halted.is_some() || verdict.decide == DecideChoice::Finish {
                 finish_ticket(line, factory, Some(&from), "")
@@ -854,13 +932,14 @@ pub fn musts_of(line: &LineState) -> Vec<String> {
 
 /// The verdict check for a Ticket of this Line's: its Station, and for Decide this Round's musts.
 pub fn verdict_check(line: &LineState, station: Station) -> VerdictCheck {
+    if station != Station::Decide {
+        return VerdictCheck::of(station);
+    }
     VerdictCheck {
         station,
-        musts: if station == Station::Decide {
-            musts_of(line)
-        } else {
-            Vec::new()
-        },
+        musts: musts_of(line),
+        report: line.report.clone(),
+        halted: line.halted.is_some(),
     }
 }
 
@@ -1154,11 +1233,9 @@ fn decide_ticket(line: &LineState, factory: &ResolvedFactory, from: Option<&str>
         ),
     };
     let work = format!(
-        "## What to do\n\nDecide how Round {n} ends. {choice}\n\nOn finish, carry out the \
-         Finish before you record it: `{}` (`none` is only the verdict). The operator approves the \
-         Line at the Finish checkpoint the engine raises next.\n\n## Prove in this Round\n\n{}\n\n\
-         ## Review findings\n\n{}",
-        js::trim(&factory.finish),
+        "## What to do\n\nDecide how Round {n} ends. {choice}\n\n{}\n\n## Prove in this Round\n\n{}\n\n\
+         ## Review findings\n\n{}{}",
+        finish_section(line, factory),
         if proves.is_empty() {
             "_(none)_".to_owned()
         } else {
@@ -1168,7 +1245,8 @@ fn decide_ticket(line: &LineState, factory: &ResolvedFactory, from: Option<&str>
             "_(none)_".to_owned()
         } else {
             findings.join("\n")
-        }
+        },
+        earlier_rounds(line)
     );
     ticket(
         line,
@@ -1179,6 +1257,125 @@ fn decide_ticket(line: &LineState, factory: &ResolvedFactory, from: Option<&str>
         work,
         from,
     )
+}
+
+/// What the Finish asks of Decide, by its kind: `none`, `draft-pr`, `pr`, or free text it carries out.
+pub fn finish_act(finish: &str, line: &LineState) -> String {
+    let name = line_name_of_brief(&line.brief_path);
+    let branch = if blank(&line.branch) {
+        "the Line's branch".to_owned()
+    } else {
+        format!("`{}`", js::trim(&line.branch))
+    };
+    let pr = |draft: bool| {
+        format!(
+            "open a {}PR for the Line. First delete the Line's spec and brief (`{BRIEF_DIR}/{name}*`) \
+             in a final commit on your branch. Then push your HEAD as the Line's branch (`git push \
+             origin HEAD:{}`) and open the PR from {branch} against `main` with `gh pr create{} \
+             --base main --head {}`, its body summing up the Line from the report. The PR's link is \
+             the Finish's result.",
+            if draft { "draft " } else { "" },
+            js::trim(&line.branch),
+            if draft { " --draft" } else { "" },
+            js::trim(&line.branch),
+        )
+    };
+    // A Line runs on its own branch, cut from main (ADR-0038); a pool on any other branch opens no PR
+    // from it, so nothing pushes a shared branch.
+    let on_line = js::trim(&line.branch).starts_with(LINE_BRANCH_PREFIX);
+    let not_line = |kind: &str| {
+        format!(
+            "`{kind}`: but the pool's branch {branch} is not a Line branch ({LINE_BRANCH_PREFIX}...), so \
+             push nothing and open no PR. Say in the report and your Outcome's summary that the \
+             Finish was not carried out, and why."
+        )
+    };
+    match js::trim(finish) {
+        "" | "none" => "`none`: nothing beyond the report.".to_owned(),
+        "draft-pr" if !on_line => not_line("draft-pr"),
+        "pr" if !on_line => not_line("pr"),
+        "draft-pr" => format!("`draft-pr`: {}", pr(true)),
+        "pr" => format!("`pr`: {}", pr(false)),
+        other => {
+            format!("carry this out as written, and say in the report what came of it: {other}")
+        }
+    }
+}
+
+// Decide's instruction for ending the Line: the Finish act, then the report at its path.
+fn finish_section(line: &LineState, factory: &ResolvedFactory) -> String {
+    let report = if blank(&line.report) {
+        format!(
+            "`runs/{}` in the pool directory",
+            report_file_name(&line.brief_path)
+        )
+    } else {
+        format!("`{}`", line.report)
+    };
+    format!(
+        "## The Finish\n\nWhen you end the Line (\"finish\", or any verdict on a halted Line), do \
+         these in order before you record your Outcome:\n\n\
+         1. Carry out the Finish. {}\n\
+         2. Write the report with /html to {report}: every Round's Prove evidence, every Review \
+         finding and what happened to it (fixed in a later Round, or dropped and why), and the \
+         Finish's result (the PR's link, say). It is the one file you write outside your working \
+         directory besides your Outcome. Without it the Ticket checkpoints with \"{NO_VERDICT}\".\n\n\
+         The operator approves the Line from the report at the Finish checkpoint the engine raises \
+         next.",
+        finish_act(&factory.finish, line)
+    )
+}
+
+// What the Rounds before this one did, for the report.
+fn earlier_rounds(line: &LineState) -> String {
+    let earlier: Vec<String> = line
+        .rounds
+        .iter()
+        .filter(|r| r.round < line.round)
+        .map(|r| {
+            let mut out = vec![format!("### Round {}", r.round)];
+            out.extend(r.proves.iter().map(|p| {
+                format!(
+                    "- Prove {}: {} (evidence `{}`)",
+                    p.ticket, p.prove, p.evidence
+                )
+            }));
+            out.extend(r.findings.iter().map(|f| {
+                format!(
+                    "- [{}] **{}**: {}",
+                    f.severity,
+                    js::trim(&f.title),
+                    f.detail
+                )
+            }));
+            if let Some(decide) = &r.decide {
+                out.push(format!("- Decide: {}", decide.decide));
+                out.extend(
+                    decide
+                        .fixes
+                        .iter()
+                        .map(|i| format!("  - fixed: {}: {}", js::trim(&i.title), i.reason)),
+                );
+                out.extend(
+                    decide
+                        .dropped
+                        .iter()
+                        .map(|i| format!("  - dropped: {}: {}", js::trim(&i.title), i.reason)),
+                );
+            }
+            out.join("\n")
+        })
+        .collect();
+    if earlier.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n## Earlier Rounds\n\n{}", earlier.join("\n\n"))
+    }
+}
+
+/// The report's path when Decide has written it: what the Finish checkpoint links.
+pub fn written_report(line: &LineState) -> Option<&str> {
+    (!blank(&line.report) && Path::new(&line.report).is_file()).then_some(line.report.as_str())
 }
 
 fn finish_ticket(
@@ -1193,10 +1390,14 @@ fn finish_ticket(
         .as_ref()
         .map(|h| format!("The Line was halted: {h}. "))
         .unwrap_or_default();
+    let report = match written_report(line) {
+        Some(path) => format!("The report: {path} (open it in the Console's Detail). "),
+        None => "There is no report. ".to_owned(),
+    };
     let brief = format!(
-        "The Line has reached its Finish after Round {n}. {halted}{why}{}Resume with \"{APPROVED}\" \
-         (or no note) to approve the Line and end it; Resume with notes to start another Round \
-         that acts on them; Close ends the Line here.",
+        "The Line has reached its Finish after Round {n}. {halted}{why}{}{report}Resume with \
+         \"{APPROVED}\" (or no note) to approve the Line and end it; Resume with notes to start \
+         another Round that acts on them; Close ends the Line here.",
         if why.is_empty() { "" } else { " " }
     );
     NewTicket {
@@ -1255,7 +1456,11 @@ pub const LINE_BRANCH_PREFIX: &str = "line/";
 pub fn line_name_of(branch: &str) -> String {
     let name = branch.strip_prefix(LINE_BRANCH_PREFIX).unwrap_or(branch);
     let name = name.replace('/', "-");
-    if name.is_empty() { "line".to_owned() } else { name }
+    if name.is_empty() {
+        "line".to_owned()
+    } else {
+        name
+    }
 }
 
 /// What the Grill is taught beside the Conversation teaching: its skills, the spec and the Line brief it

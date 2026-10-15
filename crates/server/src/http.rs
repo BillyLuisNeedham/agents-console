@@ -69,6 +69,24 @@ fn text_response(status: u16, text: &str) -> Response {
     response
 }
 
+// A page from the pool (the Line's report): HTML, never cached, so a rewritten report shows on reload.
+fn html_response(html: Vec<u8>) -> Response {
+    let mut response = (StatusCode::OK, html).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html;charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Agent-written HTML on the Console's own origin: opened in a browser tab it runs in an opaque
+    // origin, so its scripts can never act as the Console.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox allow-scripts allow-popups"),
+    );
+    response
+}
+
 // A throw that escaped a route: the runtime's own 500.
 fn uncaught(message: &str) -> Response {
     eprintln!("{message}");
@@ -293,6 +311,12 @@ async fn fetch(server: Server, request: Request) -> Response {
         }
         ("/api/line", _) => {
             return http_of(routes::line_request(&server));
+        }
+        ("/api/line/report", &Method::GET) => {
+            return match routes::line_report(&server) {
+                Ok(html) => html_response(html),
+                Err(answer) => http_of(answer),
+            };
         }
         ("/api/keep-talking", _) if post => {
             let body = read_body(body).await;

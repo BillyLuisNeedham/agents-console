@@ -15,21 +15,43 @@ use ac_core::assignment::resolve_unseen_assignments;
 use ac_core::events::last_attempt;
 use ac_core::js;
 use ac_core::line::{
-    BriefPlace, FactoryLayers, NewTicket, Routed, StationEnd, VerdictCheck, approves,
-    check_station_outcome, factory_layer_of, find_brief, find_brief_in, no_verdict_brief,
-    read_brief, read_brief_in, resolve_factory, route, save_line, start_line as begin_line,
-    station_ticket_text, verdict_check,
+    BriefPlace, FactoryLayers, LinePlaces, NewTicket, ResolvedFactory, Routed, StationEnd,
+    VerdictCheck, approves, check_station_outcome, factory_layer_of, find_brief, find_brief_in,
+    no_verdict_brief, read_brief, read_brief_in, report_file_name, resolve_factory, route,
+    save_line, start_line as begin_line, station_ticket_text, verdict_check, written_report,
 };
 use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::outcome::ValidOutcome;
 use ac_core::pool::{TicketMarker, load_pool_tickets, write_marker_status};
 use ac_io::git;
 use ac_protocol::{
-    ConversationRole, ConversationStatus, InterruptKind, LineStatus, Station, TicketStatus,
+    ConversationRole, ConversationStatus, InterruptKind, LineStatus, LineView, Station,
+    TicketStatus,
 };
 
 use crate::error::EngineError;
 use crate::session::{PoolUpdate, Session};
+
+/// A Factory pool (ADR-0037): one whose Line has started, or one Boot's Factory mode marked
+/// `factoryPool` in console.json. Approving its Finish checkpoint is the Review, so it raises no
+/// run-wide Review Interrupt.
+pub fn is_factory_pool(session: &Session) -> bool {
+    session.line.is_some()
+        || session
+            .state
+            .config
+            .get("factoryPool")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// Whether a Factory pool's Line has ended (approved, or closed at its Finish), so the pool is done.
+pub fn line_ended(session: &Session) -> bool {
+    session
+        .line
+        .as_ref()
+        .is_some_and(|line| matches!(line.status, LineStatus::Done | LineStatus::Closed))
+}
 
 /// The verdict check a Ticket's attempt Outcome passes through: `None` for a Ticket that is no Station
 /// of a Line (an Implement's check passes everything).
@@ -37,10 +59,7 @@ pub fn verdict_check_for(session: &Session, marker: &TicketMarker) -> Option<Ver
     let station = marker.station?;
     Some(match &session.line {
         Some(line) => verdict_check(line, station),
-        None => VerdictCheck {
-            station,
-            musts: Vec::new(),
-        },
+        None => VerdictCheck::of(station),
     })
 }
 
@@ -66,6 +85,34 @@ pub fn factory_layers(session: &Session) -> FactoryLayers {
     }
 }
 
+/// The Factory settings the Line runs on, as the last boundary (or Start the Line) resolved them: the
+/// snapshot reads them at every emit, so they are cached rather than read from the Machine defaults'
+/// file each time.
+fn line_factory(session: &mut Session) -> Option<ResolvedFactory> {
+    let line = session.line.as_ref()?;
+    if session.line_factory.is_none() {
+        session.line_factory = Some(resolve_factory(&factory_layers(session), &line.brief));
+    }
+    session.line_factory.clone()
+}
+
+/// The Line as the Console's header strip reads it, `None` before Start the Line.
+pub fn line_view(session: &mut Session) -> Option<LineView> {
+    let factory = line_factory(session)?;
+    let line = session.line.as_ref()?;
+    Some(LineView {
+        round: line.round,
+        station: line.station,
+        ticket: line.ticket.clone(),
+        status: line.status,
+        prove_fails: line.prove_fails,
+        prove_fails_allowed: factory.prove_fails_per_round + line.fixes_bought,
+        finish: factory.finish.clone(),
+        report: written_report(line).is_some(),
+        halted: line.halted.clone(),
+    })
+}
+
 /// Start the Line (ADR-0037): read the brief, write the Line's state and Round 1's Implement Ticket,
 /// and kick the drive. Refused, with the reason, when the brief is missing or invalid or a Line has
 /// already started.
@@ -80,7 +127,12 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     let path = find_brief(&checkout, brief.as_deref()).map_err(EngineError::refused)?;
     let brief = read_brief(&checkout, &path).map_err(EngineError::refused)?;
     let factory = resolve_factory(&factory_layers(session), &brief);
-    let (line, first) = begin_line(brief, &path, &factory);
+    session.line_factory = Some(factory.clone());
+    let places = LinePlaces {
+        branch: target_branch(session),
+        report: js::path_text(&Path::new(&session.runs_dir).join(report_file_name(&path))),
+    };
+    let (line, first) = begin_line(brief, &path, &factory, places);
     if session.marker(&first.id).is_some() {
         return Err(EngineError::refused(format!(
             "ticket {} is already in the pool: a Factory pool runs one Line",
@@ -125,6 +177,13 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))?;
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(id)
+}
+
+// The branch the pool merges into: the one an enlist captured, else the pool checkout's own.
+fn target_branch(session: &Session) -> String {
+    session.merge_target.clone().unwrap_or_else(|| {
+        git::git_line(&session.cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default()
+    })
 }
 
 // The Grill's branch's committed tree (Start the Line reads the brief there before merging anything):
@@ -241,6 +300,11 @@ fn last_resume_note(file: &Path) -> Option<String> {
 /// Each routing writes a fresh Ticket that has not ended, so this settles in one pass; the loop bound
 /// only guards against a Line that would not.
 pub fn route_line(session: &mut Session) -> anyhow::Result<()> {
+    // The boundary is where the settings reload (ADR-0018): the header strip follows them from here.
+    session.line_factory = session
+        .line
+        .as_ref()
+        .map(|line| resolve_factory(&factory_layers(session), &line.brief));
     for _ in 0..8 {
         if !route_once(session)? {
             return Ok(());

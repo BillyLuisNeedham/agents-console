@@ -978,10 +978,15 @@ export class ConsoleSession {
       : null;
     const cards = this.view?.cards ?? [];
     const detail = this.selectedId
-      ? projectDetail(cards, this.selectedId, {
-          pending: this.view?.pendingSpawns ?? [],
-          held: this.view?.heldSpawns ?? [],
-        })
+      ? projectDetail(
+          cards,
+          this.selectedId,
+          {
+            pending: this.view?.pendingSpawns ?? [],
+            held: this.view?.heldSpawns ?? [],
+          },
+          snapshot?.line ?? null,
+        )
       : null;
     const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
     // The selected card's frames: a ticket's body, events and log, a
@@ -1061,6 +1066,7 @@ export class ConsoleSession {
       terminalBacked: snapshot ? isTerminalBacked(snapshot.state.config) : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
+      lineStrip: this.view?.lineStrip ?? null,
       pendingSpawns: this.view?.pendingSpawns ?? [],
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,

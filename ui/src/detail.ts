@@ -35,6 +35,7 @@ import {
   type ResumeAction,
   type SpawnDetailView,
   type InterruptView,
+  type LineReportView,
   type LogPaneView,
   type TimelineGradeView,
   type TimelineView,
@@ -917,10 +918,11 @@ export class Detail {
   }
 
   // The Progress tab: the status, the resolver running on the ticket's merge
-  // when there is one, the interrupt form (the Detail's only action surface)
-  // and the timeline, with attempt rows opening raw logs in the pane below.
-  // A never-run ticket's timeline carries its own "no attempts yet" marker,
-  // and its log pane stays closed.
+  // when there is one, the interrupt form (the Detail's only action surface),
+  // the Line's report on its Finish Ticket (ADR-0037), and the timeline, with
+  // attempt rows opening raw logs in the pane below. A never-run ticket's
+  // timeline carries its own "no attempts yet" marker, and its log pane
+  // stays closed.
   private renderProgressTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
     timeline: TimelineView | null,
@@ -961,6 +963,9 @@ export class Detail {
     if (detail.interrupt) {
       panel.append(this.renderInterrupt(detail.interrupt, handlers, timeline));
     }
+    if (detail.report) {
+      panel.append(this.renderReport(detail.report));
+    }
     if (timeline) {
       panel.append(
         this.renderTimelineSection(
@@ -976,6 +981,48 @@ export class Detail {
       panel.append(this.renderLogPane(logPane, detail.ticketId, handlers));
     }
     return panel;
+  }
+
+  // The report Decide wrote at the Line's Finish (ADR-0037), under the Finish
+  // checkpoint it is read beside, framed whole with a way out to a tab of
+  // its own. The Round rides the address so a later Round's report is
+  // fetched afresh rather than from the cache. Moving an iframe reloads it,
+  // so the frame and its section are keyed and nothing before the frame
+  // inside the section comes or goes; the panel above it only reshapes when
+  // the checkpoint is answered. The report is an agent's HTML: the frame is
+  // sandboxed, so it runs no script and is not of the Console's origin.
+  private renderReport(report: LineReportView): HTMLElement {
+    const src = `/api/line/report?round=${report.round}`;
+    return h(
+      "section",
+      { class: "detail-report", key: "detail-report" },
+      h(
+        "div",
+        { class: "detail-report-head" },
+        h("span", { class: "detail-report-title" }, "Report"),
+        report.written
+          ? h(
+              "a",
+              {
+                class: "btn detail-report-open",
+                href: src,
+                target: "_blank",
+                rel: "noopener",
+              },
+              "Open in browser",
+            )
+          : null,
+      ),
+      report.written
+        ? h("iframe", {
+            class: "detail-report-frame",
+            key: "detail-report-frame",
+            src,
+            title: "the Line's report",
+            sandbox: "allow-popups allow-popups-to-escape-sandbox",
+          })
+        : h("div", { class: "dim detail-report-none" }, "No report: Decide did not write one."),
+    );
   }
 
   // The resolver on a held ticket's merge (issue #129): how long it has run,

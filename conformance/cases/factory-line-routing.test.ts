@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
-import { answer, approveReview, settle, statuses, ticketOf } from "../harness/pool-run.ts";
+import { answer, settle, statuses, ticketOf } from "../harness/pool-run.ts";
 import { readStateLine } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
@@ -21,7 +21,9 @@ import {
   FINISH,
   NO_FINDINGS,
   PASS,
+  approveFinish,
   atCheckpoint,
+  finishing,
   launches,
   lineOf,
   lineWorld,
@@ -40,12 +42,6 @@ function promptOf(world: World, key: string): string {
   if (!call) throw new Error(`no launch of ${key}`);
   expect(call.argv[0]).toBe("-p");
   return call.argv[1]!;
-}
-
-/** Approve the Finish checkpoint, then the run's Review, and wait for the run to be done. */
-async function approveFinish(server: CaseServer, id: string): Promise<EnrichedSnapshot> {
-  await answer(server, { ticketId: id, note: "approved" });
-  return approveReview(server);
 }
 
 conformance("factory", "the pass path runs Implement, Prove, Review and Decide to the Finish checkpoint, and approval ends the Line", async (t) => {
@@ -196,7 +192,7 @@ conformance("factory", "an Outcome with no valid verdict checkpoints its Ticket 
   // Decide finishes without dropping the must, then accounts for it.
   world.stubs.launches("r1-decide", [
     FINISH,
-    verdict({ decide: "finish", dropped: [{ title: "Leak", reason: "out of scope" }] }),
+    finishing({ decide: "finish", dropped: [{ title: "Leak", reason: "out of scope" }] }),
   ]);
   const server = await t.start(world);
   await started(server);
@@ -240,7 +236,9 @@ conformance("factory", "closing a Station Ticket halts the Line: Decide still ru
   expect((await lineOf(server))?.halted).toBe("r1-prove was closed");
 
   await answer(server, { ticketId: "r1-finish", action: "close" });
-  await settle(server, (s) => s.state.interrupts.some((i) => i.kind === "review"), { what: "the Review" });
+  // A Factory pool raises no run-wide Review: the Line closed at its Finish ends the run.
+  const closed = await settle(server, (s) => s.phase === "done", { what: "the run to be done" });
+  expect(closed.state.interrupts).toEqual([]);
   expect((await lineOf(server))?.status).toBe("closed");
 });
 

@@ -59,8 +59,8 @@ use crate::snapshot::emit_snapshot;
 pub use adopt::{
     adopt_enlisted_at_boot, adopt_started_at_boot, crash_stale_at_boot, readopt_pending,
 };
-pub use end::{answer_merge, end, end_conversation_by_steward};
 pub(crate) use end::merge_into_target;
+pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
 
@@ -790,6 +790,10 @@ pub(crate) mod stewards {
             command: &command,
             budget: steward_budget_of(&s.state.config),
             may_close: steward_may_close_of(&s.state.config),
+            factory: crate::line::is_factory_pool(s),
+            may_adopt_line_spawns: ac_core::steward::steward_may_adopt_line_spawns_of(
+                &s.state.config,
+            ),
         })
     }
 }

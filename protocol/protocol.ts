@@ -28,6 +28,7 @@ import type {
   Interrupt,
   KeepTalkingRequest,
   KeepTalkingResponse,
+  LineView,
   LogAttemptInfo,
   MachineDefaultsRequest,
   MergeQueueEntry,
@@ -167,8 +168,9 @@ export interface SnapshotDelta {
     pendingSpawns?: PendingSpawnView[];
     heldSpawns?: HeldSpawnView[];
     stewardBudget?: StewardBudgetView;
+    line?: LineView;
   };
-  unset?: ("seq" | "phase" | "poolName" | "poolTitle" | "poolDir" | "finishedTerminals" | "spawnUsage" | "pendingSpawns" | "heldSpawns" | "stewardBudget")[];
+  unset?: ("seq" | "phase" | "poolName" | "poolTitle" | "poolDir" | "finishedTerminals" | "spawnUsage" | "pendingSpawns" | "heldSpawns" | "stewardBudget" | "line")[];
   state?: {
     outcomes?: Record<string, Outcome>;
     interrupts?: Interrupt[];

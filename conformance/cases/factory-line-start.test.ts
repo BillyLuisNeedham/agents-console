@@ -111,6 +111,9 @@ conformance("factory", "Start the Line writes line.json and r1-implement with it
     extraRounds: 0,
     halted: null,
     rounds: [{ round: 1, proves: [], findings: [], decide: null }],
+    // The pool's target branch as the Line started, and where Decide writes the report at the Finish.
+    branch: "main",
+    report: join(world.pool, "runs", "line-report.html"),
   });
   expect(JSON.parse(readFileSync(join(world.pool, "line.json"), "utf8"))).toEqual(line);
 

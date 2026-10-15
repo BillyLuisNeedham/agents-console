@@ -116,7 +116,7 @@ conformance("factory", "the Machine defaults, the Pool settings and the Line bri
   expect(flagOf(world, "r1-review", "--model")).toBe("opus");
   expect(issue(world, "r1-review")).not.toContain("## Note for this Station");
   // The pool's Finish over the machine's, the brief naming none.
-  expect(issue(world, "r1-decide")).toContain("carry out the Finish before you record it: `draft-pr`");
+  expect(issue(world, "r1-decide")).toContain("1. Carry out the Finish. `draft-pr`:");
   expect(issue(world, "r1-finish")).toContain("Finish: `draft-pr`.");
 });
 

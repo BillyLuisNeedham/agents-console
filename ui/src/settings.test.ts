@@ -851,6 +851,81 @@ describe("Steward may Close checkpoints (issue #154)", () => {
   });
 });
 
+describe("Steward may adopt Line spawns (#187, ADR-0037)", () => {
+  it("seeds the toggle from the file, off when absent", () => {
+    expect(poolDraftFrom({ steward: { mayAdoptLineSpawns: true } }).stewardMayAdoptLineSpawns).toBe(true);
+    expect(poolDraftFrom({ steward: { mayClose: true } }).stewardMayAdoptLineSpawns).toBe(false);
+    expect(EMPTY.stewardMayAdoptLineSpawns).toBe(false);
+  });
+
+  it("sends mayAdoptLineSpawns inside the whole steward entry when on, and leaves it out when off", () => {
+    expect(
+      poolPatchFrom({ ...EMPTY, stewardBudget: "3", stewardMayAdoptLineSpawns: true }).steward,
+    ).toEqual({
+      budget: 3,
+      assign: { harness: "", model: "", effort: "", drivers: "" },
+      mayAdoptLineSpawns: true,
+    });
+    expect(poolPatchFrom(EMPTY).steward).not.toHaveProperty("mayAdoptLineSpawns");
+  });
+
+  it("dirties the pool form, saves, and re-seeds from the answer", async () => {
+    const rig = await opened();
+    const before = rig.changes();
+    rig.store.setStewardMayAdoptLineSpawns(true);
+    expect(rig.changes()).toBe(before + 1);
+    expect(rig.store.poolDirty).toBe(true);
+    const save = rig.store.savePool();
+    expect(rig.poolSaves[0]!.config.steward?.mayAdoptLineSpawns).toBe(true);
+    expect(rig.poolSaves[0]!.config.steward).not.toHaveProperty("mayClose");
+    const saved = settings();
+    saved.pool.config.steward = { mayAdoptLineSpawns: true };
+    rig.poolSaves[0]!.deferred.resolve(saved);
+    await save;
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.stewardMayAdoptLineSpawns).toBe(true);
+    rig.store.setStewardMayAdoptLineSpawns(false);
+    expect(rig.store.poolDirty).toBe(true);
+  });
+
+  it("draws the toggle under Steward may Close checkpoints and flips it from the checkbox", async () => {
+    const rig = await opened();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          rig.store.render(
+            { offered: true, state: "idle", failure: null, waiting: false },
+            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+          )!,
+        );
+        return shell;
+      });
+    paint();
+    const field = root.querySelector('[data-key="pool-stewardMayAdoptLineSpawns"]')!;
+    expect(field.previousElementSibling?.getAttribute("data-key")).toBe("pool-stewardMayClose");
+    expect(field.textContent).toContain("Steward may adopt Line spawns");
+    expect(field.querySelector(".settings-hint")?.textContent).toContain(
+      "Held spawn proposed from inside the Line",
+    );
+    const box = root.querySelector<HTMLInputElement>(
+      '[data-key="pool-stewardMayAdoptLineSpawns-input"]',
+    )!;
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    paint();
+    expect(rig.store.stewardMayAdoptLineSpawns).toBe(true);
+    expect(rig.store.stewardMayClose).toBe(false);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-key="pool-stewardMayAdoptLineSpawns-input"]'),
+    ).toBe(box);
+    expect(box.checked).toBe(true);
+  });
+});
+
 describe("the Factory settings (issue #187)", () => {
   function withFactory(): SettingsResponse {
     const response = settings();

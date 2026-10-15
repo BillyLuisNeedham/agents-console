@@ -925,7 +925,9 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             // the final Review; an approval recorded in state holds it down for good.
             // A merge still in flight off the drive (an adopted or Continued attempt's ending) holds
             // the gate too: in the TypeScript it lands synchronously before any drive sees its ending.
+            // In a Factory pool approving the Finish checkpoint is the Review (ADR-0037).
             let raise = pending.is_empty()
+                && !crate::line::is_factory_pool(s)
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
                 && s.merge_line.unsettled().is_empty();
@@ -957,10 +959,14 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 }
             }
             let interrupts = !s.state.interrupts.is_empty();
+            // A Factory pool is done only when its Line is: before Start the Line, and while it
+            // routes, an empty or finished pool waits on it.
+            let line_waits = crate::line::is_factory_pool(s) && !crate::line::line_ended(s);
             let phase = if interrupts
                 || !outside.is_empty()
                 || !s.continued_grades.is_empty()
                 || spawns_await_boundary(s)
+                || (line_waits && pending.is_empty())
             {
                 RunPhase::Quiescent
             } else if pending.is_empty() {
@@ -985,7 +991,13 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 ),
                 RunPhase::Quiescent => format!(
                     "pool quiescent: waiting on {}",
-                    if !outside.is_empty() {
+                    if line_waits && pending.is_empty() && outside.is_empty() {
+                        if s.line.is_some() {
+                            "the Line".to_owned()
+                        } else {
+                            "Start the Line".to_owned()
+                        }
+                    } else if !outside.is_empty() {
                         outside
                             .iter()
                             .map(|s| s.as_str())

@@ -20,6 +20,7 @@ import type {
   HeldSpawnReason,
   HeldSpawnView,
   Interrupt,
+  LineView,
   LiveAttemptRecord,
   MergeQueueEntry,
   MergeQueueState,
@@ -31,6 +32,7 @@ import type {
   ResumeAction,
   RunPhase,
   StartConversationRequest,
+  Station,
   StewardBudgetView,
   TicketReassignView,
   TicketActivityResponse,
@@ -68,6 +70,7 @@ export type {
   InterruptKind,
   KeepTalkingRequest,
   KeepTalkingResponse,
+  LineView,
   MachineDefaults,
   MachineDefaultsView,
   MergeQueueEntry,
@@ -86,6 +89,7 @@ export type {
   RunPhase,
   SettingsResponse,
   StartConversationRequest,
+  Station,
   StationSettings,
   StewardAssign,
   StewardBudgetView,
@@ -1109,6 +1113,9 @@ export interface TicketCardView {
   /** The ticket was enlisted from a live herdr pane (issue #101): the badge
    *  reads "as found" where a spawned ticket names a model. */
   enlisted: boolean;
+  /** The Station a Line's Ticket works (ADR-0037), which its card labels;
+   *  null for a Ticket that is not on a Line. */
+  station: Station | null;
   /**
    * Reassign (issue #126): whether this ticket's assign entry can be
    * rewritten now, why not when it cannot, its own verify count, and where
@@ -1298,6 +1305,8 @@ export interface PoolView {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149). */
   spawnLine: SpawnLineView;
+  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
+  lineStrip: string | null;
   /** The Pending spawns the line's list shows first (issue #150), oldest
    *  first. */
   pendingSpawns: PendingSpawnRow[];
@@ -1726,6 +1735,7 @@ function projectTicket(
     resolver: projectResolver(ticket.liveAttempt, now),
     assignment: ticket.assignment,
     enlisted: ticket.enlisted,
+    station: ticket.station ?? null,
     reassign: ticket.reassign,
     hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
@@ -1892,6 +1902,7 @@ export function projectPool(
     log: snapshot.state.log,
     mergeQueueLine: mergeQueueLine(snapshot, now),
     spawnLine: spawnLine(snapshot),
+    lineStrip: lineStrip(snapshot.line),
     pendingSpawns: projectPendingSpawns(snapshot.pendingSpawns, now),
     heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
     steward: stewardOnDuty(conversations),
@@ -1941,6 +1952,46 @@ function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
   if (pending > 0) parts.push(`${pending} pending`);
   if (held > 0) parts.push(`${held} held`);
   return { text: parts.join(" · "), warn: spawnedThisRun >= perRun || held > 0 };
+}
+
+// ---------------------------------------------------------------------------
+// The Line (ADR-0037)
+// ---------------------------------------------------------------------------
+
+/** A Station as the header strip, the card and the Detail name it. */
+export function stationLabel(station: Station): string {
+  return station.charAt(0).toUpperCase() + station.slice(1);
+}
+
+/** The Finish in force as the strip names it: the two PR acts read as
+ *  words, any other act as the Grill wrote it. */
+function finishLabel(finish: string): string {
+  if (finish === "draft-pr") return "draft PR";
+  if (finish === "pr") return "PR";
+  return finish;
+}
+
+/**
+ * The canvas header's Line strip (ADR-0037): where the Line stands, "Round 2
+ * · Prove · fails 1/2 · Finish: draft PR" while it runs, "Line done after
+ * Round 2 · Finish: PR" once it ends, with "· halted" after either while a
+ * Close of a Station Ticket holds it. Null before Start the Line, so the
+ * strip is gone from a pool that runs no Line.
+ */
+export function lineStrip(line: LineView | undefined): string | null {
+  if (!line) return null;
+  const finish = `Finish: ${finishLabel(line.finish)}`;
+  const parts =
+    line.status === "done" || line.status === "closed"
+      ? [`Line ${line.status} after Round ${line.round}`, finish]
+      : [
+          `Round ${line.round}`,
+          stationLabel(line.station),
+          `fails ${line.proveFails}/${line.proveFailsAllowed}`,
+          finish,
+        ];
+  if (line.halted !== null) parts.push("halted");
+  return parts.join(" · ");
 }
 
 // ---------------------------------------------------------------------------
@@ -2379,12 +2430,14 @@ export interface PoolConfigPatch {
   spawnCaps?: { perAttempt: number | null; perRun: number | null };
   /** The Steward entry (ADR-0030), replaced whole like `defaults`: a null
    *  budget goes back to 5, an empty Assignment field to the pool defaults,
-   *  an absent `mayClose` to off (issue #154), and nothing set removes the
+   *  an absent `mayClose` to off (issue #154), an absent
+   *  `mayAdoptLineSpawns` to off (ADR-0037), and nothing set removes the
    *  key. */
   steward?: {
     budget: number | null;
     assign: { harness: string; model: string; effort: string; drivers: string };
     mayClose?: boolean;
+    mayAdoptLineSpawns?: boolean;
   };
   /** The Factory settings (issue #187), replaced whole: an empty field falls
    *  to the Machine defaults' layer, and null removes the key. */
@@ -2755,6 +2808,21 @@ export interface TicketDetailView {
   /** Mirrors the card's: the Steward budget used and left on this ticket,
    *  null until the Steward has answered it (ADR-0030). */
   stewardBudget: StewardBudgetLine | null;
+  /** Mirrors the card's: the Station a Line's Ticket works (ADR-0037). */
+  station: Station | null;
+  /** The report Decide writes at the Line's Finish, on the Finish Ticket's
+   *  Detail only; null on every other Ticket. */
+  report: LineReportView | null;
+}
+
+/**
+ * The Line's report as the Finish checkpoint's Detail shows it (ADR-0037):
+ * whether Decide wrote one, and the Round it was written at, whose number
+ * the report's address carries so a later Round's report is fetched afresh.
+ */
+export interface LineReportView {
+  written: boolean;
+  round: number;
 }
 
 interface UtilityDetailView {
@@ -2820,13 +2888,15 @@ export type DetailView =
 /**
  * The Detail for a selected card, read off the pool's already-projected
  * cards: the caller derives the cards once per cycle and passes them in, so
- * the Detail and the canvas never disagree about the same snapshot. Null
+ * the Detail and the canvas never disagree about the same snapshot. The
+ * Line (ADR-0037) is the snapshot's, for the Finish Ticket's report. Null
  * when the card is not in the pool.
  */
 export function projectDetail(
   cards: PoolCardView[],
   cardId: string,
   spawns: { pending: PendingSpawnRow[]; held: HeldSpawnRow[] } = { pending: [], held: [] },
+  line: LineView | null = null,
 ): DetailView | null {
   const card = cards.find((c) => c.id === cardId);
   if (!card) return null;
@@ -2868,6 +2938,11 @@ export function projectDetail(
       reassign: card.reassign,
       hasLiveAttempt: card.hasLiveAttempt,
       stewardBudget: card.stewardBudget,
+      station: card.station,
+      report:
+        card.station === "finish" && line
+          ? { written: line.report, round: line.round }
+          : null,
     };
   }
   if (card.kind === "conversation") {

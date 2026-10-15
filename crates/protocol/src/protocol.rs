@@ -249,6 +249,8 @@ wire_struct! {
         pub held_spawns: Option<Vec<HeldSpawnView>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub line: Option<LineView>,
     }
 }
 
@@ -266,6 +268,7 @@ wire_enum! {
         PendingSpawns = "pendingSpawns",
         HeldSpawns = "heldSpawns",
         StewardBudget = "stewardBudget",
+        Line = "line",
     }
 }
 

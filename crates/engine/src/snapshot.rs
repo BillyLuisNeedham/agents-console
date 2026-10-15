@@ -85,6 +85,8 @@ pub struct PoolSnapshot {
     pub held_spawns: Vec<HeldSpawnView>,
     /// The Steward budget (ADR-0030).
     pub steward_budget: StewardBudgetView,
+    /// The Factory's Line for the header strip (ADR-0037); `None` until it starts.
+    pub line: Option<ac_protocol::LineView>,
 }
 
 /// `emitSnapshot`: the one emit point for every snapshot the run produces. The hold is derived fresh
@@ -146,6 +148,7 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
                 .map(|(id, used)| (id.clone(), *used))
                 .collect(),
         },
+        line: crate::line::line_view(session),
     };
     // The Spawn ledger follows every emit, so what agents read there is never staler than what the
     // Console shows (issue #150).

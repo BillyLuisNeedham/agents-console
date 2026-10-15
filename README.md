@@ -130,6 +130,20 @@ terminal-backed (`"terminal": "herdr"`).
   `--name <dir>` names the pool directory, `--title <title>` titles the pool, and
   `--config <json file>` lays its keys over the new pool's `console.json` before
   the server starts (a `steward` block, say).
+- The Steward is on by default: Boot starts one once the Grill or Round 1 is
+  up, and `--no-steward` starts none. It may answer a Station's "no verdict"
+  checkpoint and the Prove limit, never the Finish checkpoint. It decides Held
+  spawns proposed from inside the Line only while `steward.mayAdoptLineSpawns`
+  is true in the pool's settings (default false).
+
+Boot marks the pool `"factoryPool": true` in `console.json`, and a Factory pool
+raises no run-wide Review: approving the Finish checkpoint is the Review. At the
+Finish, Decide carries out the brief's `finish` (`none`, `draft-pr`, `pr`, or an
+act it names) and writes the report to `runs/<slug>-report.html` in the pool.
+The Finish checkpoint's Brief links it, the Console shows it in that checkpoint's
+Detail with Open in browser, and `GET /api/line/report` serves it. The header
+shows the Line (`Round 2 · Prove · fails 1/2 · Finish: draft PR`) and each card
+its Station.
 
 Unattended, for example:
 

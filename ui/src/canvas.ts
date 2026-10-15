@@ -14,6 +14,7 @@
 import {
   checkpointNotice,
   conversationTurnLabel,
+  stationLabel,
   statusLabel,
   UNASSIGNED_LABEL,
   VITALS_MAX_SAMPLES,
@@ -24,6 +25,7 @@ import {
   type SpawnCardView,
   type RunPhase,
   type SpawnLineView,
+  type Station,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -215,6 +217,16 @@ function interruptDot(interrupt: InterruptView): HTMLElement {
   });
 }
 
+// A Station Ticket's label (ADR-0037), in its card's head beside the id:
+// the Grill badge's chip, naming the Station the Ticket works on the Line.
+function stationBadge(station: Station): HTMLElement {
+  return h(
+    "span",
+    { class: "station-badge", title: `the Line's ${stationLabel(station)} Station` },
+    stationLabel(station),
+  );
+}
+
 type Drag =
   | {
       kind: "node";
@@ -365,6 +377,9 @@ export interface CanvasModel {
   /** The Spawn caps line (issue #149), beside the Merge queue line; a
    *  button that opens the Held spawns list. Null before the first snapshot. */
   spawnLine: SpawnLineView | null;
+  /** The Line strip (ADR-0037), after the Spawn caps line: where the
+   *  pool's Line stands. Null before Start the Line. */
+  lineStrip: string | null;
   /** The header's "Close N finished terminals" control (issue #139). */
   closeTerminals: CloseTerminalsView;
 }
@@ -693,6 +708,7 @@ export class Canvas {
       "div",
       { class: "node-card-head" },
       h("span", { class: "node-card-id" }, card.ticketId),
+      card.station ? stationBadge(card.station) : null,
       h(
         "span",
         {
@@ -726,6 +742,7 @@ export class Canvas {
         class:
           `node-card ticket-card ticket-card-${card.status}` +
           (card.mergeState ? ` ticket-card-merge-${card.mergeState}` : "") +
+          (card.station ? " ticket-card-station" : "") +
           (card.interrupt
             ? card.interrupt.queued
               ? " ticket-card-queued"
@@ -1046,6 +1063,14 @@ export class Canvas {
                 onclick: () => this.onOpenHeldSpawns(),
               },
               model.spawnLine.text,
+            )
+          : null,
+        model.lineStrip
+          ? h(
+              "span",
+              // The strip ellipsises in a narrow header, so the hover says it whole.
+              { class: "canvas-line-strip", title: model.lineStrip },
+              model.lineStrip,
             )
           : null,
         model.error ? h("span", { class: "error-inline" }, model.error) : null,

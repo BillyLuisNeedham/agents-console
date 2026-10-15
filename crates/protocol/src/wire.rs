@@ -516,6 +516,11 @@ wire_struct! {
         /// on its own. Reloaded at the super-step boundary.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub factory: Option<Box<FactorySettings>>,
+        /// Boot's Factory mode marks the pool it makes (ADR-0037): a Factory pool
+        /// raises no run-wide Review, before its Line starts as after. A pool whose
+        /// Line has started is a Factory pool without it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub factory_pool: Option<bool>,
     }
 }
 
@@ -1031,6 +1036,10 @@ wire_struct! {
         /// "Steward may Close checkpoints" (issue #154, ADR-0033): off unless true.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub may_close: Option<bool>,
+        /// Whether the Steward may Adopt or Discard a Held spawn proposed from
+        /// inside a Line (ADR-0037): off unless true.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub may_adopt_line_spawns: Option<bool>,
     }
 }
 
@@ -1123,6 +1132,8 @@ wire_struct! {
         pub budget: u64,
         /// "Steward may Close checkpoints", read live from the pool settings.
         pub may_close: bool,
+        /// `steward.mayAdoptLineSpawns`, read live from the pool settings.
+        pub may_adopt_line_spawns: bool,
         pub phase: String,
         pub interrupts: Vec<StewardStateInterrupt>,
         pub merge_queue: Vec<StewardStateMerge>,
@@ -1483,6 +1494,10 @@ wire_struct! {
         /// written before the Steward still types.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
+        /// The Factory's Line (ADR-0037) for the header strip, absent until the
+        /// pool's Line starts.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub line: Option<LineView>,
         pub state: SnapshotState,
     }
 }
@@ -1964,6 +1979,38 @@ wire_struct! {
         /// Why the Line halted (a Close of a Station Ticket); null while it runs.
         pub halted: Option<String>,
         pub rounds: Vec<LineRound>,
+        /// The Line's branch, the pool's target branch as the Line started: a
+        /// Finish that opens a PR opens it from this branch.
+        #[serde(default)]
+        pub branch: String,
+        /// The report Decide writes at the Finish, `runs/<line>-report.html` in
+        /// the pool directory, as an absolute path.
+        #[serde(default)]
+        pub report: String,
+    }
+}
+
+wire_struct! {
+    /// The Line as the Console's header strip and cards read it (ADR-0037), on
+    /// the snapshot from Start the Line on: "Round 2 · Prove · fails 1/2 ·
+    /// Finish: draft PR".
+    pub struct LineView {
+        pub round: u64,
+        /// The current Station and its Ticket.
+        pub station: Station,
+        pub ticket: String,
+        pub status: LineStatus,
+        /// Prove failures in this Round.
+        pub prove_fails: u64,
+        /// The failures this Round takes before the Line checkpoints: the
+        /// `proveFailsPerRound` in force plus the fixes Resume bought.
+        pub prove_fails_allowed: u64,
+        /// The Finish in force: none, draft-pr, pr, or the act it names.
+        pub finish: String,
+        /// Decide has written the report: GET /api/line/report serves it.
+        pub report: bool,
+        /// Why the Line halted (a Close of a Station Ticket); null while it runs.
+        pub halted: Option<String>,
     }
 }
 

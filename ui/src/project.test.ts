@@ -19,6 +19,7 @@ import {
   initialLogWindow,
   isTerminalBacked,
   joinStreamFiles,
+  lineStrip,
   logAtBottom,
   logTailOffset,
   nextNodeSelection,
@@ -63,6 +64,7 @@ import {
   type EnrichedSnapshot,
   type EnrichedTicketState,
   type InterruptKind,
+  type LineView,
   type NeedsInputRow,
   type QueuedAnswer,
   type TabOverride,
@@ -1213,6 +1215,8 @@ describe("projectDetailTabs", () => {
       },
       hasLiveAttempt: false,
       stewardBudget: null,
+      station: null,
+      report: null,
     };
   }
 
@@ -4267,5 +4271,103 @@ describe("a Conversation whose Notices are not landing", () => {
     expect(blind.delivery?.lastError).toBe(delivery.lastError);
     const fine = stewardOnDuty([conversation("conv-3", { role: "steward" })])!;
     expect(fine.delivery).toBeNull();
+  });
+});
+
+describe("the Line (#187, ADR-0037)", () => {
+  function line(overrides: Partial<LineView> = {}): LineView {
+    return {
+      round: 2,
+      station: "prove",
+      ticket: "r2-prove",
+      status: "running",
+      proveFails: 1,
+      proveFailsAllowed: 2,
+      finish: "draft-pr",
+      report: false,
+      halted: null,
+      ...overrides,
+    };
+  }
+
+  it("reads the running Line in the header strip: Round, Station, fails and Finish", () => {
+    expect(lineStrip(line())).toBe("Round 2 · Prove · fails 1/2 · Finish: draft PR");
+    expect(lineStrip(line({ round: 1, station: "implement", proveFails: 0 }))).toBe(
+      "Round 1 · Implement · fails 0/2 · Finish: draft PR",
+    );
+  });
+
+  it("names the Finish: the PR acts as words, none as none, any other act as the Grill wrote it", () => {
+    expect(lineStrip(line({ finish: "pr" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: PR");
+    expect(lineStrip(line({ finish: "none" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: none");
+    expect(lineStrip(line({ finish: "post the report in #releases" }))).toBe(
+      "Round 2 · Prove · fails 1/2 · Finish: post the report in #releases",
+    );
+  });
+
+  it("says the Line ended after its last Round once it is done or closed", () => {
+    expect(lineStrip(line({ status: "done", station: "finish", finish: "pr" }))).toBe(
+      "Line done after Round 2 · Finish: PR",
+    );
+    expect(lineStrip(line({ status: "closed", station: "finish" }))).toBe(
+      "Line closed after Round 2 · Finish: draft PR",
+    );
+  });
+
+  it("marks a halted Line", () => {
+    expect(lineStrip(line({ halted: "r2-prove closed: flaky harness" }))).toBe(
+      "Round 2 · Prove · fails 1/2 · Finish: draft PR · halted",
+    );
+    expect(lineStrip(line({ status: "closed", halted: "closed" }))).toBe(
+      "Line closed after Round 2 · Finish: draft PR · halted",
+    );
+  });
+
+  it("has no strip before Start the Line, and the pool view carries the snapshot's", () => {
+    expect(lineStrip(undefined)).toBeNull();
+    expect(projectPool(snapshot()).lineStrip).toBeNull();
+    expect(projectPool(snapshot({ line: line() })).lineStrip).toBe(
+      "Round 2 · Prove · fails 1/2 · Finish: draft PR",
+    );
+  });
+
+  it("carries a Station Ticket's Station onto its card, and none onto any other", () => {
+    const cards = projectPool(
+      snapshot({ state: { tickets: [ticket("r1-review", { station: "review" }), ticket("A")] } }),
+    ).cards;
+    const station = (id: string) =>
+      (cards.find((c) => c.id === `ticket:${id}`) as TicketCardView).station;
+    expect(station("r1-review")).toBe("review");
+    expect(station("A")).toBeNull();
+  });
+
+  it("gives the Finish Ticket's Detail the report, at the Round it was written", () => {
+    const snap = snapshot({
+      line: line({ status: "finish", station: "finish", ticket: "r2-finish", report: true }),
+      state: {
+        tickets: [
+          ticket("r2-decide", { status: "done", station: "decide" }),
+          ticket("r2-finish", { status: "checkpoint", station: "finish" }),
+        ],
+      },
+    });
+    const cards = projectPool(snap).cards;
+    const finish = projectDetail(cards, "ticket:r2-finish", undefined, snap.line);
+    expect(finish?.kind === "ticket" && finish.report).toEqual({ written: true, round: 2 });
+    expect(finish?.kind === "ticket" && finish.station).toBe("finish");
+    const decide = projectDetail(cards, "ticket:r2-decide", undefined, snap.line);
+    expect(decide?.kind === "ticket" && decide.report).toBeNull();
+    // Without the Line there is no report to say anything of.
+    const bare = projectDetail(cards, "ticket:r2-finish");
+    expect(bare?.kind === "ticket" && bare.report).toBeNull();
+  });
+
+  it("says when Decide wrote no report", () => {
+    const snap = snapshot({
+      line: line({ status: "finish", station: "finish", report: false }),
+      state: { tickets: [ticket("r2-finish", { status: "checkpoint", station: "finish" })] },
+    });
+    const detail = projectDetail(projectPool(snap).cards, "ticket:r2-finish", undefined, snap.line);
+    expect(detail?.kind === "ticket" && detail.report).toEqual({ written: false, round: 2 });
   });
 });

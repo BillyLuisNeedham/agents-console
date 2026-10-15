@@ -96,6 +96,8 @@ export interface PoolDraft {
   stewardDrivers: string;
   /** "Steward may Close checkpoints" (issue #154): off unless the file says so. */
   stewardMayClose: boolean;
+  /** "Steward may adopt Line spawns" (ADR-0037): off unless the file says so. */
+  stewardMayAdoptLineSpawns: boolean;
 }
 
 export interface MachineDraft {
@@ -107,7 +109,10 @@ export interface MachineDraft {
   engine: string;
 }
 
-export type PoolTextField = Exclude<keyof PoolDraft, "terminal" | "stewardMayClose">;
+export type PoolTextField = Exclude<
+  keyof PoolDraft,
+  "terminal" | "stewardMayClose" | "stewardMayAdoptLineSpawns"
+>;
 export type MachineTextField = Exclude<keyof MachineDraft, "terminal">;
 
 /** The "opt out of resolution" value, which the file holds as a plain string. */
@@ -135,6 +140,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   stewardEffort: "",
   stewardDrivers: "",
   stewardMayClose: false,
+  stewardMayAdoptLineSpawns: false,
 };
 
 /** The engine's Steward budget when the file sets none (crates/core/src/steward.rs),
@@ -190,6 +196,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     stewardEffort: config.steward?.assign?.effort ?? "",
     stewardDrivers: config.steward?.assign?.drivers ?? "",
     stewardMayClose: config.steward?.mayClose === true,
+    stewardMayAdoptLineSpawns: config.steward?.mayAdoptLineSpawns === true,
   };
 }
 
@@ -296,9 +303,10 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
         effort: trim(draft.stewardEffort),
         drivers: trim(draft.stewardDrivers),
       },
-      // Off is the default, so it travels as an absent key and the file
-      // never holds a `mayClose: false`.
+      // Off is the default, so each travels as an absent key and the file
+      // never holds a `mayClose: false` or a `mayAdoptLineSpawns: false`.
       ...(draft.stewardMayClose ? { mayClose: true } : {}),
+      ...(draft.stewardMayAdoptLineSpawns ? { mayAdoptLineSpawns: true } : {}),
     },
   };
 }
@@ -450,6 +458,10 @@ export class SettingsStore {
     return this.poolDraft.stewardMayClose;
   }
 
+  get stewardMayAdoptLineSpawns(): boolean {
+    return this.poolDraft.stewardMayAdoptLineSpawns;
+  }
+
   /**
    * The boot-only keys waiting on a Restart, as the engine reports them.
    * Empty before the first read: with nothing read off disk, there is
@@ -530,6 +542,14 @@ export class SettingsStore {
   setStewardMayClose(value: boolean): void {
     if (this.poolDraft.stewardMayClose === value) return;
     this.poolDraft.stewardMayClose = value;
+    if (this.poolState === "saved") this.poolState = "idle";
+    this.poolError = null;
+    this.onChange();
+  }
+
+  setStewardMayAdoptLineSpawns(value: boolean): void {
+    if (this.poolDraft.stewardMayAdoptLineSpawns === value) return;
+    this.poolDraft.stewardMayAdoptLineSpawns = value;
     if (this.poolState === "saved") this.poolState = "idle";
     this.poolError = null;
     this.onChange();
@@ -1085,6 +1105,24 @@ export class SettingsStore {
         ),
         false,
         "on, the Steward may close a checkpoint or merge conflict without merging; off, only you can",
+      ),
+      this.renderField(
+        "pool-stewardMayAdoptLineSpawns",
+        "steward line spawns",
+        h(
+          "label",
+          { class: "settings-check" },
+          h("input", {
+            type: "checkbox",
+            key: "pool-stewardMayAdoptLineSpawns-input",
+            checked: this.poolDraft.stewardMayAdoptLineSpawns,
+            onchange: (event: Event) =>
+              this.setStewardMayAdoptLineSpawns((event.currentTarget as HTMLInputElement).checked),
+          }),
+          h("span", {}, "Steward may adopt Line spawns"),
+        ),
+        false,
+        "on, the Steward may adopt or discard a Held spawn proposed from inside the Line; off, only you can",
       ),
     ];
   }

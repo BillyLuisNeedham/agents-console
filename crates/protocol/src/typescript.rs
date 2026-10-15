@@ -302,6 +302,7 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
                 exported::<LineProve>(),
                 exported::<LineRound>(),
                 exported::<LineState>(),
+                exported::<LineView>(),
                 exported::<LineStartRequest>(),
                 exported::<LineStartResponse>(),
                 exported::<LineResponse>(),

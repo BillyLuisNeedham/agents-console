@@ -16,7 +16,7 @@ import type {
 } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { HttpAnswer } from "../harness/http.ts";
-import { settle } from "../harness/pool-run.ts";
+import { answer, settle } from "../harness/pool-run.ts";
 import type { ConformanceStubBehaviour } from "../harness/stubs.ts";
 import type { World } from "../harness/world.ts";
 
@@ -71,10 +71,33 @@ export function verdict(value: unknown, extra: Record<string, unknown> = {}): Co
   };
 }
 
+/** Where Decide writes the Line's report: `runs/<line>-report.html`, `<line>` the brief's name. */
+export const REPORT = "runs/line-report.html";
+
+/** The report a Decide stub writes before it records its verdict. */
+export const REPORT_HTML = "<!doctype html><title>Line report</title><h1>The Line report</h1>";
+
+/** Bash that writes the report where Decide's body says: the runs directory beside the Ticket's issues/. */
+const WRITE_REPORT = `pool="$(dirname "$(dirname "$STUB_ISSUE")")"; mkdir -p "$pool/runs"; printf '%s' '${REPORT_HTML}' > "$pool/${REPORT}"`;
+
+/** A Decide that ends the Line: it writes the report, then records `value`. */
+export function finishing(value: unknown, extra: Record<string, unknown> = {}): ConformanceStubBehaviour {
+  return { ...verdict(value, extra), run: WRITE_REPORT };
+}
+
 export const PASS = verdict({ prove: "pass", evidence: "proof/ok.txt" });
 export const FAIL = verdict({ prove: "fail", evidence: "proof/fail.txt" }, { brief: "the CLI exits 2 on an empty pool" });
 export const NO_FINDINGS = verdict({ findings: [] });
-export const FINISH = verdict({ decide: "finish" });
+export const FINISH = finishing({ decide: "finish" });
+
+/**
+ * Approve the Finish checkpoint and wait for the run to be done: in a Factory pool that approval is
+ * the Review, so no run-wide Review follows it.
+ */
+export async function approveFinish(server: CaseServer, id: string): Promise<EnrichedSnapshot> {
+  await answer(server, { ticketId: id, note: "approved" });
+  return settle(server, (snap) => snap.phase === "done", { what: "the run to be done" });
+}
 
 /** Every Ticket on a snapshot as `id:status`, in the snapshot's order. */
 export function cards(snap: EnrichedSnapshot): string[] {

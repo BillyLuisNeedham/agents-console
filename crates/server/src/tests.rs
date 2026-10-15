@@ -60,6 +60,7 @@ fn snapshot(
             budget: 5,
             used: IndexMap::new(),
         },
+        line: None,
     }
 }
 

@@ -72,6 +72,8 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
     title: "Pilot 186",
     terminal: "herdr",
     steward: { budget: 10, mayAdoptLineSpawns: true },
+    // Marked a Factory pool: it raises no run-wide Review (ADR-0037).
+    factoryPool: true,
   });
   expect(readJson(join(pool, "line.json"))).toMatchObject({
     briefPath: "docs/specs/186.brief.json",
@@ -86,8 +88,12 @@ conformance("cli", "Boot --brief cuts the Line from main into its own worktree, 
   expect(readFileSync(join(pool, "issues", "r1-implement.md"), "utf8")).toContain(" station=implement ");
 
   // A Line branch is never reused: the same brief again is a Line of its own.
-  const again = await w.run("boot", ["--brief", "pilots/186.brief.json", "--no-open", "--port", "0"], { cwd: repo });
+  const again = await w.run("boot", ["--brief", "pilots/186.brief.json", "--no-steward", "--no-open", "--port", "0"], {
+    cwd: repo,
+  });
   expect(again.code, again.stderr).toBe(0);
+  // --no-steward: Boot starts none and says nothing of one.
+  expect(`${again.stdout}${again.stderr}`).not.toContain("steward");
   expect(again.stdout).toContain("line: cut line/186-2 from main");
   expect(readJson(join(repo, ".scratch", "lines", "186-2", ".scratch", "186-2", "console.json"))).toMatchObject({
     title: "A Continued attempt's checkpoint drops its spawns (issue #186)",
@@ -115,11 +121,16 @@ conformance("cli", "Boot --factory asks for the work, cuts the Line and opens th
   expect(run.prompts[1]).toBe("title for the Line's pool [Issue #186]");
   expect(run.stdout).toContain("line: cut line/186 from main");
   expect(run.stdout).toContain("grill: conv-1 opened with the work as its first Turn");
+  // The Steward is on by default in a Factory pool, started after the Grill.
+  expect(run.stdout).toContain("steward: conv-2 on duty; it never answers the Finish checkpoint\n");
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 
   const pool = join(repo, ".scratch", "lines", "186", ".scratch", "186");
-  expect(readJson(join(pool, "console.json"))).toMatchObject({ title: "Issue #186", terminal: "herdr" });
+  expect(readJson(join(pool, "console.json"))).toMatchObject({ title: "Issue #186", terminal: "herdr", factoryPool: true });
   expect(existsSync(join(pool, "line.json"))).toBe(false);
+  const steward = readFileSync(join(pool, "conversations", "conv-2.md"), "utf8");
+  expect(steward.split("\n", 1)[0]).toContain(" role=steward ");
+  expect(steward).toContain("Steward this Factory pool's Line while the operator is away");
   const record = readFileSync(join(pool, "conversations", "conv-1.md"), "utf8");
   expect(record.split("\n", 1)[0]).toContain(" role=grill ");
   expect(record).toContain("# Grill: Issue #186\n");

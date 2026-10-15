@@ -98,6 +98,8 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
     enlisted: false,
     hasLiveAttempt: false,
     stewardBudget: null,
+    station: null,
+    report: null,
     reassign: {
       eligible: true,
       reason: null,
@@ -1476,5 +1478,125 @@ describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
     const { root } = paint(grillDetail({ lineStart: { starting: false, failure: reason } }));
     expect(root.querySelector(".conversation-start-line-failure")?.textContent).toBe(reason);
     expect(button(root)?.disabled).toBe(false);
+  });
+});
+
+describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", () => {
+  // The Detail on Progress, painted again on demand the way a live frame
+  // paints it: the same pane, the page morphed to each new tree.
+  function progress(first: TicketDetailView) {
+    const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
+    const handlers: DetailHandlers = {
+      onSelectAttempt: () => {},
+      onSelectStream: () => {},
+      onLoadEarlier: () => {},
+      onAnswer: () => {},
+      onKeepTalking: () => {},
+      onUseStewardNote: () => {},
+      onSelectTab: () => {},
+      onEndConversation: () => {},
+      onStartLine: () => {},
+      onFocusConversationTerminal: () => Promise.resolve(true),
+      onFocusResolver: () => Promise.resolve(true),
+      renderSpawnDecision: () => document.createElement("div"),
+      reassign: new ReassignStore({
+        onGetSettings: () => new Promise(() => {}),
+        onReassign: () => new Promise(() => {}),
+        onChange: () => {},
+      }),
+    };
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = (detail: TicketDetailView) =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          pane.render(
+            {
+              ...model(detail),
+              detailTabs: (["spec", "progress", "outcome"] as const).map((id) => ({
+                id,
+                label: id,
+                active: id === "progress",
+                interruptDot: false,
+              })),
+            },
+            handlers,
+          ),
+        );
+        return shell;
+      });
+    paint(first);
+    return { root, paint };
+  }
+
+  const checkpoint: TicketDetailView["interrupt"] = {
+    ticketId: "r2-finish",
+    kind: "checkpoint",
+    body: "the Line is finished: read the report",
+    form: {
+      title: "checkpoint",
+      actions: [
+        { action: "resume", label: "resume", tone: "primary" },
+        { action: "close", label: "close", tone: "danger" },
+      ],
+    },
+    queued: false,
+    closing: false,
+    adopt: [],
+    keepTalking: null,
+  };
+
+  const finish = (overrides: Partial<TicketDetailView> = {}): TicketDetailView =>
+    detailView({
+      ticketId: "r2-finish",
+      status: "checkpoint",
+      station: "finish",
+      interrupt: checkpoint,
+      report: { written: true, round: 2 },
+      ...overrides,
+    });
+
+  it("frames the report under the checkpoint's form, with Open in browser beside its heading", () => {
+    const { root } = progress(finish());
+    const section = root.querySelector('[data-key="detail-report"]')!;
+    expect(section.previousElementSibling?.classList.contains("interrupt-box")).toBe(true);
+    expect(section.querySelector(".detail-report-title")?.textContent).toBe("Report");
+    const frame = section.querySelector<HTMLIFrameElement>('iframe[data-key="detail-report-frame"]')!;
+    expect(frame.getAttribute("src")).toBe("/api/line/report?round=2");
+    // The report is an agent's HTML: no script, not of the Console's origin.
+    expect(frame.getAttribute("sandbox")).not.toContain("allow-scripts");
+    expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
+    const open = section.querySelector<HTMLAnchorElement>("a.detail-report-open")!;
+    expect(open.textContent).toBe("Open in browser");
+    expect(open.getAttribute("href")).toBe("/api/line/report?round=2");
+    expect(open.getAttribute("target")).toBe("_blank");
+    expect(open.getAttribute("rel")).toBe("noopener");
+  });
+
+  it("keeps the frame's node across a render, and fetches a later Round's report afresh", () => {
+    const { root, paint } = progress(finish());
+    const frame = root.querySelector("iframe.detail-report-frame");
+    paint(finish({ title: "Finish the Line (renamed)" }));
+    expect(root.querySelector("iframe.detail-report-frame")).toBe(frame);
+    paint(finish({ report: { written: true, round: 3 } }));
+    expect(root.querySelector("iframe.detail-report-frame")?.getAttribute("src")).toBe(
+      "/api/line/report?round=3",
+    );
+  });
+
+  it("says Decide wrote no report, with nothing to open", () => {
+    const { root } = progress(finish({ report: { written: false, round: 2 } }));
+    const section = root.querySelector('[data-key="detail-report"]')!;
+    expect(section.querySelector(".detail-report-none")?.textContent).toBe(
+      "No report: Decide did not write one.",
+    );
+    expect(section.querySelector("iframe")).toBeNull();
+    expect(section.querySelector(".detail-report-open")).toBeNull();
+  });
+
+  it("shows no report section on any other Ticket", () => {
+    const { root } = progress(detailView({ station: "decide", status: "in-progress" }));
+    expect(root.querySelector(".detail-report")).toBeNull();
   });
 });

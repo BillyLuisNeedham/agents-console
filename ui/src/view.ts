@@ -142,6 +142,8 @@ export interface AppModel {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
   spawnLine: SpawnLineView | null;
+  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
+  lineStrip: string | null;
   /** The Pending spawns the Spawn caps line's list shows first (issue #150). */
   pendingSpawns: PendingSpawnRow[];
   /** The Held spawns list the Spawn caps line opens (issue #149). */

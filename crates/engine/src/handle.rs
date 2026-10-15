@@ -293,6 +293,7 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.call(move |s| {
             crate::steward_actions::check_steward(s, &conversation)?;
+            crate::steward_actions::check_line_spawn(s, &id, "discard")?;
             crate::spawns::discard_held_spawn(s, &id, Some(&conversation))
         })
         .await?

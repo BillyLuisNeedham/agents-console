@@ -103,6 +103,7 @@ pub fn enrich(
         pending_spawns: snapshot.pending_spawns.clone(),
         held_spawns: snapshot.held_spawns.clone(),
         steward_budget: Some(snapshot.steward_budget.clone()),
+        line: snapshot.line.clone(),
         state: SnapshotState {
             tickets,
             conversations: snapshot.conversations.clone(),

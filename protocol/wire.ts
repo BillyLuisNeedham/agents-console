@@ -452,6 +452,12 @@ export interface PoolConfig {
    * on its own. Reloaded at the super-step boundary.
    */
   factory?: FactorySettings;
+  /**
+   * Boot's Factory mode marks the pool it makes (ADR-0037): a Factory pool
+   * raises no run-wide Review, before its Line starts as after. A pool whose
+   * Line has started is a Factory pool without it.
+   */
+  factoryPool?: boolean;
 }
 
 /** The pool defaults' Assignment fields: console.json `defaults`. */
@@ -806,6 +812,11 @@ export interface StewardConfig {
   assign?: StewardAssign;
   /** "Steward may Close checkpoints" (issue #154, ADR-0033): off unless true. */
   mayClose?: boolean;
+  /**
+   * Whether the Steward may Adopt or Discard a Held spawn proposed from
+   * inside a Line (ADR-0037): off unless true.
+   */
+  mayAdoptLineSpawns?: boolean;
 }
 
 /** POST /api/steward/end: the Steward ends itself, closing line included. */
@@ -878,6 +889,8 @@ export interface StewardStateResponse {
   budget: number;
   /** "Steward may Close checkpoints", read live from the pool settings. */
   mayClose: boolean;
+  /** `steward.mayAdoptLineSpawns`, read live from the pool settings. */
+  mayAdoptLineSpawns: boolean;
   phase: string;
   interrupts: StewardStateInterrupt[];
   mergeQueue: { ticketId: string; state: string }[];
@@ -1180,6 +1193,11 @@ export interface EnrichedSnapshot {
    * written before the Steward still types.
    */
   stewardBudget?: StewardBudgetView;
+  /**
+   * The Factory's Line (ADR-0037) for the header strip, absent until the
+   * pool's Line starts.
+   */
+  line?: LineView;
   state: {
     tickets: EnrichedTicketState[];
     /**
@@ -1531,6 +1549,42 @@ export interface LineState {
   /** Why the Line halted (a Close of a Station Ticket); null while it runs. */
   halted: string | null;
   rounds: LineRound[];
+  /**
+   * The Line's branch, the pool's target branch as the Line started: a
+   * Finish that opens a PR opens it from this branch.
+   */
+  branch: string;
+  /**
+   * The report Decide writes at the Finish, `runs/<line>-report.html` in
+   * the pool directory, as an absolute path.
+   */
+  report: string;
+}
+
+/**
+ * The Line as the Console's header strip and cards read it (ADR-0037), on
+ * the snapshot from Start the Line on: "Round 2 · Prove · fails 1/2 ·
+ * Finish: draft PR".
+ */
+export interface LineView {
+  round: number;
+  /** The current Station and its Ticket. */
+  station: Station;
+  ticket: string;
+  status: LineStatus;
+  /** Prove failures in this Round. */
+  proveFails: number;
+  /**
+   * The failures this Round takes before the Line checkpoints: the
+   * `proveFailsPerRound` in force plus the fixes Resume bought.
+   */
+  proveFailsAllowed: number;
+  /** The Finish in force: none, draft-pr, pr, or the act it names. */
+  finish: string;
+  /** Decide has written the report: GET /api/line/report serves it. */
+  report: boolean;
+  /** Why the Line halted (a Close of a Station Ticket); null while it runs. */
+  halted: string | null;
 }
 
 /**

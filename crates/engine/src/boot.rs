@@ -429,14 +429,17 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
         tickets: Some(tickets),
         ..PoolUpdate::default()
     });
-    // An approval only stands while every marker on disk is finished.
-    if session.markers.iter().any(|m| !is_finished(Some(m.status)))
-        && (session.state.review_approved
-            || session
-                .state
-                .interrupts
-                .iter()
-                .any(|i| i.kind == InterruptKind::Review))
+    // An approval only stands while every marker on disk is finished. A Factory pool raises no
+    // run-wide Review (ADR-0037), so one a pool kept from before it became one goes.
+    let factory = crate::line::is_factory_pool(session);
+    let reviewing = session
+        .state
+        .interrupts
+        .iter()
+        .any(|i| i.kind == InterruptKind::Review);
+    if (factory && reviewing)
+        || (session.markers.iter().any(|m| !is_finished(Some(m.status)))
+            && (session.state.review_approved || reviewing))
     {
         let interrupts = session
             .state
@@ -450,11 +453,15 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
             review_approved: Some(false),
             ..PoolUpdate::default()
         });
-        log.push(
+        log.push(if factory {
+            "review gate cleared: a Factory pool raises no run-wide Review; its Finish checkpoint \
+             is the Review"
+                .into()
+        } else {
             "review gate cleared: markers on disk are not all done, so a fresh Review will be raised \
              when they finish"
-                .into(),
-        );
+                .into()
+        });
     }
     let stale: Vec<Interrupt> = session
         .state

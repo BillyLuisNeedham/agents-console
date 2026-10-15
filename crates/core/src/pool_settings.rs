@@ -286,6 +286,19 @@ fn normalise_steward(value: &Value, harnesses: &[String]) -> Result<Option<Value
             out.insert("mayClose".into(), Value::Bool(true));
         }
     }
+    if let Some(may_adopt) = raw
+        .get("mayAdoptLineSpawns")
+        .filter(|may_adopt| !may_adopt.is_null())
+    {
+        let Value::Bool(may_adopt) = may_adopt else {
+            return Err(refused(
+                "pool settings: steward.mayAdoptLineSpawns must be true or false".into(),
+            ));
+        };
+        if *may_adopt {
+            out.insert("mayAdoptLineSpawns".into(), Value::Bool(true));
+        }
+    }
     Ok(non_empty(out))
 }
 

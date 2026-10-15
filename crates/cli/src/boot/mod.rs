@@ -46,7 +46,7 @@ use pool::{
 };
 
 pub const USAGE: &str = "usage: agent-console [pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]
-       agent-console --factory [--work <issue number or text> | --brief <path>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--yes] [--port <n>] [--setup <name>] [--no-open]";
+       agent-console --factory [--work <issue number or text> | --brief <path>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
 
 /// What `--help` prints: the usage, then what Factory mode's flags do.
 pub const FACTORY_HELP: &str = "
@@ -64,7 +64,9 @@ inside it at <worktree>/.scratch/<name>, its target branch the Line's.
   --name <dir>           the pool directory's name (default: the Line's slug)
   --title <title>        the pool's title (default: the issue, the spec's first heading)
   --config <json file>   keys laid over the new pool's console.json before its server
-                         starts, each replacing the key there: a steward block, say";
+                         starts, each replacing the key there: a steward block, say
+  --no-steward           start no Steward (a Factory pool starts one by default; it never
+                         answers the Finish checkpoint)";
 
 /// Boot's flags, kept deliberately few.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -89,6 +91,8 @@ pub struct BootArgs {
     pub title: Option<String>,
     /// A JSON file whose keys are laid over the new pool's console.json before it starts.
     pub config: Option<String>,
+    /// Start no Steward in the Factory pool (one starts by default, ADR-0037).
+    pub no_steward: bool,
 }
 
 /// A command line Boot will not run: the usage asked for, or a refusal to print.
@@ -120,6 +124,7 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
             "--relaunch" => args.relaunch = true,
             "--no-open" => args.open = false,
             "--factory" => args.factory = true,
+            "--no-steward" => args.no_steward = true,
             "--work" | "--brief" | "--line" | "--name" | "--title" | "--config" => {
                 let Some(value) = argv.get(i + 1).filter(|value| !value.starts_with("--")) else {
                     return Err(refusal(format!("{arg} needs a value\n{USAGE}")));
@@ -181,11 +186,14 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
         ("--work", args.work.is_some()),
         ("--line", args.line.is_some()),
         ("--name", args.name.is_some()),
+        ("--no-steward", args.no_steward),
     ];
     if !args.factory
         && let Some((flag, _)) = factory_only.iter().find(|(_, given)| *given)
     {
-        return Err(refusal(format!("{flag} is for Factory mode: add --factory\n{USAGE}")));
+        return Err(refusal(format!(
+            "{flag} is for Factory mode: add --factory\n{USAGE}"
+        )));
     }
     if args.factory {
         if args.work.is_some() && args.brief.is_some() {
@@ -1213,8 +1221,8 @@ fn run_factory_boot(
     report_detection(io, &detection);
     let mut sources = Vec::new();
     if let Some(name) = args.setup.as_deref().filter(|name| !name.is_empty()) {
-        let setup =
-            read_setup(name, home).ok_or_else(|| format!("no Setup named {name} under ~/.agent-graphs/setups/"))?;
+        let setup = read_setup(name, home)
+            .ok_or_else(|| format!("no Setup named {name} under ~/.agent-graphs/setups/"))?;
         io.log(&format!("starting from Setup {name}"));
         sources.push(prefill_from_setup(&setup));
     }
@@ -1242,6 +1250,8 @@ fn run_factory_boot(
         factory::overlay_config(&mut merged, config, cwd)?;
         io.log(&format!("laid {config} over the pool's console.json"));
     }
+    // The engine raises no run-wide Review in a Factory pool, from its first boot (ADR-0037).
+    merged.insert("factoryPool".to_owned(), Value::Bool(true));
     write_console_config(&pool_dir, &merged)?;
     io.log(&format!(
         "wrote {}",
@@ -1320,12 +1330,41 @@ fn run_factory_boot(
         }
         (LineWork::Ready(_), None) => false,
     };
+    if !args.no_steward {
+        start_factory_steward(&url, io);
+    }
     report_console(&url, &pool_dir, args, io);
     io.log(&format!(
         "line: {} at {}; when the Line is done, remove it with git worktree remove {}",
         line.branch, line.worktree, line.worktree
     ));
     Ok(if started { 0 } else { 1 })
+}
+
+// The Steward is on by default in a Factory pool (ADR-0037): started once the Line or its Grill is,
+// with standing orders to keep the Line moving. A Steward that does not start leaves the pool up.
+fn start_factory_steward(url: &str, io: &mut dyn BootIo) {
+    let request = serde_json::json!({
+        "title": "Steward",
+        "opening": factory::STEWARD_ORDERS,
+        "role": "steward",
+    });
+    match launch::post_json(
+        &format!("{url}/api/conversations"),
+        &request,
+        GRILL_START_TIMEOUT_MS,
+    ) {
+        Ok((201, body)) => io.log(&format!(
+            "steward: {} on duty; it never answers the Finish checkpoint",
+            body.pointer("/conversation/id")
+                .map(js::string_of)
+                .unwrap_or_default()
+        )),
+        answer => io.warn(&format!(
+            "the Steward did not start: {}; the pool is up, so start one from the Console",
+            refusal_text(answer)
+        )),
+    }
 }
 
 fn refusal_text(answer: Result<(u16, Value), String>) -> String {
