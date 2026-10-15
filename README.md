@@ -115,6 +115,57 @@ makes the pool inside that worktree at `<worktree>/.scratch/<name>`: the pool's
 target branch is the Line's, never a shared one (ADR-0038). A Factory pool is
 terminal-backed (`"terminal": "herdr"`).
 
+#### Using it
+
+Before the first Line on a machine:
+
+- herdr is running, and the harness the Stations use (claude by default) is
+  on PATH.
+- The Stations' default skills are in `~/.claude/skills`: `implement`,
+  `my-verify`, `code-review`, `html` and, for the Grill, `my-grill-with-docs`
+  and `show-me`. Run `skills/link.sh` for this repo's own skills, including
+  `my-console-steward`.
+- The project has a `main` branch, local or on `origin`. Boot cuts every Line
+  from it.
+- For a `draft-pr` or `pr` Finish, `gh` is logged in with push rights on the
+  project.
+
+A Line from an issue, with the operator in the room:
+
+1. From the project's checkout, run `agent-console --factory --work 123`. You
+   can give free text instead of an issue number. Boot cuts `line/123`, opens
+   the Console and starts the Grill.
+2. Answer the Grill. It writes the spec and the Line brief. The brief sets the
+   Finish, `none` by default; say if you want `draft-pr` or `pr`. It can also
+   override any Station setting for this one Line.
+3. Press **Start the Line** on the Grill card. The engine merges the Grill's
+   branch, ends the Grill and creates `r1-implement`. From here the engine
+   routes every Station: Implement, Prove, Review, then Decide, which either
+   starts another Round or finishes the Line.
+4. You only answer checkpoints:
+   - **No verdict:** a Station ended without a valid verdict. Resume it or use
+     Keep talking.
+   - **Prove limit:** Prove failed too often in one Round. Resume with a note
+     to buy one more fix, or Close to halt the Line.
+   - **Finish:** read the report in the checkpoint's Detail. Resume with
+     `approved`, or with no note, to end the Line. Resume with notes to start
+     another Round on them.
+5. When the Line is done, stop the pool and remove its worktree (below).
+
+A Line from a spec you already have: write the spec, and a brief beside it
+such as `{"spec": "docs/specs/123.md", "finish": "draft-pr", "factory": {}}`.
+Then run `agent-console --brief path/to/123.brief.json`. There is no Grill:
+Round 1 starts at once and nothing is asked. This is the way to run a Line
+unattended (see the example below).
+
+Station settings (each Station's skills, Assignment and extra note, the Prove
+and Review off switches, the two limits and the default Finish) live under
+`factory` in the Machine defaults and the Pool settings. Each field falls
+through on its own, and the Settings pane edits both layers. A Line brief's
+`factory` overrides them for that Line.
+
+#### Boot flags
+
 - `--work <issue number or text>`, or the question Boot asks without it: Boot
   opens the Grill, a Conversation on the Grill Station's skills with the work as
   its first Turn. The Grill writes `docs/specs/<slug>.md` and
@@ -148,7 +199,8 @@ its Station.
 Unattended, for example:
 
 ```sh
-agent-console --brief .scratch/pilots/186.brief.json --title "Pilot #186" \
+# steward.json: {"steward": {"budget": 10, "mayAdoptLineSpawns": true}}
+agent-console --brief docs/specs/123.brief.json --title "Issue #123" \
   --config steward.json --port 8792 --no-open
 ```
 
