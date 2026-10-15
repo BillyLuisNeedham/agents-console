@@ -1,0 +1,24 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/ac_engine-651667a95677e49c)
+
+running 16 tests
+test conversations::tests::a_notice_for_a_parent_that_is_ending_is_dropped_on_the_childs_log ... ok
+test conversations::tests::a_notice_for_a_parent_that_is_not_live_says_so ... ok
+test conversations::tests::an_ending_conversation_drops_what_it_never_delivered_and_tells_its_parent ... ok
+test conversations::tests::a_refused_start_gives_back_the_id_reserved_for_it ... ok
+test conversations::tests::the_notice_queue_is_claimed_whole_before_the_first_turn_is_typed ... ok
+test conversations::tests::a_turn_state_read_that_fails_leaves_the_state_as_it_was ... ok
+test conversations::tests::ending_an_unknown_conversation_names_the_id ... ok
+test conversations::tests::a_turn_that_never_lands_goes_back_in_order_and_is_retried ... ok
+test conversations::tests::a_spawned_tickets_endings_are_typed_into_a_waiting_parent_in_their_own_words ... ok
+test conversations::tests::the_tui_counts_as_exited_at_boot_only_if_its_exit_code_is_no_older_than_the_launch ... ok
+test conversations::tests::an_unadopted_conversation_is_retried_until_its_pane_can_be_read ... ok
+test conversations::tests::two_ends_of_one_unadopted_record_record_the_ending_once ... ok
+test conversations::tests::claims_on_one_id_run_one_at_a_time ... ok
+test conversations::tests::an_end_on_an_unadopted_record_whose_pane_is_another_terminal_touches_nothing ... ok
+test conversations::tests::ending_an_enlisted_conversation_reads_nothing_of_its_pane ... ok
+test conversations::tests::a_conversation_whose_harness_is_never_found_crashes_only_after_every_try ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 1.74s
+
+exit 0

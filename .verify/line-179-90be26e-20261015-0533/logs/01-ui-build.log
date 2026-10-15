@@ -1,0 +1,14 @@
+bun install v1.3.14 (0d9b296a)
+
+Checked 31 installs across 73 packages (no changes) [3.00ms]
+$ vite build
+vite v8.2.1 building client environment for production...
+[2Ktransforming...✓ 33 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.39 kB │ gzip:  0.26 kB
+dist/assets/index-Baxa4P7E.css   40.75 kB │ gzip:  6.66 kB
+dist/assets/index-HL7ZMUgy.js   217.46 kB │ gzip: 61.90 kB
+
+✓ built in 77ms
+ui exit 0

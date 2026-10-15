@@ -1,0 +1,68 @@
+$ bun run conformance/run.ts cases/attempts-terminal-launch.test.ts cases/conversations-lifecycle.test.ts
+bun test v1.3.14 (0d9b296a)
+
+cases/attempts-terminal-launch.test.ts:
+kept the world at /tmp/cf-cqv09c/conformance-9Fe8rr
+kept the world at /tmp/cf-cqv09c/conformance-bmk76d
+kept the world at /tmp/cf-cqv09c/conformance-tPaa35
+kept the world at /tmp/cf-cqv09c/conformance-9yY1d9
+kept the world at /tmp/cf-cqv09c/conformance-pPgLhR
+kept the world at /tmp/cf-cqv09c/conformance-cDvjRF
+kept the world at /tmp/cf-cqv09c/conformance-jvXHDr
+kept the world at /tmp/cf-cqv09c/conformance-90mCKc
+kept the world at /tmp/cf-cqv09c/conformance-jWBtUJ
+kept the world at /tmp/cf-cqv09c/conformance-DjO2yq
+kept the world at /tmp/cf-cqv09c/conformance-6xk58M
+kept the world at /tmp/cf-cqv09c/conformance-s5I5KG
+kept the world at /tmp/cf-cqv09c/conformance-xlm5Ka
+
+cases/conversations-lifecycle.test.ts:
+kept the world at /tmp/cf-cqv09c/conformance-IUU5dj
+kept the world at /tmp/cf-cqv09c/conformance-i73ku8
+kept the world at /tmp/cf-cqv09c/conformance-hh5Wkk
+kept the world at /tmp/cf-cqv09c/conformance-04UQa2
+kept the world at /tmp/cf-cqv09c/conformance-NkkTDR
+kept the world at /tmp/cf-cqv09c/conformance-FUxriQ
+kept the world at /tmp/cf-cqv09c/conformance-KKPLjf
+kept the world at /tmp/cf-cqv09c/conformance-Lzl45i
+kept the world at /tmp/cf-cqv09c/conformance-ruM9lt
+kept the world at /tmp/cf-cqv09c/conformance-JSDoy8
+kept the world at /tmp/cf-cqv09c/conformance-o68Vxc
+kept the world at /tmp/cf-cqv09c/conformance-V8d3M7
+kept the world at /tmp/cf-cqv09c/conformance-hV8Bbd
+kept the world at /tmp/cf-cqv09c/conformance-Z6MEO2
+kept the world at /tmp/cf-cqv09c/conformance-3TWwgn
+kept the world at /tmp/cf-cqv09c/conformance-Los84q
+kept the world at /tmp/cf-cqv09c/conformance-MJCckX
+kept the world at /tmp/cf-cqv09c/conformance-ci5Rxk
+kept the world at /tmp/cf-cqv09c/conformance-UaP4bb
+kept the world at /tmp/cf-cqv09c/conformance-yZJHBF
+kept the world at /tmp/cf-cqv09c/conformance-I40FCQ
+kept the world at /tmp/cf-cqv09c/conformance-lujNp4
+kept the world at /tmp/cf-cqv09c/conformance-irHDhO
+kept the world at /tmp/cf-cqv09c/conformance-dgDl1f
+kept the world at /tmp/cf-cqv09c/conformance-8d7DDe
+kept the world at /tmp/cf-cqv09c/conformance-hVnI2y
+kept the world at /tmp/cf-cqv09c/conformance-2EzqvJ
+kept the world at /tmp/cf-cqv09c/conformance-rWVhcn
+kept the world at /tmp/cf-cqv09c/conformance-2l7OXP
+kept the world at /tmp/cf-cqv09c/conformance-HZmcLX
+kept the world at /tmp/cf-cqv09c/conformance-ZQ5Tc7
+kept the world at /tmp/cf-cqv09c/conformance-MHQ52b
+kept the world at /tmp/cf-cqv09c/conformance-Csuk8a
+kept the world at /tmp/cf-cqv09c/conformance-pJaD01
+kept the world at /tmp/cf-cqv09c/conformance-VquKPb
+kept the world at /tmp/cf-cqv09c/conformance-zpt0uR
+kept the world at /tmp/cf-cqv09c/conformance-tVAsqI
+
+ 48 pass
+ 0 fail
+ 383 expect() calls
+Ran 48 tests across 2 files. [347.88s]
+kept the run's temporary files at /tmp/cf-cqv09c
+
+conformance against the Rust server (/home/billy/.herdr/worktrees/agent-console/feature-software-factory/.scratch/lines/179/target/release/agent-console), takeover legs rust,rust,rust
+  attempts       13/13 passed (100%)
+  conversations  35/35 passed (100%)
+  all            48/48 passed (100%)
+exit 0

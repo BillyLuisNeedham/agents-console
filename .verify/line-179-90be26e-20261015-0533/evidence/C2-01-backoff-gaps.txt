@@ -1,0 +1,4 @@
+evidence/C1-01-ticket-events-and-herdr-calls.txt:--- gap second tab.create - launch-retried.at = 15002 ms
+evidence/C1-01-ticket-events-and-herdr-calls.txt:--- gap between tab.create calls = 15459 ms
+evidence/C3-01-conversation-post-events-and-herdr-calls.txt:--- gap second tab.create - launch-retried.at = 15001 ms
+evidence/C3-01-conversation-post-events-and-herdr-calls.txt:--- gap between tab.create calls = 15457 ms
