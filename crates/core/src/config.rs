@@ -7,9 +7,10 @@
 //! generator):
 //!
 //! - At boot it is console.json parsed in file order, with `roster` and `agents` deleted, or `{}` when
-//!   the file is absent or empty. The parse checks only `selection`, `terminal`, `spawnCaps` and
-//!   `steward`; unknown keys and unchecked values (a null, a string port) pass through.
-//! - After a Config reload it is `{ ...previous, defaults, assign, resolver, spawnCaps, steward }`
+//!   the file is absent or empty. The parse checks only `selection`, `terminal`, `spawnCaps`,
+//!   `steward` and `factory`; unknown keys and unchecked values (a null, a string port) pass through.
+//! - After a Config reload it is `{ ...previous, defaults, assign, resolver, spawnCaps, steward,
+//!   factory }`
 //!   (`reload_candidate`): existing keys keep their place, new ones go last, and a slice key the file
 //!   no longer has stays in its place as JavaScript's `undefined`, which no serialization writes.
 //! - The snapshot's `state.config` sends it verbatim: `PoolConfig` serializes as that object, its keys
@@ -44,6 +45,7 @@ use serde_json::{Map, Value};
 
 use crate::harness::Harnesses;
 use crate::js;
+use crate::line::normalise_factory;
 use crate::spawn_caps::check_spawn_caps;
 use crate::steward::check_steward_config;
 
@@ -55,10 +57,17 @@ pub const CONSOLE_JSON: &str = "console.json";
 /// it did not, with no warning, and every writer that starts from a read drops them on its next write.
 pub const RETIRED_CONFIG_KEYS: [&str; 2] = ["roster", "agents"];
 
-/// The keys the Config reload touches (ADR-0018): the assignment slice, and the Spawn caps (ADR-0029)
-/// and the Steward entry (ADR-0030) beside it. Everything else (selection, terminal, port) stays as it
+/// The keys the Config reload touches (ADR-0018): the assignment slice, and the Spawn caps (ADR-0029),
+/// the Steward entry (ADR-0030) and the Factory settings (issue #187) beside it. Everything else (selection, terminal, port) stays as it
 /// was at boot for the life of the run.
-pub const CONFIG_SLICE_KEYS: [&str; 5] = ["defaults", "assign", "resolver", "spawnCaps", "steward"];
+pub const CONFIG_SLICE_KEYS: [&str; 6] = [
+    "defaults",
+    "assign",
+    "resolver",
+    "spawnCaps",
+    "steward",
+    "factory",
+];
 
 /// A refusal or a failure whose message is the TypeScript's thrown `Error` message, verbatim: the
 /// caller prints it, logs it or answers it exactly as the TypeScript did.
@@ -241,6 +250,7 @@ pub fn parse_config(raw: Option<&str>, pool_dir: &str) -> Result<PoolConfig, Con
     }
     check_spawn_caps(parsed.get("spawnCaps"))?;
     check_steward_config(parsed.get("steward"))?;
+    check_factory_config(parsed.get("factory"))?;
     for key in RETIRED_CONFIG_KEYS {
         parsed.shift_remove(key);
     }
@@ -267,6 +277,7 @@ pub struct ConfigSlice {
     pub resolver: Option<Value>,
     pub spawn_caps: Option<Value>,
     pub steward: Option<Value>,
+    pub factory: Option<Value>,
 }
 
 /// Parses only the reloadable slice out of a console.json body. Deliberately does not validate
@@ -278,17 +289,19 @@ pub fn parse_config_slice(raw: &str, pool_dir: &str) -> Result<ConfigSlice, Conf
     let parsed = parse_object(raw, pool_dir)?;
     check_spawn_caps(parsed.get("spawnCaps"))?;
     check_steward_config(parsed.get("steward"))?;
+    check_factory_config(parsed.get("factory"))?;
     Ok(ConfigSlice {
         defaults: parsed.get("defaults").cloned(),
         assign: parsed.get("assign").cloned(),
         resolver: parsed.get("resolver").cloned(),
         spawn_caps: parsed.get("spawnCaps").cloned(),
         steward: parsed.get("steward").cloned(),
+        factory: parsed.get("factory").cloned(),
     })
 }
 
-/// The config a reload would commit, `{ ...config, defaults, assign, resolver, spawnCaps, steward }`:
-/// the slice's five keys taken from the file (one the file lacks set to undefined, keeping its place),
+/// The config a reload would commit, `{ ...config, defaults, assign, resolver, spawnCaps, steward,
+/// factory }`: the slice's six keys taken from the file (one the file lacks set to undefined, keeping its place),
 /// every other key exactly as it was at boot.
 pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig {
     let mut candidate = config.clone();
@@ -298,6 +311,7 @@ pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig 
         ("resolver", &slice.resolver),
         ("spawnCaps", &slice.spawn_caps),
         ("steward", &slice.steward),
+        ("factory", &slice.factory),
     ] {
         match value {
             Some(value) => candidate.set(key, value.clone()),
@@ -315,6 +329,48 @@ pub fn changed_slice_keys(previous: &PoolConfig, next: &PoolConfig) -> Vec<&'sta
         .into_iter()
         .filter(|key| previous.get(key).map(js::stringify) != next.get(key).map(js::stringify))
         .collect()
+}
+
+// The Factory settings' shape (issue #187): checked at parse, like the Steward entry, since a Line reads
+// them only when it writes its next Station Ticket.
+fn check_factory_config(raw: Option<&Value>) -> Result<(), ConfigError> {
+    let Some(raw) = raw else { return Ok(()) };
+    normalise_factory(raw, "pool config: factory")
+        .map(|_| ())
+        .map_err(ConfigError)
+}
+
+/// Every harness a Station of the pool's Factory settings names must be one the pool knows: checked in
+/// the reload's dry run beside the Steward's, so a bad one is refused whole like a bad assign.
+pub fn check_factory_harnesses(
+    config: &PoolConfig,
+    harnesses: &Harnesses,
+) -> Result<(), ConfigError> {
+    let Some(stations) = config
+        .get("factory")
+        .and_then(|factory| factory.get("stations"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    for (station, settings) in stations {
+        let Some(harness) = settings
+            .get("assign")
+            .and_then(|assign| assign.get("harness"))
+            .and_then(Value::as_str)
+            .map(js::trim)
+        else {
+            continue;
+        };
+        if !harness.is_empty() && !harnesses.contains(harness) {
+            return Err(ConfigError(format!(
+                "pool config: factory.stations.{station}.assign names unknown harness '{harness}'. \
+                 Known: {}",
+                harnesses.known()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The Steward's harness, when its entry names one, must be one the pool knows (ADR-0030): checked
@@ -447,6 +503,19 @@ mod tests {
                 .unwrap()
                 .get("steward"),
             Some(&json!({ "budget": 4 }))
+        );
+        assert_eq!(
+            refusal(json!({ "factory": { "stations": { "grill": { "enabled": false } } } })),
+            "pool config: factory: factory.stations.grill.enabled is false: only Prove and Review can be switched off"
+        );
+        assert!(refusal(json!({ "factory": { "limit": {} } })).contains("unknown field `limit`"));
+        // The slice a reload reads refuses what the boot parse refuses, and carries the factory.
+        assert!(parse_config_slice(r#"{"factory": []}"#, "/p").is_err());
+        assert_eq!(
+            parse_config_slice(r#"{"factory": {"finish": "pr"}}"#, "/p")
+                .unwrap()
+                .factory,
+            Some(json!({ "finish": "pr" }))
         );
     }
 

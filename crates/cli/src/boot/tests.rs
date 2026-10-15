@@ -79,8 +79,54 @@ fn accepts_the_positional_pool_and_every_flag() {
             port: Some(9001),
             setup: None,
             open: false,
+            ..BootArgs::default()
         })
     );
+}
+
+#[test]
+fn takes_the_factory_flags_and_a_brief_implies_factory_mode_asking_nothing() {
+    let args = parse_boot_args(&strings(&[
+        "--brief",
+        ".scratch/pilots/186.brief.json",
+        "--title",
+        "Pilot 186",
+        "--name",
+        "pilot",
+        "--line",
+        "186",
+        "--config",
+        "steward.json",
+    ]))
+    .unwrap();
+    assert!(args.factory && args.yes);
+    assert_eq!(
+        args.brief.as_deref(),
+        Some(".scratch/pilots/186.brief.json")
+    );
+    assert_eq!(args.title.as_deref(), Some("Pilot 186"));
+    assert_eq!(args.name.as_deref(), Some("pilot"));
+    assert_eq!(args.line.as_deref(), Some("186"));
+    assert_eq!(args.config.as_deref(), Some("steward.json"));
+    let grill = parse_boot_args(&strings(&["--factory", "--work", "#186"])).unwrap();
+    assert!(grill.factory && !grill.yes && !grill.no_steward);
+    assert_eq!(grill.work.as_deref(), Some("#186"));
+    let quiet = parse_boot_args(&strings(&["--factory", "--no-steward"])).unwrap();
+    assert!(quiet.no_steward);
+}
+
+#[test]
+fn refuses_factory_flags_that_do_not_fit_together() {
+    let message = |argv: &[&str]| parse_boot_args(&strings(argv)).unwrap_err().message;
+    assert!(message(&["--work", "x"]).starts_with("--work is for Factory mode: add --factory\n"));
+    assert!(message(&["--no-steward"]).starts_with("--no-steward is for Factory mode"));
+    assert!(
+        message(&["--factory", "--work", "x", "--brief", "b.json"])
+            .starts_with("--work and --brief both start the Line; give one\n")
+    );
+    assert!(message(&["--factory", "some/pool"]).starts_with("Factory mode makes its pool inside"));
+    assert!(message(&["--factory", "--relaunch"]).starts_with("--relaunch restarts a pool"));
+    assert!(message(&["--brief"]).starts_with("--brief needs a value\n"));
 }
 
 #[test]
@@ -133,7 +179,7 @@ fn rejects_a_flag_with_no_value_and_an_unknown_flag() {
     );
     let help = parse_boot_args(&strings(&["--yes", "--help"])).unwrap_err();
     assert!(help.help);
-    assert_eq!(help.message, USAGE);
+    assert_eq!(help.message, format!("{USAGE}\n{FACTORY_HELP}"));
 }
 
 #[test]
@@ -750,7 +796,7 @@ fn refuses_a_setup_it_cannot_find() {
 fn prints_the_usage_on_help_and_starts_nothing() {
     let mut pen = Pen::default();
     assert_eq!(run_boot(&strings(&["--help"]), &mut pen, "/nowhere"), Ok(0));
-    assert_eq!(pen.logs, [USAGE]);
+    assert_eq!(pen.logs, [format!("{USAGE}\n{FACTORY_HELP}")]);
     let mut pen = Pen::default();
     assert_eq!(
         run_boot(&strings(&["--nope"]), &mut pen, "/nowhere"),

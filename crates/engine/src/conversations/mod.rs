@@ -59,6 +59,7 @@ use crate::snapshot::emit_snapshot;
 pub use adopt::{
     adopt_enlisted_at_boot, adopt_started_at_boot, crash_stale_at_boot, readopt_pending,
 };
+pub(crate) use end::merge_into_target;
 pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
@@ -552,6 +553,25 @@ pub fn steward_id(s: &Session) -> Option<String> {
         .map(|rec| rec.id)
 }
 
+/// The live Grill's id (ADR-0037); `None` when the pool has none.
+pub fn grill_id(s: &Session) -> Option<String> {
+    load(s)
+        .into_iter()
+        .find(|rec| {
+            rec.role == Some(ConversationRole::Grill) && rec.status == ConversationStatus::Live
+        })
+        .map(|rec| rec.id)
+}
+
+/// A Conversation's branch, and whether its End has begun: from its runtime when it has one, else the
+/// branch its start gave it.
+pub(crate) fn branch_and_ending(s: &Session, id: &str) -> (String, bool) {
+    match s.conversations.runtime(id) {
+        Some(rt) => rt.with(|r| (r.worktree.branch.clone(), r.ending)),
+        None => (git::branch_for(&s.cwd, id, None), false),
+    }
+}
+
 pub(crate) fn steward_on_duty(s: &Session) -> Option<String> {
     s.conversations
         .steward_starting
@@ -693,13 +713,19 @@ pub(crate) fn teaching_for(
     let ledger = js::path_text(&ac_core::spawn_ledger::spawn_ledger_path(runs_dir(s)));
     let defaults = defaults_teaching(config);
     if role != Some(ConversationRole::Steward) {
-        return ac_core::prompt::build_conversation_teaching(
+        let teaching = ac_core::prompt::build_conversation_teaching(
             &spawn_path,
             &own,
             &defaults,
             per_file,
             &ledger,
         );
+        if role != Some(ConversationRole::Grill) {
+            return teaching;
+        }
+        let line = ac_core::line::line_name_of(&crate::merges::merge_target_branch(s));
+        let grill = ac_core::line::grill_teaching(&line, own.drivers.as_deref().unwrap_or(""));
+        return format!("{teaching}\n\n{grill}");
     }
     stewards::steward_teaching(s, id, &spawn_path, &own, &defaults, per_file, &ledger)
 }
@@ -764,6 +790,10 @@ pub(crate) mod stewards {
             command: &command,
             budget: steward_budget_of(&s.state.config),
             may_close: steward_may_close_of(&s.state.config),
+            factory: crate::line::is_factory_pool(s),
+            may_adopt_line_spawns: ac_core::steward::steward_may_adopt_line_spawns_of(
+                &s.state.config,
+            ),
         })
     }
 }
@@ -916,5 +946,6 @@ pub(crate) fn marker_of_conversation(id: &str, file: &Path) -> TicketMarker {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
+        station: None,
     }
 }

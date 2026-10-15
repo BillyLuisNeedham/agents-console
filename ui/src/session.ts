@@ -45,6 +45,7 @@ import {
   projectPool,
   projectTimeline,
   type ConversationEndView,
+  type ConversationLineStartView,
   type DetailTab,
   type EnrichedSnapshot,
   type KeepTalkingState,
@@ -955,8 +956,13 @@ export class ConsoleSession {
    * The render model: the single derivation point. One `projectPool` per
    * render, over the snapshot with any optimistic overlays drawn on it, and
    * stored so the Detail and the next selection read the same cards.
+   * `endings` and `lineStarts` are the Conversations store's End and Start
+   * the Line marks, which the view owns.
    */
-  model(endings: Record<string, ConversationEndView>): AppModel {
+  model(
+    endings: Record<string, ConversationEndView>,
+    lineStarts: Record<string, ConversationLineStartView> = {},
+  ): AppModel {
     const snapshot = this.shownSnapshot();
     this.view = snapshot
       ? this.derivePool(
@@ -967,14 +973,20 @@ export class ConsoleSession {
           Date.now(),
           endings,
           Object.fromEntries(this.keepTalkingMarks),
+          lineStarts,
         )
       : null;
     const cards = this.view?.cards ?? [];
     const detail = this.selectedId
-      ? projectDetail(cards, this.selectedId, {
-          pending: this.view?.pendingSpawns ?? [],
-          held: this.view?.heldSpawns ?? [],
-        })
+      ? projectDetail(
+          cards,
+          this.selectedId,
+          {
+            pending: this.view?.pendingSpawns ?? [],
+            held: this.view?.heldSpawns ?? [],
+          },
+          snapshot?.line ?? null,
+        )
       : null;
     const detailTicketId = detail?.kind === "ticket" ? detail.ticketId : null;
     // The selected card's frames: a ticket's body, events and log, a
@@ -1054,6 +1066,7 @@ export class ConsoleSession {
       terminalBacked: snapshot ? isTerminalBacked(snapshot.state.config) : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
+      lineStrip: this.view?.lineStrip ?? null,
       pendingSpawns: this.view?.pendingSpawns ?? [],
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,

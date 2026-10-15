@@ -390,6 +390,11 @@ pub fn take_spawn_proposals(
     let attempt = last_attempt(runs(session), parent_id);
     let mut log: Vec<String> = Vec::new();
     let mut taken: Vec<TakenProposal> = Vec::new();
+    // A Station Ticket or the Grill: both are inside the Line (ADR-0037).
+    let line_station = session
+        .marker(parent_id)
+        .is_some_and(|m| m.station.is_some())
+        || crate::conversations::grill_id(session).as_deref() == Some(parent_id);
     // Room is counted in signed numbers, which a cap fits: `spawn_caps_of` holds one at `i64::MAX`.
     let mut attempt_room = caps.per_attempt as i64;
     // `None` is a Conversation's unbounded run room.
@@ -433,7 +438,11 @@ pub fn take_spawn_proposals(
             held,
             unknown_overlaps: unknown,
         };
-        if !proposal.overlaps.as_deref().unwrap_or_default().is_empty() {
+        if line_station {
+            // Anything a Station proposes merges into the Line's branch once it lands, so only the
+            // operator lands it (ADR-0037); it uses none of the caps' room.
+            taken.push(entry(Some(HeldSpawnReason::Line), None));
+        } else if !proposal.overlaps.as_deref().unwrap_or_default().is_empty() {
             taken.push(entry(
                 Some(HeldSpawnReason::Overlaps),
                 Some(unknown_overlaps(session, &proposal, &known)),
@@ -510,6 +519,20 @@ pub fn take_spawn_proposals(
                     .map(|h| h.id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+        }
+        let in_line: Vec<&str> = held
+            .iter()
+            .filter(|h| h.reason == HeldSpawnReason::Line)
+            .map(|h| h.id.as_str())
+            .collect();
+        if !in_line.is_empty() {
+            log.push(format!(
+                "ticket {parent_id}: {} proposal{} held for the operator: proposed inside the Line \
+                 (ADR-0037): {}",
+                in_line.len(),
+                plural(in_line.len()),
+                in_line.join(", ")
             ));
         }
         for h in held

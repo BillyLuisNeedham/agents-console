@@ -850,3 +850,231 @@ describe("Steward may Close checkpoints (issue #154)", () => {
     expect(box.checked).toBe(true);
   });
 });
+
+describe("Steward may adopt Line spawns (#187, ADR-0037)", () => {
+  it("seeds the toggle from the file, off when absent", () => {
+    expect(poolDraftFrom({ steward: { mayAdoptLineSpawns: true } }).stewardMayAdoptLineSpawns).toBe(true);
+    expect(poolDraftFrom({ steward: { mayClose: true } }).stewardMayAdoptLineSpawns).toBe(false);
+    expect(EMPTY.stewardMayAdoptLineSpawns).toBe(false);
+  });
+
+  it("sends mayAdoptLineSpawns inside the whole steward entry when on, and leaves it out when off", () => {
+    expect(
+      poolPatchFrom({ ...EMPTY, stewardBudget: "3", stewardMayAdoptLineSpawns: true }).steward,
+    ).toEqual({
+      budget: 3,
+      assign: { harness: "", model: "", effort: "", drivers: "" },
+      mayAdoptLineSpawns: true,
+    });
+    expect(poolPatchFrom(EMPTY).steward).not.toHaveProperty("mayAdoptLineSpawns");
+  });
+
+  it("dirties the pool form, saves, and re-seeds from the answer", async () => {
+    const rig = await opened();
+    const before = rig.changes();
+    rig.store.setStewardMayAdoptLineSpawns(true);
+    expect(rig.changes()).toBe(before + 1);
+    expect(rig.store.poolDirty).toBe(true);
+    const save = rig.store.savePool();
+    expect(rig.poolSaves[0]!.config.steward?.mayAdoptLineSpawns).toBe(true);
+    expect(rig.poolSaves[0]!.config.steward).not.toHaveProperty("mayClose");
+    const saved = settings();
+    saved.pool.config.steward = { mayAdoptLineSpawns: true };
+    rig.poolSaves[0]!.deferred.resolve(saved);
+    await save;
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.stewardMayAdoptLineSpawns).toBe(true);
+    rig.store.setStewardMayAdoptLineSpawns(false);
+    expect(rig.store.poolDirty).toBe(true);
+  });
+
+  it("draws the toggle under Steward may Close checkpoints and flips it from the checkbox", async () => {
+    const rig = await opened();
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          rig.store.render(
+            { offered: true, state: "idle", failure: null, waiting: false },
+            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+          )!,
+        );
+        return shell;
+      });
+    paint();
+    const field = root.querySelector('[data-key="pool-stewardMayAdoptLineSpawns"]')!;
+    expect(field.previousElementSibling?.getAttribute("data-key")).toBe("pool-stewardMayClose");
+    expect(field.textContent).toContain("Steward may adopt Line spawns");
+    expect(field.querySelector(".settings-hint")?.textContent).toContain(
+      "Held spawn proposed from inside the Line",
+    );
+    const box = root.querySelector<HTMLInputElement>(
+      '[data-key="pool-stewardMayAdoptLineSpawns-input"]',
+    )!;
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    paint();
+    expect(rig.store.stewardMayAdoptLineSpawns).toBe(true);
+    expect(rig.store.stewardMayClose).toBe(false);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-key="pool-stewardMayAdoptLineSpawns-input"]'),
+    ).toBe(box);
+    expect(box.checked).toBe(true);
+  });
+});
+
+describe("the Factory settings (issue #187)", () => {
+  function withFactory(): SettingsResponse {
+    const response = settings();
+    response.pool.config.factory = { stations: { review: { enabled: false } }, limits: { extraRounds: 0 } };
+    response.machine.own = { harness: "claude", factory: { stations: { implement: { assign: { model: "sonnet" } } }, finish: "draft-pr" } };
+    response.machine.defaults = { ...response.machine.defaults, factory: response.machine.own.factory };
+    return response;
+  }
+
+  function painted(rig: Awaited<ReturnType<typeof opened>>): HTMLElement {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        rig.store.render(
+          { offered: true, state: "idle", failure: null, waiting: false },
+          { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+        )!,
+      );
+      return shell;
+    });
+    return root;
+  }
+
+  it("seeds each form's layer from its own file", async () => {
+    const rig = await opened(withFactory());
+    expect(rig.store.factoryField("pool", "review.enabled")).toBe("off");
+    expect(rig.store.factoryField("pool", "extraRounds")).toBe("0");
+    expect(rig.store.factoryField("pool", "implement.model")).toBe("");
+    expect(rig.store.factoryField("machine", "implement.model")).toBe("sonnet");
+    expect(rig.store.factoryField("machine", "finish")).toBe("draft-pr");
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.machineDirty).toBe(false);
+  });
+
+  it("saves the pool's layer whole with the pool form, null once emptied", async () => {
+    const rig = await opened(withFactory());
+    rig.store.setFactoryField("pool", "prove.drivers", "my-verify --cli");
+    expect(rig.store.poolDirty).toBe(true);
+    expect(rig.store.machineDirty).toBe(false);
+    const save = rig.store.savePool();
+    expect(rig.poolSaves[0]!.config.factory).toEqual({
+      stations: { prove: { drivers: "my-verify --cli" }, review: { enabled: false } },
+      limits: { extraRounds: 0 },
+    });
+    const saved = withFactory();
+    saved.pool.config.factory = rig.poolSaves[0]!.config.factory!;
+    rig.poolSaves[0]!.deferred.resolve(saved);
+    await save;
+    expect(rig.store.poolDirty).toBe(false);
+    expect(rig.store.factoryField("pool", "prove.drivers")).toBe("my-verify --cli");
+
+    rig.store.setFactoryField("pool", "prove.drivers", "");
+    rig.store.setFactoryField("pool", "review.enabled", "");
+    rig.store.setFactoryField("pool", "extraRounds", "");
+    void rig.store.savePool();
+    expect(rig.poolSaves[1]!.config.factory).toBeNull();
+  });
+
+  it("saves the machine's layer with the machine defaults, left out when empty", async () => {
+    const rig = await opened(withFactory());
+    rig.store.setFactoryField("machine", "decide.note", "write the report in plain words");
+    expect(rig.store.machineDirty).toBe(true);
+    void rig.store.saveMachine();
+    expect(rig.machineSaves[0]!.defaults).toEqual({
+      harness: "claude",
+      factory: {
+        stations: {
+          implement: { assign: { model: "sonnet" } },
+          decide: { note: "write the report in plain words" },
+        },
+        finish: "draft-pr",
+      },
+    });
+    const bare = await opened(settings());
+    void bare.store.saveMachine();
+    expect(bare.machineSaves[0]!.defaults).toEqual({ harness: "claude" });
+  });
+
+  it("refuses a limit that is not a whole number on the spot, sending nothing", async () => {
+    const rig = await opened(withFactory());
+    rig.store.setFactoryField("pool", "proveFailsPerRound", "two");
+    await rig.store.savePool();
+    expect(rig.poolSaves).toHaveLength(0);
+    expect(rig.store.poolFailure).toMatch(/Prove fails per Round/);
+    rig.store.setFactoryField("machine", "extraRounds", "-1");
+    await rig.store.saveMachine();
+    expect(rig.machineSaves).toHaveLength(0);
+    expect(rig.store.machineFailure).toMatch(/extra Rounds/);
+  });
+
+  it("draws every Station keyed in both forms, the pool's placeholders inheriting the machine's layer", async () => {
+    const rig = await opened(withFactory());
+    const root = painted(rig);
+    for (const form of ["pool", "machine"]) {
+      for (const station of ["implement", "prove", "review", "decide", "grill"]) {
+        expect(root.querySelector(`[data-key="${form}-factory-${station}.drivers"]`)).not.toBeNull();
+        expect(root.querySelector(`[data-key="${form}-factory-${station}.note"]`)).not.toBeNull();
+      }
+      // Only Prove and Review can be switched off.
+      expect(root.querySelector(`[data-key="${form}-factory-prove.enabled"]`)).not.toBeNull();
+      expect(root.querySelector(`[data-key="${form}-factory-review.enabled"]`)).not.toBeNull();
+      expect(root.querySelector(`[data-key="${form}-factory-implement.enabled"]`)).toBeNull();
+    }
+    const placeholder = (key: string) =>
+      root.querySelector<HTMLInputElement>(`[data-key="${key}"]`)?.getAttribute("placeholder");
+    expect(placeholder("pool-factory-implement.model")).toBe("model (sonnet)");
+    expect(placeholder("machine-factory-implement.model")).toBe("model (opus)");
+    expect(placeholder("pool-factory-finish-input")).toBe("draft-pr");
+    expect(placeholder("machine-factory-finish-input")).toBe("none");
+    expect(placeholder("pool-factory-extraRounds-input")).toBe("1 (inherited)");
+    expect(root.querySelector<HTMLSelectElement>('[data-key="pool-factory-review.enabled"]')?.value).toBe("off");
+  });
+
+  it("enables Save as the operator types a factory field, and disables it on a revert (issue #142)", async () => {
+    let paint = () => {};
+    const rig = await opened(withFactory(), () => paint());
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    paint = () =>
+      commit(root, () => {
+        const shell = document.createElement("div");
+        shell.appendChild(
+          rig.store.render(
+            { offered: true, state: "idle", failure: null, waiting: false },
+            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+          )!,
+        );
+        return shell;
+      });
+    paint();
+    const button = (which: string) =>
+      root.querySelector<HTMLButtonElement>(`[data-key="settings-save-${which}"] .settings-save`)!;
+    for (const [which, key, value, saved] of [
+      ["pool", "pool-factory-implement.drivers", "tdd", ""],
+      ["pool", "pool-factory-extraRounds-input", "2", "0"],
+      ["machine", "machine-factory-decide.note", "short", ""],
+      ["machine", "machine-factory-finish-input", "pr", "draft-pr"],
+    ] as const) {
+      expect(button(which).disabled).toBe(true);
+      const input = root.querySelector<HTMLInputElement>(`[data-key="${key}"]`)!;
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(button(which).disabled).toBe(false);
+      const again = root.querySelector<HTMLInputElement>(`[data-key="${key}"]`)!;
+      again.value = saved;
+      again.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(button(which).disabled).toBe(true);
+    }
+  });
+});

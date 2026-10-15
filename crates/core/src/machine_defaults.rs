@@ -1,5 +1,6 @@
 //! Machine defaults (issue #121; machine-defaults.ts): the per-machine harness, model, effort, drivers,
-//! terminal and engine path a new Pool inherits when nothing more specific says otherwise. One JSON
+//! terminal and engine path a new Pool inherits when nothing more specific says otherwise, and the
+//! machine's layer of the Factory settings (issue #187), under every pool's. One JSON
 //! file under `~/.agent-graphs/`, edited from the Console's Settings pane and read by Boot and by the
 //! engine's resolver fallback.
 //!
@@ -18,10 +19,11 @@ use serde_json::{Map, Value};
 use crate::config::ConfigError;
 use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
+use crate::line::{factory_layer_of, normalise_factory};
 
 /// The fields the file may hold.
-pub const MACHINE_DEFAULTS_KEYS: [&str; 6] = [
-    "harness", "model", "effort", "drivers", "terminal", "engine",
+pub const MACHINE_DEFAULTS_KEYS: [&str; 7] = [
+    "harness", "model", "effort", "drivers", "terminal", "engine", "factory",
 ];
 
 // The string fields, in the order the file is written.
@@ -147,6 +149,12 @@ pub fn validate_machine_defaults(input: &Value) -> Result<MachineDefaults, Confi
             )));
         }
     }
+    // The machine's layer of the Factory settings (issue #187), checked as the pool's is.
+    if let Some(factory) = raw.get("factory").filter(|factory| !factory.is_null()) {
+        out.factory = normalise_factory(factory, "machine defaults: factory")
+            .map_err(ConfigError)?
+            .map(Box::new);
+    }
     Ok(out)
 }
 
@@ -167,6 +175,7 @@ fn sanitize_machine_defaults(parsed: &Value) -> MachineDefaults {
     if raw.get("terminal").and_then(Value::as_str) == Some("herdr") {
         out.terminal = Some(TerminalKind::Herdr);
     }
+    out.factory = factory_layer_of(raw.get("factory")).map(Box::new);
     out
 }
 
@@ -179,6 +188,7 @@ fn no_defaults() -> MachineDefaults {
         drivers: None,
         engine: None,
         terminal: None,
+        factory: None,
     }
 }
 
@@ -208,6 +218,11 @@ fn machine_defaults_value(defaults: &MachineDefaults) -> Value {
     }
     if defaults.terminal.is_some() {
         map.insert("terminal".to_owned(), Value::String("herdr".to_owned()));
+    }
+    if let Some(factory) = &defaults.factory
+        && let Ok(factory) = serde_json::to_value(factory)
+    {
+        map.insert("factory".to_owned(), factory);
     }
     Value::Object(map)
 }
@@ -404,6 +419,37 @@ mod tests {
         .unwrap();
         assert_eq!(
             read_machine_defaults_file(&paths.file),
+            defaults(json!({ "model": "m" }))
+        );
+    }
+    #[test]
+    fn carries_the_factory_layer_through_a_write_and_a_read_and_drops_a_bad_one_on_read() {
+        let home = home();
+        let file = paths(&home).file;
+        let written = write_machine_defaults(
+            &json!({ "model": "m", "factory": { "stations": { "review": { "enabled": false, "drivers": " " } }, "limits": { "extraRounds": 0 } } }),
+            &file,
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            defaults(
+                json!({ "model": "m", "factory": { "stations": { "review": { "enabled": false } }, "limits": { "extraRounds": 0 } } })
+            )
+        );
+        assert_eq!(read_machine_defaults(&paths(&home)), written);
+        assert_eq!(
+            write_machine_defaults(
+                &json!({ "factory": { "stations": { "decide": { "enabled": false } } } }),
+                &file
+            )
+            .unwrap_err()
+            .0,
+            "machine defaults: factory: factory.stations.decide.enabled is false: only Prove and Review can be switched off"
+        );
+        std::fs::write(&file, r#"{"model": "m", "factory": {"finish": 3}}"#).unwrap();
+        assert_eq!(
+            read_machine_defaults_file(&file),
             defaults(json!({ "model": "m" }))
         );
     }

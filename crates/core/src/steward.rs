@@ -44,6 +44,13 @@ pub fn steward_assign_of(config: &PoolConfig) -> Option<StewardAssign> {
     })
 }
 
+/// Whether the Steward may Adopt (or Discard) a Held spawn proposed from inside a Line (ADR-0037):
+/// only while the pool says true. Anything that lands merges into the Line's branch, so by default
+/// such a spawn is the operator's.
+pub fn steward_may_adopt_line_spawns_of(config: &PoolConfig) -> bool {
+    steward_field(config, "mayAdoptLineSpawns") == Some(&Value::Bool(true))
+}
+
 fn steward_field<'a>(config: &'a PoolConfig, name: &str) -> Option<&'a Value> {
     config.get("steward")?.get(name)
 }
@@ -75,6 +82,13 @@ pub fn check_steward_config(raw: Option<&Value>) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::new(
             "pool config: steward.mayClose must be true or false",
+        ));
+    }
+    if let Some(may_adopt) = steward.get("mayAdoptLineSpawns")
+        && !may_adopt.is_boolean()
+    {
+        return Err(ConfigError::new(
+            "pool config: steward.mayAdoptLineSpawns must be true or false",
         ));
     }
     if let Some(assign) = steward.get("assign") {

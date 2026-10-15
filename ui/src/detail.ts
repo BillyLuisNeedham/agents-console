@@ -35,6 +35,7 @@ import {
   type ResumeAction,
   type SpawnDetailView,
   type InterruptView,
+  type LineReportView,
   type LogPaneView,
   type TimelineGradeView,
   type TimelineView,
@@ -50,7 +51,7 @@ import { h } from "./dom";
 import { keep, placed } from "./morph";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
-import { renderDeliveryWarning } from "./conversations";
+import { renderDeliveryWarning, renderGrillBadge } from "./conversations";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -91,6 +92,9 @@ export interface DetailHandlers {
   /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
    *  Conversations store tracks the in-flight/failure state on `endView`. */
   onEndConversation: (conversationId: string, closing?: string) => void;
+  /** Start the Line on a Grill (ADR-0037): fire-and-forget like End; the
+   *  store tracks the in-flight/refusal state on `lineStart`. */
+  onStartLine: (grillId: string) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
   /** "open resolver" on a ticket whose merge a resolver is resolving
@@ -914,10 +918,11 @@ export class Detail {
   }
 
   // The Progress tab: the status, the resolver running on the ticket's merge
-  // when there is one, the interrupt form (the Detail's only action surface)
-  // and the timeline, with attempt rows opening raw logs in the pane below.
-  // A never-run ticket's timeline carries its own "no attempts yet" marker,
-  // and its log pane stays closed.
+  // when there is one, the interrupt form (the Detail's only action surface),
+  // the Line's report on its Finish Ticket (ADR-0037), and the timeline, with
+  // attempt rows opening raw logs in the pane below. A never-run ticket's
+  // timeline carries its own "no attempts yet" marker, and its log pane
+  // stays closed.
   private renderProgressTab(
     detail: Extract<DetailView, { kind: "ticket" }>,
     timeline: TimelineView | null,
@@ -958,6 +963,9 @@ export class Detail {
     if (detail.interrupt) {
       panel.append(this.renderInterrupt(detail.interrupt, handlers, timeline));
     }
+    if (detail.report) {
+      panel.append(this.renderReport(detail.report));
+    }
     if (timeline) {
       panel.append(
         this.renderTimelineSection(
@@ -973,6 +981,48 @@ export class Detail {
       panel.append(this.renderLogPane(logPane, detail.ticketId, handlers));
     }
     return panel;
+  }
+
+  // The report Decide wrote at the Line's Finish (ADR-0037), under the Finish
+  // checkpoint it is read beside, framed whole with a way out to a tab of
+  // its own. The Round rides the address so a later Round's report is
+  // fetched afresh rather than from the cache. Moving an iframe reloads it,
+  // so the frame and its section are keyed and nothing before the frame
+  // inside the section comes or goes; the panel above it only reshapes when
+  // the checkpoint is answered. The report is an agent's HTML: the frame is
+  // sandboxed, so it runs no script and is not of the Console's origin.
+  private renderReport(report: LineReportView): HTMLElement {
+    const src = `/api/line/report?round=${report.round}`;
+    return h(
+      "section",
+      { class: "detail-report", key: "detail-report" },
+      h(
+        "div",
+        { class: "detail-report-head" },
+        h("span", { class: "detail-report-title" }, "Report"),
+        report.written
+          ? h(
+              "a",
+              {
+                class: "btn detail-report-open",
+                href: src,
+                target: "_blank",
+                rel: "noopener",
+              },
+              "Open in browser",
+            )
+          : null,
+      ),
+      report.written
+        ? h("iframe", {
+            class: "detail-report-frame",
+            key: "detail-report-frame",
+            src,
+            title: "the Line's report",
+            sandbox: "allow-popups allow-popups-to-escape-sandbox",
+          })
+        : h("div", { class: "dim detail-report-none" }, "No report: Decide did not write one."),
+    );
   }
 
   // The resolver on a held ticket's merge (issue #129): how long it has run,
@@ -1358,6 +1408,7 @@ export class Detail {
       "div",
       { class: "detail-body conversation-detail" },
       detail.steward ? renderStewardBadge() : null,
+      detail.grill ? renderGrillBadge() : null,
       detail.delivery ? renderDeliveryWarning(detail.delivery, { showError: true }) : null,
       h("div", { class: "dim" }, "assignment"),
       h(
@@ -1416,10 +1467,51 @@ export class Detail {
     if (model.logPane && !model.logPane.neverRun) {
       panel.append(this.renderLogPane(model.logPane, detail.conversationId, handlers));
     }
+    if (detail.status === "live" && detail.grill && !detail.endView.ending) {
+      panel.append(this.renderStartLine(detail, handlers));
+    }
     if (detail.status === "live") {
       panel.append(this.renderConversationEnd(detail, handlers));
     }
     return panel;
+  }
+
+  // Start the Line on a live Grill (ADR-0037): the engine reads the Line
+  // brief off the Grill's branch, merges it, writes the Line's first Ticket
+  // and ends the Grill, so there is no End to press after it. A refusal
+  // (no brief, a Line already started) stands beneath until the next press.
+  private renderStartLine(
+    detail: ConversationDetailView,
+    handlers: DetailHandlers,
+  ): HTMLElement {
+    const box = h(
+      "div",
+      { class: "interrupt-box conversation-end-box conversation-line-box" },
+      h(
+        "div",
+        { class: "dim" },
+        "hand the Line brief on: the Grill's branch merges, the Line's first Ticket starts and the Grill ends",
+      ),
+      h(
+        "div",
+        { class: "interrupt-actions" },
+        h(
+          "button",
+          {
+            class: "btn btn-primary conversation-start-line",
+            disabled: detail.lineStart.starting,
+            onclick: () => handlers.onStartLine(detail.conversationId),
+          },
+          detail.lineStart.starting ? "starting..." : "Start the Line",
+        ),
+      ),
+    );
+    if (detail.lineStart.failure) {
+      box.append(
+        h("div", { class: "error-inline conversation-start-line-failure" }, detail.lineStart.failure),
+      );
+    }
+    return box;
   }
 
   // End with an optional closing line: the operator's word to the

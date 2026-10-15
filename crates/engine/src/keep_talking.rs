@@ -899,6 +899,7 @@ async fn grade_continued_attempt(
                     }),
                     attempt,
                     verify: true,
+                    verdict: None,
                 },
                 update: PoolUpdate::default(),
                 joined_at_exit: true,
@@ -996,6 +997,7 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
+            station: None,
         }
     }
 

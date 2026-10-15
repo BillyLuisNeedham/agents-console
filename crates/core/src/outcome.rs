@@ -197,6 +197,7 @@ pub fn validate_outcome(parsed: &Value) -> Result<ValidOutcome, String> {
                 .map(str::to_owned),
             brief: field("brief").and_then(Value::as_str).map(str::to_owned),
             spawn: field("spawn").map(|_| spawn.proposals),
+            verdict: field("verdict").filter(|v| !v.is_null()).cloned(),
         },
         spawn_rejections: spawn.rejections,
     })

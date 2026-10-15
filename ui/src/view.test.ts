@@ -85,6 +85,7 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     onChange: () => render(),
     onStart: () => new Promise(() => {}),
     onEnd: () => new Promise(() => {}),
+    onStartLine: () => new Promise(() => {}),
     onFocusTerminal: () => Promise.resolve(true),
     onListPanes: () => new Promise(() => {}),
     onEnlist: () => new Promise(() => {}),

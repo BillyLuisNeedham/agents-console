@@ -10,15 +10,17 @@ use serde_json::{Map, Value, json};
 
 use ac_core::config::read_config;
 use ac_core::js;
+use ac_core::line::normalise_factory;
 use ac_core::machine_defaults::write_machine_defaults;
-use ac_core::pool_settings::{relaunch_port, write_pool_settings};
+use ac_core::pool_settings::{relaunch_port, require_known_station_harnesses, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
 use ac_io::herdr::PaneReadSource;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction, RunPhase, StartConversationRequest,
+    LineResponse, LineStartResponse, LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction,
+    RunPhase, StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
@@ -288,6 +290,20 @@ pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
         let Some(defaults @ Value::Object(_)) = field_of(&body, "defaults") else {
             return Err("settings: defaults must be an object".to_owned());
         };
+        // The machine's Factory layer names Station harnesses as the pool's does: each must be one
+        // this pool knows, or the Line would write a Station Ticket it cannot launch.
+        if let Some(Ok(Some(layer))) = defaults
+            .get("factory")
+            .filter(|factory| !factory.is_null())
+            .map(|factory| normalise_factory(factory, "machine defaults: factory"))
+        {
+            require_known_station_harnesses(
+                &layer,
+                "machine defaults",
+                &server.0.harnesses.names(),
+            )
+            .map_err(|err| err.to_string())?;
+        }
         write_machine_defaults(defaults, &server.0.machine_paths.file)
             .map_err(|err| err.to_string())?;
         Ok(())
@@ -396,13 +412,19 @@ pub async fn start_conversation_request(server: &Server, body: Body) -> Answer {
     let role = match field_of(&fields, "role") {
         None => None,
         Some(Value::String(role)) if role == "steward" => Some(ConversationRole::Steward),
+        Some(Value::String(role)) if role == "grill" => Some(ConversationRole::Grill),
         Some(_) => {
-            return Answer::refused(400, Field::Reason, r#"role must be "steward" when given"#);
+            return Answer::refused(
+                400,
+                Field::Reason,
+                r#"role must be "steward" or "grill" when given"#,
+            );
         }
     };
     let given = text_of(&fields, "title");
     let title = match js::trim(&given) {
-        "" if role.is_some() => "Steward".to_owned(),
+        "" if role == Some(ConversationRole::Steward) => "Steward".to_owned(),
+        "" if role == Some(ConversationRole::Grill) => "Grill".to_owned(),
         trimmed => trimmed.to_owned(),
     };
     if title.is_empty() {
@@ -520,6 +542,73 @@ pub async fn enlist_request(server: &Server, body: Body) -> Answer {
         Ok(response) => Answer::ok(201, &response),
         Err(err) => Answer::refused(409, Field::Reason, err.message()),
     }
+}
+
+/// POST /api/line/start (ADR-0037): start the pool's Line from its brief in the pool checkout, or, with
+/// `grill`, from the Grill's branch (Start the Line on the Grill, which merges that branch and ends the
+/// Grill). An operator route: the Steward's routes have no such verb. 202 with the first Ticket; a
+/// missing or invalid brief, a Line already started, or a Grill that is not one is the 409 `reason`
+/// envelope.
+pub async fn start_line_request(server: &Server, body: Body) -> Answer {
+    let Ok(body) = body else {
+        return Answer::refused(400, Field::Reason, "invalid JSON body");
+    };
+    let body = or_empty(body);
+    let brief = match body.get("brief") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(path)) => Some(path.clone()),
+        Some(_) => return Answer::refused(400, Field::Reason, "brief must be a path string"),
+    };
+    let grill = match body.get("grill") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if !js::trim(id).is_empty() => Some(js::trim(id).to_owned()),
+        Some(_) => return Answer::refused(400, Field::Reason, "grill must be a Conversation id"),
+    };
+    if brief.is_some() && grill.is_some() {
+        return Answer::refused(
+            400,
+            Field::Reason,
+            "give brief or grill, not both: the Grill's brief is the one on its branch",
+        );
+    }
+    let Some(engine) = server.engine() else {
+        return Answer::refused(409, Field::Reason, "pool not started");
+    };
+    let started = match grill {
+        Some(grill) => engine.start_line_from_grill(grill).await,
+        None => engine.start_line(brief).await,
+    };
+    match started {
+        Ok(ticket_id) => Answer::ok(202, &LineStartResponse { ticket_id }),
+        Err(err) => Answer::refused(409, Field::Reason, err.message()),
+    }
+}
+
+/// GET /api/line: the pool's Line as `line.json` holds it, null before Start the Line.
+pub fn line_request(server: &Server) -> Answer {
+    match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
+        Ok(line) => Answer::ok(200, &LineResponse { line }),
+        Err(err) => Answer::refused(500, Field::Reason, err.to_string()),
+    }
+}
+
+/// GET /api/line/report: the report Decide wrote at the Line's Finish (ADR-0037), as the HTML it is, for
+/// the Finish checkpoint's Detail and Open in browser. 404 with the `reason` envelope before Start the
+/// Line or while no report is written.
+pub fn line_report(server: &Server) -> Result<Vec<u8>, Answer> {
+    let line = match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
+        Ok(Some(line)) => line,
+        Ok(None) => return Err(Answer::refused(404, Field::Reason, "no Line has started")),
+        Err(err) => return Err(Answer::refused(500, Field::Reason, err.to_string())),
+    };
+    let Some(path) = ac_core::line::written_report(&line) else {
+        return Err(Answer::refused(
+            404,
+            Field::Reason,
+            "no report yet: Decide writes it when it ends the Line",
+        ));
+    };
+    std::fs::read(path).map_err(|err| Answer::refused(500, Field::Reason, err.to_string()))
 }
 
 /// Keep talking (issue #139): continue a ticket's checkpointed Attempt in its Held pane. Never queued,

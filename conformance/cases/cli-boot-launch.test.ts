@@ -20,19 +20,23 @@ const DEFAULT_CHECKPOINT = "a device, an external write, an undecided decision, 
 const SAVE_SETUP = "save this Setup as (blank to skip)";
 
 /**
- * Boot's usage line. How it names the command is the build's (the shim's
- * `agent-console`, or the binary's `agent-console boot`); the flags are not.
+ * Boot's usage lines: the pool form, then Factory mode's (issue #187). How
+ * they name the command is the build's (the shim's `agent-console`, or the
+ * binary's `agent-console boot`); the flags are not.
  */
-function expectUsage(line: string | undefined): void {
-  expect(line).toMatch(/^usage: agent-console( boot)? \[pool-dir\] \[--yes\] \[--relaunch\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/);
+function expectUsage(lines: (string | undefined)[]): void {
+  expect(lines[0]).toMatch(/^usage: agent-console( boot)? \[pool-dir\] \[--yes\] \[--relaunch\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/);
+  expect(lines[1]).toMatch(
+    /^ {7}agent-console( boot)? --factory \[--work <issue number or text> \| --brief <path>\] \[--line <slug>\] \[--name <dir>\] \[--title <title>\] \[--config <json file>\] \[--no-steward\] \[--yes\] \[--port <n>\] \[--setup <name>\] \[--no-open\]$/,
+  );
 }
 
-/** A refusal: its message line, then the usage line. */
+/** A refusal: its message line, then the usage lines. */
 function expectRefusal(stderr: string, message: string): void {
   const lines = stderr.split("\n");
   expect(lines[0]).toBe(message);
-  expectUsage(lines[1]);
-  expect(lines.slice(2)).toEqual([""]);
+  expectUsage(lines.slice(1, 3));
+  expect(lines.slice(3)).toEqual([""]);
 }
 
 /** A configured pool directory under the world, with a done Ticket. */
@@ -316,8 +320,9 @@ conformance("cli", "Boot prints its usage on --help and refuses bad flags and ar
   const help = await w.run("boot", ["--help"], { cwd });
   expect(help.code).toBe(0);
   expect(help.stdout.endsWith("\n")).toBe(true);
-  expect(help.stdout.split("\n")).toHaveLength(2);
-  expectUsage(help.stdout.split("\n")[0]);
+  expectUsage(help.stdout.split("\n").slice(0, 2));
+  expect(help.stdout).toContain("\nFactory mode (ADR-0037) cuts line/<slug> from main");
+  expect(help.stdout).toContain("\n  --brief <path>         a ready Line brief");
   const nope = await w.run("boot", ["--nope"], { cwd });
   const two = await w.run("boot", ["a", "b"], { cwd });
   const port = await w.run("boot", ["--port", "70000"], { cwd });

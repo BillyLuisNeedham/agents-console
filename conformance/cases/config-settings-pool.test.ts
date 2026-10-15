@@ -244,6 +244,25 @@ conformance("config", "a Pool settings save refuses a Steward may Close that is 
   expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, steward: { mayClose: true } });
 });
 
+// The Factory's steward.mayAdoptLineSpawns (issue #187, ADR-0037) is saved the way mayClose is.
+conformance("config", "a Pool settings save keeps Steward may adopt Line spawns when true, leaves it out when false, and refuses anything else", async (t) => {
+  const { world, server } = await settledPool(t, { ...DEFAULTS, steward: { budget: 3 } });
+  const steward = () => readConsoleJson(world.pool)!.steward;
+
+  await saved(server, world, { steward: { budget: 3, mayClose: true, mayAdoptLineSpawns: true } });
+  expect(steward()).toEqual({ budget: 3, mayClose: true, mayAdoptLineSpawns: true });
+
+  await saved(server, world, { steward: { budget: 3, mayAdoptLineSpawns: false } });
+  expect(steward()).toEqual({ budget: 3 });
+
+  for (const mayAdoptLineSpawns of ["true", 1, {}]) {
+    expect(await refused(server, world, { steward: { mayAdoptLineSpawns } })).toBe(
+      "pool settings: steward.mayAdoptLineSpawns must be true or false",
+    );
+  }
+  expect(steward()).toEqual({ budget: 3 });
+});
+
 // engine/pool-settings.test.ts:245 pool settings › takes a cap of 0, as a number or as the pane's text
 conformance("config", "a Pool settings save takes a Spawn cap of 0, as a number or as text", async (t) => {
   const { world, server } = await settledPool(t, DEFAULTS);

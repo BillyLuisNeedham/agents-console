@@ -105,6 +105,108 @@ asks only for what is left, starts the server and opens the browser. It takes
 `[pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]`.
 `skills/link.sh` puts it on PATH; from this checkout it is `bun run boot -- <dir>`.
 
+### Factory mode
+
+`agent-console --factory` boots a Factory pool, which runs one Line
+(`docs/adr/0037-the-factory-is-an-engine-owned-recipe.md`). Boot cuts
+`line/<slug>` from `main` into a worktree of its own at
+`.scratch/lines/<slug>`, so the checkout it runs from keeps its branch, and
+makes the pool inside that worktree at `<worktree>/.scratch/<name>`: the pool's
+target branch is the Line's, never a shared one (ADR-0038). A Factory pool is
+terminal-backed (`"terminal": "herdr"`).
+
+#### Using it
+
+Before the first Line on a machine:
+
+- herdr is running, and the harness the Stations use (claude by default) is
+  on PATH.
+- The Stations' default skills are in `~/.claude/skills`: `implement`,
+  `my-verify`, `code-review`, `html` and, for the Grill, `my-grill-with-docs`
+  and `show-me`. Run `skills/link.sh` for this repo's own skills, including
+  `my-console-steward`.
+- The project has a `main` branch, local or on `origin`. Boot cuts every Line
+  from it.
+- For a `draft-pr` or `pr` Finish, `gh` is logged in with push rights on the
+  project.
+
+A Line from an issue, with the operator in the room:
+
+1. From the project's checkout, run `agent-console --factory --work 123`. You
+   can give free text instead of an issue number. Boot cuts `line/123`, opens
+   the Console and starts the Grill.
+2. Answer the Grill. It writes the spec and the Line brief. The brief sets the
+   Finish, `none` by default; say if you want `draft-pr` or `pr`. It can also
+   override any Station setting for this one Line.
+3. Press **Start the Line** on the Grill card. The engine merges the Grill's
+   branch, ends the Grill and creates `r1-implement`. From here the engine
+   routes every Station: Implement, Prove, Review, then Decide, which either
+   starts another Round or finishes the Line.
+4. You only answer checkpoints:
+   - **No verdict:** a Station ended without a valid verdict. Resume it or use
+     Keep talking.
+   - **Prove limit:** Prove failed too often in one Round. Resume with a note
+     to buy one more fix, or Close to halt the Line.
+   - **Finish:** read the report in the checkpoint's Detail. Resume with
+     `approved`, or with no note, to end the Line. Resume with notes to start
+     another Round on them.
+5. When the Line is done, stop the pool and remove its worktree (below).
+
+A Line from a spec you already have: write the spec, and a brief beside it
+such as `{"spec": "docs/specs/123.md", "finish": "draft-pr", "factory": {}}`.
+Then run `agent-console --brief path/to/123.brief.json`. There is no Grill:
+Round 1 starts at once and nothing is asked. This is the way to run a Line
+unattended (see the example below).
+
+Station settings (each Station's skills, Assignment and extra note, the Prove
+and Review off switches, the two limits and the default Finish) live under
+`factory` in the Machine defaults and the Pool settings. Each field falls
+through on its own, and the Settings pane edits both layers. A Line brief's
+`factory` overrides them for that Line.
+
+#### Boot flags
+
+- `--work <issue number or text>`, or the question Boot asks without it: Boot
+  opens the Grill, a Conversation on the Grill Station's skills with the work as
+  its first Turn. The Grill writes `docs/specs/<slug>.md` and
+  `docs/specs/<slug>.brief.json` on its branch, and the operator presses Start
+  the Line on it, which merges that branch and starts Round 1.
+- `--brief <path>`: a ready Line brief and the spec it names (found from the
+  working directory first, then beside the brief). No Grill: Boot commits both
+  onto the Line branch as `docs/specs/<slug>.md` and `docs/specs/<slug>.brief.json`
+  and starts Round 1 at once. It implies `--factory` and `--yes`, so nothing is
+  asked.
+- `--line <slug>` names the Line (default: the issue number, the brief's file
+  name, or the work's first words); a slug already taken gets `-2`, `-3`, ….
+  `--name <dir>` names the pool directory, `--title <title>` titles the pool, and
+  `--config <json file>` lays its keys over the new pool's `console.json` before
+  the server starts (a `steward` block, say).
+- The Steward is on by default: Boot starts one once the Grill or Round 1 is
+  up, and `--no-steward` starts none. It may answer a Station's "no verdict"
+  checkpoint and the Prove limit, never the Finish checkpoint. It decides Held
+  spawns proposed from inside the Line only while `steward.mayAdoptLineSpawns`
+  is true in the pool's settings (default false).
+
+Boot marks the pool `"factoryPool": true` in `console.json`, and a Factory pool
+raises no run-wide Review: approving the Finish checkpoint is the Review. At the
+Finish, Decide carries out the brief's `finish` (`none`, `draft-pr`, `pr`, or an
+act it names) and writes the report to `runs/<slug>-report.html` in the pool.
+The Finish checkpoint's Brief links it, the Console shows it in that checkpoint's
+Detail with Open in browser, and `GET /api/line/report` serves it. The header
+shows the Line (`Round 2 · Prove · fails 1/2 · Finish: draft PR`) and each card
+its Station.
+
+Unattended, for example:
+
+```sh
+# steward.json: {"steward": {"budget": 10, "mayAdoptLineSpawns": true}}
+agent-console --brief docs/specs/123.brief.json --title "Issue #123" \
+  --config steward.json --port 8792 --no-open
+```
+
+When the Line is done, stop its pool and remove the worktree with
+`git worktree remove .scratch/lines/<slug>` (and `git branch -D line/<slug>`).
+
 `agent-console` is a shim (`bin/agent-console`) in front of the binary. Before it
 hands its arguments to `target/release/agent-console boot`, it rebuilds what is
 stale: the UI with Bun when `ui/dist` is missing or older than the UI's sources

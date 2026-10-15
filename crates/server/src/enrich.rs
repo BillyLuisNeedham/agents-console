@@ -87,6 +87,8 @@ pub fn enrich(
                 // An enlisted ticket (issue #101) reads "as found": the marker field is the durable fact.
                 enlisted: marker.enlisted_from.is_some(),
                 reassign: row.map_or_else(unknown_reassign, |row| row.reassign.clone()),
+                // A Line's Station Ticket (ADR-0037): the marker field is the durable fact.
+                station: marker.station,
             }
         })
         .collect();
@@ -101,6 +103,7 @@ pub fn enrich(
         pending_spawns: snapshot.pending_spawns.clone(),
         held_spawns: snapshot.held_spawns.clone(),
         steward_budget: Some(snapshot.steward_budget.clone()),
+        line: snapshot.line.clone(),
         state: SnapshotState {
             tickets,
             conversations: snapshot.conversations.clone(),

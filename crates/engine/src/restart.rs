@@ -1012,6 +1012,19 @@ pub fn record_adopted_exit(
     outcome_path: &str,
     what: &str,
 ) -> anyhow::Result<()> {
+    // A Line's Station ending here is checked for its verdict as a launched one is (ADR-0037).
+    let check = crate::line::verdict_check_for(session, marker);
+    let checked_decision;
+    let decision = match (&check, &decision.result) {
+        (Some(check), Ok(valid)) => {
+            checked_decision = AttemptEndingDecision {
+                result: Ok(crate::line::checked(Some(check), valid.clone())),
+                ..decision.clone()
+            };
+            &checked_decision
+        }
+        _ => decision,
+    };
     let id = marker.id.clone();
     let runs_dir = session.runs_dir.clone();
     let runs = Path::new(&runs_dir);

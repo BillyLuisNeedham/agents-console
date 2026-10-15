@@ -173,6 +173,39 @@ impl Engine {
             .await;
     }
 
+    /// Start the Line (ADR-0037): the first Station Ticket's id, or the refusal's reason.
+    pub async fn start_line(&self, brief: Option<String>) -> Result<String, EngineError> {
+        self.call(move |s| crate::line::start_line(s, brief))
+            .await?
+    }
+
+    /// Start the Line on the Grill (ADR-0037), the operator's act: the brief checked on the Grill's
+    /// branch, the branch merged and Round 1's Implement written, then the Grill ended. The first
+    /// Station Ticket's id, or the refusal's reason.
+    pub async fn start_line_from_grill(&self, grill: String) -> Result<String, EngineError> {
+        let id = grill.clone();
+        let ticket = self
+            .call(move |s| crate::line::start_line_from_grill(s, &id))
+            .await??;
+        // The Line has started by now, so an End that fails is logged, not a refusal: the Grill
+        // is left for the operator to end, with nothing left on its branch to merge.
+        if let Err(err) = crate::conversations::end(
+            self,
+            &grill,
+            Some("Start the Line".to_owned()),
+            ac_protocol::AnswerBy::Operator,
+        )
+        .await
+        {
+            let line = format!(
+                "line: the Line started but the Grill {grill} did not end: {}",
+                err.message()
+            );
+            let _ = self.call(move |s| s.log(line)).await;
+        }
+        Ok(ticket)
+    }
+
     /// `adoptHeldSpawn` (ADR-0029).
     pub async fn adopt_held_spawn(&self, id: String) -> Result<(), EngineError> {
         self.call(move |s| crate::spawns::adopt_held_spawn(s, &id))
@@ -260,6 +293,7 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.call(move |s| {
             crate::steward_actions::check_steward(s, &conversation)?;
+            crate::steward_actions::check_line_spawn(s, &id, "discard")?;
             crate::spawns::discard_held_spawn(s, &id, Some(&conversation))
         })
         .await?

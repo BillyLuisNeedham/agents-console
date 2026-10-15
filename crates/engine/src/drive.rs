@@ -187,6 +187,8 @@ pub fn ready_set(
         .iter()
         .filter(|marker| {
             engine_ticket_build_id(&marker.id).is_none()
+                // The Finish checkpoint is answered by the operator, never run (ADR-0037).
+                && marker.station != Some(ac_protocol::Station::Finish)
                 && tickets.get(&marker.id) == Some(&TicketStatus::Ready)
                 && marker
                     .blocked_by
@@ -220,6 +222,9 @@ pub async fn super_step_boundary(engine: &Engine) -> anyhow::Result<Option<Super
                             crate::answers::drain_answers(s)?;
                             // A Close the drain just applied leaves its dependents unable to run.
                             crate::interrupts::reconcile_deadlocks(s)?;
+                            // The Line routes its ended Station (ADR-0037) after the answers, so a
+                            // Close or a Resume of the Finish this drain applied routes now.
+                            crate::line::route_line(s)?;
                             // Spawn adoption (ADR-0010) rides the same boundary.
                             crate::spawns::adopt_spawn_proposals(s)?;
                             let markers = s.markers.clone();
@@ -902,7 +907,7 @@ async fn decide_round(
 /// `closeDrive`: the Review gate, the phase decision, the final persist and the settle.
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     // A closed ticket (issue #154) is finished too.
-    let (pending, closed_ids, raised) = engine
+    let (pending, closed_ids, raised, merging_at_gate) = engine
         .call(|s| {
             let pending: Vec<String> = s
                 .markers
@@ -920,15 +925,18 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             // the final Review; an approval recorded in state holds it down for good.
             // A merge still in flight off the drive (an adopted or Continued attempt's ending) holds
             // the gate too: in the TypeScript it lands synchronously before any drive sees its ending.
+            // In a Factory pool approving the Finish checkpoint is the Review (ADR-0037).
+            let merging = s.merge_line.unsettled();
             let raise = pending.is_empty()
+                && !crate::line::is_factory_pool(s)
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
-                && s.merge_line.unsettled().is_empty();
+                && merging.is_empty();
             if raise {
                 let review = crate::interrupts::review_interrupt(s);
                 raise_interrupt(s, review);
             }
-            (pending, closed, raise)
+            (pending, closed, raise, merging)
         })
         .await?;
     if raised {
@@ -940,8 +948,15 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             let pending = pending_c;
             // Tickets whose Attempt runs outside the drive (issue #139) end on their own.
             // So does a ticket whose merge is still in flight off the drive: its ending already
-            // landed, its merge has not (see the closing gate above).
-            let merging = s.merge_line.unsettled();
+            // landed, its merge has not (see the closing gate above). One the gate saw in flight
+            // counts even if it settled since: the gate held the Review for it, and the ending's
+            // finalize starts the drive that raises it, so this one must not close the store first.
+            let mut merging = s.merge_line.unsettled();
+            for id in merging_at_gate {
+                if !merging.contains(&id) {
+                    merging.push(id);
+                }
+            }
             let mut outside: Vec<&String> = pending
                 .iter()
                 .filter(|id| s.live_attempts.is_live(id))
@@ -952,10 +967,14 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 }
             }
             let interrupts = !s.state.interrupts.is_empty();
+            // A Factory pool is done only when its Line is: before Start the Line, and while it
+            // routes, an empty or finished pool waits on it.
+            let line_waits = crate::line::is_factory_pool(s) && !crate::line::line_ended(s);
             let phase = if interrupts
                 || !outside.is_empty()
                 || !s.continued_grades.is_empty()
                 || spawns_await_boundary(s)
+                || (line_waits && pending.is_empty())
             {
                 RunPhase::Quiescent
             } else if pending.is_empty() {
@@ -980,7 +999,13 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 ),
                 RunPhase::Quiescent => format!(
                     "pool quiescent: waiting on {}",
-                    if !outside.is_empty() {
+                    if line_waits && pending.is_empty() && outside.is_empty() {
+                        if s.line.is_some() {
+                            "the Line".to_owned()
+                        } else {
+                            "Start the Line".to_owned()
+                        }
+                    } else if !outside.is_empty() {
                         outside
                             .iter()
                             .map(|s| s.as_str())

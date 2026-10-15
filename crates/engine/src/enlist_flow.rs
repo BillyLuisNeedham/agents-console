@@ -748,6 +748,7 @@ fn write_enlisted_ticket(
         spawned_by: None,
         enlisted_from: Some(pane.pane_id.clone()),
         spawn_assign: None,
+        station: None,
     });
     let tickets: IndexMap<String, TicketStatus> =
         [(id.to_owned(), TicketStatus::InProgress)].into();
@@ -1205,6 +1206,7 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
+            station: None,
         }
     }
 

@@ -29,6 +29,7 @@ pub mod held;
 pub mod interrupts;
 pub mod jev;
 pub mod keep_talking;
+pub mod line;
 pub mod live_attempts;
 pub mod merges;
 pub mod options;

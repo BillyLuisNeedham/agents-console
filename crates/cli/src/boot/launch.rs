@@ -248,6 +248,35 @@ pub fn wait_for_state(url: &str, timeout_ms: u64) -> bool {
     .unwrap_or(false)
 }
 
+/// POST a JSON body to the server Boot started: the status and the JSON it answered (null when it
+/// answered none), or why there was no answer.
+pub fn post_json(
+    url: &str,
+    body: &serde_json::Value,
+    timeout_ms: u64,
+) -> Result<(u16, serde_json::Value), String> {
+    super::on_own_runtime(async {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|err| err.to_string())?;
+        let response = client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| format!("{url} did not answer: {err}"))?;
+        let status = response.status().as_u16();
+        let text = response.text().await.map_err(|err| err.to_string())?;
+        Ok((
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        ))
+    })
+    .unwrap_or_else(|| Err("no runtime to send the request on".to_owned()))
+}
+
 /// Open the Console with the platform's opener, and say nothing if it fails.
 pub fn open_browser(url: &str) -> bool {
     let opener = if cfg!(target_os = "macos") {

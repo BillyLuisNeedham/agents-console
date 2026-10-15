@@ -359,7 +359,7 @@ conformance("conversations", "a start with an unknown role or a blank title is r
 
   const admin = await server.http.post("/api/conversations", { title: "Talk", role: "admin" });
   expect(admin.status).toBe(400);
-  expect(admin.json<object>()).toEqual({ reason: 'role must be "steward" when given' });
+  expect(admin.json<object>()).toEqual({ reason: 'role must be "steward" or "grill" when given' });
 
   const blank = await server.http.post("/api/conversations", { title: "   " });
   expect(blank.status).toBe(400);

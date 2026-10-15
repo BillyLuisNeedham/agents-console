@@ -50,6 +50,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     terminalBacked: false,
     mergeQueueLine: null,
     spawnLine: null,
+    lineStrip: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
     ...overrides,
   };
@@ -164,6 +165,7 @@ function mountCanvas(
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
+    onStartLine: () => {},
     onArmStop: () => {},
     onCancelStop: () => {},
     onConfirmStop: () => {},
@@ -209,6 +211,7 @@ describe("Canvas across a morphing render", () => {
         resolver: null,
         assignment: { harness: "claude", model: "opus", drivers: "tdd" },
         enlisted: false,
+        station: null,
         reassign: {
           eligible: false,
           reason: "an Attempt is in flight",
@@ -586,6 +589,104 @@ describe("the Spawn caps header line (issue #149)", () => {
   });
 });
 
+describe("the Line on the canvas (#187, ADR-0037)", () => {
+  const cards: CanvasModel["cards"] = [
+    { kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 },
+  ];
+
+  it("shows the Line strip in the header, after the Spawn caps line, whole on hover", () => {
+    const strip = "Round 2 · Prove · fails 1/2 · Finish: draft PR";
+    const { root, commit } = mountCanvas(
+      model({
+        cards,
+        spawnLine: { text: "Spawns 3/20 this run · 5 per attempt", warn: false },
+        lineStrip: strip,
+      }),
+    );
+    commit();
+    const el = root.querySelector<HTMLElement>(".canvas-lines .canvas-line-strip")!;
+    expect(el.textContent).toBe(strip);
+    expect(el.title).toBe(strip);
+    expect(el.previousElementSibling?.classList.contains("canvas-spawn-line")).toBe(true);
+  });
+
+  it("shows no strip before Start the Line", () => {
+    const { root, commit } = mountCanvas(model({ cards }));
+    commit();
+    expect(root.querySelector(".canvas-line-strip")).toBeNull();
+  });
+
+  function stationPool(): CanvasModel {
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "running",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
+      heldSpawns: [],
+      state: {
+        tickets: (
+          [
+            ["r1-implement", "implement"],
+            ["r1-prove", "prove"],
+            ["r1-review", "review"],
+            ["r1-decide", "decide"],
+            ["r1-finish", "finish"],
+            ["side-quest", undefined],
+          ] as const
+        ).map(([id, station]) => ({
+          id,
+          title: `ticket ${id}`,
+          blockedBy: [],
+          status: "ready" as const,
+          mergeState: null,
+          enlisted: false,
+          assignment: { harness: "claude", model: "opus", drivers: "implement" },
+          liveAttempt: null,
+          heldPane: null,
+          reassign: {
+            eligible: true,
+            reason: null,
+            verify: null,
+            sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
+          },
+          ...(station ? { station } : {}),
+        })),
+        conversations: [],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: {},
+      },
+    };
+    return model({ cards: projectPool(snapshot).cards });
+  }
+
+  it("labels each Station Ticket's card with its Station in the head, beside the id", () => {
+    const { root, commit } = mountCanvas(stationPool());
+    commit();
+    const label = (id: string) =>
+      root.querySelector(`[data-ticket-id="${id}"] .node-card-head .station-badge`);
+    expect(label("r1-implement")?.textContent).toBe("Implement");
+    expect(label("r1-prove")?.textContent).toBe("Prove");
+    expect(label("r1-review")?.textContent).toBe("Review");
+    expect(label("r1-decide")?.textContent).toBe("Decide");
+    expect(label("r1-finish")?.textContent).toBe("Finish");
+    expect(label("r1-prove")?.previousElementSibling?.classList.contains("node-card-id")).toBe(true);
+  });
+
+  it("puts no label on a Ticket that is not on the Line", () => {
+    const { root, commit } = mountCanvas(stationPool());
+    commit();
+    expect(root.querySelector('[data-ticket-id="side-quest"] .station-badge')).toBeNull();
+  });
+});
+
 describe("faded cards for Pending and Held spawns (issue #150)", () => {
   const spawnCard = (
     overrides: Partial<Extract<CanvasModel["cards"][number], { kind: "spawn" }>> = {},
@@ -724,6 +825,91 @@ describe("the Steward on the canvas (ADR-0030)", () => {
   });
 });
 
+
+describe("a Grill on the canvas (ADR-0037)", () => {
+  function grillPool(
+    overrides: { ending?: boolean } = {},
+    lineStart: { starting: boolean; failure: string | null } = { starting: false, failure: null },
+    role: "grill" | "steward" = "grill",
+  ): CanvasModel {
+    const snapshot: EnrichedSnapshot = {
+      seq: 1,
+      phase: "running",
+      poolName: "repo/pool",
+      poolTitle: null,
+      poolDir: "/tmp/pool",
+      finishedTerminals: 0,
+      spawnUsage: { spawnedThisRun: 0, perAttempt: 5, perRun: 20 },
+      pendingSpawns: [],
+      heldSpawns: [],
+      state: {
+        tickets: [],
+        conversations: [
+          {
+            id: "conv-2",
+            title: "grill the next feature",
+            status: "live",
+            spawnedBy: null,
+            assignment: { harness: "claude", model: "opus", drivers: "implement" },
+            paneId: null,
+            branch: null,
+            turn: { state: "waiting", lastLine: "", idleSince: null },
+            children: [],
+            enlisted: false,
+            ending: overrides.ending ?? false,
+            role,
+          },
+        ],
+        log: [],
+        outcomes: {},
+        interrupts: [],
+        mergeQueue: [],
+        queuedAnswers: [],
+        config: {},
+      },
+    };
+    const lineStarts = { "conv-2": lineStart };
+    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), {}, {}, lineStarts).cards });
+  }
+
+  it("marks a Grill's card and offers Start the Line on it", () => {
+    const starts: string[] = [];
+    const { root, commit } = mountCanvas(grillPool(), {
+      onStartLine: (grillId) => starts.push(grillId),
+    });
+    commit();
+    const card = root.querySelector('[data-conversation-id="conv-2"]')!;
+    expect(card.classList.contains("conversation-card-grill")).toBe(true);
+    expect(card.querySelector(".grill-badge")?.textContent).toBe("Grill");
+    const start = card.querySelector<HTMLButtonElement>(".conversation-start-line")!;
+    expect(start.textContent).toBe("Start the Line");
+    expect(start.disabled).toBe(false);
+    start.click();
+    expect(starts).toEqual(["conv-2"]);
+  });
+
+  it("disables Start the Line in flight and shows its refusal", () => {
+    const busy = mountCanvas(grillPool({}, { starting: true, failure: null }));
+    busy.commit();
+    const button = busy.root.querySelector<HTMLButtonElement>(".conversation-start-line")!;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("starting...");
+
+    const refused = mountCanvas(grillPool({}, { starting: false, failure: "the Line has already started" }));
+    refused.commit();
+    expect(refused.root.querySelector(".conversation-start-line-failure")?.textContent).toBe(
+      "the Line has already started",
+    );
+  });
+
+  it("offers no Start the Line on a Grill that is ending, or on a Conversation that is not a Grill", () => {
+    for (const pool of [grillPool({ ending: true }), grillPool({}, undefined, "steward")]) {
+      const { root, commit } = mountCanvas(pool);
+      commit();
+      expect(root.querySelector(".conversation-start-line")).toBeNull();
+    }
+  });
+});
 describe("Notices not landing on the canvas", () => {
   it("warns on the card, the error on hover", () => {
     const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };

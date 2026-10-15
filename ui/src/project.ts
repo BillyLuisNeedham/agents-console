@@ -14,11 +14,13 @@ import type {
   EnlistPane,
   EnrichedSnapshot,
   EnrichedTicketState,
+  FactorySettings,
   Grade,
   HeldPaneRecord,
   HeldSpawnReason,
   HeldSpawnView,
   Interrupt,
+  LineView,
   LiveAttemptRecord,
   MergeQueueEntry,
   MergeQueueState,
@@ -30,6 +32,7 @@ import type {
   ResumeAction,
   RunPhase,
   StartConversationRequest,
+  Station,
   StewardBudgetView,
   TicketReassignView,
   TicketActivityResponse,
@@ -58,6 +61,7 @@ export type {
   EnlistResponse,
   EnrichedSnapshot,
   EnrichedTicketState,
+  FactorySettings,
   Grade,
   HeldPaneRecord,
   HeldSpawnReason,
@@ -66,6 +70,7 @@ export type {
   InterruptKind,
   KeepTalkingRequest,
   KeepTalkingResponse,
+  LineView,
   MachineDefaults,
   MachineDefaultsView,
   MergeQueueEntry,
@@ -84,6 +89,8 @@ export type {
   RunPhase,
   SettingsResponse,
   StartConversationRequest,
+  Station,
+  StationSettings,
   StewardAssign,
   StewardBudgetView,
   StewardConfig,
@@ -1106,6 +1113,9 @@ export interface TicketCardView {
   /** The ticket was enlisted from a live herdr pane (issue #101): the badge
    *  reads "as found" where a spawned ticket names a model. */
   enlisted: boolean;
+  /** The Station a Line's Ticket works (ADR-0037), which its card labels;
+   *  null for a Ticket that is not on a Line. */
+  station: Station | null;
   /**
    * Reassign (issue #126): whether this ticket's assign entry can be
    * rewritten now, why not when it cannot, its own verify count, and where
@@ -1210,6 +1220,13 @@ export interface ConversationEndView {
   failure: string | null;
 }
 
+/** Start the Line's in-flight/failure state for one Grill (ADR-0037), shared
+ *  by the card and Detail the way the End view is. */
+export interface ConversationLineStartView {
+  starting: boolean;
+  failure: string | null;
+}
+
 export interface ConversationCardView {
   kind: "conversation";
   id: string;
@@ -1228,12 +1245,16 @@ export interface ConversationCardView {
   enlisted: boolean;
   /** It is the Steward (ADR-0030): the card is marked as such. */
   steward: boolean;
+  /** It is a Factory Line's Grill (ADR-0037): the card is marked as such
+   *  and, while live, offers Start the Line. */
+  grill: boolean;
   /** Notices are not reaching its pane; null while they land. */
   delivery: DeliveryWarningView | null;
   /** The card's terminal surface, reused from ticket cards; present while
    *  the Conversation is live and carries a pane id. */
   terminal: TerminalSurfaceView | null;
   endView: ConversationEndView;
+  lineStart: ConversationLineStartView;
   x: number;
   y: number;
 }
@@ -1284,6 +1305,8 @@ export interface PoolView {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149). */
   spawnLine: SpawnLineView;
+  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
+  lineStrip: string | null;
   /** The Pending spawns the line's list shows first (issue #150), oldest
    *  first. */
   pendingSpawns: PendingSpawnRow[];
@@ -1712,6 +1735,7 @@ function projectTicket(
     resolver: projectResolver(ticket.liveAttempt, now),
     assignment: ticket.assignment,
     enlisted: ticket.enlisted,
+    station: ticket.station ?? null,
     reassign: ticket.reassign,
     hasLiveAttempt: ticket.liveAttempt !== null,
     outcome: state.outcomes[ticket.id] ?? null,
@@ -1762,11 +1786,14 @@ function projectConversationEnd(
   return engineEnding ? { ...view, ending: true } : view;
 }
 
+const NO_LINE_START: ConversationLineStartView = { starting: false, failure: null };
+
 function projectConversation(
   conversation: ConversationView,
   pos: Point,
   terminal: TerminalSurfaceView | undefined,
   endings: Record<string, ConversationEndView>,
+  lineStarts: Record<string, ConversationLineStartView>,
   now: number,
 ): ConversationCardView {
   return {
@@ -1783,9 +1810,11 @@ function projectConversation(
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
     steward: conversation.role === "steward",
+    grill: conversation.role === "grill",
     delivery: projectDelivery(conversation.delivery),
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id], conversation.ending),
+    lineStart: lineStarts[conversation.id] ?? NO_LINE_START,
     x: pos.x,
     y: pos.y,
   };
@@ -1818,6 +1847,7 @@ export function projectPool(
   now: number = Date.now(),
   conversationEndings: Record<string, ConversationEndView> = {},
   keepTalking: Record<string, KeepTalkingState> = {},
+  conversationLineStarts: Record<string, ConversationLineStartView> = {},
 ): PoolView {
   const tickets = snapshot.state.tickets;
   const conversations = snapshot.state.conversations;
@@ -1835,6 +1865,7 @@ export function projectPool(
         positions[conversationCardId(conversation.id)],
         terminal[conversation.id],
         conversationEndings,
+        conversationLineStarts,
         now,
       ),
     ),
@@ -1871,6 +1902,7 @@ export function projectPool(
     log: snapshot.state.log,
     mergeQueueLine: mergeQueueLine(snapshot, now),
     spawnLine: spawnLine(snapshot),
+    lineStrip: lineStrip(snapshot.line),
     pendingSpawns: projectPendingSpawns(snapshot.pendingSpawns, now),
     heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
     steward: stewardOnDuty(conversations),
@@ -1923,6 +1955,46 @@ function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
 }
 
 // ---------------------------------------------------------------------------
+// The Line (ADR-0037)
+// ---------------------------------------------------------------------------
+
+/** A Station as the header strip, the card and the Detail name it. */
+export function stationLabel(station: Station): string {
+  return station.charAt(0).toUpperCase() + station.slice(1);
+}
+
+/** The Finish in force as the strip names it: the two PR acts read as
+ *  words, any other act as the Grill wrote it. */
+function finishLabel(finish: string): string {
+  if (finish === "draft-pr") return "draft PR";
+  if (finish === "pr") return "PR";
+  return finish;
+}
+
+/**
+ * The canvas header's Line strip (ADR-0037): where the Line stands, "Round 2
+ * · Prove · fails 1/2 · Finish: draft PR" while it runs, "Line done after
+ * Round 2 · Finish: PR" once it ends, with "· halted" after either while a
+ * Close of a Station Ticket holds it. Null before Start the Line, so the
+ * strip is gone from a pool that runs no Line.
+ */
+export function lineStrip(line: LineView | undefined): string | null {
+  if (!line) return null;
+  const finish = `Finish: ${finishLabel(line.finish)}`;
+  const parts =
+    line.status === "done" || line.status === "closed"
+      ? [`Line ${line.status} after Round ${line.round}`, finish]
+      : [
+          `Round ${line.round}`,
+          stationLabel(line.station),
+          `fails ${line.proveFails}/${line.proveFailsAllowed}`,
+          finish,
+        ];
+  if (line.halted !== null) parts.push("halted");
+  return parts.join(" · ");
+}
+
+// ---------------------------------------------------------------------------
 // Held spawns (issue #149, ADR-0029)
 // ---------------------------------------------------------------------------
 
@@ -1954,6 +2026,8 @@ export function heldReasonCopy(
       return "held by operator";
     case "refused":
       return refusal ? `refused at landing: ${refusal}` : "refused at landing";
+    case "line":
+      return "proposed inside the Line";
   }
 }
 
@@ -1967,6 +2041,7 @@ const HELD_SPAWN_REASONS: readonly string[] = [
   "overlaps",
   "operator",
   "refused",
+  "line",
 ];
 
 function isHeldSpawnReason(value: unknown): value is HeldSpawnReason {
@@ -2094,6 +2169,8 @@ export interface ConversationTrayRow {
   idleAge: string | null;
   /** It is the Steward (ADR-0030): the row is marked as such. */
   steward: boolean;
+  /** It is a Factory Line's Grill (ADR-0037): the row is marked as such. */
+  grill: boolean;
   /** Notices are not reaching its pane; null while they land. */
   delivery: DeliveryWarningView | null;
 }
@@ -2120,6 +2197,7 @@ export function projectConversationsTray(
       turn: c.turn,
       idleAge: conversationIdleAge(c.turn.idleSince, now),
       steward: c.role === "steward",
+      grill: c.role === "grill",
       delivery: projectDelivery(c.delivery),
     }));
   return rows.sort((a, b) => {
@@ -2352,13 +2430,18 @@ export interface PoolConfigPatch {
   spawnCaps?: { perAttempt: number | null; perRun: number | null };
   /** The Steward entry (ADR-0030), replaced whole like `defaults`: a null
    *  budget goes back to 5, an empty Assignment field to the pool defaults,
-   *  an absent `mayClose` to off (issue #154), and nothing set removes the
+   *  an absent `mayClose` to off (issue #154), an absent
+   *  `mayAdoptLineSpawns` to off (ADR-0037), and nothing set removes the
    *  key. */
   steward?: {
     budget: number | null;
     assign: { harness: string; model: string; effort: string; drivers: string };
     mayClose?: boolean;
+    mayAdoptLineSpawns?: boolean;
   };
+  /** The Factory settings (issue #187), replaced whole: an empty field falls
+   *  to the Machine defaults' layer, and null removes the key. */
+  factory?: FactorySettings | null;
 }
 
 /**
@@ -2725,6 +2808,21 @@ export interface TicketDetailView {
   /** Mirrors the card's: the Steward budget used and left on this ticket,
    *  null until the Steward has answered it (ADR-0030). */
   stewardBudget: StewardBudgetLine | null;
+  /** Mirrors the card's: the Station a Line's Ticket works (ADR-0037). */
+  station: Station | null;
+  /** The report Decide writes at the Line's Finish, on the Finish Ticket's
+   *  Detail only; null on every other Ticket. */
+  report: LineReportView | null;
+}
+
+/**
+ * The Line's report as the Finish checkpoint's Detail shows it (ADR-0037):
+ * whether Decide wrote one, and the Round it was written at, whose number
+ * the report's address carries so a later Round's report is fetched afresh.
+ */
+export interface LineReportView {
+  written: boolean;
+  round: number;
 }
 
 interface UtilityDetailView {
@@ -2751,6 +2849,9 @@ export interface ConversationDetailView {
   endView: ConversationEndView;
   /** Mirrors the card's: it is the Steward (ADR-0030). */
   steward: boolean;
+  /** Mirrors the card's: it is a Factory Line's Grill (ADR-0037). */
+  grill: boolean;
+  lineStart: ConversationLineStartView;
   /** Mirrors the card's: Notices are not reaching its pane. */
   delivery: DeliveryWarningView | null;
 }
@@ -2787,13 +2888,15 @@ export type DetailView =
 /**
  * The Detail for a selected card, read off the pool's already-projected
  * cards: the caller derives the cards once per cycle and passes them in, so
- * the Detail and the canvas never disagree about the same snapshot. Null
+ * the Detail and the canvas never disagree about the same snapshot. The
+ * Line (ADR-0037) is the snapshot's, for the Finish Ticket's report. Null
  * when the card is not in the pool.
  */
 export function projectDetail(
   cards: PoolCardView[],
   cardId: string,
   spawns: { pending: PendingSpawnRow[]; held: HeldSpawnRow[] } = { pending: [], held: [] },
+  line: LineView | null = null,
 ): DetailView | null {
   const card = cards.find((c) => c.id === cardId);
   if (!card) return null;
@@ -2835,6 +2938,11 @@ export function projectDetail(
       reassign: card.reassign,
       hasLiveAttempt: card.hasLiveAttempt,
       stewardBudget: card.stewardBudget,
+      station: card.station,
+      report:
+        card.station === "finish" && line
+          ? { written: line.report, round: line.round }
+          : null,
     };
   }
   if (card.kind === "conversation") {
@@ -2852,6 +2960,8 @@ export function projectDetail(
       terminal: card.terminal,
       endView: card.endView,
       steward: card.steward,
+      grill: card.grill,
+      lineStart: card.lineStart,
       delivery: card.delivery,
     };
   }

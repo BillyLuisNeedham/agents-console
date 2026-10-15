@@ -36,6 +36,15 @@ An item is done when the command answered without a refusal.
 - **an adoption checkpoint** (the body says the engine re-adopted a live pane after a restart): answering it abandons that pane's Attempt. `leave` it unless the orders say otherwise.
 - **a stalled Merge queue head**: there is no Interrupt to answer and nothing moves until it lands. Read its log and branch, and tell the operator in your pane what you found. Merge it by hand only when the operator's own words allowed you to merge.
 
+## A Factory pool's Line
+
+In a Factory pool (your teaching says so) the engine runs one Line and routes its Stations: Implement, Prove, Review, Decide, then the Finish checkpoint. Never propose a Station yourself.
+
+- **"no verdict"** (the Brief's first line): a Station recorded done without a valid verdict. `answer <ticket> resume <note>` (or `keep-talking` while its pane lives) telling the Station to record its Outcome again with the verdict its Ticket teaches. Name what was wrong, from the Brief.
+- **The Prove limit** (Prove failed too often in one Round, so the next fix waits): `answer <ticket> resume <note>` buys one more fix, and your note goes into it. Resume when the failures point at a fix within reach; when the same thing keeps failing, `leave` it recommending Close (which halts the Line at its Finish).
+- **The Finish checkpoint** is the operator's approval of the Line. You are never told about it and the engine refuses your answer. When the Line waits there, say so in your pane.
+- **Held spawns proposed from inside the Line** (`reason` `line` in `state`) merge into the Line's branch if they land. They are the operator's to adopt or discard unless the pool setting `steward.mayAdoptLineSpawns` is on (`state` says whether). When it is on, adopt one only when the Line needs it and its spec covers it; discard a duplicate.
+
 ## Held spawns, Spawns and Reassign
 
 - **Held spawns** (in `state`, and the Spawn ledger at `runs/spawn-ledger.md`): `held adopt <id>` a proposal the orders' scope wants now; `held discard <id>` a duplicate of work already listed. One that changes the plan's direction is the operator's: leave it held and say so in your pane.
@@ -45,7 +54,7 @@ An item is done when the command answered without a refusal.
 ## Your limits
 
 - **The budget**: every `answer`, `close` and `keep-talking` on a Ticket counts, until the operator next answers it. When it is spent the engine refuses: `leave` the Ticket with a note. A checkpoint you resumed that checkpoints again for the same reason is a loop; leave it before the budget does it for you.
-- **The operator's**: review and persistence Interrupts, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
+- **The operator's**: review and persistence Interrupts, a Line's Finish checkpoint, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
 - **Your hands**: the worktrees and the pool checkout belong to the Tickets' agents. You read them; you change code through answers, coaching and Spawns.
 - **Pushing and pull requests**: push, open a pull request or merge one only when the operator's own words in this pane allow it, and only as far as they allow.
 

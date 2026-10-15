@@ -198,12 +198,20 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
     let merge_queue = last
         .map(|snapshot| snapshot.merge_queue.clone())
         .unwrap_or_default();
+    // The Line's Finish checkpoint is the operator's approval (ADR-0037): the Steward never hears of it.
+    let interrupts: Vec<Interrupt> = session
+        .state
+        .interrupts
+        .iter()
+        .filter(|i| !is_finish_checkpoint(session, &i.ticket_id))
+        .cloned()
+        .collect();
     let title_of = |id: &str| titles.get(id).map(|title| (*title).to_owned());
     let left = |id: &str, kind: &str| session.steward_notes.get(id, kind).is_some();
     let keep_talking = |id: &str| session.held.contains_key(id);
     let used = |id: &str| session.steward_used.get(id).copied().unwrap_or(0);
     steward_items(&StewardPoolView {
-        interrupts: &session.state.interrupts,
+        interrupts: &interrupts,
         title_of: &title_of,
         conversations: &conversations,
         queued: &queued,
@@ -216,6 +224,12 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
         merged: &merged,
         review,
     })
+}
+
+/// Whether a Ticket is a Line's Finish checkpoint: approving the Line, the operator's alone.
+pub fn is_finish_checkpoint(session: &Session, ticket_id: &str) -> bool {
+    session.marker(ticket_id).and_then(|marker| marker.station)
+        == Some(ac_protocol::Station::Finish)
 }
 
 fn steward_refusal(why: impl AsRef<str>) -> EngineError {
@@ -267,6 +281,12 @@ fn steward_interrupt(
             ));
         }
         _ => {}
+    }
+    if is_finish_checkpoint(session, ticket_id) {
+        return Err(steward_refusal(format!(
+            "{ticket_id} is the Line's Finish checkpoint: approving the Line is the operator's, \
+             never the Steward's"
+        )));
     }
     if !steward_may_answer(
         &interrupt.ticket_id,
@@ -467,6 +487,22 @@ fn append_log_event(
         .map_err(|e| EngineError::refused(e.to_string()))
 }
 
+/// A Held spawn proposed from inside a Line is the operator's to Adopt or Discard, unless the pool
+/// has told the Steward otherwise (`steward.mayAdoptLineSpawns`, ADR-0037).
+pub fn check_line_spawn(session: &Session, id: &str, verb: &str) -> Result<(), EngineError> {
+    let line = session
+        .spawn_proposals
+        .get_held(id)
+        .is_some_and(|held| held.reason == ac_protocol::HeldSpawnReason::Line);
+    if line && !ac_core::steward::steward_may_adopt_line_spawns_of(&session.state.config) {
+        return Err(steward_refusal(format!(
+            "held spawn {id} was proposed from inside the Line, so it is the operator's to {verb} \
+             (steward.mayAdoptLineSpawns is off)"
+        )));
+    }
+    Ok(())
+}
+
 /// `stewardAdoptHeldSpawn`: the Steward's Adopt of a Held spawn; the adoption it queues says whose
 /// it was.
 pub fn steward_adopt_held_spawn(
@@ -475,6 +511,7 @@ pub fn steward_adopt_held_spawn(
     id: &str,
 ) -> Result<(), EngineError> {
     check_steward(session, conversation)?;
+    check_line_spawn(session, id, "adopt")?;
     // Before the Adopt, which lands at once on an idle pool.
     session
         .steward_adopts
@@ -533,6 +570,9 @@ pub fn steward_state(
         steward: conversation.to_owned(),
         budget,
         may_close: steward_may_close_of(&session.state.config),
+        may_adopt_line_spawns: ac_core::steward::steward_may_adopt_line_spawns_of(
+            &session.state.config,
+        ),
         phase: session.current_phase().as_str().to_owned(),
         interrupts: session
             .state
@@ -554,7 +594,7 @@ pub fn steward_state(
                         &interrupt.ticket_id,
                         interrupt.kind.as_str(),
                         &conversations,
-                    ),
+                    ) && !is_finish_checkpoint(session, &interrupt.ticket_id),
                     keep_talking: interrupt.kind == InterruptKind::Checkpoint
                         && session.held.contains_key(&interrupt.ticket_id),
                     queued: queued.contains(&interrupt.ticket_id),

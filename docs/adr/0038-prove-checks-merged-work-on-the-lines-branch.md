@@ -1,0 +1,7 @@
+# Prove checks merged work on the Line's branch instead of gating the merge
+
+The Merge hold merges a done Ticket into the pool's target branch before anything new is scheduled, so an Implement Ticket's work lands before the Prove Ticket after it runs. Prove (the /my-verify run that shows the change working end to end) therefore cannot keep bad work out. It can only fail the Round back to Implement. The engine's Verify does grade before merge, but it fans out Candidate Attempts, only the operator can set it, and it judges the work against its Ticket rather than running it.
+
+We keep the merge-first order. A Factory pool runs exactly one Line on its own branch, cut from main, so the pool's target branch is the Line's branch. Nothing outside the Line ever sees unproven work. The real gate is the operator's approval at the Finish checkpoint, and any PR the Finish opens. Prove is a Station of its own, not a mode of Verify. The two words stay apart in the glossary: Verify grades Candidates before they merge, and Prove checks merged work.
+
+**Consequences**: a failed Prove leaves its Round's work on the Line's branch, and the fix Implement builds on top of it. Prove may fail a Round twice before the Line checkpoints for the operator. A Factory pool must never target a shared branch: Boot's Factory mode always cuts a new one.

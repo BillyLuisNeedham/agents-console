@@ -46,6 +46,11 @@ const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textar
 const STEWARD = "steward-1";
 const STEWARD_NOTE =
   "Recommend resume with: keep the old endpoint behind the flag until the migration lands, then delete it in a follow-up ticket.";
+/** A Factory Line's Station Tickets (ADR-0037), the Line at its Finish
+ *  checkpoint with Decide's report written: the header strip, the cards'
+ *  Station labels and the report's frame in the Finish Ticket's Detail. */
+const FINISH_TICKET = "r1-finish";
+const STATIONS = ["implement", "prove", "review", "decide", "finish"] as const;
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -120,6 +125,17 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     ticket("t-5", { status: "in-progress", blockedBy: ["t-1", "t-2"], liveAttempt: agentAttempt(1, null) }),
     ticket("t-6", { status: "ready", blockedBy: ["t-3", "t-4"] }),
     ticket("t-7", { status: "ready", blockedBy: ["t-5"] }),
+    // The Line's Round, one Station Ticket each, the first held on the longest
+    // state word a card head carries, so its Station label is measured
+    // against it.
+    ...STATIONS.map((station, i) =>
+      ticket(`r1-${station}`, {
+        station,
+        blockedBy: i === 0 ? [] : [`r1-${STATIONS[i - 1]}`],
+        status: station === "finish" ? "checkpoint" : "done",
+        mergeState: station === "implement" ? "awaiting-approval" : null,
+      }),
+    ),
     // Extra interrupted tickets so the Needs input tray overflows its max-height.
     ...Array.from({ length: 12 }, (_, i) =>
       ticket(`t-${i + 8}`, { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
@@ -187,6 +203,17 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // The Steward has answered the selected ticket twice since the operator
     // last did (ADR-0030), so its Detail shows the budget line.
     stewardBudget: { budget: 5, used: { [SELECTED_TICKET]: 2 } },
+    line: {
+      round: 1,
+      station: "finish",
+      ticket: FINISH_TICKET,
+      status: "finish",
+      proveFails: 0,
+      proveFailsAllowed: 2,
+      finish: "draft-pr",
+      report: true,
+      halted: null,
+    },
     state: {
       tickets,
       conversations: [
@@ -227,6 +254,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         { ticketId: "t-4", kind: "crash", body: lines("crash log", 10) },
         { ticketId: "t-5", kind: "review", body: lines("review", 10) },
         { ticketId: "t-1", kind: "merge-approval", body: lines("merge", 10) },
+        { ticketId: FINISH_TICKET, kind: "checkpoint", body: "The Line is finished: read the report." },
         ...Array.from({ length: 12 }, (_, i) => ({
           ticketId: `t-${i + 8}`,
           kind: `t-${i + 8}` === SECOND_CHECKPOINT ? ("checkpoint" as const) : ("crash" as const),
@@ -393,6 +421,7 @@ const view = new ConsoleView({
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
+  onStartLine: () => Promise.resolve(),
 });
 
 const handlers: Handlers = {
@@ -582,6 +611,9 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     ["steward note", `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] .steward-note`],
     ["held spawn card", '.node-card[data-node-id="spawn:held-3"]'],
     ["spawns list", ".held-spawns-pane"],
+    // The Line's report (ADR-0037): moving an iframe reloads it, so its
+    // frame must keep its node, not only look the same.
+    ["line report frame", ".detail-open iframe.detail-report-frame"],
   ] as const) {
     const el = q(selector);
     if (el) identities.push({ label, selector, el });
@@ -936,6 +968,38 @@ function layoutChecks(name: string): void {
   } else {
     push("canvas header holds its width", "no canvas header", "");
   }
+  // The Line strip (ADR-0037) sits in the header's lines and ellipsises
+  // there, never pushing past the header's edge.
+  const strip = q<HTMLElement>(".canvas-lines .canvas-line-strip");
+  push(
+    "line strip in the header",
+    !strip
+      ? "no .canvas-line-strip"
+      : header && strip.getBoundingClientRect().right > header.getBoundingClientRect().right + 1
+        ? `strip ends at ${Math.round(strip.getBoundingClientRect().right)}, past the header's ${Math.round(header.getBoundingClientRect().right)}`
+        : null,
+    `"${strip?.textContent}" in ${Math.round(strip?.getBoundingClientRect().width ?? 0)}px`,
+  );
+  // A Station Ticket's label rides its card's head beside the id and the
+  // state word: the head holds the card's width, nothing in it past its edge.
+  const labelled = [...root.querySelectorAll<HTMLElement>(".ticket-card .node-card-head .station-badge")];
+  const heads = labelled.map((badge) => badge.parentElement as HTMLElement);
+  const spilled = heads.filter((head) => {
+    const card = head.closest<HTMLElement>(".node-card")!;
+    return (
+      overflowOf(head, card) !== null ||
+      [...head.children].some((kid) => overflowOf(kid as HTMLElement, head) !== null)
+    );
+  });
+  push(
+    "station card heads hold their width",
+    labelled.length !== STATIONS.length
+      ? `${labelled.length} Station labels, expected ${STATIONS.length}`
+      : spilled.length
+        ? `heads overflow: ${spilled.map((head) => head.textContent).join(", ")}`
+        : null,
+    `${labelled.length} labelled heads, each inside its card`,
+  );
   const tray = q<HTMLElement>(".conversations-tray");
   for (const [assertion, selector] of [
     ["tray head holds the tray's width", ".conversations-head"],
@@ -1073,6 +1137,53 @@ async function closeSelectedChecks(): Promise<void> {
   await settleAll();
 }
 
+/**
+ * The Line's report on the Finish checkpoint's Detail (ADR-0037): framed
+ * under the checkpoint on Progress at a height that reads, inside the
+ * Detail's width, with Open in browser beside its heading.
+ */
+async function finishReportChecks(): Promise<void> {
+  const name = "finish report";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  session.select(card(FINISH_TICKET));
+  session.selectTab(FINISH_TICKET, "progress");
+  await settleAll();
+  const detail = q<HTMLElement>(".detail-open");
+  const frame = q<HTMLIFrameElement>(".detail-open iframe.detail-report-frame");
+  const open = q<HTMLAnchorElement>(".detail-open a.detail-report-open");
+  if (!detail || !frame) {
+    push("report framed in the Detail", `detail ${detail ? "open" : "absent"}, frame ${frame ? "present" : "absent"}`, "");
+    return;
+  }
+  const f = frame.getBoundingClientRect();
+  const d = detail.getBoundingClientRect();
+  push(
+    "report framed in the Detail",
+    frame.getAttribute("src") === "/api/line/report?round=1" &&
+      f.height >= window.innerHeight * 0.5 &&
+      f.left >= d.left - 1 &&
+      f.right <= d.right + 1
+      ? null
+      : `src ${frame.getAttribute("src")}, ${Math.round(f.width)}x${Math.round(f.height)} at ${Math.round(f.left)}-${Math.round(f.right)} in a Detail at ${Math.round(d.left)}-${Math.round(d.right)}`,
+    `${Math.round(f.width)}x${Math.round(f.height)} inside a ${Math.round(d.width)}px Detail`,
+  );
+  push(
+    "open in browser beside the heading",
+    open &&
+      open.textContent === "Open in browser" &&
+      open.getAttribute("href") === "/api/line/report?round=1" &&
+      open.target === "_blank" &&
+      open.getBoundingClientRect().width > 0
+      ? null
+      : `link ${open ? `"${open.textContent}" to ${open.getAttribute("href")}` : "absent"}`,
+    `"${open?.textContent}" to ${open?.getAttribute("href")}`,
+  );
+  session.select(card(SELECTED_TICKET));
+  await settleAll();
+}
+
 function parsePan(transform: string): { x: number; y: number; zoom: number } {
   const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(transform);
   return m ? { x: Number(m[1]), y: Number(m[2]), zoom: Number(m[3]) } : { x: NaN, y: NaN, zoom: NaN };
@@ -1174,6 +1285,13 @@ async function main(): Promise<void> {
     q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
+  // The Finish checkpoint's Detail (ADR-0037): the Line's report framed
+  // under the checkpoint, which must keep its frame across every render.
+  await runScenario("finish report detail", async () => {
+    session.select(card(FINISH_TICKET));
+    session.selectTab(FINISH_TICKET, "progress");
+  });
+  await finishReportChecks();
   await stewardChecks();
   await closeSelectedChecks();
   await settingsTyping();

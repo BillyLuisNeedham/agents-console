@@ -142,6 +142,8 @@ export interface AppModel {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
   spawnLine: SpawnLineView | null;
+  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
+  lineStrip: string | null;
   /** The Pending spawns the Spawn caps line's list shows first (issue #150). */
   pendingSpawns: PendingSpawnRow[];
   /** The Held spawns list the Spawn caps line opens (issue #149). */
@@ -342,6 +344,9 @@ export class ConsoleView {
       onEndConversation: (conversationId) => {
         void this.conversationsTray.endConversation(conversationId);
       },
+      onStartLine: (grillId) => {
+        void this.conversationsTray.startLine(grillId);
+      },
       onArmStop: () => this.headerHandlers?.onArmStop(),
       onCancelStop: () => this.headerHandlers?.onCancelStop(),
       onConfirmStop: () => this.headerHandlers?.onConfirmStop(),
@@ -358,6 +363,12 @@ export class ConsoleView {
     return this.conversationsTray.endState();
   }
 
+  /** The Conversations store's per-Grill Start the Line state (ADR-0037),
+   *  for the pool projection beside the End state. */
+  conversationLineStartState(): Record<string, { starting: boolean; failure: string | null }> {
+    return this.conversationsTray.lineStartState();
+  }
+
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
     this.onSelectNode = handlers.onSelectNode;
     this.headerHandlers = handlers;
@@ -368,9 +379,9 @@ export class ConsoleView {
     this.needsInput.pruneTicks(
       new Set(closableRows(model.needsInput).map((row) => row.ticketId)),
     );
-    this.conversationsTray.pruneEndFailures(
-      new Set(model.conversationsTray.map((row) => row.id)),
-    );
+    const liveConversations = new Set(model.conversationsTray.map((row) => row.id));
+    this.conversationsTray.pruneEndFailures(liveConversations);
+    this.conversationsTray.pruneLineStartFailures(liveConversations);
     // A Reassign draft belongs to a ticket a write could still reach; one
     // that started an Attempt or finished loses its draft rather than
     // holding an edit that can no longer land.
@@ -392,6 +403,9 @@ export class ConsoleView {
       ...handlers,
       onEndConversation: (conversationId: string, closing?: string) => {
         void this.conversationsTray.endConversation(conversationId, closing);
+      },
+      onStartLine: (grillId: string) => {
+        void this.conversationsTray.startLine(grillId);
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),

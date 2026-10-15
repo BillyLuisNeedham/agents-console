@@ -10,13 +10,25 @@
  * what this pool runs with, and what a pool inherits when it says nothing.
  * Each has its own Save, its own dirty flag and its own inline status, so a
  * refused machine write never loses a pool edit. The assignment slice, the
- * Spawn caps and the Steward entry take effect through the engine's Config
- * reload at the next super-step boundary; the boot-only keys carry a "restart to apply" badge
+ * Spawn caps, the Steward entry and the Factory settings take effect through
+ * the engine's Config reload at the next super-step boundary; the boot-only keys carry a "restart to apply" badge
  * until the Restart in the footer hands off to Boot.
  */
 
 import { h } from "./dom";
 import { effortInput } from "./effort";
+import {
+  FACTORY_DEFAULTS,
+  FACTORY_STATIONS,
+  factoryDraftFrom,
+  factoryFrom,
+  factoryUnder,
+  sameFactoryDraft,
+  validateFactoryDraft,
+  type FactoryDraft,
+  type FactoryField,
+  type FactoryStation,
+} from "./factory-settings";
 import {
   projectRestartBadges,
   type BootOnlyKey,
@@ -84,6 +96,8 @@ export interface PoolDraft {
   stewardDrivers: string;
   /** "Steward may Close checkpoints" (issue #154): off unless the file says so. */
   stewardMayClose: boolean;
+  /** "Steward may adopt Line spawns" (ADR-0037): off unless the file says so. */
+  stewardMayAdoptLineSpawns: boolean;
 }
 
 export interface MachineDraft {
@@ -95,7 +109,10 @@ export interface MachineDraft {
   engine: string;
 }
 
-export type PoolTextField = Exclude<keyof PoolDraft, "terminal" | "stewardMayClose">;
+export type PoolTextField = Exclude<
+  keyof PoolDraft,
+  "terminal" | "stewardMayClose" | "stewardMayAdoptLineSpawns"
+>;
 export type MachineTextField = Exclude<keyof MachineDraft, "terminal">;
 
 /** The "opt out of resolution" value, which the file holds as a plain string. */
@@ -123,6 +140,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   stewardEffort: "",
   stewardDrivers: "",
   stewardMayClose: false,
+  stewardMayAdoptLineSpawns: false,
 };
 
 /** The engine's Steward budget when the file sets none (crates/core/src/steward.rs),
@@ -178,6 +196,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     stewardEffort: config.steward?.assign?.effort ?? "",
     stewardDrivers: config.steward?.assign?.drivers ?? "",
     stewardMayClose: config.steward?.mayClose === true,
+    stewardMayAdoptLineSpawns: config.steward?.mayAdoptLineSpawns === true,
   };
 }
 
@@ -284,9 +303,10 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
         effort: trim(draft.stewardEffort),
         drivers: trim(draft.stewardDrivers),
       },
-      // Off is the default, so it travels as an absent key and the file
-      // never holds a `mayClose: false`.
+      // Off is the default, so each travels as an absent key and the file
+      // never holds a `mayClose: false` or a `mayAdoptLineSpawns: false`.
       ...(draft.stewardMayClose ? { mayClose: true } : {}),
+      ...(draft.stewardMayAdoptLineSpawns ? { mayAdoptLineSpawns: true } : {}),
     },
   };
 }
@@ -339,6 +359,13 @@ export class SettingsStore {
   private poolState: SaveState = "idle";
   private poolError: string | null = null;
 
+  // The Factory settings (issue #187): each form's layer, a draft of its own
+  // beside the form's, saved with it.
+  private poolFactory: FactoryDraft = factoryDraftFrom(undefined);
+  private poolFactoryBaseline: FactoryDraft = factoryDraftFrom(undefined);
+  private machineFactory: FactoryDraft = factoryDraftFrom(undefined);
+  private machineFactoryBaseline: FactoryDraft = factoryDraftFrom(undefined);
+
   private machineDraft: MachineDraft = { ...EMPTY_MACHINE_DRAFT };
   private machineBaseline: MachineDraft = { ...EMPTY_MACHINE_DRAFT };
   private machineState: SaveState = "idle";
@@ -377,11 +404,17 @@ export class SettingsStore {
   }
 
   get poolDirty(): boolean {
-    return !sameDraft(this.poolDraft, this.poolBaseline);
+    return (
+      !sameDraft(this.poolDraft, this.poolBaseline) ||
+      !sameFactoryDraft(this.poolFactory, this.poolFactoryBaseline)
+    );
   }
 
   get machineDirty(): boolean {
-    return !sameDraft(this.machineDraft, this.machineBaseline);
+    return (
+      !sameDraft(this.machineDraft, this.machineBaseline) ||
+      !sameFactoryDraft(this.machineFactory, this.machineFactoryBaseline)
+    );
   }
 
   get poolSaveState(): SaveState {
@@ -408,6 +441,11 @@ export class SettingsStore {
     return this.machineDraft[name];
   }
 
+  /** One field of a form's Factory settings draft. */
+  factoryField(form: "pool" | "machine", field: FactoryField): string {
+    return (form === "pool" ? this.poolFactory : this.machineFactory)[field];
+  }
+
   get poolTerminal(): boolean {
     return this.poolDraft.terminal;
   }
@@ -418,6 +456,10 @@ export class SettingsStore {
 
   get stewardMayClose(): boolean {
     return this.poolDraft.stewardMayClose;
+  }
+
+  get stewardMayAdoptLineSpawns(): boolean {
+    return this.poolDraft.stewardMayAdoptLineSpawns;
   }
 
   /**
@@ -505,6 +547,28 @@ export class SettingsStore {
     this.onChange();
   }
 
+  setStewardMayAdoptLineSpawns(value: boolean): void {
+    if (this.poolDraft.stewardMayAdoptLineSpawns === value) return;
+    this.poolDraft.stewardMayAdoptLineSpawns = value;
+    if (this.poolState === "saved") this.poolState = "idle";
+    this.poolError = null;
+    this.onChange();
+  }
+
+  setFactoryField(form: "pool" | "machine", field: FactoryField, value: string): void {
+    const draft = form === "pool" ? this.poolFactory : this.machineFactory;
+    if (draft[field] === value) return;
+    draft[field] = value;
+    if (form === "pool") {
+      if (this.poolState === "saved") this.poolState = "idle";
+      this.poolError = null;
+    } else {
+      if (this.machineState === "saved") this.machineState = "idle";
+      this.machineError = null;
+    }
+    this.onChange();
+  }
+
   setMachineField(name: MachineTextField, value: string): void {
     if (this.machineDraft[name] === value) return;
     this.machineDraft[name] = value;
@@ -530,7 +594,8 @@ export class SettingsStore {
    */
   async savePool(): Promise<void> {
     if (this.poolState === "saving") return;
-    const invalid = validatePoolDraft(this.poolDraft);
+    const invalid =
+      validatePoolDraft(this.poolDraft) ?? validateFactoryDraft(this.poolFactory);
     if (invalid) {
       this.poolError = invalid;
       this.poolState = "idle";
@@ -541,7 +606,10 @@ export class SettingsStore {
     this.poolError = null;
     this.onChange();
     try {
-      const response = await this.onSavePool(poolPatchFrom(this.poolDraft));
+      const response = await this.onSavePool({
+        ...poolPatchFrom(this.poolDraft),
+        factory: factoryFrom(this.poolFactory),
+      });
       this.apply(response);
       this.poolState = "saved";
     } catch (err) {
@@ -554,13 +622,22 @@ export class SettingsStore {
   /** Save the machine defaults form. Same refusal and re-seed as the pool's. */
   async saveMachine(): Promise<void> {
     if (this.machineState === "saving") return;
+    const invalid = validateFactoryDraft(this.machineFactory);
+    if (invalid) {
+      this.machineError = invalid;
+      this.machineState = "idle";
+      this.onChange();
+      return;
+    }
     this.machineState = "saving";
     this.machineError = null;
     this.onChange();
     try {
-      const response = await this.onSaveMachine(
-        machineDefaultsFrom(this.machineDraft),
-      );
+      const factory = factoryFrom(this.machineFactory);
+      const response = await this.onSaveMachine({
+        ...machineDefaultsFrom(this.machineDraft),
+        ...(factory ? { factory } : {}),
+      });
       this.apply(response);
       this.machineState = "saved";
     } catch (err) {
@@ -577,6 +654,10 @@ export class SettingsStore {
     this.poolBaseline = { ...this.poolDraft };
     this.machineDraft = machineDraftFrom(response.machine.own);
     this.machineBaseline = { ...this.machineDraft };
+    this.poolFactory = factoryDraftFrom(response.pool.config.factory);
+    this.poolFactoryBaseline = { ...this.poolFactory };
+    this.machineFactory = factoryDraftFrom(response.machine.own.factory);
+    this.machineFactoryBaseline = { ...this.machineFactory };
   }
 
   // -------------------------------------------------------------------------
@@ -799,6 +880,7 @@ export class SettingsStore {
       ...this.renderStewardFields(data),
       text("reviewer", "reviewer", { area: true }),
       text("checkpoint", "checkpoint", { area: true }),
+      ...this.renderFactoryFields("pool", data),
       this.renderSaveRow(
         "pool",
         this.poolDirty,
@@ -929,6 +1011,7 @@ export class SettingsStore {
         false,
       ),
       text("engine", "engine", merged.engine),
+      ...this.renderFactoryFields("machine", data),
       this.renderSaveRow(
         "machine",
         this.machineDirty,
@@ -1022,6 +1105,155 @@ export class SettingsStore {
         ),
         false,
         "on, the Steward may close a checkpoint or merge conflict without merging; off, only you can",
+      ),
+      this.renderField(
+        "pool-stewardMayAdoptLineSpawns",
+        "steward line spawns",
+        h(
+          "label",
+          { class: "settings-check" },
+          h("input", {
+            type: "checkbox",
+            key: "pool-stewardMayAdoptLineSpawns-input",
+            checked: this.poolDraft.stewardMayAdoptLineSpawns,
+            onchange: (event: Event) =>
+              this.setStewardMayAdoptLineSpawns((event.currentTarget as HTMLInputElement).checked),
+          }),
+          h("span", {}, "Steward may adopt Line spawns"),
+        ),
+        false,
+        "on, the Steward may adopt or discard a Held spawn proposed from inside the Line; off, only you can",
+      ),
+    ];
+  }
+
+  /**
+   * The Factory settings (issue #187, ADR-0037) of one form's layer: each
+   * Station's drivers, Assignment and note, whether Prove and Review run, the
+   * Line's two limits and the default Finish. Every empty field inherits, and
+   * its placeholder shows what it inherits: the pool's the machine's layer
+   * over the built-in settings, the machine's the built-in settings. They
+   * reload at the next boundary and reach the next Station Ticket written, so
+   * none carries a badge.
+   */
+  private renderFactoryFields(form: "pool" | "machine", data: SettingsResponse): HTMLElement[] {
+    const draft = form === "pool" ? this.poolFactory : this.machineFactory;
+    const under =
+      form === "pool"
+        ? factoryUnder(factoryDraftFrom(data.machine.defaults.factory), FACTORY_DEFAULTS)
+        : FACTORY_DEFAULTS;
+    const key = (field: string): string => `${form}-factory-${field}`;
+    const set = (field: FactoryField) => (value: string) =>
+      this.setFactoryField(form, field, value);
+    const input = (
+      field: FactoryField,
+      cls: string,
+      placeholder: string,
+      inputKey: string = key(field),
+    ): HTMLElement =>
+      h("input", {
+        class: `settings-input ${cls}`,
+        key: inputKey,
+        type: "text",
+        value: draft[field],
+        placeholder,
+        oninput: (event: Event) => set(field)((event.currentTarget as HTMLInputElement).value),
+      });
+    const number = (field: "proveFailsPerRound" | "extraRounds", label: string, hint: string) =>
+      this.renderField(
+        key(field),
+        label,
+        h("input", {
+          class: "settings-input settings-number",
+          key: key(`${field}-input`),
+          type: "number",
+          min: "0",
+          value: draft[field],
+          placeholder: `${under[field]} (${form === "pool" ? "inherited" : "default"})`,
+          oninput: (event: Event) => set(field)((event.currentTarget as HTMLInputElement).value),
+        }),
+        false,
+        hint,
+      );
+    const station = (name: FactoryStation): HTMLElement[] => {
+      const enabled =
+        name === "prove" || name === "review"
+          ? this.renderSelect(
+              key(`${name}.enabled`),
+              [
+                { value: "", label: `(${under[`${name}.enabled`]})` },
+                { value: "on", label: "on" },
+                { value: "off", label: "off" },
+              ],
+              draft[`${name}.enabled`],
+              set(`${name}.enabled`),
+            )
+          : null;
+      return [
+        this.renderField(
+          key(name),
+          `factory ${name}`,
+          h(
+            "div",
+            { class: "settings-pair settings-factory-station" },
+            enabled,
+            input(`${name}.drivers`, "settings-pair-model", `drivers (${under[`${name}.drivers`]})`),
+            this.renderHarnessSelect(
+              key(`${name}.harness`),
+              data.harnesses,
+              draft[`${name}.harness`],
+              `(${under[`${name}.harness`]})`,
+              null,
+              set(`${name}.harness`),
+            ),
+            input(`${name}.model`, "settings-pair-model", `model (${under[`${name}.model`]})`),
+            effortInput({
+              key: key(`${name}.effort`),
+              class: "settings-input settings-pair-effort",
+              harness: draft[`${name}.harness`] || under[`${name}.harness`],
+              value: draft[`${name}.effort`],
+              placeholder: `effort (${under[`${name}.effort`]})`,
+              onInput: set(`${name}.effort`),
+            }),
+          ),
+          false,
+          name === "prove" || name === "review"
+            ? "on or off, drivers and Assignment; off skips the Station"
+            : "drivers and Assignment",
+        ),
+        this.renderField(
+          key(`${name}-note`),
+          `${name} note`,
+          h("textarea", {
+            class: "settings-input settings-area",
+            key: key(`${name}.note`),
+            value: draft[`${name}.note`],
+            placeholder: under[`${name}.note`] || "(none)",
+            oninput: (event: Event) =>
+              set(`${name}.note`)((event.currentTarget as HTMLTextAreaElement).value),
+          }),
+          false,
+          "an extra instruction written into every Ticket of the Station",
+        ),
+      ];
+    };
+    return [
+      h(
+        "div",
+        { class: "settings-note dim", key: key("head") },
+        form === "pool"
+          ? "factory: this pool's layer over the machine's; empty fields inherit, and a Line brief may override any of them. Changes reach the next Station Ticket written"
+          : "factory: every pool's Factory settings unless the pool or a Line brief says otherwise",
+      ),
+      ...FACTORY_STATIONS.flatMap(station),
+      number("proveFailsPerRound", "prove fails per round", "Prove failures before the Line checkpoints"),
+      number("extraRounds", "extra rounds", "Rounds Decide may start after the first"),
+      this.renderField(
+        key("finish"),
+        "finish",
+        input("finish", "", under.finish, key("finish-input")),
+        false,
+        "none, draft-pr, pr, or an act Decide carries out",
       ),
     ];
   }

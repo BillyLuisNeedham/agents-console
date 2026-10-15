@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use ac_protocol::{SpawnAssignRequest, SpawnProposal, TicketStatus};
+use ac_protocol::{SpawnAssignRequest, SpawnProposal, Station, TicketStatus};
 use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde_json::Value;
@@ -64,6 +64,9 @@ pub struct TicketMarker {
     /// adopted it. It ranks under the operator's console.json assign entry for the id and over the
     /// parent's Assignment. The engine writes the field.
     pub spawn_assign: Option<SpawnAssignRequest>,
+    /// Set on a Line's Station Tickets (ADR-0037): which Station the Ticket is. The engine writes the
+    /// field when it routes the Line.
+    pub station: Option<Station>,
 }
 
 impl AssignmentMarker for TicketMarker {
@@ -226,6 +229,16 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
         spawned_by: non_empty("spawned-by"),
         enlisted_from: non_empty("enlisted-from"),
         spawn_assign,
+        station: match field(&fields, "station").filter(|v| !v.is_empty()) {
+            None => None,
+            Some(raw) => Some(Station::parse(raw).ok_or_else(|| {
+                anyhow!(
+                    "pool load: {}: marker station must be one of implement|prove|review|decide|\
+                     finish, got '{raw}'",
+                    file.display()
+                )
+            })?),
+        },
     })
 }
 

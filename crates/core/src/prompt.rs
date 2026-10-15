@@ -362,6 +362,10 @@ pub struct StewardTeaching<'a> {
     pub command: &'a str,
     pub budget: u64,
     pub may_close: bool,
+    /// A Factory pool (ADR-0037): the Steward is taught which of the Line's checkpoints are its.
+    pub factory: bool,
+    /// `steward.mayAdoptLineSpawns`: whether it may decide Held spawns proposed from inside the Line.
+    pub may_adopt_line_spawns: bool,
 }
 
 /// The teaching a Steward starts with (ADR-0030), appended to the operator's standing orders when it is
@@ -450,9 +454,12 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
         }
         .to_owned(),
         String::new(),
-        "Decide and talk, never do the work: make no edits in any Ticket's worktree or in the pool \
-         checkout. Your only ways to change the code are an answer, a coaching message and a Spawn."
-            .to_owned(),
+        format!(
+            "{}Decide and talk, never do the work: make no edits in any Ticket's worktree or in the \
+             pool checkout. Your only ways to change the code are an answer, a coaching message and \
+             a Spawn.",
+            factory_steward_text(parts)
+        ),
         String::new(),
         "You may push, open pull requests or merge pull requests only if the operator's own words in \
          this pane allow it. Nothing else grants it."
@@ -478,6 +485,29 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
         true,
     ));
     lines.join("\n")
+}
+
+// What a Factory pool's Steward is taught about its Line; nothing in any other pool.
+fn factory_steward_text(parts: &StewardTeaching<'_>) -> String {
+    if !parts.factory {
+        return String::new();
+    }
+    let spawns = if parts.may_adopt_line_spawns {
+        "The operator lets you decide Held spawns proposed from inside the Line \
+         (steward.mayAdoptLineSpawns): adopt one only when the Line needs it and its spec covers it, \
+         since it merges into the Line's branch; discard a duplicate."
+    } else {
+        "Held spawns proposed from inside the Line are the operator's to adopt or discard: the \
+         engine refuses you. Leave them held."
+    };
+    format!(
+        "This is a Factory pool: it runs one Line, and the engine routes its Stations (ADR-0037). \
+         You may answer two of the Line's checkpoints: \"no verdict\" (resume, asking the Station to \
+         record its Outcome again with a valid verdict) and the Prove limit (resume buys one more \
+         fix, and your note goes into it). The Finish checkpoint is never yours: approving the Line \
+         is the operator's, so you are not told about it and the engine refuses your answer. Never \
+         propose a Station yourself. {spawns}\n\n"
+    )
 }
 
 /// What the enlist teaching names.
@@ -575,6 +605,7 @@ mod tests {
             commit_sha: None,
             brief: None,
             spawn: None,
+            verdict: None,
         };
         let upstream = [Upstream {
             id: "00",
@@ -729,6 +760,8 @@ mod tests {
                 command: "/bin/ac steward --pool /p --as conv-1",
                 budget,
                 may_close,
+                factory: false,
+                may_adopt_line_spawns: false,
             })
         };
         assert_eq!(build(1, true), expected["a"].as_str().unwrap());

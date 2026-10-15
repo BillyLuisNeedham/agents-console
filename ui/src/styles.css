@@ -386,6 +386,18 @@ body {
   color: var(--status-running);
 }
 
+/* The Line strip (#187, ADR-0037): where a Factory pool's Line stands, after
+   the Spawn caps line in its type, present only once the Line has started. */
+.canvas-line-strip {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 .canvas-tools {
   display: flex;
   flex-wrap: wrap;
@@ -1489,6 +1501,42 @@ body {
 .detail-resolver-files ul {
   margin: 4px 0 0;
   padding-left: 18px;
+}
+
+/* The Line's report on the Finish checkpoint's Detail (#187, ADR-0037):
+   framed in the Detail's border at a height that reads, with Open in
+   browser beside its heading for a tab of its own. A report that sets no
+   background reads on white, as it would in that tab, not on the dark
+   panel behind the frame. */
+.detail-report {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.detail-report-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-report-title {
+  font-weight: 600;
+}
+
+.detail-report-open {
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.detail-report-frame {
+  width: 100%;
+  min-height: 60vh;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
 }
 
 .detail-channels {
@@ -3209,6 +3257,55 @@ textarea.conversations-field {
    a whole border, so the selection and flow rings still read on it. */
 .conversation-card-steward {
   border-left: 3px solid var(--steward);
+}
+
+/* A Factory Line's Grill (ADR-0037): the Steward's badge and stripe in the
+   Factory's hue, so the Conversation that Start the Line hands on from is
+   told from an ordinary one. */
+.grill-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--accent-purple);
+  border-radius: 3px;
+  color: var(--accent-purple);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-card-grill {
+  border-left: 3px solid var(--accent-purple);
+}
+
+/* A Station Ticket's label (#187, ADR-0037): the Grill badge's chip in the
+   same hue, naming the Station the Ticket works on its card's head. It sits
+   against the id rather than midway along the head, and the id beside it
+   keeps to one line: a long state word wraps instead. */
+.station-badge {
+  flex-shrink: 0;
+  margin-right: auto;
+  padding: 0 6px;
+  border: 1px solid var(--accent-purple);
+  border-radius: 3px;
+  color: var(--accent-purple);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ticket-card-station .node-card-id {
+  white-space: nowrap;
+}
+
+.ticket-card-station .node-card-state {
+  text-align: right;
+}
+
+.conversation-start-line-failure {
+  margin-top: 4px;
+  font-size: 10px;
 }
 
 /* The Conversations tray's Steward box: pinned at the top of the tray as it
