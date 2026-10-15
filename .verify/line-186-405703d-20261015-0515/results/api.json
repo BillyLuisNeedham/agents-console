@@ -1,0 +1,140 @@
+{
+  "area": "api",
+  "claims": [
+    {
+      "id": "C1",
+      "verdict": "PASS",
+      "summary": "On HEAD, a Continued attempt's valid checkpoint Outcome with a spawn array produces spawn-pending {pending:[{id:proposal-1,title:Follow-up}]} before exited/checkpoint, and the proposal lands as issues/01-spawn-1.md with spawn-adopted {adopted:[01-spawn-1],fromPending:[proposal-1]}. The same HEAD case file against a release binary built from 1b38631 fails at the attempt-2 event-kinds assertion because spawn-pending is missing. On base the log goes exited, checkpoint with nothing landed.",
+      "steps": [
+        "cd ui && bun install && bun run build; cargo build --release (HEAD)",
+        "bun run conformance ./cases/interrupts-keep-talking.test.ts -t \"checkpoint Outcome takes its spawn proposals\" (pass)",
+        "same with CONFORMANCE_KEEP=1 to keep the world; copied runs/01.events.jsonl, spawn-ledger.md, issues/01-spawn-1.md",
+        "git worktree add <scratchpad>/base 1b38631; built ui and CARGO_TARGET_DIR=<base>/target cargo build --release there",
+        "from the HEAD worktree: CONFORMANCE_KEEP=1 bun run conformance --rust-bin <base>/target/release/agent-console ./cases/interrupts-keep-talking.test.ts -t \"checkpoint Outcome takes its spawn proposals\" (fail)"
+      ],
+      "evidence": [
+        {"kind": "log", "path": "C1-01-head-new-case.log", "caption": "New conformance case passes on the HEAD release binary (1 pass, 6 expect calls)."},
+        {"kind": "log", "path": "C1-02-head-new-case-kept-world.log", "caption": "Second HEAD pass with the world kept, so the Ticket log could be read."},
+        {"kind": "log", "path": "C1-03-head-01-events.jsonl", "caption": "HEAD Ticket 01 log: attempt 2 goes spawned, spawn-pending {pending:[{id:proposal-1,title:Follow-up}]}, exited (status checkpoint), checkpoint, spawn-adopted {adopted:[01-spawn-1],fromPending:[proposal-1]}."},
+        {"kind": "file", "path": "C1-04-head-spawn-ledger.md", "caption": "HEAD Spawn ledger lists 01-spawn-1 'Follow-up' as a Ticket and 01 at checkpoint."},
+        {"kind": "file", "path": "C1-05-head-issues-01-spawn-1.md", "caption": "The landed follow-up Ticket file on HEAD."},
+        {"kind": "log", "path": "C1-06-base-new-case.log", "caption": "Same HEAD case against the base (1b38631) binary fails at 'attempt 2's events': expected spawn-pending, exited, checkpoint; received exited, checkpoint."},
+        {"kind": "log", "path": "C1-07-base-01-events.jsonl", "caption": "Base Ticket 01 log: attempt 2 is spawned, exited, checkpoint and nothing about spawns, the exact bug from issue #186."},
+        {"kind": "file", "path": "C1-08-base-issues-and-ledger.txt", "caption": "Base pool: issues/ holds only 01.md; no Pending or Held spawns."}
+      ],
+      "before_after": {
+        "base": ["C1-06-base-new-case.log", "C1-07-base-01-events.jsonl", "C1-08-base-issues-and-ledger.txt"],
+        "head": ["C1-01-head-new-case.log", "C1-03-head-01-events.jsonl", "C1-04-head-spawn-ledger.md", "C1-05-head-issues-01-spawn-1.md"]
+      },
+      "reason": "",
+      "reproduce": [
+        "export PATH=$HOME/.bun/bin:$PATH",
+        "(cd ui && bun install && bun run build) && cargo build --release",
+        "bun run conformance ./cases/interrupts-keep-talking.test.ts -t \"checkpoint Outcome takes its spawn proposals\"",
+        "bun run conformance --rust-bin <base-checkout>/target/release/agent-console ./cases/interrupts-keep-talking.test.ts -t \"checkpoint Outcome takes its spawn proposals\""
+      ]
+    },
+    {
+      "id": "C2",
+      "verdict": "PASS",
+      "summary": "The done branch of the new unit test (done Outcome with one proposal gives SpawnPending then Exited, one Pending spawn, Ticket Done) passes on HEAD. The existing conformance cases for a Continued done Outcome and the spawns-pending/spawns-blocks files also pass.",
+      "steps": ["cargo test -p ac-engine", "bun run conformance ./cases/interrupts-keep-talking.test.ts", "bun run conformance ./cases/spawns-pending.test.ts ./cases/spawns-blocks.test.ts"],
+      "evidence": [
+        {"kind": "log", "path": "C5-03-cargo-test-ac-engine-rerun.log", "caption": "keep_talking::tests::a_continued_attempt_takes_its_spawn_proposals_from_a_checkpoint_as_from_done ... ok (covers the done case); 220/220 pass."},
+        {"kind": "log", "path": "C3-03-base-experiment-b-with-fix.log", "caption": "Base code plus the one-line fix plus the new test: 8/8 keep_talking tests pass, so the done path behaves the same with and without the change."}
+      ],
+      "before_after": {"base": [], "head": []},
+      "reason": "",
+      "reproduce": ["cargo test -p ac-engine --lib keep_talking"]
+    },
+    {
+      "id": "C3",
+      "verdict": "PASS",
+      "summary": "The unit test loops over three crash endings with the checkpoint-plus-spawn Outcome: PaneGone with the Outcome removed, Exited with status 'finished', and Outcome with status 'finished'. It asserts no Pending spawn, no SpawnPending event and the Ticket still InProgress, and it passes. Red check in the base worktree: base code without the fix plus HEAD's test fails at the first kinds assertion (left [Exited, Checkpoint], right [SpawnPending, Exited, Checkpoint]). Mutation check: removing the crash_reason.is_none() guard is not caught. Reading the code shows that guard is redundant, because a valid read always yields Observed::Outcome with crash_reason None. So crash endings are protected by read.is_ok(), which the test does cover.",
+      "steps": [
+        "Read the test in crates/engine/src/keep_talking.rs (HEAD lines ~1388-1474)",
+        "Base worktree: git apply HEAD's keep_talking.rs diff, re-add the Done guard, cargo test -p ac-engine --lib keep_talking (red)",
+        "Remove the Done guard (equals HEAD logic): green",
+        "Also remove decision.crash_reason.is_none(): still green (guard redundant)"
+      ],
+      "evidence": [
+        {"kind": "file", "path": "C3-01-base-experiment-a-diff.txt", "caption": "Base worktree diff for experiment A: HEAD's test added, Done guard kept, so the base behaviour is under test."},
+        {"kind": "log", "path": "C3-02-base-experiment-a-test-without-fix.log", "caption": "Without the fix the new unit test fails: kinds [Exited, Checkpoint] vs expected [SpawnPending, Exited, Checkpoint]."},
+        {"kind": "log", "path": "C3-03-base-experiment-b-with-fix.log", "caption": "With the fix applied on base the same tests pass 8/8, including the crash loop."},
+        {"kind": "file", "path": "C3-04-base-mutation-c-no-crash-guard.txt", "caption": "Mutation: the crash_reason guard removed from the take-proposals condition."},
+        {"kind": "log", "path": "C3-05-base-mutation-c-test.log", "caption": "The mutation survives (8/8 pass); explained by observed being Outcome whenever read is Ok, so crash_reason is Some only when read is Err."},
+        {"kind": "log", "path": "C5-03-cargo-test-ac-engine-rerun.log", "caption": "On HEAD the test including the crash loop passes."}
+      ],
+      "before_after": {"base": ["C3-02-base-experiment-a-test-without-fix.log"], "head": ["C3-03-base-experiment-b-with-fix.log", "C5-03-cargo-test-ac-engine-rerun.log"]},
+      "reason": "",
+      "reproduce": ["cargo test -p ac-engine --lib keep_talking"]
+    },
+    {
+      "id": "C4",
+      "verdict": "PASS",
+      "summary": "All 17 cases in interrupts-keep-talking.test.ts pass on HEAD, including the one that pins the teaching Turn's bytes with expectSameBytes. spawns-pending and spawns-blocks pass 24/24. The diff only adds lines to the conformance file (0 removed lines) and does not touch crates/core (verify_prompts.rs), so the teaching text is unchanged.",
+      "steps": ["bun run conformance ./cases/interrupts-keep-talking.test.ts", "bun run conformance ./cases/spawns-pending.test.ts ./cases/spawns-blocks.test.ts", "git diff --stat 1b38631 405703d"],
+      "evidence": [
+        {"kind": "log", "path": "C4-01-head-interrupts-keep-talking.log", "caption": "interrupts 17/17 passed on the HEAD release binary."},
+        {"kind": "log", "path": "C4-02-head-spawns-pending-blocks.log", "caption": "spawns 24/24 passed across spawns-pending and spawns-blocks."},
+        {"kind": "file", "path": "C4-03-diff-scope.txt", "caption": "Range touches only keep_talking.rs, the conformance file (additions only) and docs/specs; the teaching Turn case is at line ~300 with expectSameBytes."}
+      ],
+      "before_after": {"base": [], "head": []},
+      "reason": "",
+      "reproduce": ["bun run conformance ./cases/interrupts-keep-talking.test.ts", "bun run conformance ./cases/spawns-pending.test.ts ./cases/spawns-blocks.test.ts"]
+    },
+    {
+      "id": "C5",
+      "verdict": "PASS",
+      "summary": "ac-core 348/348 pass, including a_continued_teaching_says_who_chose_to_carry_on. In the first ac-engine run, 219 passed and 1 failed: enlisted::tests::every_turn_state_read_is_of_the_viewport_only_and_the_register_holds_the_latest_one_until_release, in enlisted.rs, which this change does not touch. That run happened while the base release build was going and other pools' conformance runs were on the box. The full rerun passed 220/220, and the single test passed 5/5 when run alone. I judge it a load-sensitive timing flake that this change did not cause. clippy -D warnings and fmt --check are clean.",
+      "steps": ["cargo test -p ac-engine", "cargo test -p ac-core", "cargo test -p ac-engine (rerun)", "cargo test -p ac-engine --lib every_turn_state_read x5", "cargo clippy --workspace --all-targets -- -D warnings", "cargo fmt --check"],
+      "evidence": [
+        {"kind": "log", "path": "C5-01-cargo-test-ac-engine.log", "caption": "First ac-engine run: 219 pass, 1 fail in enlisted.rs (latest_read was Some after release); unrelated file, under heavy load."},
+        {"kind": "log", "path": "C5-02-cargo-test-ac-core.log", "caption": "ac-core 348/348 pass, including verify_prompts::tests::a_continued_teaching_says_who_chose_to_carry_on."},
+        {"kind": "log", "path": "C5-03-cargo-test-ac-engine-rerun.log", "caption": "ac-engine rerun 220/220 pass, including the new test and a_continued_attempt_ends_as_typescript_records_it_for_every_outcome_and_ending."},
+        {"kind": "log", "path": "C5-04-enlisted-test-x5.log", "caption": "The enlisted test that failed once passes 5 times out of 5 when run alone."},
+        {"kind": "log", "path": "C5-05-clippy.log", "caption": "clippy with -D warnings exits 0."},
+        {"kind": "log", "path": "C5-06-fmt-check.log", "caption": "cargo fmt --check exits 0 with no output."}
+      ],
+      "before_after": {"base": [], "head": []},
+      "reason": "",
+      "reproduce": ["cargo test -p ac-engine", "cargo test -p ac-core", "cargo clippy --workspace --all-targets -- -D warnings", "cargo fmt --check"]
+    }
+  ],
+  "edge_cases": [
+    {"claim": "C1", "case": "The proposal lands at the next boundary while the Ticket stays paused on its checkpoint Interrupt (spawn-adopted on 01, 01.md status checkpoint, Brief replaced)", "verdict": "PASS", "evidence": ["C1-03-head-01-events.jsonl", "C1-04-head-spawn-ledger.md"]},
+    {"claim": "C3", "case": "PaneGone with no Outcome on disk", "verdict": "PASS", "evidence": ["C5-03-cargo-test-ac-engine-rerun.log"]},
+    {"claim": "C3", "case": "Outcome with status 'finished' under both Exited and Outcome endings", "verdict": "PASS", "evidence": ["C5-03-cargo-test-ac-engine-rerun.log"]},
+    {"claim": "C3", "case": "Mutation removing the crash_reason guard is not caught; the guard is redundant with read.is_ok() given how observed is computed", "verdict": "PASS", "evidence": ["C3-05-base-mutation-c-test.log"]},
+    {"claim": "C4", "case": "Teaching Turn bytes pinned by expectSameBytes still match", "verdict": "PASS", "evidence": ["C4-01-head-interrupts-keep-talking.log"]}
+  ],
+  "regressions": [
+    {"area": "interrupts-keep-talking conformance (17 cases)", "verdict": "PASS", "evidence": ["C4-01-head-interrupts-keep-talking.log"]},
+    {"area": "spawns-pending + spawns-blocks conformance (24 cases)", "verdict": "PASS", "evidence": ["C4-02-head-spawns-pending-blocks.log"]},
+    {"area": "ac-engine unit tests", "verdict": "PASS", "evidence": ["C5-03-cargo-test-ac-engine-rerun.log", "C5-01-cargo-test-ac-engine.log"]},
+    {"area": "ac-core unit tests", "verdict": "PASS", "evidence": ["C5-02-cargo-test-ac-core.log"]}
+  ],
+  "tests": [
+    {"command": "bun run conformance ./cases/interrupts-keep-talking.test.ts -t \"checkpoint Outcome takes its spawn proposals\" (HEAD)", "passed": 1, "failed": 0, "skipped": 16, "output": "C1-01-head-new-case.log"},
+    {"command": "same, --rust-bin base 1b38631 binary", "passed": 0, "failed": 1, "skipped": 16, "output": "C1-06-base-new-case.log"},
+    {"command": "bun run conformance ./cases/interrupts-keep-talking.test.ts", "passed": 17, "failed": 0, "skipped": 0, "output": "C4-01-head-interrupts-keep-talking.log"},
+    {"command": "bun run conformance ./cases/spawns-pending.test.ts ./cases/spawns-blocks.test.ts", "passed": 24, "failed": 0, "skipped": 0, "output": "C4-02-head-spawns-pending-blocks.log"},
+    {"command": "cargo test -p ac-engine (first run, under load)", "passed": 219, "failed": 1, "skipped": 0, "output": "C5-01-cargo-test-ac-engine.log"},
+    {"command": "cargo test -p ac-engine (rerun)", "passed": 220, "failed": 0, "skipped": 0, "output": "C5-03-cargo-test-ac-engine-rerun.log"},
+    {"command": "cargo test -p ac-core", "passed": 348, "failed": 0, "skipped": 0, "output": "C5-02-cargo-test-ac-core.log"},
+    {"command": "cargo clippy --workspace --all-targets -- -D warnings", "passed": 1, "failed": 0, "skipped": 0, "output": "C5-05-clippy.log"},
+    {"command": "cargo fmt --check", "passed": 1, "failed": 0, "skipped": 0, "output": "C5-06-fmt-check.log"}
+  ],
+  "environment": [
+    "Linux (Arch), bun 1.3.14 at ~/.bun/bin, PATH prefixed with it",
+    "HEAD 405703d built in the worktree's target/release; base 1b38631 built in a temporary worktree under the session scratchpad with its own CARGO_TARGET_DIR",
+    "The runner's --rust-bin flag picked the binary for the base run; the case file came from the HEAD worktree",
+    "The spec's commands pass 'conformance/cases/...' as the filter, but bun test runs with cwd conformance/, so that path matches no file (env-06-spec-path-filter-mismatch.log). './cases/...' works. The spec's command lines need that fix",
+    "The box was busy: other pools (line/179, software-factory, main) were running their own conformance suites and agents at the same time"
+  ],
+  "risks": [
+    "ac-engine's enlisted::tests::every_turn_state_read_is_of_the_viewport_only_and_the_register_holds_the_latest_one_until_release failed once under load and then passed 6 times. It is a pre-existing timing flake in a file this change does not touch",
+    "Out of scope, as the spec says: end_enlisted_attempt still takes proposals only on done, so the same gap remains for enlisted Tickets"
+  ],
+  "cleanup_failures": []
+}

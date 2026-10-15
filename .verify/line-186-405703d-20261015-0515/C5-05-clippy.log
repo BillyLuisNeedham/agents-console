@@ -1,0 +1,4 @@
+    Checking ac-engine v0.1.0 (/home/billy/.herdr/worktrees/agent-console/feature-software-factory/.scratch/lines/186/crates/engine)
+   Compiling ac-server v0.1.0 (/home/billy/.herdr/worktrees/agent-console/feature-software-factory/.scratch/lines/186/crates/server)
+    Checking agent-console v0.1.0 (/home/billy/.herdr/worktrees/agent-console/feature-software-factory/.scratch/lines/186/crates/cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.21s

@@ -1,0 +1,11 @@
+$ bun run conformance/run.ts ./cases/interrupts-keep-talking.test.ts
+bun test v1.3.14 (0d9b296a)
+
+ 17 pass
+ 0 fail
+ 113 expect() calls
+Ran 17 tests across 1 file. [48.11s]
+
+conformance against the Rust server (/home/billy/.herdr/worktrees/agent-console/feature-software-factory/.scratch/lines/186/target/release/agent-console), takeover legs rust,rust,rust
+  interrupts  17/17 passed (100%)
+  all         17/17 passed (100%)

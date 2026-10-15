@@ -1,0 +1,8 @@
+
+    if !work.numbered || decision.crash_reason.is_some() || read.is_err() {
+        if !work.numbered
+            && let Ok(valid) = &read
+            && let Some(proposals) = valid.outcome.spawn.as_ref().filter(|p| !p.is_empty())
+        {
+            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
+        }

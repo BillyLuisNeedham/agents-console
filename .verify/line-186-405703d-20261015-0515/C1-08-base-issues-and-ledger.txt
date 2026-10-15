@@ -1,0 +1,13 @@
+01.md
+
+## Pending spawns
+
+Proposals that land at the next super-step boundary.
+
+_(none)_
+
+## Held spawns
+
+Proposals waiting for the operator to adopt or discard them.
+
+_(none)_

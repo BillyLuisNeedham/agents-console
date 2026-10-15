@@ -1,0 +1,3 @@
+Preparing worktree (detached HEAD 1b38631)
+HEAD is now at 1b38631 Port the engine and pool server to Rust and flip the Console to the Rust binary (#176)
+1b38631 Port the engine and pool server to Rust and flip the Console to the Rust binary (#176)

@@ -1,0 +1,17 @@
+ conformance/cases/interrupts-keep-talking.test.ts |  48 +++++++++
+ crates/engine/src/keep_talking.rs                 | 126 +++++++++++++++++++++-
+ docs/specs/186.brief.json                         |   5 +
+ docs/specs/186.md                                 |  69 ++++++++++++
+ 4 files changed, 246 insertions(+), 2 deletions(-)
+
+0
+7: * a 409 `reason` in the engine's own words, and the teaching Turn typed into
+131:/** Write a Ticket's Outcome where its prompt and its teaching said, as the agent in the pane would. */
+162:/** The teaching Turn a Continued attempt of 01 is typed, as the operator chose it. */
+163:function teaching(world: World, attempt: number): string {
+268:      what: "the teaching Turn",
+300:  "the teaching Turn tells the agent the operator carries on, the Outcome contract whole and the Spawn ledger",
+306:      what: "the teaching Turn",
+310:    expectSameBytes(turns[0]!, teaching(world, 2), "the keep-talking teaching Turn");
+708:// A teaching Turn that cannot land, and the Continued attempt's own log
+714:  "a Continued attempt whose teaching Turn cannot be typed ends at a checkpoint of the engine's own over the same pane",
