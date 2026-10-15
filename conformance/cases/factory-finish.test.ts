@@ -1,6 +1,7 @@
 /**
  * The Line's Finish (issue #187, ADR-0037), seen from outside the server:
- * Decide's body says how to carry out the Finish and where to write the
+ * Prove's body sends its evidence to the pool's runs directory and out of
+ * git, Decide's body says how to carry out the Finish and where to write the
  * report, a Decide that ends the Line without the report is the no-verdict
  * checkpoint, the Finish checkpoint's Brief links the report, GET
  * /api/line/report serves it, and the snapshot carries the Line for the
@@ -35,7 +36,7 @@ const issue = (pool: string, id: string): string => readFileSync(join(pool, "iss
 const interruptOn = (snap: EnrichedSnapshot, id: string): string =>
   snap.state.interrupts.find((i) => i.ticketId === id)?.body ?? "";
 
-conformance("factory", "Finish none: Decide writes the report, the Finish checkpoint links it, GET /api/line/report serves it, and approval ends the run with no Review", async (t) => {
+conformance("factory", "Finish none: Prove's evidence goes to the pool's runs directory, Decide writes the report, the Finish checkpoint links it, GET /api/line/report serves it, and approval ends the run with no Review", async (t) => {
   const world = lineWorld(t);
   world.stubs.script("r1-prove", PASS);
   world.stubs.script("r1-review", NO_FINDINGS);
@@ -54,7 +55,14 @@ conformance("factory", "Finish none: Decide writes the report, the Finish checkp
   const decide = issue(world.pool, "r1-decide");
   expect(decide).toContain("## The Finish\n\n");
   expect(decide).toContain("1. Carry out the Finish. `none`: nothing beyond the report.");
-  expect(decide).toContain(`2. Write the report with /html to \`${report}\`: every Round's Prove evidence, every Review finding`);
+  expect(decide).toContain(
+    `2. Write the report with /html to \`${report}\`: every Round's Prove evidence, linked at its path in the pool's runs directory beside the report (\`<prove ticket>.evidence/\`, so a relative link works), every Review finding`,
+  );
+  // Prove keeps its evidence in the pool's runs directory, beside the report, and never commits it.
+  const prove = issue(world.pool, "r1-prove");
+  expect(prove).toContain(`Write the evidence to \`${join(world.pool, "runs", "r1-prove.evidence")}/\`, and name that path in your verdict's "evidence".`);
+  expect(prove).toContain("this one path is yours to write despite the rule against writing into the pool directory. Never commit the evidence.");
+  expect(prove).not.toContain("commit it");
   expect(readFileSync(report, "utf8")).toBe(REPORT_HTML);
   expect(interruptOn(atFinish, "r1-finish")).toContain(`The report: ${report} (open it in the Console's Detail).`);
 
@@ -89,7 +97,7 @@ conformance("factory", "Finish none: Decide writes the report, the Finish checkp
   expect(done.state.log.slice(from).some((l) => l.includes("REVIEW"))).toBe(false);
 });
 
-conformance("factory", "Finish draft-pr: Decide's body says how to open the draft PR from the Line's branch; Resume with notes on the Finish starts another Round", async (t) => {
+conformance("factory", "Finish draft-pr: Decide's body says how to open the draft PR from the Line's branch, dropping any committed .verify/; Resume with notes on the Finish starts another Round", async (t) => {
   const world = lineWorld(t, { spec: "docs/specs/line.md", finish: "draft-pr" });
   // A Factory pool's checkout is on its own Line branch (ADR-0038).
   world.git(["checkout", "-q", "-b", "line/x"]);
@@ -107,7 +115,9 @@ conformance("factory", "Finish draft-pr: Decide's body says how to open the draf
   expect(line?.branch).toBe("line/x");
   const decide = issue(world.pool, "r1-decide");
   expect(decide).toContain("1. Carry out the Finish. `draft-pr`: open a draft PR for the Line.");
-  expect(decide).toContain("delete the Line's spec and brief (`docs/specs/line*`) in a final commit on your branch");
+  expect(decide).toContain(
+    "delete the Line's spec and brief (`docs/specs/line*`) and any `.verify/` directory committed on the Line's branch (Prove's evidence belongs in the pool, never in the PR), in one final commit on your branch",
+  );
   expect(decide).toContain(`git push origin HEAD:${line?.branch}`);
   expect(decide).toContain(`gh pr create --draft --base main --head ${line?.branch}`);
   expect(existsSync(join(world.pool, REPORT))).toBe(true);

@@ -40,6 +40,12 @@ pub const APPROVED: &str = "approved";
 /// The report's file name in the pool's runs directory follows the Line's name: `<line>-report.html`.
 pub const REPORT_SUFFIX: &str = "-report.html";
 
+/// A Prove Ticket's evidence directory in the pool's runs directory: `<ticket>.evidence/`.
+pub const EVIDENCE_SUFFIX: &str = ".evidence";
+
+/// The run folder a proving skill may leave in the checkout, which the PR Finish removes.
+pub const VERIFY_DIR: &str = ".verify";
+
 /// The Line's name, as its spec and brief are named in `docs/specs/`: the brief's file name without
 /// `.brief.json` (or without its extension, for a brief named otherwise).
 pub fn line_name_of_brief(brief_path: &str) -> String {
@@ -1143,13 +1149,19 @@ fn prove_ticket(line: &LineState, factory: &ResolvedFactory, from: &str) -> NewT
     } else {
         format!("r{n}-prove-{k}")
     };
-    let work = "## What to do\n\nProve the Round's work, already merged on the Line's branch: \
-                run the change end to end the way it will be used and gather evidence that it \
-                works or that it does not. This is not a code review. Keep the evidence in a file \
-                in your working directory, commit it, and name its path in your verdict. A fail \
-                sends the Round back to a fix Implement with your brief, so say exactly what failed \
-                and how to reproduce it."
-        .to_owned();
+    let work = format!(
+        "## What to do\n\nProve the Round's work, already merged on the Line's branch: run the \
+         change end to end the way it will be used and gather evidence that it works or that it \
+         does not. This is not a code review. A fail sends the Round back to a fix Implement with \
+         your brief, so say exactly what failed and how to reproduce it.\n\n## Your evidence\n\n\
+         Write the evidence to {}, and name that path in your verdict's \"evidence\". It is in the \
+         pool directory, so it stays out of the Line's branch and out of the PR its Finish opens: \
+         this one path is yours to write despite the rule against writing into the pool \
+         directory. Never commit the evidence. If the skill you prove with makes its own run \
+         folder (`{VERIFY_DIR}/` at the root of your checkout, say), use the evidence path as that \
+         folder, or move the folder there when you finish, and leave nothing of it in git.",
+        evidence_place(line, &id)
+    );
     ticket(
         line,
         factory,
@@ -1309,10 +1321,11 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
     let pr = |draft: bool| {
         format!(
             "open a {}PR for the Line. First delete the Line's spec and brief (`{BRIEF_DIR}/{name}*`) \
-             in a final commit on your branch. Then push your HEAD as the Line's branch (`git push \
-             origin HEAD:{}`) and open the PR from {branch} against `main` with `gh pr create{} \
-             --base main --head {}`, its body summing up the Line from the report. The PR's link is \
-             the Finish's result.",
+             and any `{VERIFY_DIR}/` directory committed on the Line's branch (Prove's evidence \
+             belongs in the pool, never in the PR), in one final commit on your branch. Then push \
+             your HEAD as the Line's branch (`git push origin HEAD:{}`) and open the PR from \
+             {branch} against `main` with `gh pr create{} --base main --head {}`, its body summing \
+             up the Line from the report. The PR's link is the Finish's result.",
             if draft { "draft " } else { "" },
             js::trim(&line.branch),
             if draft { " --draft" } else { "" },
@@ -1355,9 +1368,10 @@ fn finish_section(line: &LineState, factory: &ResolvedFactory) -> String {
         "## The Finish\n\nWhen you end the Line (\"finish\", or any verdict on a halted Line), do \
          these in order before you record your Outcome:\n\n\
          1. Carry out the Finish. {}\n\
-         2. Write the report with /html to {report}: every Round's Prove evidence, every Review \
-         finding and what happened to it (fixed in a later Round, or dropped and why), and the \
-         Finish's result (the PR's link, say). It is the one file you write outside your working \
+         2. Write the report with /html to {report}: every Round's Prove evidence, linked at its \
+         path in the pool's runs directory beside the report (`<prove ticket>{EVIDENCE_SUFFIX}/`, \
+         so a relative link works), every Review finding and what happened to it (fixed in a \
+         later Round, or dropped and why), and the Finish's result (the PR's link, say). It is the one file you write outside your working \
          directory besides your Outcome. Without it the Ticket checkpoints with \"{NO_VERDICT}\".\n\n\
          The operator approves the Line from the report at the Finish checkpoint the engine raises \
          next.",
@@ -1409,6 +1423,25 @@ fn earlier_rounds(line: &LineState) -> String {
         String::new()
     } else {
         format!("\n\n## Earlier Rounds\n\n{}", earlier.join("\n\n"))
+    }
+}
+
+/// Where a Prove Ticket keeps its evidence: `<ticket>.evidence/` in the pool's runs directory, beside
+/// the Line's report, so it never rides the Line's branch into the PR.
+pub fn evidence_dir(line: &LineState, ticket: &str) -> Option<String> {
+    let runs = Path::new(&line.report)
+        .parent()
+        .filter(|_| !blank(&line.report))?;
+    Some(js::path_text(
+        &runs.join(format!("{ticket}{EVIDENCE_SUFFIX}")),
+    ))
+}
+
+// The evidence directory as the Prove body names it.
+fn evidence_place(line: &LineState, ticket: &str) -> String {
+    match evidence_dir(line, ticket) {
+        Some(dir) => format!("`{dir}/`"),
+        None => format!("`runs/{ticket}{EVIDENCE_SUFFIX}/` in the pool directory"),
     }
 }
 

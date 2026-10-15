@@ -938,8 +938,17 @@ fn the_finish_act_says_what_decide_does_for_each_kind() {
     );
     assert!(draft.contains("git push origin HEAD:line/186"));
     assert!(draft.contains("gh pr create --draft --base main --head line/186"));
+    // Prove's evidence belongs in the pool: a `.verify/` committed anyway leaves in the final commit.
+    assert!(
+        draft.contains(
+            "and any `.verify/` directory committed on the Line's branch (Prove's evidence belongs \
+             in the pool, never in the PR), in one final commit on your branch"
+        ),
+        "{draft}"
+    );
     let pr = finish_act("pr", &line);
     assert!(pr.contains("gh pr create --base main --head line/186") && !pr.contains("draft"));
+    assert!(pr.contains("and any `.verify/` directory committed on the Line's branch"));
     let mut shared = line.clone();
     shared.branch = "main".into();
     let refused = finish_act("draft-pr", &shared);
@@ -951,6 +960,74 @@ fn the_finish_act_says_what_decide_does_for_each_kind() {
     assert_eq!(
         finish_act("tag a release", &line),
         "carry this out as written, and say in the report what came of it: tag a release"
+    );
+}
+
+#[test]
+fn prove_keeps_its_evidence_in_the_pool_and_out_of_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut line, factory) = placed(dir.path(), "none");
+    let done = outcome(None);
+    let fail = failed("it breaks");
+    let prove = next(route(&mut line, &factory, StationEnd::Done(&done)));
+    assert_eq!(prove.id, "r1-prove");
+    let evidence = js::path_text(&dir.path().join("r1-prove.evidence"));
+    assert_eq!(evidence_dir(&line, "r1-prove"), Some(evidence.clone()));
+    assert!(
+        prove.body.contains(&format!(
+            "Write the evidence to `{evidence}/`, and name that path in your verdict's \"evidence\"."
+        )),
+        "{}",
+        prove.body
+    );
+    assert!(prove.body.contains(
+        "this one path is yours to write despite the rule against writing into the pool directory"
+    ));
+    assert!(prove.body.contains("Never commit the evidence."));
+    assert!(prove.body.contains("use the evidence path as that folder"));
+    assert!(!prove.body.contains("commit it"));
+    // A second Prove in the Round gets its own directory.
+    walk(&mut line, &factory, &[StationEnd::Done(&fail)]);
+    let again = next(route(&mut line, &factory, StationEnd::Done(&done)));
+    assert_eq!(again.id, "r1-prove-2");
+    assert!(
+        again
+            .body
+            .contains(&js::path_text(&dir.path().join("r1-prove-2.evidence")))
+    );
+    // With no report path the body still points into the pool's runs directory.
+    let (mut bare, factory) = started();
+    let prove = next(route(&mut bare, &factory, StationEnd::Done(&done)));
+    assert_eq!(evidence_dir(&bare, "r1-prove"), None);
+    assert!(
+        prove
+            .body
+            .contains("Write the evidence to `runs/r1-prove.evidence/` in the pool directory")
+    );
+}
+
+#[test]
+fn the_report_links_each_proves_evidence_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut line, factory) = placed(dir.path(), "none");
+    let done = outcome(None);
+    let pass = passed();
+    let none = findings(json!([]));
+    walk(
+        &mut line,
+        &factory,
+        &[StationEnd::Done(&done), StationEnd::Done(&pass)],
+    );
+    let decide = next(route(&mut line, &factory, StationEnd::Done(&none)));
+    assert!(
+        decide.body.contains(&format!(
+            "Write the report with /html to `{}`: every Round's Prove evidence, linked at its path \
+             in the pool's runs directory beside the report (`<prove ticket>.evidence/`, so a \
+             relative link works), every Review finding",
+            line.report
+        )),
+        "{}",
+        decide.body
     );
 }
 
