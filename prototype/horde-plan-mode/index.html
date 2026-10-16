@@ -445,12 +445,7 @@ const Horde = (() => {
     s.plan.edges.push({ id: edgeId(id, ok, mid), from: id, on: ok, to: mid, max: null, steward: false });
     s.changed.push(mid);
     say(s, `Put down ${mid} beside ${id}: ${id} "${ok}" now goes through it${outs.length ? `, and ${mid} "merged" carries on to ${outs.map(e => e.to).join(', ')}` : ''}.`);
-    const r = s.run.nodes[id], parked = r && r.parked[ok];
-    if (parked) {
-      delete r.parked[ok];
-      if (r.status === 'parked' && !Object.keys(r.parked).length) r.status = 'done';
-      traverse(s, s.plan.edges.find(e => e.id === edgeId(id, ok, mid)), parked);
-    }
+    flowParked(s, id, ok, s.plan.edges.find(e => e.id === edgeId(id, ok, mid)));
   }
   function liftMerger(s, mid, why) {
     const m = findNode(s, mid), src = m.of && findNode(s, m.of);
@@ -486,6 +481,7 @@ const Horde = (() => {
     if (lostParked.length) say(s, `${id} starts again; its earlier waiting handoff (${lostParked.join(', ')}) is replaced.`, 'warn');
     r.pass++; r.status = 'running'; r.parked = {}; r.made = 0; r.input = packet; r.copies = []; r.queue = []; r.seq = 0;
     const items = packet.items || [];
+    if (packet.spawned) opts = { ...opts, spawned: true };
     if (node.copies.mode === 'per-item' && items.length && !opts.single) {
       r.cap = node.copies.n === 'all' ? Infinity : node.copies.n;
       const now = items.slice(0, r.cap);
@@ -519,9 +515,7 @@ const Horde = (() => {
       return;
     }
     if (K.merger) {
-      r.status = 'done'; r.verdict = 'merged';
-      say(s, `${id}: the conflict is resolved and ${plural(r.input.branches.length, 'branch')} merged into the line base.`, 'good');
-      emit(s, id, 'merged', { from: id, verdict: 'merged', items: r.input.items || [], branches: ['line base'] });
+      mergeDone(s, id, `${id}: the conflict is resolved and ${plural(r.input.branches.length, 'branch')} merged into the line base.`, intoBase(r.input));
       if (r.inbox.length && !busy(r)) startNode(s, id, r.inbox.shift());
       return;
     }
@@ -545,11 +539,7 @@ const Horde = (() => {
     }
     const br = packet.branches || [];
     r.pass++; r.input = packet; r.copies = []; r.queue = []; r.seq = 0; r.parked = {}; r.cap = 1;
-    if (br.length <= 1) {
-      r.status = 'done'; r.verdict = 'merged';
-      say(s, `${id} received a single branch from ${packet.from}, so it passes it through.`);
-      return emit(s, id, 'merged', { ...packet, from: id, verdict: 'merged' });
-    }
+    if (br.length <= 1) return mergeDone(s, id, `${id} received a single branch from ${packet.from}, so it passes it through.`, packet, 'info');
     if (r.armed) {
       r.armed = false; r.status = 'running';
       const c = newCopy(s, id, r, `conflict in ${br.join(' + ')}`);
@@ -563,9 +553,26 @@ const Horde = (() => {
       }
       return;
     }
+    mergeDone(s, id, `${id} merged ${plural(br.length, 'branch')} from ${packet.from} into the line base.`, intoBase(packet));
+  }
+
+  /* Every way a merger's pass ends: done, verdict merged, the packet handed on. */
+  function mergeDone(s, id, line, packet, tone = 'good') {
+    const r = rn(s, id);
     r.status = 'done'; r.verdict = 'merged';
-    say(s, `${id} merged ${plural(br.length, 'branch')} from ${packet.from} into the line base.`, 'good');
-    emit(s, id, 'merged', { from: id, verdict: 'merged', items: packet.items || [], branches: ['line base'] });
+    say(s, line, tone);
+    emit(s, id, 'merged', { ...packet, from: id, verdict: 'merged' });
+  }
+  const intoBase = p => ({ items: p.items || [], branches: ['line base'] });
+
+  /* A handoff waiting on a node flows on along a link made since. */
+  function flowParked(s, id, verdict, edge, line) {
+    const r = s.run.nodes[id], parked = r && r.parked[verdict];
+    if (!parked) return;
+    delete r.parked[verdict];
+    if (r.status === 'parked' && !Object.keys(r.parked).length) r.status = 'done';
+    if (line) say(s, line, 'park');
+    traverse(s, edge, parked);
   }
 
   function emit(s, id, verdict, packet) {
@@ -630,6 +637,11 @@ const Horde = (() => {
       if (node.copies.mode === 'per-item' && live(r) >= r.cap) {
         r.queue.push(item);
         say(s, `${why} It queues behind the cap of ${capText(r.cap)} (${counts(r)}).`, 'good');
+        return;
+      }
+      if (node.copies.mode === 'one') {
+        r.inbox.push({ from: 'spawn', items: [item], spawned: true });
+        say(s, `${why} ${nodeId} runs one copy at a time, so it waits in ${nodeId}'s inbox and runs as one more pass after this one.`, 'good');
         return;
       }
       const c = newCopy(s, nodeId, r, item, true);
@@ -785,14 +797,7 @@ const Horde = (() => {
       s.plan.edges.push({ id, from: from.id, on, to: a.to, max, steward: false });
       s.changed.push(id);
       say(s, back ? `Linked ${from.id} "${on}" back to ${a.to}. It loops, so it is capped at ${max} passes.` : `Linked ${from.id} "${on}" → ${a.to}.`);
-      const r = s.run.nodes[from.id];
-      const parked = r && r.parked[on];
-      if (parked) {
-        delete r.parked[on];
-        if (r.status === 'parked' && !Object.keys(r.parked).length) r.status = 'done';
-        say(s, `${from.id}'s waiting handoff flows on to ${a.to}.`, 'park');
-        traverse(s, s.plan.edges.find(e => e.id === id), parked);
-      }
+      flowParked(s, from.id, on, s.plan.edges.find(e => e.id === id), `${from.id}'s waiting handoff flows on to ${a.to}.`);
     },
     unlink(s, a) {
       if (!s.plan.edges.some(e => e.id === a.edge)) return refuse(s, `There is no link ${a.edge}.`);
@@ -832,7 +837,9 @@ const Horde = (() => {
       startNode(s, a.id, { from: 'you', verdict: 'prompt', items: [], note: s.run.prompt });
     },
     runAll(s, a) {
-      const entries = Object.values(s.plan.nodes).filter(n => isAgent(n.kind) && !s.plan.edges.some(e => e.to === n.id));
+      /* A loop link coming back does not make a node a later step: Foggy starts at the chart its research loops back to. */
+      const loopsBack = e => e.max != null && reachable(s, e.to, e.from);
+      const entries = Object.values(s.plan.nodes).filter(n => isAgent(n.kind) && !s.plan.edges.some(e => e.to === n.id && !loopsBack(e)));
       if (!entries.length) return refuse(s, 'There is no node to start: put an agent node down first.');
       if (a.prompt != null) s.run.prompt = a.prompt;
       if (!s.run.prompt) return refuse(s, 'Write an opening prompt first.');
@@ -1167,7 +1174,7 @@ const PRESET_SCRIPTS = {
     `add agent as unslop ${at(3040)} "Unslop: open the PR"`, 'set unslop skill pstack-unslop',
     `add finish ${at(3340)}`,
     ...runOn('cursor', PSTACK.judge, ['how', 'why', 'architect', 'writing', 'unslop', 'no-comments']),
-    ...runOn('cursor', PSTACK.code, ['reproduce', 'fix', 'verify', 'tdd', 'deslop']),
+    ...runOn('cursor', PSTACK.code, ['reproduce', 'fix', 'verify', 'tdd', 'deslop', 'why-merge']),
     'link reproduce.done -> how', 'link how.done -> why', 'link why.done -> architect', 'link architect.done -> fix',
     'link fix.done -> verify', 'link verify.fail -> fix max 2', 'link verify.pass -> tdd', 'link tdd.done -> deslop',
     'link deslop.done -> no-comments', 'link no-comments.done -> writing', 'link writing.done -> unslop', 'link unslop.done -> finish',
