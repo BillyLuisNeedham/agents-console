@@ -113,6 +113,10 @@ conformance("factory", "Finish draft-pr: Decide's body says how to open the draf
   const atFinish = await atCheckpoint(server, "r1-finish");
   const line = await lineOf(server);
   expect(line?.branch).toBe("line/x");
+  // A pool with no lineBase in console.json (a Line Boot did not cut, or one from before issue #193)
+  // has no base: it reads as cut from main, Review diffs from main and the PR targets main.
+  expect(line).not.toHaveProperty("base");
+  expect(issue(world.pool, "r1-review")).toContain("Review the work on the Line's branch (the changes since it left main) against the spec");
   const decide = issue(world.pool, "r1-decide");
   expect(decide).toContain("1. Carry out the Finish. `draft-pr`: open a draft PR for the Line.");
   expect(decide).toContain(
@@ -120,6 +124,7 @@ conformance("factory", "Finish draft-pr: Decide's body says how to open the draf
   );
   expect(decide).toContain(`git push origin HEAD:${line?.branch}`);
   expect(decide).toContain(`gh pr create --draft --base main --head ${line?.branch}`);
+  expect(decide).not.toContain("pushBase");
   expect(existsSync(join(world.pool, REPORT))).toBe(true);
   expect(interruptOn(atFinish, "r1-finish")).toContain(`The report: ${join(world.pool, REPORT)}`);
   expect(atFinish.line).toMatchObject({ finish: "draft-pr", report: true, status: "finish" });

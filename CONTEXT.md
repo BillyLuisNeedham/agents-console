@@ -351,6 +351,10 @@ _Avoid_: pipeline, workflow, chain (all too generic), recipe (the plain-English 
 One piece of work's pass through the Factory: its Grill, then Rounds until the Decide Station finishes it. A Factory pool runs exactly one Line, on its own branch.
 _Avoid_: task, job, run (a run is one Console boot)
 
+**Line base**:
+The branch a Line was cut from and the commit it was cut at. Boot chooses it once, and it never changes. The Line's work is everything since that commit, and a PR Finish targets that branch.
+_Avoid_: trunk, main (the base is often neither), parent branch, upstream (git's own word for what a branch pushes to and pulls from)
+
 **Station**:
 The kind of work one Pool citizen does on a Line: the Grill, a Conversation; or Implement, Prove, Review or Decide, each a Ticket. Each Station has its own skills and Assignment.
 _Avoid_: stage, step (both collide with Node), phase

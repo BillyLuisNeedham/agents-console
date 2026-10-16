@@ -458,6 +458,12 @@ export interface PoolConfig {
    * Line has started is a Factory pool without it.
    */
   factoryPool?: boolean;
+  /**
+   * The Line base (issue #193): the branch Boot's Factory mode cut the
+   * Line from and the commit it was cut at. Start the Line copies it into
+   * the Line's state.
+   */
+  lineBase?: LineBase;
 }
 
 /** The pool defaults' Assignment fields: console.json `defaults`. */
@@ -1502,6 +1508,21 @@ export interface LineBrief {
   spec: string;
   finish?: string;
   factory?: FactorySettings;
+  /**
+   * Whether the Finish may push the Line base to origin, only to create
+   * or fast-forward it, never forcing (issue #193). False when absent.
+   */
+  pushBase?: boolean;
+}
+
+/**
+ * The Line base (issue #193): the branch a Line was cut from, as Boot
+ * resolved it (`experiment/x` or `origin/experiment/x`), and the full SHA
+ * of the commit it was cut at. Chosen once, it never changes.
+ */
+export interface LineBase {
+  ref: string;
+  commit: string;
 }
 
 /**
@@ -1554,6 +1575,12 @@ export interface LineState {
    * Finish that opens a PR opens it from this branch.
    */
   branch: string;
+  /**
+   * The Line base, copied from console.json's `lineBase` as the Line
+   * started (issue #193). Absent for a Line with none, which reads as
+   * cut from `main` at no known commit.
+   */
+  base?: LineBase;
   /**
    * The report Decide writes at the Finish, `runs/<line>-report.html` in
    * the pool directory, as an absolute path.

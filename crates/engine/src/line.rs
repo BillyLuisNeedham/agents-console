@@ -17,8 +17,8 @@ use ac_core::js;
 use ac_core::line::{
     BriefPlace, FactoryLayers, LinePlaces, NewTicket, ResolvedFactory, Routed, StationEnd,
     VerdictCheck, approves, check_station_outcome, factory_layer_of, find_brief, find_brief_in,
-    no_verdict_brief, read_brief, read_brief_in, report_file_name, resolve_factory, route,
-    save_line, start_line as begin_line, station_ticket_text, verdict_check, written_report,
+    line_base_of, no_verdict_brief, read_brief, read_brief_in, report_file_name, resolve_factory,
+    route, save_line, start_line as begin_line, station_ticket_text, verdict_check, written_report,
 };
 use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::outcome::ValidOutcome;
@@ -129,9 +129,11 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
     let brief = read_brief(&checkout, &path).map_err(EngineError::refused)?;
     let factory = resolve_factory(&factory_layers(session), &brief);
     refuse_if_unlaunchable(session, &factory)?;
+    let base = line_base(session)?;
     session.line_factory = Some(factory.clone());
     let places = LinePlaces {
         branch: target_branch(session),
+        base,
         report: js::path_text(&Path::new(&session.runs_dir).join(report_file_name(&path))),
     };
     let (line, first) = begin_line(brief, &path, &factory, places);
@@ -203,6 +205,22 @@ fn refuse_if_taken(session: &Session, first: &NewTicket) -> Result<(), EngineErr
         ))),
         None => Ok(()),
     }
+}
+
+// The Line base Boot's Factory mode wrote into console.json (issue #193): none in a pool Boot did not
+// cut, whose Line reads as cut from main. A malformed one refuses the Line rather than read as main,
+// where its PR would land on the wrong shared branch (ADR-0038).
+fn line_base(session: &Session) -> Result<Option<ac_protocol::LineBase>, EngineError> {
+    let Some(value) = session.state.config.get("lineBase") else {
+        return Ok(None);
+    };
+    line_base_of(value).map(Some).map_err(|why| {
+        EngineError::refused(format!(
+            "the Line cannot start: console.json's lineBase is malformed ({why}), and a Line read as \
+             cut from main would open its PR against main. Fix it to the {{ ref, commit }} Boot \
+             wrote, or remove it for a Line cut from main"
+        ))
+    })
 }
 
 // The branch the pool merges into: the one an enlist captured, else the pool checkout's own.

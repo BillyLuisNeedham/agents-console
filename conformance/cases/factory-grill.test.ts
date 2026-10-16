@@ -106,6 +106,11 @@ conformance("factory", "the Grill launches on the Grill Station's skills and Ass
   expect(typed).toContain("Use these skills, in this order: my-grill-with-docs, show-me.");
   // The pool checkout is on main here, so the Line is named main.
   expect(typed).toContain("the spec at `docs/specs/main.md` and the Line brief at `docs/specs/main.brief.json`");
+  // The brief may grant pushBase; the Grill asks about it only for a PR Finish (issue #193).
+  expect(typed).toContain(
+    'The brief may add "pushBase": true, which lets the Finish push the Line base (the branch this Line was cut from) to origin, only to create it or fast-forward it, never forcing',
+  );
+  expect(typed).toContain("Ask the operator about pushBase only when the finish is pr or draft-pr");
   expect(typed).toContain("The operator then presses Start the Line");
 
   const second = await server.http.post("/api/conversations", { role: "grill", opening: ISSUE });

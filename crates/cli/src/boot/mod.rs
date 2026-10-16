@@ -46,19 +46,24 @@ use pool::{
 };
 
 pub const USAGE: &str = "usage: agent-console [pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]
-       agent-console --factory [--work <issue number or text> | --brief <path>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
+       agent-console --factory [--work <issue number or text> | --brief <path>] [--from <branch>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
 
 /// What `--help` prints: the usage, then what Factory mode's flags do.
 pub const FACTORY_HELP: &str = "
-Factory mode (ADR-0037) cuts line/<slug> from main into a worktree of its own at
-.scratch/lines/<slug>, leaving this checkout's branch alone, and boots a Factory pool
-inside it at <worktree>/.scratch/<name>, its target branch the Line's.
+Factory mode (ADR-0037) cuts line/<slug> from the branch this checkout has out (or from
+--from's) into a worktree of its own at .scratch/lines/<slug>, leaving this checkout's
+branch alone, and boots a Factory pool inside it at <worktree>/.scratch/<name>, its
+target branch the Line's. The Line's branch never tracks the branch it was cut from.
   --factory              Factory mode; asks for the work unless --work or --brief gives it
   --work <text>          the piece of work: an issue number (186, #186) or free text; Boot
                          opens the Grill with it as the Grill's first Turn
   --brief <path>         a ready Line brief (its spec found from here first, then beside
                          the brief): no Grill, the spec and brief committed onto the Line
                          branch, Round 1 started at once; implies --factory and --yes
+  --from <branch>        the Line base: the branch to cut the Line from instead of the
+                         current one; a local branch, else origin's as written (origin/x),
+                         else origin's by name; never another remote's, HEAD, a tag or a
+                         commit, never fetched
   --line <slug>          the Line's slug (default: the issue number, the brief's file name,
                          or the work's first words); a taken one gets -2, -3, ...
   --name <dir>           the pool directory's name (default: the Line's slug)
@@ -83,6 +88,8 @@ pub struct BootArgs {
     pub work: Option<String>,
     /// A ready Line brief: no Grill, Round 1 at once. Implies Factory mode and asks nothing.
     pub brief: Option<String>,
+    /// The Line base's branch, when not the current one (issue #193).
+    pub from: Option<String>,
     /// The Line's slug, `line/<slug>`.
     pub line: Option<String>,
     /// The Factory pool's directory name.
@@ -125,7 +132,7 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
             "--no-open" => args.open = false,
             "--factory" => args.factory = true,
             "--no-steward" => args.no_steward = true,
-            "--work" | "--brief" | "--line" | "--name" | "--title" | "--config" => {
+            "--work" | "--brief" | "--from" | "--line" | "--name" | "--title" | "--config" => {
                 let Some(value) = argv.get(i + 1).filter(|value| !value.starts_with("--")) else {
                     return Err(refusal(format!("{arg} needs a value\n{USAGE}")));
                 };
@@ -133,6 +140,7 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
                 let slot = match arg {
                     "--work" => &mut args.work,
                     "--brief" => &mut args.brief,
+                    "--from" => &mut args.from,
                     "--line" => &mut args.line,
                     "--name" => &mut args.name,
                     "--title" => &mut args.title,
@@ -184,6 +192,7 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
     }
     let factory_only = [
         ("--work", args.work.is_some()),
+        ("--from", args.from.is_some()),
         ("--line", args.line.is_some()),
         ("--name", args.name.is_some()),
         ("--no-steward", args.no_steward),
@@ -1184,10 +1193,13 @@ fn run_factory_boot(
         None => normalise_title(&io.ask("title for the Line's pool", &fallback_title)),
     };
 
-    let line = factory::cut_line(&top, &slug, io)?;
+    let line = factory::cut_line(&top, &slug, args.from.as_deref(), io)?;
     io.log(&format!(
-        "line: cut {} from {} at {}",
-        line.branch, line.from, line.worktree
+        "line: cut {} from {} ({}) at {}",
+        line.branch,
+        line.base.base_ref,
+        factory::short_commit(&line.base.commit),
+        line.worktree
     ));
     let brief_path = match &work {
         LineWork::Ready(ready) => {
@@ -1252,6 +1264,11 @@ fn run_factory_boot(
     }
     // The engine raises no run-wide Review in a Factory pool, from its first boot (ADR-0037).
     merged.insert("factoryPool".to_owned(), Value::Bool(true));
+    // The Line base, chosen once: Start the Line copies it into the Line's state (issue #193).
+    merged.insert(
+        "lineBase".to_owned(),
+        serde_json::to_value(&line.base).map_err(|err| err.to_string())?,
+    );
     write_console_config(&pool_dir, &merged)?;
     io.log(&format!(
         "wrote {}",
@@ -1298,7 +1315,7 @@ fn run_factory_boot(
             );
             let request = serde_json::json!({
                 "title": normalise_title(&grill_title).unwrap_or_else(|| "Grill".to_owned()),
-                "opening": factory::grill_opening(work),
+                "opening": factory::grill_opening(work, &line.base),
                 "role": "grill",
             });
             match launch::post_json(

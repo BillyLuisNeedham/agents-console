@@ -298,6 +298,7 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
                 exported::<FactoryLimits>(),
                 exported::<FactorySettings>(),
                 exported::<LineBrief>(),
+                exported::<LineBase>(),
                 exported::<LineStatus>(),
                 exported::<LineProve>(),
                 exported::<LineRound>(),

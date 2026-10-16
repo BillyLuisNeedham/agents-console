@@ -97,8 +97,11 @@ fn takes_the_factory_flags_and_a_brief_implies_factory_mode_asking_nothing() {
         "186",
         "--config",
         "steward.json",
+        "--from",
+        "origin/experiment/x",
     ]))
     .unwrap();
+    assert_eq!(args.from.as_deref(), Some("origin/experiment/x"));
     assert!(args.factory && args.yes);
     assert_eq!(
         args.brief.as_deref(),
@@ -120,6 +123,8 @@ fn refuses_factory_flags_that_do_not_fit_together() {
     let message = |argv: &[&str]| parse_boot_args(&strings(argv)).unwrap_err().message;
     assert!(message(&["--work", "x"]).starts_with("--work is for Factory mode: add --factory\n"));
     assert!(message(&["--no-steward"]).starts_with("--no-steward is for Factory mode"));
+    assert!(message(&["--from", "develop"]).starts_with("--from is for Factory mode"));
+    assert!(message(&["--factory", "--from"]).starts_with("--from needs a value\n"));
     assert!(
         message(&["--factory", "--work", "x", "--brief", "b.json"])
             .starts_with("--work and --brief both start the Line; give one\n")

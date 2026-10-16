@@ -109,7 +109,8 @@ asks only for what is left, starts the server and opens the browser. It takes
 
 `agent-console --factory` boots a Factory pool, which runs one Line
 (`docs/adr/0037-the-factory-is-an-engine-owned-recipe.md`). Boot cuts
-`line/<slug>` from `main` into a worktree of its own at
+`line/<slug>` from its Line base, the branch the checkout has out (or the one
+`--from` names), into a worktree of its own at
 `.scratch/lines/<slug>`, so the checkout it runs from keeps its branch, and
 makes the pool inside that worktree at `<worktree>/.scratch/<name>`: the pool's
 target branch is the Line's, never a shared one (ADR-0038). A Factory pool is
@@ -125,8 +126,8 @@ Before the first Line on a machine:
   `my-verify`, `code-review`, `html` and, for the Grill, `my-grill-with-docs`
   and `show-me`. Run `skills/link.sh` for this repo's own skills, including
   `my-console-steward`.
-- The project has a `main` branch, local or on `origin`. Boot cuts every Line
-  from it.
+- The checkout Boot runs from has a branch out (not a detached HEAD), or
+  `--from` names one. Boot cuts the Line from it and never fetches first.
 - For a `draft-pr` or `pr` Finish, `gh` is logged in with push rights on the
   project.
 
@@ -176,6 +177,11 @@ through on its own, and the Settings pane edits both layers. A Line brief's
   onto the Line branch as `docs/specs/<slug>.md` and `docs/specs/<slug>.brief.json`
   and starts Round 1 at once. It implies `--factory` and `--yes`, so nothing is
   asked.
+- `--from <branch>` cuts the Line from that branch instead of the current one:
+  a local branch, else origin's as written (`origin/x`), else origin's by its
+  name there. Another remote's branch, `HEAD`, tags and commits are refused. The
+  branch may be checked out in another worktree. The Line's branch never tracks
+  it.
 - `--line <slug>` names the Line (default: the issue number, the brief's file
   name, or the work's first words); a slug already taken gets `-2`, `-3`, ….
   `--name <dir>` names the pool directory, `--title <title>` titles the pool, and
@@ -188,9 +194,17 @@ through on its own, and the Settings pane edits both layers. A Line brief's
   is true in the pool's settings (default false).
 
 Boot marks the pool `"factoryPool": true` in `console.json`, and a Factory pool
-raises no run-wide Review: approving the Finish checkpoint is the Review. At the
+raises no run-wide Review: approving the Finish checkpoint is the Review. Boot
+also writes the Line base there, `"lineBase": {"ref": "experiment/x", "commit":
+"<sha>"}`, and prints `line: cut line/<slug> from experiment/x (<short sha>)`;
+Start the Line copies it into `line.json`'s `base`. Review diffs from that
+commit, and a PR's base is the Line base's branch on `origin`. At the
 Finish, Decide carries out the brief's `finish` (`none`, `draft-pr`, `pr`, or an
 act it names) and writes the report to `runs/<slug>-report.html` in the pool.
+For `pr` and `draft-pr` it checks the base on `origin` first. It pushes the base
+only when the brief sets `"pushBase": true`, and then only to create it or
+fast-forward it, never forcing. Without the grant, a base `origin` lacks means
+no PR.
 The Finish checkpoint's Brief links it, the Console shows it in that checkpoint's
 Detail with Open in browser, and `GET /api/line/report` serves it. The header
 shows the Line (`Round 2 · Prove · fails 1/2 · Finish: draft PR`) and each card

@@ -521,6 +521,23 @@ wire_struct! {
         /// Line has started is a Factory pool without it.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub factory_pool: Option<bool>,
+        /// The Line base (issue #193): the branch Boot's Factory mode cut the
+        /// Line from and the commit it was cut at. Start the Line copies it into
+        /// the Line's state.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub line_base: Option<LineBase>,
+    }
+}
+
+wire_struct! {
+    /// The Line base (issue #193): the branch a Line was cut from, as Boot
+    /// resolved it (`experiment/x` or `origin/experiment/x`), and the full SHA
+    /// of the commit it was cut at. Chosen once, it never changes.
+    #[derive(Eq)]
+    pub struct LineBase {
+        #[serde(rename = "ref")]
+        pub base_ref: String,
+        pub commit: String,
     }
 }
 
@@ -1923,6 +1940,10 @@ wire_struct! {
         pub finish: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub factory: Option<FactorySettings>,
+        /// Whether the Finish may push the Line base to origin, only to create
+        /// or fast-forward it, never forcing (issue #193). False when absent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub push_base: bool,
     }
 }
 
@@ -1983,6 +2004,11 @@ wire_struct! {
         /// Finish that opens a PR opens it from this branch.
         #[serde(default)]
         pub branch: String,
+        /// The Line base, copied from console.json's `lineBase` as the Line
+        /// started (issue #193). Absent for a Line with none, which reads as
+        /// cut from `main` at no known commit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub base: Option<LineBase>,
         /// The report Decide writes at the Finish, `runs/<line>-report.html` in
         /// the pool directory, as an absolute path.
         #[serde(default)]

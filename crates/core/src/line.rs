@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 
 use ac_protocol::{
     DecideChoice, DecideItem, DecideVerdict, FactorySettings, FactoryStations, FindingSeverity,
-    LineBrief, LineProve, LineRound, LineState, LineStatus, Outcome, OutcomeStatus, ProveResult,
-    ProveVerdict, ReviewVerdict, SpawnAssignRequest, Station, StationAssign, StationSettings,
+    LineBase, LineBrief, LineProve, LineRound, LineState, LineStatus, Outcome, OutcomeStatus,
+    ProveResult, ProveVerdict, ReviewVerdict, SpawnAssignRequest, Station, StationAssign,
+    StationSettings,
 };
 use serde_json::Value;
 
@@ -800,10 +801,12 @@ fn begin_round(line: &mut LineState, round: u64) {
     round_of(line);
 }
 
-/// Where a Line lives beside its brief: its branch and the path of its report.
+/// Where a Line lives beside its brief: its branch, the Line base it was cut from, and the path of its
+/// report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinePlaces {
     pub branch: String,
+    pub base: Option<LineBase>,
     pub report: String,
 }
 
@@ -816,6 +819,7 @@ pub fn start_line(
 ) -> (LineState, NewTicket) {
     let mut line = LineState {
         branch: places.branch,
+        base: places.base,
         report: places.report,
         brief,
         brief_path: brief_path.to_owned(),
@@ -1225,11 +1229,19 @@ fn fix_ticket(
 
 fn review_ticket(line: &LineState, factory: &ResolvedFactory, from: &str) -> NewTicket {
     let n = line.round;
-    let work = "## What to do\n\nReview the work on the Line's branch (the changes since it left \
-                main) against the spec and the repository's standards. Prove has passed it. \
-                Report each finding with a severity: must (the Line cannot finish with it), \
-                should, or nit. Change no code."
-        .to_owned();
+    // The cut commit never moves, so a base pushed, rebased or deleted mid-Line changes nothing here.
+    let since = match &line.base {
+        Some(base) => format!(
+            "the changes since it left `{}` at `{}`: `git diff {}..HEAD`",
+            base.base_ref, base.commit, base.commit
+        ),
+        None => "the changes since it left main".to_owned(),
+    };
+    let work = format!(
+        "## What to do\n\nReview the work on the Line's branch ({since}) against the spec and the \
+         repository's standards. Prove has passed it. Report each finding with a severity: must \
+         (the Line cannot finish with it), should, or nit. Change no code."
+    );
     ticket(
         line,
         factory,
@@ -1318,23 +1330,22 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
     } else {
         format!("`{}`", js::trim(&line.branch))
     };
+    let target = pr_base(line);
     let pr = |draft: bool| {
         format!(
             "open a {}PR for the Line. First delete the Line's spec and brief (`{BRIEF_DIR}/{name}*`) \
              and any `{VERIFY_DIR}/` directory committed on the Line's branch (Prove's evidence \
              belongs in the pool, never in the PR), in one final commit on your branch. Then push \
              your HEAD as the Line's branch (`git push origin HEAD:{}`) and open the PR from \
-             {branch} against `main` with `gh pr create{} --base main --head {}`, its body summing \
-             up the Line from the report. The PR's link is the Finish's result.",
+             {branch} against `{target}` with `gh pr create{} --base {target} --head {}`, its body \
+             summing up the Line from the report. The PR's link is the Finish's result.",
             if draft { "draft " } else { "" },
             js::trim(&line.branch),
             if draft { " --draft" } else { "" },
             js::trim(&line.branch),
         )
     };
-    // A Line runs on its own branch, cut from main (ADR-0038); a pool on any other branch opens no PR
-    // from it, so nothing pushes a shared branch.
-    let on_line = js::trim(&line.branch).starts_with(LINE_BRANCH_PREFIX);
+    let on_line = on_line_branch(line);
     let not_line = |kind: &str| {
         format!(
             "`{kind}`: but the pool's branch {branch} is not a Line branch ({LINE_BRANCH_PREFIX}...), so \
@@ -1354,6 +1365,138 @@ pub fn finish_act(finish: &str, line: &LineState) -> String {
     }
 }
 
+// A Line runs on its own branch, cut from its Line base (ADR-0038); a pool on any other branch opens
+// no PR from it, so nothing pushes a shared branch.
+fn on_line_branch(line: &LineState) -> bool {
+    js::trim(&line.branch).starts_with(LINE_BRANCH_PREFIX)
+}
+
+/// What a `pr` or `draft-pr` Finish does about the Line base on origin before it pushes anything:
+/// `None` for any other Finish, a pool off a Line branch, or a Line with no base.
+pub fn finish_base(finish: &str, line: &LineState) -> Option<String> {
+    let base = line.base.as_ref()?;
+    let opens_pr = matches!(js::trim(finish), "pr" | "draft-pr");
+    (opens_pr && on_line_branch(line)).then(|| base_on_origin(base, line.brief.push_base))
+}
+
+/// A Line base's branch: a local one, or origin's, never another remote's (ADR-0038). `lineBase.ref`
+/// writes it `x` or `origin/x`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseBranch {
+    Local(String),
+    Origin(String),
+}
+
+impl BaseBranch {
+    /// A Line base's ref as `lineBase` writes it: `origin/x` is origin's `x`, anything else local.
+    pub fn of(base_ref: &str) -> Self {
+        match base_ref.strip_prefix("origin/") {
+            Some(name) => BaseBranch::Origin(name.to_owned()),
+            None => BaseBranch::Local(base_ref.to_owned()),
+        }
+    }
+
+    /// The branch's name, which is its name on origin too, where the Line's PR targets it.
+    pub fn name(&self) -> &str {
+        match self {
+            BaseBranch::Local(name) | BaseBranch::Origin(name) => name,
+        }
+    }
+
+    /// The ref as `lineBase` writes it: `x`, or `origin/x`.
+    pub fn base_ref(&self) -> String {
+        match self {
+            BaseBranch::Local(name) => name.clone(),
+            BaseBranch::Origin(name) => format!("origin/{name}"),
+        }
+    }
+
+    /// The full ref git cuts from: `refs/heads/x`, or `refs/remotes/origin/x`.
+    pub fn full_ref(&self) -> String {
+        match self {
+            BaseBranch::Local(name) => format!("refs/heads/{name}"),
+            BaseBranch::Origin(name) => format!("refs/remotes/origin/{name}"),
+        }
+    }
+}
+
+/// A Line base as console.json's `lineBase` holds it, checked: `{ ref, commit }` with neither blank,
+/// naming a branch. A malformed one is refused rather than read as main, since a Line read as cut from
+/// main opens its PR against main (ADR-0038).
+pub fn line_base_of(value: &Value) -> Result<LineBase, String> {
+    let base: LineBase = serde_json::from_value(value.clone()).map_err(|err| err.to_string())?;
+    if blank(BaseBranch::of(&base.base_ref).name()) {
+        return Err(format!("its ref {:?} names no branch", base.base_ref));
+    }
+    if blank(&base.commit) {
+        return Err("its commit is blank".to_owned());
+    }
+    Ok(base)
+}
+
+/// The branch on origin a Line's PR targets: its Line base's name there, `main` for a Line with none.
+pub fn pr_base(line: &LineState) -> String {
+    match &line.base {
+        Some(base) => BaseBranch::of(&base.base_ref).name().to_owned(),
+        None => "main".to_owned(),
+    }
+}
+
+// What Decide does about the Line base on origin before it pushes anything (ADR-0038): checked when
+// the Finish runs, never inferred. The only branch besides its own a Factory pool may push is its Line
+// base, and only under the brief's pushBase grant, creating or fast-forwarding it, never forcing.
+fn base_on_origin(base: &LineBase, push_base: bool) -> String {
+    let branch = BaseBranch::of(&base.base_ref);
+    let name = branch.name();
+    let no_pr = "push nothing and open no PR, and say in the report and your Outcome's summary that \
+                 the Finish was not carried out, and why";
+    let check = format!(
+        "Before you push anything, check the Line base on origin with `git ls-remote --heads \
+         origin {name}` (origin only, never another remote)"
+    );
+    if let BaseBranch::Origin(_) = branch {
+        // Cut from origin's branch: there is no local base to push, so origin's state is all there is.
+        return format!(
+            "The Line was cut from `{}`, so origin already had its Line base and there is no local \
+             base to push: never push `{name}`. {check}. If origin still has `{name}`, open the PR. \
+             If it no longer does, {no_pr}.",
+            base.base_ref
+        );
+    }
+    let grant = if push_base {
+        format!(
+            "The Line brief grants `pushBase`: you may push the Line base `{name}` to origin, but \
+             only to create it or to fast-forward it. Never force-push it."
+        )
+    } else {
+        format!(
+            "The Line brief does not grant `pushBase`: never push the Line base `{name}` to origin."
+        )
+    };
+    let rows = if push_base {
+        format!(
+            "- origin has no `{name}`: push the local base to create it (`git push origin \
+             refs/heads/{name}:refs/heads/{name}`), then open the PR.\n\
+             - origin's `{name}` is the local `{name}`: open the PR.\n\
+             - the local `{name}` is ahead of origin's (a fast-forward): push it (`git push origin \
+             refs/heads/{name}:refs/heads/{name}`), then open the PR.\n\
+             - they have diverged, so it would take a force-push: {no_pr}."
+        )
+    } else {
+        format!(
+            "- origin has no `{name}`: {no_pr}.\n\
+             - origin's `{name}` is the local `{name}`: open the PR.\n\
+             - the local `{name}` is ahead of origin's: open the PR, and note in the report that it \
+             carries the base's unpushed commits.\n\
+             - they have diverged, so it would take a force-push: {no_pr}."
+        )
+    };
+    format!(
+        "{grant} {check}, compare it with the local branch `{name}` the Line was cut from, and act \
+         on what you find:\n\n{rows}"
+    )
+}
+
 // Decide's instruction for ending the Line: the Finish act, then the report at its path.
 fn finish_section(line: &LineState, factory: &ResolvedFactory) -> String {
     let report = if blank(&line.report) {
@@ -1364,18 +1507,28 @@ fn finish_section(line: &LineState, factory: &ResolvedFactory) -> String {
     } else {
         format!("`{}`", line.report)
     };
+    let act = finish_act(&factory.finish, line);
+    // The base's checks and rows are a section of their own after the list, which item 1 points at.
+    let (act, base) = match finish_base(&factory.finish, line) {
+        Some(base) => (
+            format!(
+                "{act} Before you push anything, check the Line base on origin as the section below says."
+            ),
+            format!("### The Line base on origin\n\n{base}\n\n"),
+        ),
+        None => (act, String::new()),
+    };
     format!(
         "## The Finish\n\nWhen you end the Line (\"finish\", or any verdict on a halted Line), do \
          these in order before you record your Outcome:\n\n\
-         1. Carry out the Finish. {}\n\
+         1. Carry out the Finish. {act}\n\
          2. Write the report with /html to {report}: every Round's Prove evidence, linked at its \
          path in the pool's runs directory beside the report (`<prove ticket>{EVIDENCE_SUFFIX}/`, \
          so a relative link works), every Review finding and what happened to it (fixed in a \
          later Round, or dropped and why), and the Finish's result (the PR's link, say). It is the one file you write outside your working \
          directory besides your Outcome. Without it the Ticket checkpoints with \"{NO_VERDICT}\".\n\n\
-         The operator approves the Line from the report at the Finish checkpoint the engine raises \
-         next.",
-        finish_act(&factory.finish, line)
+         {base}The operator approves the Line from the report at the Finish checkpoint the engine \
+         raises next."
     )
 }
 
@@ -1551,7 +1704,11 @@ pub fn grill_teaching(line: &str, drivers: &str) -> String {
          `{BRIEF_DIR}/{line}{BRIEF_SUFFIX}`, and commit both on your branch. The brief is JSON: \
          {{\"spec\": \"{BRIEF_DIR}/{line}.md\", \"finish\": \"none\", \"factory\": {{}}}}, where finish \
          is none, draft-pr, pr, or a sentence naming another act the Decide Station carries out, \
-         and factory holds only the Station settings this Line overrides. The operator then \
+         and factory holds only the Station settings this Line overrides. The brief may add \
+         \"pushBase\": true, which lets the Finish push the Line base (the branch this Line was cut \
+         from) to origin, only to create it or fast-forward it, never forcing; without it the \
+         Finish never pushes the base and opens no PR when origin lacks it. Ask the operator about \
+         pushBase only when the finish is pr or draft-pr, and leave it out otherwise. The operator then \
          presses Start the Line: the engine merges your branch into the Line's branch, ends this \
          Conversation and starts Round 1. Never start or propose a Station yourself: the engine \
          routes the Line."
