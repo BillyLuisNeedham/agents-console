@@ -46,6 +46,7 @@ import {
   type ViewTransform,
 } from "./geometry";
 import { h } from "./dom";
+import { prototypeVariant, renderHeaderStop, renderStatusChip } from "./prototype-stop-variants";
 import { nextFrame } from "./frame";
 import { KEEP_CHILDREN, keep } from "./morph";
 import { renderTerminalSurface } from "./terminal";
@@ -1049,6 +1050,8 @@ export class Canvas {
         "div",
         { class: "canvas-lines" },
         h("span", { class: "dim canvas-status" }, canvasStatusText(model)),
+        // PROTOTYPE (throwaway): variant C's hold-to-stop chip; null without ?variant=.
+        renderStatusChip(model),
         model.mergeQueueLine
           ? h("span", { class: "canvas-merge-queue" }, model.mergeQueueLine)
           : null,
@@ -1136,7 +1139,8 @@ export class Canvas {
           "Settings",
         ),
         this.renderCloseTerminalsControl(model.closeTerminals),
-        this.renderStopControl(model.stop),
+        // PROTOTYPE (throwaway): ?variant= swaps in the always-present Stop.
+        prototypeVariant() ? renderHeaderStop(model) : this.renderStopControl(model.stop),
       ),
     );
   }

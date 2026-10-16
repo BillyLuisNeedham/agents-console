@@ -8,7 +8,8 @@
     "dev": "vite",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "vite build"
+    "build": "vite build",
+    "prototype:stop": "bun harness/prototype-stop.ts"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.14.5",

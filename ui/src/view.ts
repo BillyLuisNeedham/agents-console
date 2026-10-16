@@ -33,6 +33,7 @@ import {
 import { flowNeighbourhood, type TopologyEdge } from "./geometry";
 import { settleLogScroll } from "./log-pane";
 import { commit } from "./morph";
+import { prototypeModel, syncPrototypeOverlay } from "./prototype-stop-variants";
 import { Canvas } from "./canvas";
 import {
   ConversationsTray,
@@ -370,6 +371,8 @@ export class ConsoleView {
   }
 
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
+    // PROTOTYPE (throwaway): the identity without ?variant=.
+    model = prototypeModel(model, () => this.onChange());
     this.onSelectNode = handlers.onSelectNode;
     this.headerHandlers = handlers;
     this.canvas.sync(model.cards);
@@ -468,6 +471,7 @@ export class ConsoleView {
         : null;
     settleLogScroll(logPaneKey);
     this.detail.settleNoteFocus(root);
+    syncPrototypeOverlay(model);
     const world = root.querySelector(".canvas-world");
     const viewport = root.querySelector(".canvas-viewport");
     if (world instanceof HTMLElement && viewport instanceof HTMLElement) {

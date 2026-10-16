@@ -15,5 +15,13 @@ export default defineConfig({
     emptyOutDir: true,
     minify: false,
     sourcemap: false,
+    // PROTOTYPE (throwaway): the Stop button prototype's page beside the
+    // render-survival one; `bun harness/prototype-stop.ts` serves it.
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL("./index.html", import.meta.url)),
+        "prototype-stop": fileURLToPath(new URL("./prototype-stop.html", import.meta.url)),
+      },
+    },
   },
 });
