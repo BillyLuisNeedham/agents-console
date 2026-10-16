@@ -422,11 +422,17 @@ conformance("protocol", "requests › refuses with the HTTP twin's status, for e
   expect(
     await refusal("terminal.focus", { ticketId: "nope" }, { method: "POST", path: "/api/terminal/focus?ticket=nope" }),
   ).toEqual({ reason: "no terminal-backed pane for ticket nope", status: 404 });
-  // A pool not yet done may not be stopped.
-  expect(await refusal("stop", {}, { method: "POST", path: "/api/stop" })).toEqual({
-    reason: "pool is quiescent, not done: stop refused",
-    status: 409,
-  });
+  // The 409 class: Keep talking on a Ticket with no checkpoint to continue.
+  // (Stop was this class until ADR-0039 let it stop a pool in any phase.)
+  expect(
+    (
+      await refusal("keepTalking", { ticketId: "01" }, {
+        method: "POST",
+        path: "/api/keep-talking",
+        body: { ticketId: "01" },
+      })
+    ).status,
+  ).toBe(409);
   // Its twin, GET /api/panes, is not asked here: on the Bun server it answers
   // 502 and then the process dies of an uncaught connect error, a bug in
   // the TypeScript server; the engine suite asked the socket only.
@@ -1097,10 +1103,14 @@ conformance(
 
     // Stop and Restart each end the server they are asked of, so each is
     // asked of two servers in the same state: one on the socket, one over
-    // HTTP. Stop on finished pools; Restart (any phase) from a stand-in
-    // checkout whose Boot only records the hand-off, which would otherwise
-    // start a server the case does not own.
-    const [stopSocket, stopHttp] = await Promise.all([finishedPool(t), finishedPool(t)]);
+    // HTTP. Stop on pools held at their review gate, not done (ADR-0039:
+    // any phase); Restart (any phase) from a stand-in checkout whose Boot
+    // only records the hand-off, which would otherwise start a server the
+    // case does not own.
+    const stops = await Promise.all([poolWorld(t, ["01"]), poolWorld(t, ["01"])].map((world) => t.start(world)));
+    await Promise.all(stops.map((each) => interruptFor(each, REVIEW)));
+    const stopSocket = { server: stops[0]! };
+    const stopHttp = { server: stops[1]! };
     const stopClient = await t.socket(stopSocket.server);
     await parity(stopClient, stopSocket.server, stopHttp.server, "stop", {}, { method: "POST", path: "/api/stop" }, seen);
 
