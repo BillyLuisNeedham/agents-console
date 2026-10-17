@@ -1070,6 +1070,29 @@ mod tests {
     }
 
     #[test]
+    fn keep_talking_refuses_a_ticket_whose_checkpoint_answer_is_queued() {
+        let runs = tempfile::tempdir().unwrap();
+        let mut s = session();
+        checkpointed(&mut s, true);
+        s.runs_dir = runs.path().to_string_lossy().into_owned();
+        s.answers = ac_core::queued_answers::QueuedAnswerStore::open(runs.path());
+        assert_eq!(check(&s, "01").unwrap().1.pane_id, "p1");
+        crate::answers::accept_answer(
+            &mut s,
+            "01",
+            None,
+            ac_protocol::ResumeAction::Resume,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            check(&s, "01").unwrap_err().to_string(),
+            "keep talking: ticket 01 already has an answer to its checkpoint queued"
+        );
+    }
+
+    #[test]
     fn a_verify_ticket_owes_the_lone_grade_of_a_continued_attempt_that_ended_done() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = session();

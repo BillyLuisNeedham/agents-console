@@ -834,6 +834,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_a_steward_answer_to_a_ticket_with_an_answer_queued() {
+        let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let refusal = engine
+            .call(|s| {
+                s.state.interrupts.push(pending("01", InterruptKind::Crash));
+                crate::answers::accept_answer(s, "01", None, ResumeAction::Resume, None, None)
+                    .unwrap();
+                steward_answer(s, "conv-1", "01", StewardAnswerAction::Resume, None)
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refusal.message(),
+            "steward: ticket 01 already has an answer queued"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tells_the_steward_of_an_interrupt_with_no_answer_queued_and_not_of_one_with() {
+        let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let (before, after, state) = engine
+            .call(|s| {
+                s.state.interrupts.push(pending("01", InterruptKind::Crash));
+                s.state.interrupts.push(pending("02", InterruptKind::Crash));
+                let keys = |s: &Session| {
+                    steward_items_of(s)
+                        .into_iter()
+                        .map(|item| item.key)
+                        .filter(|key| key.starts_with("interrupt:"))
+                        .collect::<Vec<_>>()
+                };
+                let before = keys(s);
+                crate::answers::accept_answer(s, "01", None, ResumeAction::Resume, None, None)
+                    .unwrap();
+                let queued: Vec<(String, bool)> = steward_state(s, "conv-1")
+                    .unwrap()
+                    .interrupts
+                    .into_iter()
+                    .map(|i| (i.ticket_id, i.queued))
+                    .collect();
+                (before, keys(s), queued)
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, ["interrupt:01:crash", "interrupt:02:crash"]);
+        assert_eq!(after, ["interrupt:02:crash"]);
+        assert!(state.contains(&("01".to_owned(), true)));
+        assert!(state.contains(&("02".to_owned(), false)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refuses_a_steward_resume_on_a_merge_approval_interrupt() {
         let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
         let refusal = engine

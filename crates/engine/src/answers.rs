@@ -637,9 +637,70 @@ fn close_engine_tickets(session: &mut Session, build_id: &str) -> anyhow::Result
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use ac_protocol::{InterruptKind, ResumeAction, RunPhase, TicketStatus};
+    use ac_core::pool::TicketMarker;
+    use ac_core::queued_answers::QueuedAnswerStore;
+    use ac_protocol::{Interrupt, InterruptKind, ResumeAction, RunPhase, TicketStatus};
 
+    use crate::error::EngineError;
+    use crate::session::Session;
     use crate::testkit::{Pool, answer, last, settled};
+
+    fn checkpointed_ticket(runs: &std::path::Path) -> Session {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.runs_dir = runs.to_string_lossy().into_owned();
+        session.answers = QueuedAnswerStore::open(runs);
+        session.markers.push(TicketMarker {
+            id: "01".into(),
+            file: "/p/issues/01.md".into(),
+            blocked_by: Vec::new(),
+            status: TicketStatus::Checkpoint,
+            title: "t".into(),
+            spec: String::new(),
+            spawned_by: None,
+            enlisted_from: None,
+            spawn_assign: None,
+            station: None,
+        });
+        session
+            .state
+            .tickets
+            .insert("01".into(), TicketStatus::Checkpoint);
+        session.state.interrupts.push(Interrupt {
+            ticket_id: "01".into(),
+            kind: InterruptKind::Checkpoint,
+            body: "b".into(),
+            candidates: None,
+            steward_note: None,
+        });
+        session
+    }
+
+    #[test]
+    fn a_different_answer_to_a_ticket_with_an_answer_queued_is_refused_whichever_came_first() {
+        for (first, second) in [
+            (ResumeAction::Resume, ResumeAction::Close),
+            (ResumeAction::Close, ResumeAction::Resume),
+        ] {
+            let runs = tempfile::tempdir().unwrap();
+            let mut session = checkpointed_ticket(runs.path());
+            super::accept_answer(&mut session, "01", None, first, None, None).unwrap();
+            let refusal =
+                super::accept_answer(&mut session, "01", None, second, None, None).unwrap_err();
+            assert_eq!(
+                refusal,
+                EngineError::AnswerQueuedConflict(
+                    "answer: ticket 01 already has an answer queued".into()
+                ),
+                "{second} behind {first}"
+            );
+            assert_eq!(
+                session.answers.pending().len(),
+                1,
+                "{second} behind {first}"
+            );
+        }
+    }
 
     // NOT-PORTED.md, interrupts "Pinned as the TypeScript server does it" (engine.ts:5587-5592): an
     // answer whose persist fails is refused with the store's error and its queued record stays pending,
