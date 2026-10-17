@@ -93,6 +93,37 @@ pub struct PoolSnapshot {
 /// here and nowhere persisted (ADR-0014); the watch notes what went out so a merge done by hand can
 /// move it. Each snapshot carries the store's pending answers at emit time.
 pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
+    let snapshot = build_snapshot(session, phase);
+    let hold = snapshot.merge_hold.clone();
+    // The Spawn ledger follows every emit, so what agents read there is never staler than what the
+    // Console shows (issue #150).
+    crate::spawns::refresh_spawn_ledger(session, &snapshot.conversations);
+    session.emitted += 1;
+    let snapshot = Arc::new(snapshot);
+    session.snapshots.push_back(snapshot.clone());
+    if let Some(history) = session.snapshot_history {
+        while session.snapshots.len() > history {
+            session.snapshots.pop_front();
+        }
+    }
+    hold_watch_emitted(session, &hold);
+    session.unpublished = Some(snapshot.clone());
+    if let Some(hook) = &session.on_snapshot {
+        hook(&snapshot);
+    }
+}
+
+pub fn emit_would_change(session: &mut Session, phase: RunPhase) -> bool {
+    let next = build_snapshot(session, phase);
+    session.snapshots.back().is_none_or(|last| {
+        PoolSnapshot {
+            seq: last.seq,
+            ..next
+        } != **last
+    })
+}
+
+fn build_snapshot(session: &mut Session, phase: RunPhase) -> PoolSnapshot {
     let hold = crate::merges::merge_hold(session);
     let live_attempts = {
         let conversations = &session.conversations;
@@ -121,7 +152,7 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
         .merge_line
         .queue(&hold, &resolvers, &session.state.interrupts);
     let caps = spawn_caps_of(&session.state.config);
-    let snapshot = PoolSnapshot {
+    PoolSnapshot {
         seq: session.emitted,
         phase,
         state,
@@ -149,22 +180,6 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
                 .collect(),
         },
         line: crate::line::line_view(session),
-    };
-    // The Spawn ledger follows every emit, so what agents read there is never staler than what the
-    // Console shows (issue #150).
-    crate::spawns::refresh_spawn_ledger(session, &snapshot.conversations);
-    session.emitted += 1;
-    let snapshot = Arc::new(snapshot);
-    session.snapshots.push_back(snapshot.clone());
-    if let Some(history) = session.snapshot_history {
-        while session.snapshots.len() > history {
-            session.snapshots.pop_front();
-        }
-    }
-    hold_watch_emitted(session, &hold);
-    session.unpublished = Some(snapshot.clone());
-    if let Some(hook) = &session.on_snapshot {
-        hook(&snapshot);
     }
 }
 

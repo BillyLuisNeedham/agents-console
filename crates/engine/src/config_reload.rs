@@ -74,6 +74,13 @@ pub fn reload_config(session: &mut Session) -> anyhow::Result<()> {
         .chain(session.continued.keys())
         .chain(session.launched.iter())
         .chain(session.live_attempts.ids().iter())
+        .chain(
+            session
+                .markers
+                .iter()
+                .filter(|m| m.enlisted_from.is_some())
+                .map(|m| &m.id),
+        )
         .cloned()
         .collect();
     for id in frozen_ids {

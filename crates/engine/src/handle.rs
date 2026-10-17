@@ -164,10 +164,9 @@ impl Engine {
         let _ = self
             .call(|s| -> anyhow::Result<()> {
                 if !s.driving {
-                    let before = serde_json::to_value(&s.state)?;
                     crate::config_reload::reload_config(s)?;
-                    if serde_json::to_value(&s.state)? != before {
-                        let phase = s.idle_phase();
+                    let phase = s.idle_phase();
+                    if crate::snapshot::emit_would_change(s, phase) {
                         crate::snapshot::emit_snapshot(s, phase);
                     }
                 }
