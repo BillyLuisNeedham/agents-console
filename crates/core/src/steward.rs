@@ -416,7 +416,7 @@ pub fn steward_merge_stall_text(ticket_id: &str, title: Option<&str>, behind: &[
     };
     [
         format!(
-            "The Merge queue head, Ticket {ticket_id}{title}, is stalled: it is done, its branch has not landed, and no resolver runs and no Interrupt is raised for it. Nothing in the pool moves until it lands."
+            "The Merge queue head, Ticket {ticket_id}{title}, is stalled: it is done, its branch has not landed, and no resolver runs and no Interrupt is raised for it. Only the Tickets that name it as a blocker wait until it lands."
         ),
         if behind.is_empty() {
             "Nothing else waits behind it.".to_owned()

@@ -270,8 +270,8 @@ function ticket(id: string, title: string, blockedBy = "none"): TicketSeed {
 function stallText(head: string, title: string, behind: string): string {
   return (
     `The Merge queue head, Ticket ${head} ("${title}"), is stalled: it is done, its branch ` +
-    "has not landed, and no resolver runs and no Interrupt is raised for it. Nothing in the " +
-    "pool moves until it lands.\n" +
+    "has not landed, and no resolver runs and no Interrupt is raised for it. Only the Tickets " +
+    "that name it as a blocker wait until it lands.\n" +
     `${behind}\n` +
     "There is no Interrupt to answer. Read its Ticket log and branch, and tell the operator in " +
     "this pane what you found; merge it by hand only if the operator's own words allowed you to."
