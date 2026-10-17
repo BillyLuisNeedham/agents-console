@@ -510,6 +510,31 @@ async fn reassigns_from_the_file_and_answers_with_the_fresh_snapshot() {
 }
 
 #[tokio::test]
+async fn wakes_the_drive_for_a_reassign_that_applied_and_not_for_one_refused() {
+    let rig = rig(RigOptions::default()).await;
+    let wakes = || async { rig.engine().call(|session| session.wakes).await.unwrap() };
+    let before = wakes().await;
+    let (status, _) = rig
+        .json(
+            "PUT",
+            "/api/reassign",
+            Some(r#"{"tickets":["zz"],"fields":{}}"#),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(wakes().await, before);
+    let (status, _) = rig
+        .json(
+            "PUT",
+            "/api/reassign",
+            Some(r#"{"tickets":["02"],"fields":{"model":"x-model"}}"#),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(wakes().await, before + 1);
+}
+
+#[tokio::test]
 async fn serves_the_page_with_the_boot_snapshot_the_socket_repeats() {
     let rig = rig(RigOptions::default()).await;
     let (status, headers, page) = rig.http("GET", "/", None).await;

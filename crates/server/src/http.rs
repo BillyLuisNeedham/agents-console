@@ -249,8 +249,7 @@ async fn fetch(server: Server, request: Request) -> Response {
         }
         ("/api/reassign", &Method::PUT) => {
             let body = read_body(body).await;
-            let mut inner = server.lock();
-            return http_of(routes::reassign_request(&server, &mut inner, body));
+            return http_of(routes::reassign_request(&server, body).await);
         }
         ("/api/settings/machine", &Method::PUT) => {
             let body = read_body(body).await;

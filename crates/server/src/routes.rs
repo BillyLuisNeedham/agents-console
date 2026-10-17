@@ -24,7 +24,7 @@ use ac_protocol::{
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
-use crate::reassign::{ReassignContext, ReassignError, write_reassign};
+use crate::reassign::{ReassignContext, ReassignError, ReassignOutcome, write_reassign};
 use crate::server::{Inner, Server, live_attempt_ids};
 
 /// Which key a refusal's reason goes under over HTTP: the older routes say `error`, the Conversation
@@ -239,17 +239,41 @@ pub async fn pool_settings_request(server: &Server, body: Body) -> Answer {
 
 /// Reassign (issue #126): an edit of console.json's `assign`, answered in the settings convention: 400
 /// for a refused request, 500 for a file this server can no longer read or a pool that never started.
-pub fn reassign_request(server: &Server, inner: &mut Inner, body: Body) -> Answer {
+/// The write wakes the drive (ADR-0040), so a waiting Ticket launches on the new Assignment at the
+/// next Tick instead of when something else stirs.
+pub async fn reassign_request(server: &Server, body: Body) -> Answer {
+    let written = {
+        let mut inner = server.lock();
+        write_reassign_request(server, &mut inner, body)
+    };
+    let outcome = match written {
+        Ok(outcome) => outcome,
+        Err(refused) => return refused,
+    };
+    if let Some(engine) = server.engine() {
+        engine.reload_config().await;
+    }
+    let Some(snapshot) = server.reenrich(&mut server.lock()) else {
+        return Answer::refused(500, Field::Error, "reassign: pool not started".to_owned());
+    };
+    Answer::ok(
+        200,
+        &json!({ "applied": outcome.applied, "skipped": outcome.skipped, "snapshot": &*snapshot }),
+    )
+}
+
+fn write_reassign_request(
+    server: &Server,
+    inner: &mut Inner,
+    body: Body,
+) -> Result<ReassignOutcome, Answer> {
     let failed = |err: String| Answer::refused(500, Field::Error, err);
     let Some(raw) = server.last_raw() else {
-        return failed("reassign: pool not started".to_owned());
+        return Err(failed("reassign: pool not started".to_owned()));
     };
-    let body = match body {
-        Ok(body) => body,
-        Err(err) => return failed(err),
-    };
+    let body = body.map_err(failed)?;
     if !body.is_object() {
-        return failed("reassign: body must be an object".to_owned());
+        return Err(failed("reassign: body must be an object".to_owned()));
     }
     server.refresh_meta(inner, Some(&raw));
     let live = live_attempt_ids(&raw);
@@ -264,23 +288,16 @@ pub fn reassign_request(server: &Server, inner: &mut Inner, body: Body) -> Answe
         None | Some(Value::Null) => json!({}),
         Some(fields) => fields.clone(),
     };
-    let outcome = match write_reassign(
+    write_reassign(
         server.pool_dir(),
         field_of(&body, "tickets"),
         &fields,
         &context,
-    ) {
-        Ok(outcome) => outcome,
-        Err(ReassignError::Refusal(err)) => return Answer::refused(400, Field::Error, err),
-        Err(err) => return failed(err.message().to_owned()),
-    };
-    let Some(snapshot) = server.reenrich(inner) else {
-        return failed("reassign: pool not started".to_owned());
-    };
-    Answer::ok(
-        200,
-        &json!({ "applied": outcome.applied, "skipped": outcome.skipped, "snapshot": &*snapshot }),
     )
+    .map_err(|err| match err {
+        ReassignError::Refusal(err) => Answer::refused(400, Field::Error, err),
+        err => failed(err.message().to_owned()),
+    })
 }
 
 /// The Machine defaults, written whole: a field left empty is the operator clearing it.
@@ -938,10 +955,7 @@ pub async fn socket_request(
         RequestKind::TerminalFocus => focus_request(server, &field("ticketId")).await,
         RequestKind::TerminalsCloseFinished => close_finished_request(server).await,
         RequestKind::Enlist => enlist_request(server, body()).await,
-        RequestKind::Reassign => {
-            let mut inner = server.lock();
-            reassign_request(server, &mut inner, body()).without_snapshot()
-        }
+        RequestKind::Reassign => reassign_request(server, body()).await.without_snapshot(),
         RequestKind::SpawnsHeldAdopt
         | RequestKind::SpawnsHeldDiscard
         | RequestKind::SpawnsPendingHold
