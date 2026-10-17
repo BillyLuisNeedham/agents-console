@@ -433,13 +433,6 @@ async fn serves_the_enriched_snapshot_and_the_ticket_reads() {
         (400, json!({ "reason": "invalid JSON body" }))
     );
     assert_eq!(
-        rig.json("POST", "/api/stop", None).await,
-        (
-            409,
-            json!({ "error": "pool is quiescent, not done: stop refused" })
-        )
-    );
-    assert_eq!(
         rig.json("GET", "/api/panes", None).await,
         (
             409,
@@ -806,6 +799,38 @@ async fn hands_a_stop_to_its_owner_exactly_once_and_does_not_shut_itself_down() 
     );
 }
 
+// ADR-0039: Stop is a kill switch in any phase, before the pool starts too.
+#[tokio::test]
+async fn accepts_a_stop_while_the_pool_runs_and_before_it_starts() {
+    let running = rig(RigOptions {
+        hand_off_stop: true,
+        ..RigOptions::default()
+    })
+    .await;
+    publish(
+        &running.engine(),
+        snapshot(1, RunPhase::Running, &[("02", TicketStatus::InProgress)], &[]),
+    )
+    .await;
+    assert_eq!(
+        running.json("POST", "/api/stop", None).await,
+        (202, json!({ "stopping": true }))
+    );
+    let unstarted = rig(RigOptions {
+        hand_off_stop: true,
+        start: false,
+        ..RigOptions::default()
+    })
+    .await;
+    assert_eq!(
+        unstarted.json("POST", "/api/stop", None).await,
+        (202, json!({ "stopping": true }))
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(running.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(unstarted.stops.load(Ordering::SeqCst), 1);
+}
+
 fn failing_encode(_: &ac_protocol::EnrichedSnapshot, _: u64) -> Result<Pushed, String> {
     Err("a BigInt cannot be serialised".to_owned())
 }
@@ -941,10 +966,6 @@ async fn answers_before_the_pool_starts_without_tearing_anything_down() {
         ..RigOptions::default()
     })
     .await;
-    assert_eq!(
-        rig.json("POST", "/api/stop", None).await,
-        (409, json!({ "error": "pool not started: nothing to stop" }))
-    );
     assert_eq!(
         rig.json("GET", "/api/state", None).await,
         (200, json!({ "snapshot": null }))

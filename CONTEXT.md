@@ -223,7 +223,7 @@ A drive loop that has died — from an unhandled error or a hang — while the s
 _Avoid_: stuck, frozen, hung pool
 
 **Stopped**:
-The terminal phase a pool server sends as its farewell on an orderly shutdown, whether the Console asked for it (only offered once the pool is done) or a signal did. The last snapshot on the stream before the stream ends; a tab that has seen it knows the server left on purpose, shows the relaunch command, and reconnects on its own when the pool is relaunched. Distinct from dead: nothing went wrong, and there is no `errors.jsonl` entry. Introduced by ADR-0019 (`docs/adr/0019-finished-pool-stops-from-the-console-with-a-farewell.md`), closing issue #97.
+The terminal phase a pool server sends as its farewell on an orderly shutdown, whether the Console asked for it (offered in any phase; terminal-backed panes keep running for the next boot to re-adopt, ADR-0039) or a signal did. The last snapshot on the stream before the stream ends; a tab that has seen it knows the server left on purpose, shows the relaunch command, and reconnects on its own when the pool is relaunched. Distinct from dead: nothing went wrong, and there is no `errors.jsonl` entry. Introduced by ADR-0019 (`docs/adr/0019-finished-pool-stops-from-the-console-with-a-farewell.md`), closing issue #97; widened to every phase by ADR-0039.
 _Avoid_: killed, crashed, disconnected (those are the cases it exists to be told apart from)
 
 **Needs input**:

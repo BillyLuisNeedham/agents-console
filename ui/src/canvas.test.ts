@@ -19,6 +19,7 @@ function stop(overrides: Partial<StopView> = {}): StopView {
   return {
     offered: false,
     state: "idle",
+    prompt: "Really stop?",
     failure: null,
     stoppedFromHere: false,
     relaunch: null,
@@ -166,9 +167,6 @@ function mountCanvas(
     onResetLayout: () => {},
     onEndConversation: () => {},
     onStartLine: () => {},
-    onArmStop: () => {},
-    onCancelStop: () => {},
-    onConfirmStop: () => {},
     onArmCloseTerminals: () => {},
     onCancelCloseTerminals: () => {},
     onConfirmCloseTerminals: () => {},
@@ -488,11 +486,11 @@ describe("the header's close-finished-terminals control (issue #139)", () => {
     );
   });
 
-  it("sits beside Stop, each keyed as its own control", () => {
+  it("is the header's only inline confirm: Stop lives in the Settings footer (ADR-0039)", () => {
     const { root } = mount(closeTerminals(), stop({ offered: true }));
-    expect(root.querySelector(".canvas-stop-server")?.textContent).toBe("Stop server");
     expect(control(root)?.getAttribute("data-key")).toBe("canvas-close-terminals");
-    expect(root.querySelector(".canvas-stop")?.getAttribute("data-key")).toBe("canvas-stop");
+    expect(root.querySelector(".canvas-stop")).toBeNull();
+    expect(root.querySelector(".canvas-stop-server")).toBeNull();
   });
 });
 
