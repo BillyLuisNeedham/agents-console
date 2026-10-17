@@ -729,7 +729,7 @@ fn write_enlisted_ticket(
                 )));
             }
         }
-        // Keep the in-memory marker in step with the file: the next super-step boundary's ready set
+        // Keep the in-memory marker in step with the file: the next Tick's eligibility
         // reads it, and the ticked ticket must be gated.
         if let Some(marker) = s.marker_mut(blocker)
             && !marker.blocked_by.iter().any(|b| b == id)
@@ -847,7 +847,7 @@ impl Engine {
 
 /// `reRunAssignment`: the Assignment a ticket that stopped being an enlisted attempt runs on: the
 /// ordinary pool assignment for its id, with verify stripped (an enlisted id never fans out,
-/// `planSuperStep` says so too). Used where a pane-gone checkpoint hands the ticket back to the
+/// and the drive's launch says so too). Used where a pane-gone checkpoint hands the ticket back to the
 /// ordinary engine-launched path.
 pub fn re_run_assignment(session: &Session, marker: &TicketMarker) -> anyhow::Result<Assignment> {
     let mut resolved =
@@ -898,9 +898,8 @@ fn enlisted_attempt_ended(session: &Session, ticket_id: &str, attempt: u64) -> b
 }
 
 /// `finishAdoptedFinalize`: the last step of an ending, after its merge chain has settled: emit the new
-/// state, persist it, and kick a drive pass when the run had already settled, so the closing gate, the
-/// ready set, and any queued answers see the attempt's real ending. The kick is a no-op while a drive
-/// is in flight; its boundary machinery picks the state up instead.
+/// state and wake the drive, so the closing gate, the Tickets it unblocks, and any queued answers see
+/// the attempt's real ending.
 pub fn finish_adopted_finalize(session: &mut Session) {
     crate::restart::finish_adopted_finalize(session);
 }

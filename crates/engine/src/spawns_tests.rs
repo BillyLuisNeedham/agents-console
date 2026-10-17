@@ -76,7 +76,7 @@ impl CheckpointStore for HookedStore {
 }
 
 // engine.test.ts "lands a spawn queued while the drive was closing, without another kick": an Adopt
-// of a Held spawn accepted while the drive is closing (after its last boundary, as the Review is
+// of a Held spawn accepted while the drive is closing (after its last Tick, as the Review is
 // raised) keeps the run quiescent and starts a fresh drive that lands the spawn and runs it to done.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lands_a_spawn_queued_while_the_drive_was_closing_without_another_kick() {
@@ -255,25 +255,37 @@ async fn writes_the_spawn_ledger_with_every_ticket_pending_and_held_spawn() {
     );
 }
 
-// engine.test.ts "holds a Pending spawn the boundary can no longer land, with the reason on it": the
-// blocks target finished between the take and the boundary.
+// engine.test.ts "holds a Pending spawn a Tick can no longer land, with the reason on it": the
+// blocks target finished between the take and the Tick, here across a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn holds_a_pending_spawn_the_boundary_can_no_longer_land_with_the_reason_on_it() {
+async fn holds_a_pending_spawn_the_tick_can_no_longer_land_with_the_reason_on_it() {
     let pool = Pool::git(&[("01", &[]), ("02", &[])]);
-    pool.script(
-        "01",
-        vec![spawning(vec![proposal(
-            "Fix first",
-            json!({ "blocks": ["02"] }),
-        )])],
-    );
+    for id in ["01", "02"] {
+        std::fs::write(
+            pool.file(&format!("issues/{id}.md")),
+            crate::testkit::ticket_text(id, &[], "done"),
+        )
+        .unwrap();
+    }
+    let mut proposals = ac_core::spawn_proposals::load_spawn_proposals(&pool.file("runs")).unwrap();
+    proposals
+        .take(vec![ac_core::spawn_proposals::TakenProposal {
+            parent_id: "01".into(),
+            origin: ac_protocol::SpawnKind::Ticket,
+            proposal: serde_json::from_value(proposal("Fix first", json!({ "blocks": ["02"] })))
+                .unwrap(),
+            at: "2026-01-01T00:00:00.000Z".into(),
+            held: None,
+            unknown_overlaps: None,
+        }])
+        .unwrap();
     let engine = pool.start().await;
     assert_eq!(settled(&engine).await, RunPhase::Quiescent);
     let reason = "blocks names done tickets, which have no next attempt to hold: 02";
     assert!(!pool.file("issues/01-spawn-1.md").exists());
     let snapshot = last(&engine);
     assert!(snapshot.pending_spawns.is_empty());
-    assert_eq!(snapshot.held_spawns.len(), 1);
+    assert_eq!(snapshot.held_spawns.len(), 1, "{:#?}", snapshot.state.log);
     assert_eq!(snapshot.held_spawns[0].reason, HeldSpawnReason::Refused);
     assert_eq!(snapshot.held_spawns[0].adopt_error.as_deref(), Some(reason));
     assert_eq!(

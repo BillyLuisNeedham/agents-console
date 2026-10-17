@@ -1,13 +1,13 @@
 //! The Factory's Line in the engine (issue #187, ADR-0037): Start the Line, routing a Station Ticket's
-//! ending to the next Station at the super-step boundary, and the verdict check every Station attempt's
+//! ending to the next Station at a Tick, and the verdict check every Station attempt's
 //! Outcome passes through. The decisions are `ac_core::line`'s; this module reads the pool for them and
 //! writes what they return: the next Station Ticket, the Line's state in `line.json`, and the engine's
 //! checkpoints.
 //!
-//! Routing runs at the boundary rather than at an attempt's exit, so every way a Station Ticket can end
-//! (a launched attempt, an adopted one, a Continued one, a Close, a Resume of the Finish checkpoint)
-//! comes to the one place, and a restart between the ending and the routing loses nothing: the Line
-//! still points at the ended Ticket, and the next boundary routes it.
+//! Routing runs at a Tick rather than at an attempt's exit, so every way a Station Ticket can end (a
+//! launched attempt, an adopted one, a Continued one, a Close, a Resume of the Finish checkpoint) comes
+//! to the one place, and a restart between the ending and the routing loses nothing: the Line still
+//! points at the ended Ticket, and the next Tick routes it.
 
 use std::path::Path;
 
@@ -79,8 +79,8 @@ pub fn checked(check: Option<&VerdictCheck>, valid: ValidOutcome) -> ValidOutcom
 }
 
 /// The Factory settings layers under the Line brief, read afresh: the Machine defaults' file and the
-/// Pool settings as the last Config reload committed them. Routing reads them at the super-step
-/// boundary, after the reload (ADR-0018), so a change reaches the next Station Ticket written and never
+/// Pool settings as the last Config reload committed them. Routing reads them at a Tick, after the
+/// reload (ADR-0018), so a change reaches the next Station Ticket written and never
 /// one already written, whose Assignment and note its file carries.
 pub fn factory_layers(session: &Session) -> FactoryLayers {
     FactoryLayers {
@@ -91,7 +91,7 @@ pub fn factory_layers(session: &Session) -> FactoryLayers {
     }
 }
 
-/// The Factory settings the Line runs on, as the last boundary (or Start the Line) resolved them: the
+/// The Factory settings the Line runs on, as the last Tick (or Start the Line) resolved them: the
 /// snapshot reads them at every emit, so they are cached rather than read from the Machine defaults'
 /// file each time.
 fn line_factory(session: &mut Session) -> Option<ResolvedFactory> {
@@ -169,11 +169,9 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
         ..PoolUpdate::default()
     });
     session.log(format!("line: started from {path}; {id} written"));
-    // A drive closing right now would settle without seeing the new Ticket: have it start the next.
-    if session.driving {
-        session.finalized_while_driving = true;
-    }
-    crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))?;
+    session
+        .wake()
+        .map_err(|e| EngineError::refused(e.to_string()))?;
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(id)
 }
@@ -343,11 +341,11 @@ fn last_resume_note(file: &Path) -> Option<String> {
     (!note.is_empty()).then(|| note.to_owned())
 }
 
-/// The boundary's Line step: while the current Station Ticket has ended, route it and write the next.
+/// A Tick's Line step: while the current Station Ticket has ended, route it and write the next.
 /// Each routing writes a fresh Ticket that has not ended, so this settles in one pass; the loop bound
 /// only guards against a Line that would not.
 pub fn route_line(session: &mut Session) -> anyhow::Result<()> {
-    // The boundary is where the settings reload (ADR-0018): the header strip follows them from here.
+    // A Tick is where the settings reload (ADR-0018): the header strip follows them from here.
     session.line_factory = session
         .line
         .as_ref()

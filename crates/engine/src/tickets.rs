@@ -35,7 +35,7 @@ use crate::merges::merge_target_ref;
 use crate::session::{PoolState, PoolUpdate, Session};
 
 /// `attemptEnvOf`: the Attempt-run module's environment, the one place the pool's terminal setting is
-/// decided. The drive passes the super-step's frozen config; the other spawn sites read the live one.
+/// decided. The drive passes the config frozen at the launch; the other spawn sites read the live one.
 pub fn attempt_env_of(session: &Session, config: Option<&PoolConfig>) -> AttemptEnv {
     let config = config.unwrap_or(&session.state.config);
     AttemptEnv {
@@ -67,7 +67,7 @@ pub struct TicketPlan {
     pub verdict: Option<ac_core::line::VerdictCheck>,
 }
 
-/// One attempt's ending as the drive joins it.
+/// One attempt's ending, as its exit job takes it.
 #[derive(Debug, Clone)]
 pub struct TicketResult {
     pub marker: TicketMarker,
@@ -76,8 +76,6 @@ pub struct TicketResult {
     pub exit_code: i64,
     pub plan: TicketPlan,
     pub update: PoolUpdate,
-    /// True when the drive applied this result's update at attempt exit; the boundary join skips it.
-    pub joined_at_exit: bool,
     /// The attempt's schema-valid spawn proposals (ADR-0010); a verify candidate carries none.
     pub spawn_proposals: Option<Vec<SpawnProposal>>,
     /// The exit facts (ADR-0012), frozen at exit for the crash interrupt body.
@@ -86,6 +84,51 @@ pub struct TicketResult {
     pub outcome_exists: bool,
     /// The crash reason the crash event recorded, `None` on a clean exit.
     pub crash_reason: Option<String>,
+}
+
+impl TicketResult {
+    /// What a verify round keeps of this Candidate's ending.
+    pub fn ending(&self) -> CandidateEnding {
+        CandidateEnding {
+            attempt: self.plan.attempt,
+            status: self.status,
+            crash_reason: self.crash_reason.clone(),
+            log_path: self.log_path.clone(),
+            log_tail: self.log_tail.clone(),
+            outcome_path: self.outcome_path.clone(),
+            outcome_exists: self.outcome_exists,
+            worktree: self.plan.worktree.clone(),
+        }
+    }
+}
+
+/// One verify Candidate's ending: what its round's crash Interrupts, grading and decision read. Rebuilt
+/// from its `exited` and `crash` events after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateEnding {
+    pub attempt: u64,
+    /// Done, checkpoint, or in-progress for a crash.
+    pub status: TicketStatus,
+    pub crash_reason: Option<String>,
+    pub log_path: String,
+    pub log_tail: Vec<String>,
+    pub outcome_path: String,
+    pub outcome_exists: bool,
+    /// Where its work is; `None` reads as the attempt's own worktree.
+    pub worktree: Option<WorktreeInfo>,
+}
+
+impl CandidateEnding {
+    /// The crash Interrupt's body for this ending.
+    pub fn crash_body(&self) -> String {
+        crash_interrupt_body(&CrashFacts {
+            crash_reason: self.crash_reason.as_deref().unwrap_or("crashed"),
+            log_path: &self.log_path,
+            log_tail: &self.log_tail,
+            outcome_path: &self.outcome_path,
+            outcome_exists: self.outcome_exists,
+        })
+    }
 }
 
 /// The exit facts a crash interrupt body quotes (ADR-0012), frozen at raise time.
@@ -272,35 +315,16 @@ fn git_attempt(attempt: u64) -> Option<u32> {
     Some(u32::try_from(attempt).unwrap_or(u32::MAX))
 }
 
-/// `planTicket`: where an attempt runs. A lone ready ticket runs in the pool checkout itself; a
-/// multi-ticket super-step, a parked branch, a verify candidate, a captured merge target or a
-/// Continued attempt in the checkout gives the ticket its own worktree, seeded with the Ticket file
-/// (kept under runs/ too for the reconcile at merge).
+/// `planTicket`: where an attempt runs. Every git Ticket gets its own worktree cut from the merge
+/// target's tip now (ADR-0040), a parked branch reused, seeded with the Ticket file (kept under runs/
+/// too for the reconcile at merge). A pool outside git runs it in the pool directory.
 pub fn plan_ticket(
     session: &mut Session,
     marker: &TicketMarker,
-    ready_count: usize,
     attempt: u64,
     verify: bool,
 ) -> anyhow::Result<TicketPlan> {
     if !session.git {
-        session.pool_checkout_planned.insert(marker.id.clone());
-        return Ok(TicketPlan {
-            cwd: session.cwd.clone(),
-            worktree: None,
-            attempt,
-            verify,
-            verdict: crate::line::verdict_check_for(session, marker),
-        });
-    }
-    if !verify
-        && ready_count < 2
-        && !git::branch_exists(&session.cwd, &marker.id, None)
-        && session.merge_target.is_none()
-        && !session.continued.values().any(|c| c.in_pool_checkout)
-    {
-        // Occupied from the plan on (ADR-0027).
-        session.pool_checkout_planned.insert(marker.id.clone());
         return Ok(TicketPlan {
             cwd: session.cwd.clone(),
             worktree: None,
@@ -525,7 +549,6 @@ pub async fn run_ticket(
         status,
         log_path: run.log_path.clone(),
         exit_code: run.code,
-        joined_at_exit: false,
         log_tail: run.log_tail.clone(),
         outcome_path: run.outcome_path.clone(),
         outcome_exists: run.outcome_exists,

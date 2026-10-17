@@ -394,6 +394,14 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
             session.continued_grades.push(owed);
             continue;
         }
+        if crate::drive::rebuild_verify_group(session, &marker) {
+            log.push(format!(
+                "ticket {}: every candidate of its verify round ended before a restart; the round is \
+                 graded, not fanned out again",
+                marker.id
+            ));
+            continue;
+        }
         let orphans = crate::restart::headless_orphans(session, &marker.id);
         write_marker_status(&marker.file, TicketStatus::Ready)?;
         js::append_file(

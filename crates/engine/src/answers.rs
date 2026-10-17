@@ -1,5 +1,5 @@
-//! Answers (ADR-0004; engine.ts 5397-5887): accepting an answer, the processing kick, the drain that
-//! applies queued answers in submission order, processing one, and Close (issue #154).
+//! Answers (ADR-0004; engine.ts 5397-5887): accepting an answer, the drain a Tick runs that applies
+//! queued answers in submission order, processing one, and Close (issue #154).
 
 use std::path::Path;
 
@@ -214,31 +214,19 @@ pub fn accept_answer(
     );
     // Mid-flight acceptance is the one moment the queue changes without an emit of its own.
     if session.driving {
-        session.queued_since_drain = true;
         emit_snapshot(session, RunPhase::Running);
     }
     Ok(record)
-}
-
-/// `kickProcessing`: every answer path's second step. Idle, the drain applies the answer right away
-/// and a fresh drive starts; in flight, the queued record waits for the boundary drain.
-pub fn kick_processing(session: &mut Session) -> anyhow::Result<()> {
-    if session.driving {
-        return Ok(());
-    }
-    drain_answers(session)?;
-    crate::drive::start_drive(session);
-    Ok(())
 }
 
 /// `drainAnswers`: every queued answer applied in submission order. One that fails processing
 /// rejects its own waiters and is consumed; a processed one persists the resulting state itself
 /// before its record is marked processed. A persist failure propagates.
 pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
-    session.queued_since_drain = false;
     for record in session.answers.pending() {
         // An answer that merges into the pool checkout waits, still queued, while a Continued attempt
-        // works there (ADR-0027). A Close merges nothing, so it never waits.
+        // works there (ADR-0027), and while a merge on the merge chain has not settled, so nothing
+        // lands beside a resolver's work. A Close merges nothing, so it never waits.
         let merges_into_checkout = record.action == Some(QueuedAnswerAction::Adopt)
             || (record.action != Some(QueuedAnswerAction::Close)
                 && matches!(
@@ -247,7 +235,8 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
                         | InterruptKind::MergeApproval
                         | InterruptKind::Selection
                 ));
-        if pool_checkout_held(session) && merges_into_checkout {
+        let merging = pool_checkout_held(session) || !session.merge_line.unsettled().is_empty();
+        if merging && merges_into_checkout {
             continue;
         }
         let waiters = session
@@ -307,8 +296,8 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         }
         return reject_review(session, &pending, note);
     }
-    // The persistence interrupt belongs to the run: answering it only clears it, and the resumed
-    // drive's next boundary write is the retry.
+    // The persistence interrupt belongs to the run: answering it only clears it, and the next Tick's
+    // write is the retry.
     if pending.kind == InterruptKind::Persistence {
         clear_interrupt(
             session,
@@ -660,7 +649,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on() {
         let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
-        // The first boundary write fails all four attempts and raises the persistence Interrupt.
+        // The launching Tick's write fails all four attempts and raises the persistence Interrupt.
         pool.store.fail.store(4, Ordering::SeqCst);
         let engine = pool.start().await;
         assert_eq!(settled(&engine).await, RunPhase::Quiescent);

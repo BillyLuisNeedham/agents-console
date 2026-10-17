@@ -1,4 +1,4 @@
-//! The Config reload (ADR-0018; engine.ts 6627-7145): the boundary re-reads console.json, and when its
+//! The Config reload (ADR-0018; engine.ts 6627-7145): every Tick re-reads console.json, and when its
 //! slice changed, dry-runs every reassignable ticket's Assignment before committing anything. The pure
 //! resolution lives in `ac_core::assignment`.
 
@@ -19,7 +19,6 @@ use ac_core::harness::{effort_applies, pool_harness_mode};
 use ac_protocol::{AssignmentView, TicketEventKind};
 
 use crate::session::{PoolUpdate, Session};
-use crate::snapshot::emit_snapshot;
 
 /// `assignmentWireView`: a ticket's Assignment on the wire, with the effort marked not applied when
 /// the harness cannot take it in the mode this pool launches in.
@@ -45,7 +44,7 @@ fn same_assignment(before: &Assignment, after: &Assignment) -> bool {
 /// `reloadConfigAtBoundary`: re-read console.json; a parse failure or a resolution failure rejects the
 /// whole reload atomically, with one pool-log line. The same raw content is never considered twice.
 /// Fails only when the file cannot be read.
-pub fn reload_config_at_boundary(session: &mut Session) -> anyhow::Result<()> {
+pub fn reload_config(session: &mut Session) -> anyhow::Result<()> {
     let raw = read_config_text(&session.pool_dir)?;
     if raw == session.last_config_text {
         return Ok(());
@@ -67,8 +66,8 @@ pub fn reload_config_at_boundary(session: &mut Session) -> anyhow::Result<()> {
         return Ok(());
     }
     // The dry run: every id that is not a ticket is a Conversation's Assignment, carried over; every
-    // in-flight ticket keeps its frozen Assignment; everything else resolves fresh against the
-    // candidate.
+    // ticket with a live Attempt keeps its frozen Assignment; everything else resolves fresh against
+    // the candidate.
     let mut resolved = Assignments::new();
     for (id, assignment) in &session.assignments {
         if !session.markers.iter().any(|m| &m.id == id) {
@@ -80,6 +79,8 @@ pub fn reload_config_at_boundary(session: &mut Session) -> anyhow::Result<()> {
         .keys()
         .chain(session.enlisted_work.keys())
         .chain(session.continued.keys())
+        .chain(session.launched.iter())
+        .chain(session.live_attempts.ids().iter())
         .cloned()
         .collect();
     for id in frozen_ids {
@@ -133,17 +134,5 @@ pub fn reload_config_at_boundary(session: &mut Session) -> anyhow::Result<()> {
             &event_now(attempt, TicketEventKind::Reassigned, payload),
         )?;
     }
-    Ok(())
-}
-
-/// `reloadConfigWhenIdle`: a Pool settings save's reload (issue #149). Idle, this is a boundary as far
-/// as the reload is concerned, and the emit carries its result; in flight, the next boundary reloads.
-pub fn reload_config_when_idle(session: &mut Session) -> anyhow::Result<()> {
-    if session.driving {
-        return Ok(());
-    }
-    reload_config_at_boundary(session)?;
-    let phase = session.idle_phase();
-    emit_snapshot(session, phase);
     Ok(())
 }

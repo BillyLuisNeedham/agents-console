@@ -20,7 +20,7 @@ use ac_core::verify_prompts::{
 use ac_io::git;
 use ac_io::herdr::PaneAgentState;
 use ac_protocol::{
-    AnswerBy, InterruptKind, OutcomeStatus, RunPhase, SpawnKind, TicketEventKind, TicketStatus,
+    AnswerBy, InterruptKind, OutcomeStatus, SpawnKind, TicketEventKind, TicketStatus,
 };
 
 use crate::actor::Engine;
@@ -29,10 +29,7 @@ use crate::attempt_ending::{
     SPAWN_INTERACTIVE_PROMPT_FAILED, read_attempt_result,
 };
 use crate::attempt_run::{read_log_tail, release_attempt_agent, report_attempt_agent};
-use crate::checkout_gate::{
-    hold_pool_checkout, in_pool_checkout, other_agent_in_pool_checkout, pool_checkout_free,
-    release_pool_checkout,
-};
+use crate::checkout_gate::{in_pool_checkout, other_agent_in_pool_checkout};
 use crate::continued::{
     ContinuedEnding, ContinuedEnv, ContinuedInput, ContinuedRelease, run_continued,
 };
@@ -44,13 +41,12 @@ use crate::held::{
     restore_assignment, tui_exited,
 };
 use crate::live_attempts::LiveAttemptEntry;
-use crate::persist::persist_with_retry;
 use crate::restart::{finish_adopted_finalize, record_adopted_exit};
 use crate::session::{PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::spawns::take_spawn_proposals;
 use crate::steward_actions::note_answered;
-use crate::tickets::{TicketPlan, TicketResult};
+use crate::tickets::CandidateEnding;
 use crate::verify::{checkpoint_ticket_by_engine, grade_round, resolve_lone_attempt};
 
 /// One Continued attempt in flight.
@@ -99,8 +95,8 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
         .iter()
         .find(|i| i.ticket_id == ticket_id);
     let marker = session.marker(ticket_id);
-    // The state, not the marker object: a checkpoint joined at its attempt's exit reaches the markers
-    // only at the boundary persist, and a sibling may still be running.
+    // The state, not the marker object: a checkpoint applied at its attempt's exit reaches the markers
+    // only at the next persist.
     let (Some(interrupt), Some(marker)) = (interrupt, marker) else {
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
     };
@@ -128,13 +124,13 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
 }
 
 /// `keepTalking` (issue #139): continue a ticket's checkpointed Attempt in its Held pane as a Continued
-/// attempt. It starts at once, never queued for the super-step boundary and never held by the Merge
-/// hold, exactly as an enlist claims its pane (an exception to ADR-0004, like Enlist): the agent that
-/// holds the context is waiting in the pane now, and the operator chose to talk to it now. What makes
-/// that safe is what Keep talking does not do: it launches nothing, opens no worktree and merges
-/// nothing, so nothing the boundary serialises is touched here; the Continued attempt's ending is
-/// recorded the way an adopted attempt's is, off the drive loop, and a verify ticket's grading waits for
-/// the drive ([`grade_continued_attempts`]).
+/// attempt. It starts at once, never queued for a Tick and never waiting on a merge, exactly as an
+/// enlist claims its pane (an exception to ADR-0004, like Enlist): the agent that holds the context is
+/// waiting in the pane now, and the operator chose to talk to it now. What makes that safe is what
+/// Keep talking does not do: it launches nothing, opens no worktree and merges nothing, so nothing a
+/// Tick serialises is touched here; the Continued attempt's ending is recorded the way an adopted
+/// attempt's is, off the drive loop, and a verify ticket's grading is a flow the next Tick starts
+/// ([`grade_continued_attempt`]).
 ///
 /// The claim answers the checkpoint Interrupt (the ticket leaves Needs input), writes the marker
 /// in-progress, numbers the next Attempt, records a `spawned` event naming the same pane and tab and
@@ -163,7 +159,7 @@ pub async fn keep_talking(
         .await?
 }
 
-// The claim: synchronous from the second check on, so no answer, boundary or second Keep talking can
+// The claim: synchronous from the second check on, so no answer, Tick or second Keep talking can
 // land between the check and the ticket moving.
 fn claim(
     session: &mut Session,
@@ -403,7 +399,7 @@ fn claim_pane(
     let mut entry = LiveAttemptEntry::new(attempt, Some(held.pane_id.clone()), held.tab_id.clone());
     entry.started_at = at;
     crate::live_attempts::register(session, ticket_id, entry);
-    // The next boundary persist (or the persistence interrupt machinery) owns store failures; a claim
+    // A Tick's persist (or the persistence interrupt machinery) owns store failures; a claim
     // already made stands.
     let _ = crate::persist::persist(session);
     Ok(attempt)
@@ -817,59 +813,16 @@ fn end_continued_attempt(
     });
     session.log(format!(
         "ticket {ticket_id}: continued attempt {attempt} done; graded as a lone attempt at the next \
-         boundary"
+         Tick"
     ));
     finish_adopted_finalize(session);
     Ok(())
 }
 
-/// `gradeContinuedAttempts`: grade every verify ticket's Continued attempt that ended done (issue
-/// #139), each as a lone attempt: one round of one attempt, then the lone rules (a flag checkpoints the
-/// ticket over the same pane, a pass merges the branch the chain worked on). Run by the drive loop
-/// between super-steps, the one place grading already runs: graders are spawned attempts and a pass
-/// merges, neither of which may run beside a super-step (ADR-0004).
-pub async fn grade_continued_attempts(engine: &Engine) -> anyhow::Result<()> {
-    if engine.call(|s| s.continued_grades.is_empty()).await? {
-        return Ok(());
-    }
-    loop {
-        let next = engine
-            .call(|s| (!s.continued_grades.is_empty()).then(|| s.continued_grades.remove(0)))
-            .await?;
-        let Some(owed) = next else { break };
-        let id = owed.ticket_id.clone();
-        let marker = engine
-            .call(move |s| {
-                s.marker(&id)
-                    .filter(|m| m.status == TicketStatus::InProgress)
-                    .cloned()
-            })
-            .await?;
-        let Some(marker) = marker else { continue };
-        // Before the grade is recorded (as in the drive's grading): a shutdown while it waits leaves
-        // the grade owed, and the next boot grades it.
-        if !pool_checkout_free(engine).await? {
-            engine
-                .call(move |s| s.continued_grades.insert(0, owed))
-                .await?;
-            return Ok(());
-        }
-        let what = format!(
-            "the lone grade of {}'s continued attempt is deciding its merge",
-            marker.id
-        );
-        let hold = engine.call(move |s| hold_pool_checkout(s, what)).await?;
-        let graded = grade_continued_attempt(engine, &marker, owed.attempt, owed.work).await;
-        engine.call(move |s| release_pool_checkout(s, hold)).await?;
-        graded?;
-    }
-    persist_with_retry(engine).await?;
-    engine.call(|s| emit_snapshot(s, RunPhase::Running)).await?;
-    Ok(())
-}
-
-/// One owed lone grade and its decision ([`grade_continued_attempts`]).
-async fn grade_continued_attempt(
+/// One owed lone grade (issue #139) and its decision, run by the drive's grading flow: one round of one
+/// attempt, then the lone rules (a flag checkpoints the ticket over the same pane, a pass merges the
+/// branch the chain worked on, on the merge chain).
+pub async fn grade_continued_attempt(
     engine: &Engine,
     marker: &TicketMarker,
     attempt: u64,
@@ -877,42 +830,30 @@ async fn grade_continued_attempt(
 ) -> anyhow::Result<()> {
     let grades = grade_round(engine, marker, &[attempt]).await?;
     let marker = marker.clone();
-    engine
-        .call(move |s| {
-            let log_path = js::path_join(&[
+    crate::merges::in_merge_chain(engine, move |s| {
+        let outcome_path = js::path_join(&[
+            &s.runs_dir,
+            &attempt_outcome_name(&marker.id, Some(attempt), false),
+        ]);
+        let ending = CandidateEnding {
+            attempt,
+            status: TicketStatus::Done,
+            crash_reason: None,
+            log_path: js::path_join(&[
                 &s.runs_dir,
                 &attempt_log_name(&marker.id, Some(attempt), false),
-            ]);
-            let outcome_path = js::path_join(&[
-                &s.runs_dir,
-                &attempt_outcome_name(&marker.id, Some(attempt), false),
-            ]);
-            let result = TicketResult {
-                marker: marker.clone(),
-                status: TicketStatus::Done,
-                log_path,
-                exit_code: 0,
-                plan: TicketPlan {
-                    cwd: work.cwd.clone(),
-                    worktree: work.branch.clone().map(|branch| git::WorktreeInfo {
-                        path: work.cwd.clone(),
-                        branch,
-                    }),
-                    attempt,
-                    verify: true,
-                    verdict: None,
-                },
-                update: PoolUpdate::default(),
-                joined_at_exit: true,
-                spawn_proposals: None,
-                log_tail: Vec::new(),
-                outcome_exists: js::exists(&outcome_path),
-                outcome_path,
-                crash_reason: None,
-            };
-            resolve_lone_attempt(s, &marker, &result, grades.get(&attempt))
-        })
-        .await?
+            ]),
+            log_tail: Vec::new(),
+            outcome_exists: js::exists(&outcome_path),
+            outcome_path,
+            worktree: work.branch.clone().map(|branch| git::WorktreeInfo {
+                path: work.cwd.clone(),
+                branch,
+            }),
+        };
+        resolve_lone_attempt(s, &marker, &ending, grades.get(&attempt))
+    })
+    .await
 }
 
 /// `owedContinuedGrade`: the lone grade a verify ticket's Continued attempt is still owed at boot (issue

@@ -513,18 +513,16 @@ fn finish_or_chain(s: &mut Session, rt: &Rt) {
     // and its outcome is reported the usual way: the ended record and snapshot, or a merge interrupt. A
     // merge-chain failure must never wedge the End: the Conversation is left `ending` with its worktree
     // intact, visible as a stuck End, and the chain itself stays usable for the next caller.
-    use futures::FutureExt;
     let engine = s.engine();
-    let previous = s.merge_chain.clone();
     let rt = rt.clone();
-    let link = async move {
-        previous.await;
+    crate::merges::chain_link(s, async move {
         end_merge_link(&engine, rt).await;
-    }
-    .boxed()
-    .shared();
-    s.merge_chain = link.clone();
-    tokio::spawn(link);
+        let _ = engine
+            .call(|s| {
+                let _ = s.wake();
+            })
+            .await;
+    });
 }
 
 // The merge, inside its chain link and the pool checkout's gate (ADR-0027): checked as the merge is
@@ -569,7 +567,7 @@ async fn end_merge_link(engine: &Engine, rt: Rt) {
     let marker = marker_of_conversation(&id, &file);
     let _ = crate::merges::handle_merge_conflict(engine, marker, result, 1).await;
     // The Interrupt the handling raised is published here: the End runs off the drive loop, so no
-    // drive boundary would carry it to the snapshot.
+    // Tick would carry it to the snapshot.
     let _ = engine
         .call(move |s| {
             release_pool_checkout(s, hold);

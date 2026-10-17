@@ -394,7 +394,9 @@ pub fn steward_answer(
         StewardAnswerAction::Close => ResumeAction::Close,
     };
     crate::answers::accept_answer(session, ticket_id, note, resume, None, Some(conversation))?;
-    crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))
+    session
+        .wake()
+        .map_err(|e| EngineError::refused(e.to_string()))
 }
 
 /// The checks `stewardKeepTalking` makes before it calls Keep talking, all synchronous: the

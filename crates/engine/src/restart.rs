@@ -15,8 +15,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared, join_all};
+use futures::future::join_all;
 use serde_json::{Map, Value};
 
 use ac_core::assignment::engine_ticket_build_id;
@@ -42,17 +41,14 @@ use crate::attempt_run::{
     start_pane_stream_tail,
 };
 use crate::boot::engine_reset_note;
-use crate::checkout_gate::{DeferredMerge, through_pool_checkout_gate};
 use crate::interrupts::{
     ENGINE_BRIEF_HEADING, interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt,
 };
 use crate::live_attempts::{self, LiveAttemptEntry};
-use crate::merges::{
-    handle_merge_conflict, merge_target_ref, merge_target_sha, merge_ticket, merged_payload,
-};
+use crate::merges::chain_ticket_merge;
 use crate::session::{AdoptedAttempt, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::tickets::{CrashFacts, close_attempt_tab, crash_interrupt_body};
+use crate::tickets::{CrashFacts, crash_interrupt_body};
 
 /// A headless attempt a previous engine process spawned and never saw exit, still alive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1144,116 +1140,18 @@ pub fn record_adopted_exit(
         )
         .ok
     {
-        // The merge chains onto the session merge chain: the drive's merges wait for it and it waits
-        // for them, so two git merges never run concurrently on the main checkout. The kick below runs
-        // only once the chain settles, so a resumed drive's closing gate can never raise the Review
-        // interrupt ahead of this merge landing.
-        session.merge_line.taken(&id);
-        drop(merge_done_ticket(
-            session, current, worktree, attempt, what, true,
-        ));
+        // The wake comes only once the chain settles, so a drive's closing gate can never raise the
+        // Review interrupt ahead of this merge landing.
+        chain_ticket_merge(session, current, worktree, attempt, Some(what));
     } else {
         finish_adopted_finalize(session);
     }
     Ok(())
 }
 
-/// A merge chained onto the session's merge chain, settled when the merge has run.
-pub type MergeLink = Shared<BoxFuture<'static, Result<(), String>>>;
-
-/// `mergeDoneTicket`: merge a done ticket's worktree branch off the drive loop: an adopted or a
-/// Continued attempt's ending, or a merge a shutdown dropped at the pool checkout's gate and the next
-/// boot takes up again (ADR-0027). It chains onto the session merge chain, so two git merges never run
-/// at once on the main checkout, passes the gate inside its link, and records the merge exactly as the
-/// drive's own merges do: the merged event, the tab close, the done-Notice, the pool log; a conflict
-/// goes to the resolver machinery. With `finish` the link ends in [`finish_adopted_finalize`], however
-/// the merge went.
-pub fn merge_done_ticket(
-    session: &mut Session,
-    marker: TicketMarker,
-    worktree: WorktreeInfo,
-    attempt: u64,
-    what: &str,
-    finish: bool,
-) -> MergeLink {
-    let engine = session.engine();
-    let previous = session.merge_chain.clone();
-    let what = what.to_owned();
-    let link_engine = engine.clone();
-    let link: MergeLink = async move {
-        previous.await;
-        merge_link(&link_engine, marker, worktree, attempt, what).await
-    }
-    .boxed()
-    .shared();
-    session.merge_chain = link.clone().map(drop).boxed().shared();
-    let driven = link.clone();
-    tokio::spawn(async move {
-        let _ = driven.await;
-        if finish {
-            let _ = engine.call(finish_adopted_finalize).await;
-        }
-    });
-    link
-}
-
-// The merge inside its link: through the gate, recorded as the drive's own merges are, a conflict to the
-// resolver.
-async fn merge_link(
-    engine: &Engine,
-    marker: TicketMarker,
-    worktree: WorktreeInfo,
-    attempt: u64,
-    what: String,
-) -> Result<(), String> {
-    let deferred = DeferredMerge {
-        ticket_id: marker.id.clone(),
-        path: worktree.path.clone(),
-        branch: worktree.branch.clone(),
-        attempt,
-    };
-    let (merge_marker, merge_worktree) = (marker.clone(), worktree);
-    let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
-        let (marker, worktree) = (merge_marker, merge_worktree);
-        // Captured inside the serialized chain, right before the merge: HEAD may have moved since this
-        // ticket's attempt ended (another merge landing first), and merge_ticket removes this branch
-        // on success, so the range for a done-Notice's diff summary has to be taken here or not at all.
-        let before_sha = merge_target_sha(s);
-        let merge = merge_ticket(s, &marker, &worktree)?;
-        if !merge.ok {
-            return Ok(Some(merge));
-        }
-        s.merge_line.settled(&marker.id);
-        append_event(
-            Path::new(&s.runs_dir),
-            &marker.id,
-            &event_now(attempt, TicketEventKind::Merged, merged_payload(&merge)),
-        )?;
-        close_attempt_tab(s, &marker.id, attempt);
-        let range =
-            (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(s)));
-        crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
-        s.apply(PoolUpdate::log([format!(
-            "ticket {}: {what} {attempt} merged {} onto the working branch",
-            marker.id, worktree.branch
-        )]));
-        Ok(None)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    if let Some(Some(merge)) = passed {
-        handle_merge_conflict(engine, marker, merge, attempt)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// `finishAdoptedFinalize`: the adopted finalize's last step, after its merge chain has settled: emit
-/// the new state, persist it, and kick a drive pass when the run had already settled (it was waiting
-/// quiescent on the adoption interrupt), so the closing gate, the ready set, and any queued answers see
-/// the attempt's real ending. The kick is a no-op while a drive is in flight; its boundary machinery
-/// picks the state up instead.
+/// `finishAdoptedFinalize`: the last step of an ending off the drive, or of a merge link: emit the new
+/// state and wake the drive, whose Tick persists it, so the closing gate, the Tickets it unblocks, and
+/// any queued answers see it.
 pub fn finish_adopted_finalize(session: &mut Session) {
     let phase = if session.driving {
         RunPhase::Running
@@ -1261,13 +1159,7 @@ pub fn finish_adopted_finalize(session: &mut Session) {
         RunPhase::Quiescent
     };
     emit_snapshot(session, phase);
-    // The next boundary persist (or the persistence interrupt machinery) owns store failures; the
-    // finalize's record must not die on one.
-    let _ = crate::persist::persist(session);
-    if session.driving {
-        session.finalized_while_driving = true;
-    }
-    let _ = crate::answers::kick_processing(session);
+    let _ = session.wake();
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1340,16 +1232,14 @@ pub fn redo_deferred_merges(session: &mut Session) {
             peers::chain_enlisted_merge(session, &marker, deferred.attempt, &branch);
             continue;
         }
-        session.merge_line.taken(&marker.id);
         taken = true;
-        drop(merge_done_ticket(
+        chain_ticket_merge(
             session,
             marker,
             WorktreeInfo { path, branch },
             deferred.attempt,
-            "attempt",
-            true,
-        ));
+            Some("attempt"),
+        );
     }
     // The Merge queue now has a place taken in it, which the TypeScript's drive shows in its next emit,
     // a microtask away. Here the drive's next emit is a few jobs off, so a reader would see the

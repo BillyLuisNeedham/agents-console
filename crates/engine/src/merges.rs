@@ -1,14 +1,13 @@
-//! Merges (engine.ts 749-890, 5887-6560, 11616-11732): the Merge hold over the engine's git probe and
-//! the wait-and-recompute rule, the merge target and its checkout, the Ticket file reconcile at merge,
-//! `mergeTicket`, the failed-merge records and Interrupts, resuming a conflicted merge, and the merge
-//! resolver with its approval.
+//! Merges (engine.ts 749-890, 5887-6560, 11616-11732): the Merge hold over the engine's git probe, the
+//! merge target and its checkout, the Ticket file reconcile at merge, `mergeTicket`, the merge chain
+//! every merge into the target runs on, the failed-merge records and Interrupts, resuming a conflicted
+//! merge, and the merge resolver with its approval.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::Path;
 use std::sync::LazyLock;
-use std::time::Duration;
 
+use futures::FutureExt;
 use regex::Regex;
 use serde_json::{Map, Value};
 
@@ -19,22 +18,24 @@ use ac_core::events::{
 };
 use ac_core::js;
 use ac_core::machine_defaults::read_machine_defaults;
-use ac_core::merge_hold::{MERGE_HOLD_POLL_MS, MergeHoldProbe};
+use ac_core::merge_hold::MergeHoldProbe;
 use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_core::prompt::{ResolverPromptParts, build_resolver_prompt};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
-use ac_protocol::{Interrupt, InterruptKind, RunPhase, TicketEventKind, TicketStatus};
+use ac_protocol::{Interrupt, InterruptKind, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
 use crate::attempt_run::{
     AttemptEvents, AttemptNaming, AttemptSpec, CrashSubject, Fallback, PromptDelivery, Rotate,
     run_attempt,
 };
-use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
+use crate::checkout_gate::{
+    DeferredMerge, hold_pool_checkout, release_pool_checkout, through_pool_checkout_gate,
+};
 use crate::interrupts::{interrupt, raise_interrupt, without};
 use crate::session::{EnlistedWork, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::tickets::{attempt_env_of, close_attempt_tabs};
+use crate::tickets::{attempt_env_of, close_attempt_tab, close_attempt_tabs};
 
 // ---------------------------------------------------------------------------------------------------
 // The Merge hold (ADR-0014)
@@ -83,7 +84,8 @@ impl MergeHoldProbe for EngineHoldProbe<'_> {
 }
 
 /// `mergeHold`: the ids of done tickets whose branch has not landed in the merge target, derived on
-/// demand and never persisted. A git-less pool holds nothing; engine-run tickets never hold.
+/// demand and never persisted: the Merge queue's tickets, and the branch reading of a blocker's
+/// merged-ness (ADR-0040). A git-less pool holds nothing; engine-run tickets never hold.
 pub fn merge_hold(session: &mut Session) -> Vec<String> {
     if !session.git {
         return Vec::new();
@@ -107,87 +109,6 @@ pub fn merge_hold(session: &mut Session) -> Vec<String> {
         &|id| engine_ticket_build_id(id).is_some(),
         Some(&probe),
     )
-}
-
-/// What the wait-and-recompute rule needs of a session: the hold derived fresh, the queued-answer
-/// drain (true when it applied any), the log line that says the pool paused and why, and the emit.
-pub trait HoldHost: Sync {
-    fn derive(&self) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send;
-    fn drain(&self) -> impl Future<Output = anyhow::Result<bool>> + Send;
-    fn engaged(&self, hold: Vec<String>) -> impl Future<Output = anyhow::Result<()>> + Send;
-    fn emit(&self) -> impl Future<Output = anyhow::Result<()>> + Send;
-}
-
-/// The engine as a [`HoldHost`] (engine.ts `holdHost`).
-pub struct EngineHoldHost<'a>(pub &'a Engine);
-
-impl HoldHost for EngineHoldHost<'_> {
-    async fn derive(&self) -> anyhow::Result<Vec<String>> {
-        Ok(self.0.call(merge_hold).await?)
-    }
-
-    async fn drain(&self) -> anyhow::Result<bool> {
-        self.0
-            .call(|s| {
-                let before = s.answers.pending().len();
-                crate::answers::drain_answers(s)?;
-                // The drive waits on the hold from here.
-                crate::drive::drive_turned(s);
-                Ok(s.answers.pending().len() != before)
-            })
-            .await?
-    }
-
-    async fn engaged(&self, hold: Vec<String>) -> anyhow::Result<()> {
-        self.0
-            .call(move |s| {
-                s.log(format!(
-                    "merge hold (ADR-0014): pool paused; awaiting the merge of {}",
-                    hold.join(", ")
-                ))
-            })
-            .await?;
-        Ok(())
-    }
-
-    async fn emit(&self) -> anyhow::Result<()> {
-        self.0.call(|s| emit_snapshot(s, RunPhase::Running)).await?;
-        Ok(())
-    }
-}
-
-/// `throughMergeHold`, the one wait-and-recompute rule: recompute; if the recompute saw the hold
-/// standing, wait the hold out (draining queued answers on every tick) and recompute again; hand back
-/// the first value a recompute produced with nothing held. The engagement is logged once per wait.
-pub async fn through_merge_hold<T, H, F, Fut>(
-    host: &H,
-    mut recompute: F,
-    interval: Duration,
-) -> anyhow::Result<T>
-where
-    H: HoldHost,
-    F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<(T, Vec<String>)>>,
-{
-    loop {
-        let (value, hold) = recompute().await?;
-        if hold.is_empty() {
-            return Ok(value);
-        }
-        host.engaged(hold).await?;
-        host.emit().await?;
-        while !host.derive().await?.is_empty() {
-            if host.drain().await? {
-                host.emit().await?;
-            }
-            tokio::time::sleep(interval).await;
-        }
-    }
-}
-
-/// The poll cadence of a waiting flow.
-pub fn hold_poll() -> Duration {
-    Duration::from_millis(MERGE_HOLD_POLL_MS)
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -450,6 +371,129 @@ pub fn remove_merge_worktree(session: &Session, marker: &TicketMarker, worktree:
         return;
     }
     git::remove_worktree(&session.cwd, worktree);
+}
+
+/// Run `job` as one link of the session's merge chain, once every merge chained before it is done: the
+/// way a verify decision that merges waits its turn behind the Ticket merges (ADR-0040). Its result
+/// comes back to the caller; the chain itself never fails.
+pub async fn in_merge_chain<T: Send + 'static>(
+    engine: &Engine,
+    job: impl FnOnce(&mut Session) -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    let (done, result) = tokio::sync::oneshot::channel();
+    let link_engine = engine.clone();
+    engine
+        .call(move |s| {
+            chain_link(s, async move {
+                let _ = done.send(link_engine.call(job).await);
+            });
+        })
+        .await?;
+    result
+        .await
+        .map_err(|_| anyhow::anyhow!("the merge chain dropped a link"))??
+}
+
+/// `mergeDoneTicket`: chain a done Ticket's merge onto the session's merge chain, the only queue
+/// merges into the target wait in, so two git merges never run at once on the pool checkout. Its place
+/// in the Merge queue is the moment it joins. Inside its link the merge passes the pool checkout's gate
+/// (ADR-0027), takes the target's tip for the done-Notice's range, and either lands (the merged event,
+/// the tab closed, the Conversation told, the pool log) or goes to the resolver machinery, which also
+/// runs inside the link, so nothing else lands while a resolver works. `what` words the pool log line
+/// for an Attempt that ended off the drive ("adopted attempt"), `None` for one the drive launched. The
+/// link ends in [`crate::restart::finish_adopted_finalize`], which wakes the drive; a link that fails
+/// leaves its error for the next Tick.
+pub fn chain_ticket_merge(
+    session: &mut Session,
+    marker: TicketMarker,
+    worktree: WorktreeInfo,
+    attempt: u64,
+    what: Option<&str>,
+) {
+    session.merge_line.taken(&marker.id);
+    let engine = session.engine();
+    let what = what.map(str::to_owned);
+    chain_link(session, async move {
+        let merged = merge_link(&engine, marker, worktree, attempt, what).await;
+        let _ = engine
+            .call(move |s| {
+                if let Err(error) = merged {
+                    s.drive_failure.get_or_insert(error.to_string());
+                }
+                crate::restart::finish_adopted_finalize(s);
+            })
+            .await;
+    });
+}
+
+/// Chain `work` onto the session's merge chain: it starts once every link before it is done, and the
+/// next link waits for it.
+pub fn chain_link(
+    session: &mut Session,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let previous = session.merge_chain.clone();
+    let link = async move {
+        previous.await;
+        work.await;
+    }
+    .boxed()
+    .shared();
+    session.merge_chain = link.clone();
+    tokio::spawn(link);
+}
+
+async fn merge_link(
+    engine: &Engine,
+    marker: TicketMarker,
+    worktree: WorktreeInfo,
+    attempt: u64,
+    what: Option<String>,
+) -> anyhow::Result<()> {
+    let deferred = DeferredMerge {
+        ticket_id: marker.id.clone(),
+        path: worktree.path.clone(),
+        branch: worktree.branch.clone(),
+        attempt,
+    };
+    let (merge_marker, merge_worktree) = (marker.clone(), worktree);
+    let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
+        let (marker, worktree) = (merge_marker, merge_worktree);
+        // Taken inside the chain, right before the merge: the target may have moved since the attempt
+        // ended, and merge_ticket removes the branch on success.
+        let before_sha = merge_target_sha(s);
+        let merge = merge_ticket(s, &marker, &worktree)?;
+        if !merge.ok {
+            return Ok(Some(merge));
+        }
+        let id = &marker.id;
+        s.merge_line.settled(id);
+        append_event(
+            Path::new(&s.runs_dir),
+            id,
+            &event_now(attempt, TicketEventKind::Merged, merged_payload(&merge)),
+        )?;
+        close_attempt_tab(s, id, attempt);
+        let range =
+            (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(s)));
+        crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
+        let branch = &worktree.branch;
+        s.log(match &what {
+            Some(what) => {
+                format!("ticket {id}: {what} {attempt} merged {branch} onto the working branch")
+            }
+            None => format!(
+                "ticket {id}: merged {branch} onto the working branch{}",
+                landed_detail(&merge)
+            ),
+        });
+        Ok(None)
+    })
+    .await?;
+    if let Some(Some(conflict)) = passed {
+        handle_merge_conflict(engine, marker, conflict, attempt).await?;
+    }
+    Ok(())
 }
 
 /// `recordFailedMerge`: merge-blocked names the files in the way of a merge git refused to start (#92),
@@ -1040,114 +1084,6 @@ async fn run_resolver_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // A host over a scripted sequence of derived holds, recording what the rule did.
-    struct ScriptedHost {
-        derived: Mutex<Vec<Vec<String>>>,
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl ScriptedHost {
-        fn new(derived: Vec<Vec<&str>>) -> Self {
-            ScriptedHost {
-                derived: Mutex::new(
-                    derived
-                        .into_iter()
-                        .map(|d| d.into_iter().map(str::to_owned).collect())
-                        .collect(),
-                ),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl HoldHost for ScriptedHost {
-        async fn derive(&self) -> anyhow::Result<Vec<String>> {
-            self.calls.lock().unwrap().push("derive".into());
-            let mut derived = self.derived.lock().unwrap();
-            Ok(if derived.is_empty() {
-                Vec::new()
-            } else {
-                derived.remove(0)
-            })
-        }
-        async fn drain(&self) -> anyhow::Result<bool> {
-            self.calls.lock().unwrap().push("drain".into());
-            Ok(false)
-        }
-        async fn engaged(&self, hold: Vec<String>) -> anyhow::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("engaged {}", hold.join(",")));
-            Ok(())
-        }
-        async fn emit(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("emit".into());
-            Ok(())
-        }
-    }
-
-    // merge-hold.test.ts:418
-    #[tokio::test]
-    async fn hands_back_the_first_recompute_when_nothing_holds_without_a_wait() {
-        let host = ScriptedHost::new(vec![]);
-        let value = through_merge_hold(
-            &host,
-            || async { Ok((7, Vec::new())) },
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(value, 7);
-        assert!(host.calls().is_empty());
-    }
-
-    // merge-hold.test.ts:431
-    #[tokio::test]
-    async fn re_waits_a_hold_that_re_engages_between_the_wait_and_the_recompute() {
-        // The first recompute sees 01 held; the wait sees it lift; the second recompute sees 02 held
-        // (re-engaged), so a second wait starts, logged again; the third recompute is clear.
-        let host = ScriptedHost::new(vec![vec!["01"], vec![], vec!["02"], vec![]]);
-        let holds = Mutex::new(vec![vec!["01"], vec!["02"], vec![]]);
-        let value = through_merge_hold(
-            &host,
-            || {
-                let hold: Vec<String> = holds
-                    .lock()
-                    .unwrap()
-                    .remove(0)
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect();
-                async move { Ok((hold.is_empty(), hold)) }
-            },
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
-        assert!(value);
-        assert_eq!(
-            host.calls(),
-            [
-                "engaged 01",
-                "emit",
-                "derive",
-                "drain",
-                "derive",
-                "engaged 02",
-                "emit",
-                "derive",
-                "drain",
-                "derive"
-            ]
-        );
-    }
 
     #[test]
     fn a_resolution_needs_a_resolved_boolean() {

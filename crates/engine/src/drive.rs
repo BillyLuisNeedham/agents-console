@@ -1,55 +1,55 @@
-//! The drive (engine.ts 1553-2440): the drive loop, the Super-step boundary, the plan, the run with
-//! its merge chain and joins, the close with the Review gate and the phase decision, settling, and a
-//! drive's death.
+//! The drive (ADR-0040): the rolling scheduler every pool runs. The drive is a loop of Ticks; a Tick is
+//! one job on the actor that reloads the config, drains Queued answers, reconciles deadlocks, routes
+//! the Line, lands Pending spawns, starts owed grading, and launches every Ticket that may start. The
+//! drive then waits for a wake. Each launched Attempt ends in its own exit job, each verify round is
+//! graded once its last Candidate exits, and each merge runs on the merge chain. The close holds the
+//! Review gate and the phase decision; a drive's death and its settle close it out.
 //!
-//! Each stretch of synchronous TypeScript between two awaits is one job on the actor; the loop itself
-//! is a flow on its own task.
+//!   drive_loop -- tick --> launches --> run_launch --+ exit job: the result, a crash Interrupt,
+//!        ^                                           | the merge chained, a Candidate's ending
+//!        +------ wake.notified() <-- wake() <--------+
+//!                                     ^   ^   ^
+//!          merge landed, grading ended+   |   +-- answer, settings save, spawn, Adopt, hand merge
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared, join_all};
+use futures::future::join_all;
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 
-use ac_core::assignment::engine_ticket_build_id;
+use ac_core::assignment::{Assignment, engine_ticket_build_id};
 use ac_core::events::{append_event, attempt_log_name, event_now, last_attempt, next_attempt};
 use ac_core::pool::{TicketMarker, is_finished, write_marker_status};
-use ac_io::git::{self, MergeResult};
+use ac_io::git;
 use ac_protocol::{InterruptKind, RunPhase, SpawnKind, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
-use crate::checkout_gate::{
-    DeferredMerge, hold_pool_checkout, pool_checkout_free, release_pool_checkout,
-    through_pool_checkout_gate,
-};
+use crate::checkout_gate::{hold_pool_checkout, pool_checkout_free, release_pool_checkout};
 use crate::error::EngineError;
 use crate::interrupts::{interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt};
-use crate::lock;
-use crate::merges::{
-    EngineHoldHost, handle_merge_conflict, hold_poll, merge_hold, merge_target_ref,
-    merge_target_sha, merge_ticket, merged_payload, through_merge_hold,
-};
+use crate::merges::{chain_ticket_merge, in_merge_chain, merge_hold, merge_target_sha};
 use crate::persist::{close_store, persist_with_retry, write_markers};
 use crate::session::{PoolState, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::spawns::spawns_await_boundary;
+use crate::spawns::spawns_await_tick;
 use crate::tickets::{
-    CrashFacts, TicketEnv, TicketPlan, TicketResult, attempt_env_of, close_attempt_tab,
-    crash_interrupt_body, plan_ticket, run_ticket,
+    CandidateEnding, TicketEnv, TicketPlan, TicketResult, attempt_env_of, plan_ticket, run_ticket,
 };
 
-/// How long shutdown waits for the drive to join its super-step after the children are stopped.
+/// How long shutdown waits for the drive to settle after the children are stopped.
 pub const SHUTDOWN_SETTLE_WAIT_MS: u64 = 3_000;
 
+/// The pool log line a shutdown leaves, once, when it stopped an Attempt.
+pub const SHUTDOWN_LINE: &str =
+    "engine shutdown: no crash interrupts raised and nothing more launched";
+
 // ---------------------------------------------------------------------------------------------------
-// Starting, settling, dying
+// Starting, waking, settling, dying
 // ---------------------------------------------------------------------------------------------------
 
-/// `startDrive`: a drive is in flight from here; its first emit happens now, as the TypeScript's
-/// drive loop emits before its first await. The loop's every death reports through
-/// [`report_drive_death`].
+/// `startDrive`: a drive is in flight from here; its first emit happens now. The loop's every death
+/// reports through [`report_drive_death`].
 pub fn start_drive(session: &mut Session) {
     session.driving = true;
     emit_snapshot(session, RunPhase::Running);
@@ -60,6 +60,25 @@ pub fn start_drive(session: &mut Session) {
             let _ = engine.call(move |s| report_drive_death(s, &message)).await;
         }
     });
+}
+
+impl Session {
+    /// The one way anything asks the drive to look again (ADR-0040). In flight, a permit the drive's
+    /// wait takes; idle, the Queued answers drain at once and a fresh drive starts. A pool whose store
+    /// has closed, or that is shutting down, starts nothing. A drain whose persist fails refuses here.
+    pub fn wake(&mut self) -> anyhow::Result<()> {
+        self.wakes += 1;
+        if self.driving {
+            self.wake.notify_one();
+            return Ok(());
+        }
+        if !self.store_open || self.children.stopping {
+            return Ok(());
+        }
+        crate::answers::drain_answers(self)?;
+        start_drive(self);
+        Ok(())
+    }
 }
 
 /// The boot's drive has reached its first real wait, or settled: start_pool may return.
@@ -137,172 +156,145 @@ pub fn report_drive_death(session: &mut Session, message: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The loop
+// Eligibility: the scheduler's one rule
 // ---------------------------------------------------------------------------------------------------
 
-/// `driveLoop`: one super-step per turn: the boundary decides whether there is a next one, the plan
-/// numbers and records it, the run fans it out and joins it, and the close settles the drive.
-pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
-    // Boot reconciliation lands before the first scheduling.
-    let mut reconcile = engine.call(|s| s.terminal_reconcile.clone()).await?;
-    if !*reconcile.borrow() {
-        engine.call(drive_turned).await?;
-    }
-    let _ = reconcile.wait_for(|done| *done).await;
-    loop {
-        // A verify ticket's Continued attempt that ended done is graded here, between super-steps.
-        crate::keep_talking::grade_continued_attempts(engine).await?;
-        if engine.call(|s| s.children.stopping).await? {
-            break;
-        }
-        let Some(step) = super_step_boundary(engine).await? else {
-            break;
-        };
-        if run_super_step(engine, step).await? == StepEnd::Stop {
-            break;
-        }
-    }
-    close_drive(engine).await
+/// Whether a Ticket starts now, waits, or needs the operator first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Eligibility {
+    Start,
+    Wait(WaitWhy),
+    Checkpoint(CheckpointWhy),
 }
 
-/// `readySet`: the ready set's one home. While any done ticket's branch is unmerged nothing is handed
-/// back (ADR-0014); an all-engine proposal is cleared where proposed; otherwise the ordinary tickets
-/// whose marker is ready and whose blockers are all done. The hold rides back beside the set.
-pub fn ready_set(
-    session: &mut Session,
-    candidates: &[TicketMarker],
-) -> (Vec<TicketMarker>, Vec<String>) {
-    let hold = merge_hold(session);
-    if !hold.is_empty() {
-        return (Vec::new(), hold);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitWhy {
+    NotReady,
+    /// The Finish checkpoint: answered by the operator, never run (ADR-0037).
+    Hold,
+    /// A grader or head-to-head judge: run by its grading flow, never launched by a Tick.
+    EngineRun,
+    Live,
+    BlockerNotDone(String),
+    BlockerNotMerged(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointWhy {
+    MissingAssignment(&'static str),
+    BranchHeldAt(String),
+}
+
+/// What [`eligibility`] reads of the pool.
+pub trait PoolFacts {
+    fn status(&self, id: &str) -> Option<TicketStatus>;
+    /// A hold Ticket: the Finish checkpoint.
+    fn is_hold(&self, id: &str) -> bool;
+    fn is_live(&self, id: &str) -> bool;
+    fn in_git(&self) -> bool;
+    /// The branch reading: the Ticket's branch is gone or an ancestor of the merge target.
+    fn landed(&mut self, id: &str) -> bool;
+    fn missing_assignment(&self, id: &str) -> Option<&'static str>;
+    /// Where the Ticket's branch is checked out, when that is somewhere the engine cannot run it.
+    fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String>;
+}
+
+/// Whether a done blocker counts as merged (ADR-0040), in this order: a hold Ticket and an engine-run
+/// Ticket by rule, since neither has a branch; every Ticket of a pool outside git; otherwise the branch
+/// reading, where a missing branch reads as landed by hand.
+pub fn merged(facts: &mut impl PoolFacts, id: &str) -> bool {
+    if facts.is_hold(id) || engine_ticket_build_id(id).is_some() || !facts.in_git() {
+        return true;
     }
-    if candidates
+    facts.landed(id)
+}
+
+/// The scheduler's rule: a Ticket starts once it is Ready, not a hold, not engine-run, not live, and
+/// each blocker is done and merged; a config gap or a branch held elsewhere raises its checkpoint.
+pub fn eligibility(facts: &mut impl PoolFacts, marker: &TicketMarker) -> Eligibility {
+    let id = marker.id.as_str();
+    if facts.status(id) != Some(TicketStatus::Ready) {
+        return Eligibility::Wait(WaitWhy::NotReady);
+    }
+    if facts.is_hold(id) {
+        return Eligibility::Wait(WaitWhy::Hold);
+    }
+    if engine_ticket_build_id(id).is_some() {
+        return Eligibility::Wait(WaitWhy::EngineRun);
+    }
+    if facts.is_live(id) {
+        return Eligibility::Wait(WaitWhy::Live);
+    }
+    if let Some(blocker) = marker
+        .blocked_by
         .iter()
-        .all(|marker| engine_ticket_build_id(&marker.id).is_some())
+        .find(|b| facts.status(b) != Some(TicketStatus::Done))
     {
-        return (candidates.to_vec(), hold);
+        return Eligibility::Wait(WaitWhy::BlockerNotDone(blocker.clone()));
     }
-    let tickets = &session.state.tickets;
-    let ready = candidates
-        .iter()
-        .filter(|marker| {
-            engine_ticket_build_id(&marker.id).is_none()
-                // The Finish checkpoint is answered by the operator, never run (ADR-0037).
-                && marker.station != Some(ac_protocol::Station::Finish)
-                && tickets.get(&marker.id) == Some(&TicketStatus::Ready)
-                && marker
-                    .blocked_by
-                    .iter()
-                    .all(|id| tickets.get(id) == Some(&TicketStatus::Done))
-        })
-        .cloned()
-        .collect();
-    (ready, hold)
+    if let Some(blocker) = marker.blocked_by.iter().find(|b| !merged(facts, b)) {
+        return Eligibility::Wait(WaitWhy::BlockerNotMerged(blocker.clone()));
+    }
+    if let Some(missing) = facts.missing_assignment(id) {
+        return Eligibility::Checkpoint(CheckpointWhy::MissingAssignment(missing));
+    }
+    if let Some(at) = facts.branch_held_at(marker) {
+        return Eligibility::Checkpoint(CheckpointWhy::BranchHeldAt(at));
+    }
+    Eligibility::Start
 }
 
-/// `superStepBoundary`: everything a super-step in flight must not do, then the ready set, run through
-/// the wait-and-recompute rule so the whole boundary runs again once a hold lifts. `None` is the
-/// close. The plan of a ready set is made in the same job that found it: in the TypeScript no
-/// request is served between the boundary and the plan, so none may be here (a request between them
-/// would read the files an adoption just wrote beside a snapshot older than they are).
-pub async fn super_step_boundary(engine: &Engine) -> anyhow::Result<Option<SuperStepPlan>> {
-    let host = EngineHoldHost(engine);
-    let step = through_merge_hold(
-        &host,
-        || {
-            let engine = engine.clone();
-            async move {
-                engine
-                    .call(
-                        |s| -> anyhow::Result<(Option<SuperStepPlan>, Vec<String>)> {
-                            crate::interrupts::reconcile_deadlocks(s)?;
-                            // Config reload (ADR-0018), before the drain and adoption below.
-                            crate::config_reload::reload_config_at_boundary(s)?;
-                            // Answers accepted while the previous super-step was in flight.
-                            crate::answers::drain_answers(s)?;
-                            // A Close the drain just applied leaves its dependents unable to run.
-                            crate::interrupts::reconcile_deadlocks(s)?;
-                            // The Line routes its ended Station (ADR-0037) after the answers, so a
-                            // Close or a Resume of the Finish this drain applied routes now.
-                            crate::line::route_line(s)?;
-                            // Spawn adoption (ADR-0010) rides the same boundary.
-                            crate::spawns::adopt_spawn_proposals(s)?;
-                            let markers = s.markers.clone();
-                            let (ready, hold) = ready_set(s, &markers);
-                            if ready.is_empty() || !hold.is_empty() {
-                                return Ok((None, hold));
-                            }
-                            Ok((Some(plan_super_step(s, ready)?), hold))
-                        },
-                    )
-                    .await?
-            }
-        },
-        hold_poll(),
-    )
-    .await?;
-    Ok(step)
+// The pool as one Tick reads it. The branch reading is the Merge hold's derivation, behind its memo,
+// taken at most once per Tick.
+struct SessionFacts<'a> {
+    session: &'a mut Session,
+    unlanded: &'a mut Option<Vec<String>>,
 }
 
-/// One super-step, planned.
-pub struct SuperStepPlan {
-    pub ready: Vec<TicketMarker>,
-    pub planned: Vec<(TicketMarker, TicketPlan)>,
-    /// The state every attempt of this super-step spawns against, fixed at the plan.
-    pub snapshot: Arc<PoolState>,
-}
+impl PoolFacts for SessionFacts<'_> {
+    fn status(&self, id: &str) -> Option<TicketStatus> {
+        self.session.status_of(id)
+    }
 
-// The Assignment field a ticket about to schedule has no value for (issue #118).
-fn missing_assignment_field(session: &Session, marker: &TicketMarker) -> Option<&'static str> {
-    let assignment = session.assignments.get(&marker.id);
-    if assignment.is_none_or(|a| a.harness.is_empty()) {
-        return Some("harness");
+    fn is_hold(&self, id: &str) -> bool {
+        self.session
+            .marker(id)
+            .is_some_and(|m| m.station == Some(ac_protocol::Station::Finish))
     }
-    if assignment.is_none_or(|a| a.model.is_empty()) {
-        return Some("model");
-    }
-    None
-}
 
-// A pool-config gap pauses the one ticket as a config interrupt instead of ending the run.
-fn checkpoint_unassigned(
-    session: &mut Session,
-    marker: &TicketMarker,
-    missing: &str,
-) -> anyhow::Result<()> {
-    let runs = Path::new(&session.runs_dir).to_path_buf();
-    let attempt = last_attempt(&runs, &marker.id);
-    let mut payload = Map::new();
-    payload.insert("missing".into(), Value::String(missing.to_owned()));
-    append_event(
-        &runs,
-        &marker.id,
-        &event_now(attempt, TicketEventKind::Unassigned, payload),
-    )?;
-    write_marker_status(&marker.file, TicketStatus::Checkpoint)?;
-    if let Some(m) = session.marker_mut(&marker.id) {
-        m.status = TicketStatus::Checkpoint;
+    fn is_live(&self, id: &str) -> bool {
+        self.session.live_attempts.is_live(id)
+            || self.session.adopted.contains_key(id)
+            || self.session.continued.contains_key(id)
     }
-    let id = &marker.id;
-    let body = format!(
-        "ticket {id} has no {missing}: set one in console.json (an assign entry for {id}, or \
-         defaults.{missing}) and answer resume. The pool reloads console.json at the next super-step \
-         boundary and schedules the ticket on what it finds."
-    );
-    land_checkpoint_brief(&marker.file, Some(&body))?;
-    raise_interrupt(session, interrupt(id, InterruptKind::Config, body));
-    session.apply(PoolUpdate {
-        tickets: Some(
-            [(id.clone(), TicketStatus::Checkpoint)]
-                .into_iter()
-                .collect(),
-        ),
-        log: Some(vec![format!(
-            "ticket {id}: no {missing}; config interrupt raised instead of a launch"
-        )]),
-        ..PoolUpdate::default()
-    });
-    Ok(())
+
+    fn in_git(&self) -> bool {
+        self.session.git
+    }
+
+    fn landed(&mut self, id: &str) -> bool {
+        let session = &mut *self.session;
+        !self
+            .unlanded
+            .get_or_insert_with(|| merge_hold(session))
+            .iter()
+            .any(|held| held == id)
+    }
+
+    fn missing_assignment(&self, id: &str) -> Option<&'static str> {
+        let assignment = self.session.assignments.get(id);
+        if assignment.is_none_or(|a| a.harness.is_empty()) {
+            return Some("harness");
+        }
+        if assignment.is_none_or(|a| a.model.is_empty()) {
+            return Some("model");
+        }
+        None
+    }
+
+    fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String> {
+        held_branch_directory(self.session, marker)
+    }
 }
 
 fn verify_of(session: &Session, marker: &TicketMarker) -> Option<u64> {
@@ -329,6 +321,47 @@ fn held_branch_directory(session: &Session, marker: &TicketMarker) -> Option<Str
         return None;
     }
     Some(at)
+}
+
+// A pool-config gap pauses the one ticket as a config interrupt instead of ending the run.
+fn checkpoint_unassigned(
+    session: &mut Session,
+    marker: &TicketMarker,
+    missing: &str,
+) -> anyhow::Result<()> {
+    let runs = Path::new(&session.runs_dir).to_path_buf();
+    let attempt = last_attempt(&runs, &marker.id);
+    let mut payload = Map::new();
+    payload.insert("missing".into(), Value::String(missing.to_owned()));
+    append_event(
+        &runs,
+        &marker.id,
+        &event_now(attempt, TicketEventKind::Unassigned, payload),
+    )?;
+    write_marker_status(&marker.file, TicketStatus::Checkpoint)?;
+    if let Some(m) = session.marker_mut(&marker.id) {
+        m.status = TicketStatus::Checkpoint;
+    }
+    let id = &marker.id;
+    let body = format!(
+        "ticket {id} has no {missing}: set one in console.json (an assign entry for {id}, or \
+         defaults.{missing}) and answer resume. The pool reloads console.json at the next Tick and \
+         schedules the ticket on what it finds."
+    );
+    land_checkpoint_brief(&marker.file, Some(&body))?;
+    raise_interrupt(session, interrupt(id, InterruptKind::Config, body));
+    session.apply(PoolUpdate {
+        tickets: Some(
+            [(id.clone(), TicketStatus::Checkpoint)]
+                .into_iter()
+                .collect(),
+        ),
+        log: Some(vec![format!(
+            "ticket {id}: no {missing}; config interrupt raised instead of a launch"
+        )]),
+        ..PoolUpdate::default()
+    });
+    Ok(())
 }
 
 fn checkpoint_held_branch(
@@ -379,162 +412,269 @@ fn checkpoint_held_branch(
     Ok(())
 }
 
-/// `planSuperStep`: the super-step gets its number, every attempt its number, the markers their
-/// in-progress status on disk, and every attempt its scheduled event, all before any spawn. A step
-/// with nothing left to plan is no super-step.
-pub fn plan_super_step(
-    session: &mut Session,
-    ready: Vec<TicketMarker>,
-) -> anyhow::Result<SuperStepPlan> {
-    let mut held: Vec<String> = Vec::new();
-    for marker in &ready {
-        if let Some(missing) = missing_assignment_field(session, marker) {
-            checkpoint_unassigned(session, marker, missing)?;
-            held.push(marker.id.clone());
+// ---------------------------------------------------------------------------------------------------
+// The loop
+// ---------------------------------------------------------------------------------------------------
+
+/// One Ticket's launch, planned in the Tick that found it eligible: one plan per Attempt (N for a
+/// `verify: N` round), its Assignment and environment as they stand now, and the state its prompts
+/// read upstream Outcomes from, frozen at the launch.
+pub struct Launch {
+    pub marker: TicketMarker,
+    pub plans: Vec<TicketPlan>,
+    pub assignment: Assignment,
+    pub env: TicketEnv,
+    pub snapshot: Arc<PoolState>,
+}
+
+/// What the drive does after a Tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Wait,
+    /// Nothing runs, merges, grades or can start: the drive closes.
+    Close,
+}
+
+/// A Tick's result: the launches to start, what the drive does next, and whether the state moved
+/// since the store last took it.
+pub struct Tick {
+    pub launches: Vec<Launch>,
+    pub next: Next,
+    pub changed: bool,
+}
+
+/// `driveLoop`: Ticks until one closes the drive, each followed by its launches, a checkpoint row when
+/// the state changed, and a wait for the next wake.
+pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
+    // Boot reconciliation lands before the first Tick.
+    let mut reconcile = engine.call(|s| s.terminal_reconcile.clone()).await?;
+    if !*reconcile.borrow() {
+        engine.call(drive_turned).await?;
+    }
+    let _ = reconcile.wait_for(|done| *done).await;
+    let wake = engine.call(|s| Arc::clone(&s.wake)).await?;
+    loop {
+        // A shutdown launches nothing more and closes once the stopped Attempts' exits are recorded.
+        let (stopping, running) = engine
+            .call(|s| (s.children.stopping, !s.launched.is_empty()))
+            .await?;
+        if stopping && !running {
+            break;
+        }
+        if stopping {
+            wake.notified().await;
             continue;
         }
-        if let Some(at) = held_branch_directory(session, marker) {
-            checkpoint_held_branch(session, marker, &at)?;
-            held.push(marker.id.clone());
+        let Tick {
+            launches,
+            next,
+            changed,
+        } = engine.call(tick).await??;
+        for launch in launches {
+            tokio::spawn(run_launch(engine.clone(), launch));
         }
+        // An exhausted retry raises the persistence Interrupt, which holds every launch until answered.
+        if changed {
+            persist_with_retry(engine).await?;
+        }
+        if next == Next::Close {
+            break;
+        }
+        wake.notified().await;
     }
-    let ready: Vec<TicketMarker> = ready
-        .into_iter()
-        .filter(|marker| !held.contains(&marker.id))
-        .collect();
-    if ready.is_empty() {
+    close_drive(engine).await
+}
+
+fn persistence_pending(session: &Session) -> bool {
+    session
+        .state
+        .interrupts
+        .iter()
+        .any(|i| i.kind == InterruptKind::Persistence)
+}
+
+/// One Tick, one job. Each step is idempotent, so a spurious wake costs one job. The order is the
+/// order each step can create work for the next.
+pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
+    if let Some(failure) = session.drive_failure.take() {
+        anyhow::bail!(failure);
+    }
+    let before = serde_json::to_value(&session.state)?;
+    crate::config_reload::reload_config(session)?;
+    crate::answers::drain_answers(session)?;
+    crate::interrupts::reconcile_deadlocks(session)?;
+    crate::line::route_line(session)?;
+    crate::spawns::adopt_spawn_proposals(session)?;
+    start_owed_grading(session)?;
+    let held = persistence_pending(session);
+    let launches = if held {
+        Vec::new()
+    } else {
+        launch_eligible(session)?
+    };
+    let state = serde_json::to_value(&session.state)?;
+    if state != before || !launches.is_empty() {
         emit_snapshot(session, RunPhase::Running);
-        return Ok(SuperStepPlan {
-            ready,
-            planned: Vec::new(),
-            snapshot: Arc::new(session.state.clone()),
-        });
     }
-    session.super_step += 1;
+    drive_turned(session);
+    session.wakes_seen = session.wakes;
+    // A done Ticket whose merge has not landed keeps the drive alive, as ADR-0014's hold did: the
+    // pool never reaches its Review with work unmerged, and the Merge queue watch wakes it when a
+    // merge done by hand lands.
+    let close = launches.is_empty()
+        && session.launched.is_empty()
+        && session.merge_line.unsettled().is_empty()
+        && session.grading == 0
+        && session.continued_grades.is_empty()
+        && !spawns_await_tick(session)
+        && merge_hold(session).is_empty();
+    Ok(Tick {
+        launches,
+        next: if close { Next::Close } else { Next::Wait },
+        changed: !held && session.persisted.as_ref() != Some(&state),
+    })
+}
+
+// Every eligible Ticket in load order, launched; a checkpoint raised for each that needs the operator.
+fn launch_eligible(session: &mut Session) -> anyhow::Result<Vec<Launch>> {
+    let mut unlanded = None;
+    let mut launches = Vec::new();
+    for index in 0..session.markers.len() {
+        let marker = session.markers[index].clone();
+        let verdict = eligibility(
+            &mut SessionFacts {
+                session,
+                unlanded: &mut unlanded,
+            },
+            &marker,
+        );
+        match verdict {
+            Eligibility::Start => launches.push(plan_launch(session, &marker)?),
+            Eligibility::Checkpoint(CheckpointWhy::MissingAssignment(missing)) => {
+                checkpoint_unassigned(session, &marker, missing)?;
+            }
+            Eligibility::Checkpoint(CheckpointWhy::BranchHeldAt(at)) => {
+                checkpoint_held_branch(session, &marker, &at)?;
+            }
+            Eligibility::Wait(_) => {}
+        }
+    }
+    Ok(launches)
+}
+
+// The launch of one Ticket: every Attempt numbered and planned (a worktree cut from the target's tip
+// now), the marker in progress on disk, a scheduled event per Attempt and one `start` line, all before
+// any spawn.
+fn plan_launch(session: &mut Session, marker: &TicketMarker) -> anyhow::Result<Launch> {
     let runs = Path::new(&session.runs_dir).to_path_buf();
-    let mut planned = Vec::new();
-    for marker in &ready {
-        let verify = verify_of(session, marker);
-        if verify.is_some() {
-            // A pre-verify solo attempt's well-known log rotates before the fan-out spawns.
-            ac_core::streamlog::rotate_attempt_log(
-                &runs,
-                &marker.id,
-                &runs.join(attempt_log_name(&marker.id, None, false)),
-                TicketEventKind::Exited,
-            )?;
-        }
-        let base = next_attempt(&runs, &marker.id);
-        for i in 0..verify.unwrap_or(1) {
-            let plan = plan_ticket(session, marker, ready.len(), base + i, verify.is_some())?;
-            planned.push((marker.clone(), plan));
-        }
+    let verify = verify_of(session, marker);
+    if verify.is_some() {
+        // A pre-verify solo attempt's well-known log rotates before the fan-out spawns.
+        ac_core::streamlog::rotate_attempt_log(
+            &runs,
+            &marker.id,
+            &runs.join(attempt_log_name(&marker.id, None, false)),
+            TicketEventKind::Exited,
+        )?;
     }
-    let ids: Vec<&str> = ready.iter().map(|m| m.id.as_str()).collect();
+    let first = next_attempt(&runs, &marker.id);
+    let count = verify.unwrap_or(1);
+    let mut plans = Vec::new();
+    for attempt in first..first + count {
+        plans.push(plan_ticket(session, marker, attempt, verify.is_some())?);
+    }
+    let id = &marker.id;
+    let line = if session.git {
+        let tip = merge_target_sha(session);
+        format!("start {id} at {}", tip.get(..7).unwrap_or(&tip))
+    } else {
+        format!("start {id}")
+    };
     session.apply(PoolUpdate {
         tickets: Some(
-            ready
-                .iter()
-                .map(|m| (m.id.clone(), TicketStatus::InProgress))
+            [(id.clone(), TicketStatus::InProgress)]
+                .into_iter()
                 .collect(),
         ),
-        log: Some(vec![format!(
-            "super-step {}: {}",
-            session.super_step,
-            ids.join(", ")
-        )]),
+        log: Some(vec![line]),
         ..PoolUpdate::default()
     });
     write_markers(session)?;
-    drive_turned(session);
-    for (marker, plan) in &planned {
+    for plan in &plans {
         append_event(
             &runs,
-            &marker.id,
+            id,
             &event_now(plan.attempt, TicketEventKind::Scheduled, Map::new()),
         )?;
+        session.launched.push(id.clone());
     }
-    emit_snapshot(session, RunPhase::Running);
-    Ok(SuperStepPlan {
-        ready,
-        planned,
+    if let Some(expected) = verify {
+        session.verify_groups.insert(
+            id.clone(),
+            VerifyGroup {
+                expected: expected as usize,
+                ended: Vec::new(),
+                flow: false,
+            },
+        );
+    }
+    Ok(Launch {
+        marker: marker.clone(),
+        plans,
+        assignment: session.assignments.get(id).cloned().unwrap_or_default(),
+        env: TicketEnv {
+            engine: session.engine(),
+            attempt: attempt_env_of(session, None),
+            pool_dir: session.pool_dir.clone(),
+            issues_dir: session.issues_dir.clone(),
+        },
         snapshot: Arc::new(session.state.clone()),
     })
 }
 
-// ---------------------------------------------------------------------------------------------------
-// The run
-// ---------------------------------------------------------------------------------------------------
-
-/// Whether the drive goes on to the next boundary or stops at the close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepEnd {
-    Continue,
-    Stop,
-}
-
-/// One merge this super-step ran: the result, the attempt, and the merge target's tip just before it.
-struct StepMerge {
-    marker: TicketMarker,
-    result: MergeResult,
-    attempt: u64,
-    before_sha: String,
-}
-
-/// The step's own merge queue: a link that fails once any merge before it threw, so later merges of
-/// the step are skipped and the step's join sees the error, as the TypeScript's local promise chain.
-type StepLink = Shared<BoxFuture<'static, Result<(), String>>>;
-
-struct StepMerges {
-    queue: Mutex<StepLink>,
-    merges: Mutex<Vec<StepMerge>>,
-    // Attempts of the step still running, and the updates of the ones that exited without joining
-    // (a crash), each with its place in the plan: the boundary join's, applied in the job the last
-    // attempt exits in.
-    running: Mutex<usize>,
-    unjoined: Mutex<Vec<(usize, PoolUpdate)>>,
-}
-
-// The `.then` on each attempt's ending: proposals ride to the boundary, a verify candidate moves only
-// the pool log, a done attempt with a worktree joins the merge chain, and a terminal result joins state
-// at once (a checkpoint raises its interrupt here).
-fn on_ticket_exit(
-    session: &mut Session,
-    result: TicketResult,
-    index: usize,
-    step: &Arc<StepMerges>,
-) -> anyhow::Result<TicketResult> {
-    let mut result = join_at_exit(session, result, step)?;
-    if !result.joined_at_exit {
-        lock(&step.unjoined).push((index, result.update.clone()));
-        result.joined_at_exit = true;
-    }
-    // The boundary join's apply of the unjoined results, in plan order. In the TypeScript it runs in
-    // the same turn as the last attempt's `.then` (nothing but microtasks between them), so no reader
-    // ever sees the last exit's update without the crashed siblings' log lines; here that is one job.
-    let last = {
-        let mut running = lock(&step.running);
-        *running -= 1;
-        *running == 0
-    };
-    if last {
-        let mut unjoined = std::mem::take(&mut *lock(&step.unjoined));
-        if !unjoined.is_empty() {
-            unjoined.sort_by_key(|(index, _)| *index);
-            for (_, update) in unjoined {
-                session.apply(update);
-            }
-            emit_snapshot(session, RunPhase::Running);
+// A launch's Attempts, each run to its exit job. A Ticket resumed from a checkpoint launches fresh:
+// its old pane closes first (issue #139).
+async fn run_launch(engine: Engine, launch: Launch) {
+    let Launch {
+        marker,
+        plans,
+        assignment,
+        env,
+        snapshot,
+    } = launch;
+    crate::terminals::close_checkpointed_tabs(&engine, std::slice::from_ref(&marker)).await;
+    let runs = plans.into_iter().map(|plan| {
+        let (engine, marker, assignment, env, snapshot) =
+            (&engine, marker.clone(), &assignment, &env, &snapshot);
+        async move {
+            let id = marker.id.clone();
+            let result = run_ticket(marker, snapshot, assignment, env, plan)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = engine.call(move |s| on_exit(s, &id, result)).await;
         }
-    }
-    Ok(result)
+    });
+    join_all(runs).await;
 }
 
-fn join_at_exit(
-    session: &mut Session,
-    mut result: TicketResult,
-    step: &Arc<StepMerges>,
-) -> anyhow::Result<TicketResult> {
+// One Attempt's exit job. A failure to run it at all, or to record its exit, kills the drive at the
+// next Tick, as a fatal stretch of the drive does.
+fn on_exit(session: &mut Session, id: &str, result: Result<TicketResult, String>) {
+    if let Some(at) = session.launched.iter().position(|l| l == id) {
+        session.launched.remove(at);
+    }
+    let recorded =
+        result.and_then(|result| record_exit(session, result).map_err(|e| e.to_string()));
+    if let Err(error) = recorded {
+        session.drive_failure.get_or_insert(error);
+    }
+    let _ = session.wake();
+}
+
+// The proposals taken; the result applied; a Candidate's ending joins its round; a done Ticket's merge
+// chained; a checkpoint's or a crash's Interrupt raised now. A shutdown-stopped Attempt raises nothing
+// (ADR-0017).
+fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()> {
     if let Some(proposals) = result.spawn_proposals.clone().filter(|p| !p.is_empty()) {
         crate::spawns::take_spawn_proposals(
             session,
@@ -543,368 +683,357 @@ fn join_at_exit(
             SpawnKind::Ticket,
         )?;
     }
+    session.apply(result.update.clone());
+    let attempt = result.plan.attempt;
     if result.plan.verify {
-        session.apply(result.update.clone());
-        result.joined_at_exit = true;
-        emit_snapshot(session, RunPhase::Running);
-        return Ok(result);
-    }
-    if let (Some(worktree), TicketStatus::Done) = (result.plan.worktree.clone(), result.status) {
-        // Its place in the Merge queue is the order it joins the chain.
-        session.merge_line.taken(&result.marker.id);
-        let engine = session.engine();
-        let marker = result.marker.clone();
-        let attempt = result.plan.attempt;
-        let step_for_link = Arc::clone(step);
-        let deferred = DeferredMerge {
-            ticket_id: marker.id.clone(),
-            path: worktree.path.clone(),
-            branch: worktree.branch.clone(),
-            attempt,
-        };
-        let work = async move {
-            through_pool_checkout_gate(&engine, Some(deferred), move |s| {
-                // Captured inside the serialized chain, just before the merge.
-                let before_sha = merge_target_sha(s);
-                let merged = merge_ticket(s, &marker, &worktree)?;
-                lock(&step_for_link.merges).push(StepMerge {
-                    marker,
-                    result: merged,
-                    attempt,
-                    before_sha,
-                });
-                Ok(())
-            })
-            .await
-            .map(drop)
-            .map_err(|error| error.to_string())
-        };
-        let link: StepLink = {
-            let mut queue = lock(&step.queue);
-            let prev = queue.clone();
-            let link = async move {
-                prev.await?;
-                work.await
-            }
-            .boxed()
-            .shared();
-            *queue = link.clone();
-            link
-        };
-        // Published at every extension, so a merge chained from outside the drive never sees a
-        // stale tail.
-        session.merge_chain = link.clone().map(drop).boxed().shared();
-        tokio::spawn(link);
-    }
-    if result.status == TicketStatus::InProgress {
-        // A crashed attempt was recorded at exit; the snapshot shows it now.
-        emit_snapshot(session, RunPhase::Running);
+        if let Some(group) = session.verify_groups.get_mut(&result.marker.id) {
+            group.ended.push(result.ending());
+        }
     } else {
-        session.apply(result.update.clone());
-        result.joined_at_exit = true;
-        if result.status == TicketStatus::Checkpoint {
-            raise_checkpoint(session, &result.marker, result.plan.attempt, None)?;
+        match result.status {
+            TicketStatus::Done => {
+                if let Some(worktree) = result.plan.worktree.clone() {
+                    chain_ticket_merge(session, result.marker.clone(), worktree, attempt, None);
+                }
+            }
+            TicketStatus::Checkpoint => raise_checkpoint(session, &result.marker, attempt, None)?,
+            TicketStatus::InProgress if session.children.stopping => note_shutdown(session),
+            TicketStatus::InProgress => {
+                let body = result.ending().crash_body();
+                raise_interrupt(
+                    session,
+                    interrupt(&result.marker.id, InterruptKind::Crash, body),
+                );
+            }
+            _ => {}
         }
-        emit_snapshot(session, RunPhase::Running);
     }
-    Ok(result)
+    emit_snapshot(session, RunPhase::Running);
+    Ok(())
 }
 
-enum PostJoin {
-    Conflict(usize),
-    Stop,
-    Graded,
+fn note_shutdown(session: &mut Session) {
+    if !session.shutdown_noted {
+        session.shutdown_noted = true;
+        session.log(SHUTDOWN_LINE);
+    }
 }
 
-// The boundary join, the merge outcomes from `from` up to the next conflict, then the shutdown gate,
-// the crash interrupts and the fan-out tallies: one stretch of the TypeScript between two awaits.
-fn after_join(
-    session: &mut Session,
-    results: &[TicketResult],
-    ready: &[TicketMarker],
-    step: &StepMerges,
-    from: usize,
-) -> anyhow::Result<PostJoin> {
-    if from == 0 {
-        for result in results {
-            if !result.joined_at_exit {
-                session.apply(result.update.clone());
-            }
-        }
+// ---------------------------------------------------------------------------------------------------
+// Grading
+// ---------------------------------------------------------------------------------------------------
+
+/// The Candidates of one verify Ticket's round, joined per Ticket: complete once every Candidate
+/// ended, then graded by one grading flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyGroup {
+    pub expected: usize,
+    pub ended: Vec<CandidateEnding>,
+    /// Its grading flow has started.
+    pub flow: bool,
+}
+
+impl VerifyGroup {
+    pub fn complete(&self) -> bool {
+        self.ended.len() >= self.expected
     }
-    let merges = lock(&step.merges);
-    for (index, merge) in merges.iter().enumerate().skip(from) {
-        if !merge.result.ok {
-            return Ok(PostJoin::Conflict(index));
-        }
-        let id = &merge.marker.id;
-        session.merge_line.settled(id);
-        append_event(
-            Path::new(&session.runs_dir),
-            id,
-            &event_now(
-                merge.attempt,
-                TicketEventKind::Merged,
-                merged_payload(&merge.result),
-            ),
-        )?;
-        close_attempt_tab(session, id, merge.attempt);
-        let branch = git::branch_for(&session.cwd, id, None);
-        let range = (!merge.before_sha.is_empty())
-            .then(|| format!("{}..{}", merge.before_sha, merge_target_ref(session)));
-        crate::conversations::ticket_ended(session, &merge.marker, &branch, range);
-        session.log(format!(
-            "ticket {id}: merged {branch} onto the working branch{}",
-            if merge.result.detail.ends_with("is gone") {
-                format!(" ({})", merge.result.detail)
-            } else {
-                String::new()
-            }
-        ));
+}
+
+// Step 6 of a Tick: a grading flow for each owed Continued grade and each complete verify round. A
+// round's crashed Candidates raise their crash Interrupts first, unless a Candidate checkpointed: the
+// checkpoint its grading raises owns the round then (ADR-0034).
+fn start_owed_grading(session: &mut Session) -> anyhow::Result<()> {
+    let engine = session.engine();
+    for owed in std::mem::take(&mut session.continued_grades) {
+        session.grading += 1;
+        tokio::spawn(continued_grade_flow(engine.clone(), owed));
     }
-    drop(merges);
-    if session.children.stopping {
-        // Shutdown (ADR-0017): no crash interrupts for the stopped attempts, nothing more scheduled.
-        session.log(
-            "engine shutdown: super-step joined; no crash interrupts raised and nothing more \
-             scheduled",
-        );
-        return Ok(PostJoin::Stop);
-    }
-    for result in results {
-        // A verify round that also holds a checkpointed candidate is owned by the checkpoint its
-        // grading raises (ADR-0034).
-        if result.plan.verify
-            && results
+    let complete: Vec<TicketMarker> = session
+        .markers
+        .iter()
+        .filter(|m| {
+            session
+                .verify_groups
+                .get(&m.id)
+                .is_some_and(|g| !g.flow && g.complete())
+        })
+        .cloned()
+        .collect();
+    for marker in complete {
+        let Some(group) = session.verify_groups.get_mut(&marker.id) else {
+            continue;
+        };
+        group.flow = true;
+        let mut ended = group.ended.clone();
+        let expected = group.expected as u64;
+        ended.sort_by_key(|e| e.attempt);
+        let tally = |status: TicketStatus| ended.iter().filter(|e| e.status == status).count();
+        if tally(TicketStatus::Checkpoint) == 0 {
+            for crashed in ended
                 .iter()
-                .any(|r| r.marker.id == result.marker.id && r.status == TicketStatus::Checkpoint)
-        {
-            continue;
+                .filter(|e| e.status == TicketStatus::InProgress)
+            {
+                raise_interrupt(
+                    session,
+                    interrupt(&marker.id, InterruptKind::Crash, crashed.crash_body()),
+                );
+            }
         }
-        if result.status == TicketStatus::InProgress {
-            let reason = result.crash_reason.as_deref().unwrap_or("crashed");
-            let body = crash_interrupt_body(&CrashFacts {
-                crash_reason: reason,
-                log_path: &result.log_path,
-                log_tail: &result.log_tail,
-                outcome_path: &result.outcome_path,
-                outcome_exists: result.outcome_exists,
-            });
-            raise_interrupt(
-                session,
-                interrupt(&result.marker.id, InterruptKind::Crash, body),
-            );
-        }
-    }
-    for marker in ready {
-        if session
-            .assignments
-            .get(&marker.id)
-            .and_then(|a| a.verify)
-            .is_none()
-        {
-            continue;
-        }
-        let attempts: Vec<&TicketResult> = results
-            .iter()
-            .filter(|r| r.marker.id == marker.id)
-            .collect();
-        let tally = |status: TicketStatus| attempts.iter().filter(|r| r.status == status).count();
         session.log(format!(
             "ticket {}: verify fan-out complete: {} attempts exited ({} done, {} checkpoint, {} \
              crash); no merge and no status write until grading",
             marker.id,
-            attempts.len(),
+            ended.len(),
             tally(TicketStatus::Done),
             tally(TicketStatus::Checkpoint),
             tally(TicketStatus::InProgress)
         ));
+        session.grading += 1;
+        tokio::spawn(verify_grade_flow(engine.clone(), marker, ended, expected));
     }
-    Ok(PostJoin::Graded)
+    Ok(())
 }
 
-/// `runSuperStep`: the fan-out, the serialised merge chain, the boundary join, the merge outcomes, the
-/// crash interrupts, grading and selection, and the boundary persist.
-pub async fn run_super_step(engine: &Engine, plan: SuperStepPlan) -> anyhow::Result<StepEnd> {
-    let SuperStepPlan {
-        ready,
-        planned,
-        snapshot,
-    } = plan;
-    // A ticket resumed from a checkpoint launches fresh: its old pane closes first (issue #139).
-    let markers: Vec<TicketMarker> = planned.iter().map(|(m, _)| m.clone()).collect();
-    crate::terminals::close_checkpointed_tabs(engine, &markers).await;
-    let config = snapshot.config.clone();
-    let ids: Vec<String> = planned.iter().map(|(m, _)| m.id.clone()).collect();
-    let (env, assignments, chain) = engine
-        .call(move |s| {
-            let env = TicketEnv {
-                engine: s.engine(),
-                attempt: attempt_env_of(s, Some(&config)),
-                pool_dir: s.pool_dir.clone(),
-                issues_dir: s.issues_dir.clone(),
-            };
-            let assignments: Vec<_> = ids
-                .iter()
-                .map(|id| s.assignments.get(id).cloned().unwrap_or_default())
-                .collect();
-            (env, assignments, s.merge_chain.clone())
-        })
-        .await?;
-    // Merges land in completion order: each ticket's merge chains onto a serialized queue the moment
-    // the ticket finishes, starting from the session-wide chain.
-    let step = Arc::new(StepMerges {
-        queue: Mutex::new(chain.map(Ok).boxed().shared()),
-        merges: Mutex::new(Vec::new()),
-        running: Mutex::new(planned.len()),
-        unjoined: Mutex::new(Vec::new()),
-    });
-    let runs = planned.into_iter().zip(assignments).enumerate().map(
-        |(index, ((marker, plan), assignment))| {
-            let (env, snapshot, step) = (&env, &snapshot, Arc::clone(&step));
-            async move {
-                let id = marker.id.clone();
-                let result = run_ticket(marker, snapshot, &assignment, env, plan).await;
-                // Its ending, however it ends, ends its hold on the pool checkout.
-                engine
-                    .call(move |s| {
-                        s.pool_checkout_planned.shift_remove(&id);
-                    })
-                    .await?;
-                let result = result?;
-                engine
-                    .call(move |s| on_ticket_exit(s, result, index, &step))
-                    .await?
-            }
-        },
+// A grading flow's end: counted off, its error left for the next Tick, the drive woken.
+fn grading_ended(session: &mut Session, outcome: anyhow::Result<()>) {
+    session.grading -= 1;
+    if let Err(error) = outcome {
+        session.drive_failure.get_or_insert(error.to_string());
+    }
+    let _ = session.wake();
+}
+
+// Work that may merge into the pool checkout: it waits at the checkout's gate (ADR-0027) and writes
+// there until it is done. `None` when a shutdown began while it waited.
+async fn writing_in_pool_checkout<T, F>(
+    engine: &Engine,
+    what: String,
+    work: impl FnOnce() -> F,
+) -> anyhow::Result<Option<T>>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    if !pool_checkout_free(engine).await? {
+        return Ok(None);
+    }
+    let hold = engine.call(move |s| hold_pool_checkout(s, what)).await?;
+    let done = work().await;
+    engine.call(move |s| release_pool_checkout(s, hold)).await?;
+    done.map(Some)
+}
+
+// One verify round graded and decided.
+async fn verify_grade_flow(
+    engine: Engine,
+    marker: TicketMarker,
+    ended: Vec<CandidateEnding>,
+    verify: u64,
+) {
+    let what = format!(
+        "the verify round of {} is deciding its merge into the pool checkout",
+        marker.id
     );
-    let mut results = Vec::new();
-    for result in join_all(runs).await {
-        results.push(result?);
-    }
-    let last = lock(&step.queue).clone();
-    last.await.map_err(anyhow::Error::msg)?;
-    let results = Arc::new(results);
-    let ready = Arc::new(ready);
-    let mut from = 0;
-    loop {
-        let (results_c, ready_c, step_c) =
-            (Arc::clone(&results), Arc::clone(&ready), Arc::clone(&step));
-        let next = engine
-            .call(move |s| after_join(s, &results_c, &ready_c, &step_c, from))
-            .await??;
-        match next {
-            PostJoin::Stop => return Ok(StepEnd::Stop),
-            PostJoin::Graded => break,
-            PostJoin::Conflict(index) => {
-                let (marker, result, attempt) = {
-                    let merges = lock(&step.merges);
-                    let merge = merges.get(index).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "the merge conflict at {index} is not among the step's merges"
-                        )
-                    })?;
-                    (merge.marker.clone(), merge.result.clone(), merge.attempt)
-                };
-                handle_merge_conflict(engine, marker, result, attempt).await?;
-                from = index + 1;
-            }
-        }
-    }
-    // Grading (ticket 03): once every attempt of a verify ticket has exited.
-    for marker in ready.iter() {
-        let marker_c = marker.clone();
-        let verify = engine
-            .call(move |s| s.assignments.get(&marker_c.id).and_then(|a| a.verify))
-            .await?;
-        let Some(verify) = verify else {
-            continue;
-        };
-        let mut attempts: Vec<u64> = results
-            .iter()
-            .filter(|r| r.marker.id == marker.id)
-            .map(|r| r.plan.attempt)
-            .collect();
-        attempts.sort_unstable();
-        // Both decisions can merge into the pool checkout, so the round waits at its gate first.
-        if !pool_checkout_free(engine).await? {
-            return Ok(StepEnd::Stop);
-        }
-        let what = format!(
-            "the verify round of {} is deciding its merge into the pool checkout",
-            marker.id
-        );
-        let hold = engine.call(move |s| hold_pool_checkout(s, what)).await?;
-        let decided = decide_round(engine, marker, &results, &attempts, verify).await;
-        engine.call(move |s| release_pool_checkout(s, hold)).await?;
-        decided?;
-    }
-    // The boundary persist: an exhausted retry raises the persistence interrupt and stops scheduling.
-    if !persist_with_retry(engine).await? {
-        return Ok(StepEnd::Stop);
-    }
-    engine.call(|s| emit_snapshot(s, RunPhase::Running)).await?;
-    Ok(StepEnd::Continue)
+    let outcome = writing_in_pool_checkout(&engine, what, || {
+        decide_round(&engine, &marker, &ended, verify)
+    })
+    .await
+    .map(drop);
+    let id = marker.id;
+    let _ = engine
+        .call(move |s| {
+            s.verify_groups.remove(&id);
+            grading_ended(s, outcome);
+        })
+        .await;
 }
 
-// A verify round's decision: lone-attempt resolution, a paused round's checkpoint, or Selection.
+// A verify round's decision: lone-attempt resolution, a paused round's checkpoint, or Selection. The
+// graders run beside everything; a decision that merges waits its turn on the merge chain.
 async fn decide_round(
     engine: &Engine,
     marker: &TicketMarker,
-    results: &[TicketResult],
-    attempts: &[u64],
+    round: &[CandidateEnding],
     verify: u64,
 ) -> anyhow::Result<()> {
-    let grades = crate::verify::grade_round(engine, marker, attempts).await?;
-    let round: Vec<TicketResult> = results
-        .iter()
-        .filter(|r| r.marker.id == marker.id)
-        .cloned()
-        .collect();
-    if verify == 1 && attempts.len() == 1 {
+    let attempts: Vec<u64> = round.iter().map(|e| e.attempt).collect();
+    let grades = crate::verify::grade_round(engine, marker, &attempts).await?;
+    // A round a shutdown cut short is decided at the next boot, from its events.
+    if engine.call(|s| s.children.stopping).await? {
+        return Ok(());
+    }
+    if verify == 1 && round.len() == 1 {
         let (marker, grade, lone) = (
             marker.clone(),
             grades.get(&attempts[0]).cloned(),
             round[0].clone(),
         );
+        return in_merge_chain(engine, move |s| {
+            crate::verify::resolve_lone_attempt(s, &marker, &lone, grade.as_ref())
+        })
+        .await;
+    }
+    if round.iter().any(|e| e.status == TicketStatus::Checkpoint) {
+        let (marker, round) = (marker.clone(), round.to_vec());
         return engine
-            .call(move |s| crate::verify::resolve_lone_attempt(s, &marker, &lone, grade.as_ref()))
+            .call(move |s| crate::verify::checkpoint_fan_out_round(s, &marker, &round, &grades))
             .await?;
     }
-    if round.iter().any(|r| r.status == TicketStatus::Checkpoint) {
-        let (marker, grades) = (marker.clone(), grades.clone());
+    let all_graded = attempts.iter().all(|a| grades.contains_key(a));
+    if !round.iter().all(|e| e.status == TicketStatus::Done) || !all_graded {
+        return Ok(());
+    }
+    let human = engine
+        .call(|s| s.state.config.selection_mode() == ac_protocol::SelectionMode::Human)
+        .await?;
+    if human {
+        let marker = marker.clone();
         return engine
             .call(move |s| {
-                let round: Vec<&TicketResult> = round.iter().collect();
-                crate::verify::checkpoint_fan_out_round(s, &marker, &round, &grades)
+                crate::verify::raise_selection_interrupt(s, &marker, &attempts, &grades);
+                emit_snapshot(s, RunPhase::Running);
+            })
+            .await
+            .map_err(Into::into);
+    }
+    let selection = crate::verify::pick_winner(engine, marker, &attempts, &grades).await?;
+    let marker = marker.clone();
+    in_merge_chain(engine, move |s| {
+        crate::verify::finish_selection(s, &marker, selection)
+    })
+    .await
+}
+
+// One owed Continued grade (issue #139), graded and decided as a lone attempt.
+async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::ContinuedGrade) {
+    let outcome = async {
+        let id = owed.ticket_id.clone();
+        let marker = engine
+            .call(move |s| {
+                s.marker(&id)
+                    .filter(|m| m.status == TicketStatus::InProgress)
+                    .cloned()
             })
             .await?;
-    }
-    let all_graded: bool = attempts.iter().all(|a| grades.contains_key(a));
-    if round.iter().all(|r| r.status == TicketStatus::Done) && all_graded {
-        let human = engine
-            .call(|s| s.state.config.selection_mode() == ac_protocol::SelectionMode::Human)
-            .await?;
-        if human {
-            let (marker, attempts, grades) = (marker.clone(), attempts.to_vec(), grades.clone());
+        let Some(marker) = marker else {
+            return Ok(());
+        };
+        let what = format!(
+            "the lone grade of {}'s continued attempt is deciding its merge",
+            marker.id
+        );
+        let (attempt, work) = (owed.attempt, owed.work.clone());
+        let graded = writing_in_pool_checkout(&engine, what, || {
+            crate::keep_talking::grade_continued_attempt(&engine, &marker, attempt, work)
+        })
+        .await?;
+        // A shutdown while it waited leaves the grade owed, and the next boot grades it.
+        if graded.is_none() {
             engine
-                .call(move |s| {
-                    crate::verify::raise_selection_interrupt(s, &marker, &attempts, &grades);
-                    emit_snapshot(s, RunPhase::Running);
-                })
+                .call(move |s| s.continued_grades.insert(0, owed))
                 .await?;
-        } else {
-            crate::verify::select_and_merge_winner(engine, marker, attempts, &grades).await?;
         }
+        Ok(())
     }
-    Ok(())
+    .await;
+    let _ = engine.call(move |s| grading_ended(s, outcome)).await;
+}
+
+/// Restart: an in-progress verify Ticket with no Interrupt gets its round back from its events file.
+/// The round is the run of `scheduled` events that ends at its last one. A round whose every Candidate
+/// ended (an `exited` or a `crash` event) is restored complete, and the first Tick grades what is
+/// ungraded and decides; true then, and the marker stays in progress. A round with a Candidate that
+/// never ended is not restored: the marker returns to Ready and the round fans out again.
+pub fn rebuild_verify_group(session: &mut Session, marker: &TicketMarker) -> bool {
+    if verify_of(session, marker).is_none() {
+        return false;
+    }
+    let Some(group) = rebuilt_group(session, &marker.id) else {
+        return false;
+    };
+    session.verify_groups.insert(marker.id.clone(), group);
+    true
+}
+
+fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
+    let runs = Path::new(&session.runs_dir);
+    let events = ac_core::events::read_events(runs, id);
+    let last = events
+        .iter()
+        .rposition(|e| e.kind == TicketEventKind::Scheduled)?;
+    let mut start = last;
+    while start > 0 && events[start - 1].kind == TicketEventKind::Scheduled {
+        start -= 1;
+    }
+    let attempts: Vec<u64> = events[start..=last].iter().map(|e| e.attempt).collect();
+    if events[last..]
+        .iter()
+        .any(|e| matches!(e.kind, TicketEventKind::Selected | TicketEventKind::Merged))
+    {
+        return None;
+    }
+    let mut ended = Vec::new();
+    for attempt in &attempts {
+        let of = |kind: TicketEventKind| {
+            events[last..]
+                .iter()
+                .rfind(|e| e.kind == kind && e.attempt == *attempt)
+        };
+        let (exited, crash) = (of(TicketEventKind::Exited), of(TicketEventKind::Crash));
+        let ending = exited.or(crash)?;
+        let status = match exited
+            .and_then(|e| e.payload.get("status"))
+            .and_then(Value::as_str)
+        {
+            Some("done") => TicketStatus::Done,
+            Some("checkpoint") => TicketStatus::Checkpoint,
+            _ => TicketStatus::InProgress,
+        };
+        let outcome_name = ac_core::events::attempt_outcome_name(id, Some(*attempt), false);
+        ended.push(CandidateEnding {
+            attempt: *attempt,
+            status,
+            crash_reason: crash
+                .and_then(|c| c.payload.get("reason"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            log_path: ac_core::js::path_join(&[
+                &session.runs_dir,
+                &attempt_log_name(id, Some(*attempt), false),
+            ]),
+            log_tail: ending
+                .payload
+                .get("logTail")
+                .and_then(Value::as_array)
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            outcome_path: ac_core::js::path_join(&[&session.runs_dir, &outcome_name]),
+            outcome_exists: ending
+                .payload
+                .get("outcomeExists")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            worktree: None,
+        });
+    }
+    Some(VerifyGroup {
+        expected: attempts.len(),
+        ended,
+        flow: false,
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------
 // The close
 // ---------------------------------------------------------------------------------------------------
 
-/// `closeDrive`: the Review gate, the phase decision, the final persist and the settle.
+/// `closeDrive`: the Review gate, the phase decision, the final persist and the settle. A wake that
+/// came after the last Tick starts the next drive.
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     // A closed ticket (issue #154) is finished too.
     let (pending, closed_ids, raised, merging_at_gate) = engine
@@ -922,10 +1051,9 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .map(|m| m.id.clone())
                 .collect();
             // The closing gate: every ticket finished and nothing else waiting on the human raises
-            // the final Review; an approval recorded in state holds it down for good.
-            // A merge still in flight off the drive (an adopted or Continued attempt's ending) holds
-            // the gate too: in the TypeScript it lands synchronously before any drive sees its ending.
-            // In a Factory pool approving the Finish checkpoint is the Review (ADR-0037).
+            // the final Review; an approval recorded in state holds it down for good. A merge still in
+            // flight off the drive (an adopted or Continued attempt's ending) holds the gate too. In a
+            // Factory pool approving the Finish checkpoint is the Review (ADR-0037).
             let merging = s.merge_line.unsettled();
             let raise = pending.is_empty()
                 && !crate::line::is_factory_pool(s)
@@ -946,11 +1074,11 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     let mut phase = engine
         .call(move |s| {
             let pending = pending_c;
-            // Tickets whose Attempt runs outside the drive (issue #139) end on their own.
-            // So does a ticket whose merge is still in flight off the drive: its ending already
-            // landed, its merge has not (see the closing gate above). One the gate saw in flight
-            // counts even if it settled since: the gate held the Review for it, and the ending's
-            // finalize starts the drive that raises it, so this one must not close the store first.
+            // Tickets whose Attempt runs outside the drive (issue #139) end on their own. So does a
+            // ticket whose merge is still in flight off the drive: its ending already landed, its
+            // merge has not (see the closing gate above). One the gate saw in flight counts even if it
+            // settled since: the gate held the Review for it, and its merge's wake starts the drive
+            // that raises it, so this one must not close the store first.
             let mut merging = s.merge_line.unsettled();
             for id in merging_at_gate {
                 if !merging.contains(&id) {
@@ -973,7 +1101,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             let phase = if interrupts
                 || !outside.is_empty()
                 || !s.continued_grades.is_empty()
-                || spawns_await_boundary(s)
+                || spawns_await_tick(s)
                 || (line_waits && pending.is_empty())
             {
                 RunPhase::Quiescent
@@ -1030,9 +1158,10 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     engine
         .call(move |s| {
             let mut phase = phase;
-            // A proposal taken, or a Held spawn adopted, while this drive was closing waits for a
-            // boundary this drive will not reach.
-            if spawns_await_boundary(s) {
+            // Something woke the drive after its last Tick: the store stays open and the next drive
+            // starts once this one settles.
+            let again = s.wakes != s.wakes_seen || spawns_await_tick(s);
+            if again {
                 phase = RunPhase::Quiescent;
             }
             emit_snapshot(s, phase);
@@ -1041,18 +1170,213 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             }
             settle_drive(s, Some(phase), None);
             drive_turned(s);
-            // A Continued attempt's grading or spawns waiting to land kicked a drive that was still
-            // in flight, which does nothing: the drive that closes starts the next. So does an answer
-            // queued after the last boundary's drain.
-            let finalized = std::mem::take(&mut s.finalized_while_driving);
-            if !s.continued_grades.is_empty()
-                || spawns_await_boundary(s)
-                || s.queued_since_drain
-                || finalized
-            {
-                crate::answers::kick_processing(s)?;
+            if again {
+                s.wake()?;
             }
             Ok(())
         })
         .await?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    // A pool over fixed facts: statuses, the hold, the live ids, the ids whose branch has not landed,
+    // the missing Assignment fields and the held branches.
+    #[derive(Default)]
+    struct Facts {
+        statuses: HashMap<String, TicketStatus>,
+        hold: Vec<String>,
+        live: Vec<String>,
+        git: bool,
+        unlanded: Vec<String>,
+        missing: HashMap<String, &'static str>,
+        held_at: HashMap<String, String>,
+    }
+
+    impl PoolFacts for Facts {
+        fn status(&self, id: &str) -> Option<TicketStatus> {
+            self.statuses.get(id).copied()
+        }
+        fn is_hold(&self, id: &str) -> bool {
+            self.hold.iter().any(|h| h == id)
+        }
+        fn is_live(&self, id: &str) -> bool {
+            self.live.iter().any(|l| l == id)
+        }
+        fn in_git(&self) -> bool {
+            self.git
+        }
+        fn landed(&mut self, id: &str) -> bool {
+            !self.unlanded.iter().any(|u| u == id)
+        }
+        fn missing_assignment(&self, id: &str) -> Option<&'static str> {
+            self.missing.get(id).copied()
+        }
+        fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String> {
+            self.held_at.get(&marker.id).cloned()
+        }
+    }
+
+    fn marker(id: &str, blocked_by: &[&str]) -> TicketMarker {
+        TicketMarker {
+            id: id.to_owned(),
+            file: std::path::PathBuf::from(format!("{id}.md")),
+            blocked_by: blocked_by.iter().map(|b| (*b).to_owned()).collect(),
+            status: TicketStatus::Ready,
+            title: id.to_owned(),
+            spec: String::new(),
+            spawned_by: None,
+            enlisted_from: None,
+            spawn_assign: None,
+            station: None,
+        }
+    }
+
+    fn facts(statuses: &[(&str, TicketStatus)]) -> Facts {
+        Facts {
+            statuses: statuses
+                .iter()
+                .map(|(id, status)| ((*id).to_owned(), *status))
+                .collect(),
+            git: true,
+            ..Facts::default()
+        }
+    }
+
+    #[test]
+    fn eligibility_answers_every_row_of_the_rule_in_order() {
+        use TicketStatus::{Closed, Done, InProgress, Ready};
+        let grader = "01-grader-1";
+        let rows: Vec<(&str, Facts, TicketMarker, Eligibility)> = vec![
+            (
+                "not ready",
+                facts(&[("01", InProgress)]),
+                marker("01", &[]),
+                Eligibility::Wait(WaitWhy::NotReady),
+            ),
+            (
+                "a hold Ticket is never run",
+                Facts {
+                    hold: vec!["01".into()],
+                    ..facts(&[("01", Ready)])
+                },
+                marker("01", &[]),
+                Eligibility::Wait(WaitWhy::Hold),
+            ),
+            (
+                "an engine-run Ticket is its grading flow's",
+                facts(&[(grader, Ready), ("01", InProgress)]),
+                marker(grader, &["01"]),
+                Eligibility::Wait(WaitWhy::EngineRun),
+            ),
+            (
+                "live",
+                Facts {
+                    live: vec!["01".into()],
+                    ..facts(&[("01", Ready)])
+                },
+                marker("01", &[]),
+                Eligibility::Wait(WaitWhy::Live),
+            ),
+            (
+                "a blocker still running",
+                facts(&[("02", Ready), ("01", InProgress)]),
+                marker("02", &["01"]),
+                Eligibility::Wait(WaitWhy::BlockerNotDone("01".into())),
+            ),
+            (
+                "a closed blocker is not done",
+                facts(&[("02", Ready), ("01", Closed)]),
+                marker("02", &["01"]),
+                Eligibility::Wait(WaitWhy::BlockerNotDone("01".into())),
+            ),
+            (
+                "a done blocker whose branch has not landed",
+                Facts {
+                    unlanded: vec!["01".into()],
+                    ..facts(&[("02", Ready), ("01", Done)])
+                },
+                marker("02", &["01"]),
+                Eligibility::Wait(WaitWhy::BlockerNotMerged("01".into())),
+            ),
+            (
+                "a done hold blocker is merged by rule",
+                Facts {
+                    hold: vec!["01".into()],
+                    unlanded: vec!["01".into()],
+                    ..facts(&[("02", Ready), ("01", Done)])
+                },
+                marker("02", &["01"]),
+                Eligibility::Start,
+            ),
+            (
+                "a done engine-run blocker is merged by rule",
+                Facts {
+                    unlanded: vec![grader.into()],
+                    ..facts(&[("02", Ready), (grader, Done)])
+                },
+                marker("02", &[grader]),
+                Eligibility::Start,
+            ),
+            (
+                "outside git every done blocker is merged",
+                Facts {
+                    git: false,
+                    unlanded: vec!["01".into()],
+                    ..facts(&[("02", Ready), ("01", Done)])
+                },
+                marker("02", &["01"]),
+                Eligibility::Start,
+            ),
+            (
+                "a missing Assignment field",
+                Facts {
+                    missing: HashMap::from([("01".to_owned(), "model")]),
+                    ..facts(&[("01", Ready)])
+                },
+                marker("01", &[]),
+                Eligibility::Checkpoint(CheckpointWhy::MissingAssignment("model")),
+            ),
+            (
+                "a branch checked out elsewhere",
+                Facts {
+                    held_at: HashMap::from([("01".to_owned(), "/elsewhere".to_owned())]),
+                    ..facts(&[("01", Ready)])
+                },
+                marker("01", &[]),
+                Eligibility::Checkpoint(CheckpointWhy::BranchHeldAt("/elsewhere".into())),
+            ),
+            (
+                "each blocker done and merged",
+                facts(&[("03", Ready), ("01", Done), ("02", Done)]),
+                marker("03", &["01", "02"]),
+                Eligibility::Start,
+            ),
+        ];
+        for (row, mut facts, marker, expected) in rows {
+            assert_eq!(eligibility(&mut facts, &marker), expected, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_wake_in_flight_leaves_a_permit_and_moves_the_count_a_closing_drive_reads() {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.driving = true;
+        session.wakes_seen = session.wakes;
+        session.wake().unwrap();
+        let waited = futures::FutureExt::now_or_never(session.wake.notified());
+        assert!(
+            waited.is_some(),
+            "the drive's next wait takes the permit at once"
+        );
+        assert_ne!(
+            session.wakes, session.wakes_seen,
+            "a drive closing after this wake starts the next"
+        );
+    }
 }
