@@ -163,13 +163,15 @@ impl Engine {
     pub async fn reload_config(&self) {
         let _ = self
             .call(|s| -> anyhow::Result<()> {
-                s.wake()?;
                 if !s.driving {
+                    let before = serde_json::to_value(&s.state)?;
                     crate::config_reload::reload_config(s)?;
-                    let phase = s.idle_phase();
-                    crate::snapshot::emit_snapshot(s, phase);
+                    if serde_json::to_value(&s.state)? != before {
+                        let phase = s.idle_phase();
+                        crate::snapshot::emit_snapshot(s, phase);
+                    }
                 }
-                Ok(())
+                s.wake()
             })
             .await;
     }

@@ -31,7 +31,9 @@ pub const SHUTDOWN_LINE: &str =
 
 pub fn start_drive(session: &mut Session) {
     session.driving = true;
-    emit_snapshot(session, RunPhase::Running);
+    if session.emitted == 0 {
+        emit_snapshot(session, RunPhase::Running);
+    }
     let engine = session.engine();
     tokio::spawn(async move {
         if let Err(error) = drive_loop(&engine).await {
@@ -51,8 +53,12 @@ impl Session {
         if !self.store_open || self.children.stopping {
             return Ok(());
         }
+        let answered = !self.answers.pending().is_empty();
         crate::answers::drain_answers(self)?;
         start_drive(self);
+        if answered {
+            emit_snapshot(self, RunPhase::Running);
+        }
         Ok(())
     }
 }
@@ -387,6 +393,7 @@ pub struct Tick {
     pub launches: Vec<Launch>,
     pub next: Next,
     pub changed: bool,
+    pub stirred: bool,
 }
 
 pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
@@ -396,6 +403,7 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
     }
     let _ = reconcile.wait_for(|done| *done).await;
     let wake = engine.call(|s| Arc::clone(&s.wake)).await?;
+    let mut stirred = false;
     loop {
         let (stopping, running) = engine
             .call(|s| (s.children.stopping, !s.launched.is_empty()))
@@ -411,7 +419,9 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
             launches,
             next,
             changed,
+            stirred: this_tick_stirred,
         } = engine.call(tick).await??;
+        stirred |= this_tick_stirred;
         for launch in launches {
             tokio::spawn(run_launch(engine.clone(), launch));
         }
@@ -423,7 +433,7 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
         }
         wake.notified().await;
     }
-    close_drive(engine).await
+    close_drive(engine, stirred).await
 }
 
 fn persistence_pending(session: &Session) -> bool {
@@ -452,11 +462,6 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         launch_eligible(session)?
     };
     let state = serde_json::to_value(&session.state)?;
-    if state != before || !launches.is_empty() {
-        emit_snapshot(session, RunPhase::Running);
-    }
-    drive_turned(session);
-    session.wakes.see_all();
     let close = launches.is_empty()
         && session.launched.is_empty()
         && session.merge_line.unsettled().is_empty()
@@ -464,10 +469,17 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         && session.continued_grades.is_empty()
         && !spawns_await_tick(session)
         && merge_hold(session).is_empty();
+    let stirred = state != before || !launches.is_empty() || !close;
+    if stirred {
+        emit_snapshot(session, RunPhase::Running);
+    }
+    drive_turned(session);
+    session.wakes.see_all();
     Ok(Tick {
         launches,
         next: if close { Next::Close } else { Next::Wait },
         changed: !held && session.persisted.as_ref() != Some(&state),
+        stirred,
     })
 }
 
@@ -932,7 +944,7 @@ fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
 // The close
 // ---------------------------------------------------------------------------------------------------
 
-pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
+pub async fn close_drive(engine: &Engine, stirred: bool) -> anyhow::Result<()> {
     // A closed ticket (issue #154) is finished too.
     let (pending, closed_ids, raised, merging_at_gate) = engine
         .call(|s| {
@@ -965,7 +977,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
         persist_with_retry(engine).await?;
     }
     let pending_c = pending.clone();
-    let mut phase = engine
+    let (mut phase, quiet) = engine
         .call(move |s| {
             let pending = pending_c;
             let mut merging = s.merge_line.unsettled();
@@ -1036,10 +1048,14 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 ),
                 _ => format!("pool stalled: {} cannot run", pending.join(", ")),
             };
-            s.log(line);
-            phase
+            let quiet = !stirred && !raised && s.settled_phase == Some(phase);
+            if !quiet {
+                s.log(line);
+            }
+            (phase, quiet)
         })
         .await?;
+    let quiet_phase = phase;
     // The final persist decides the store's fate: still failing, the run waits quiescent for a human.
     if !persist_with_retry(engine).await? {
         phase = RunPhase::Quiescent;
@@ -1051,7 +1067,9 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             if again {
                 phase = RunPhase::Quiescent;
             }
-            emit_snapshot(s, phase);
+            if !(quiet && !again && phase == quiet_phase) {
+                emit_snapshot(s, phase);
+            }
             if phase != RunPhase::Quiescent {
                 close_store(s);
             }

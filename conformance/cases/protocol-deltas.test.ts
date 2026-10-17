@@ -86,10 +86,19 @@ conformance(
     // One delta, ahead of the reply: 01 whole under upsert, no order since no
     // id moved, and nothing of 02 or 03. Keeping the neighbours by reference
     // is the Console's apply (ui/src/protocol.ts); not resending them is the
-    // server's half.
+    // server's half. The Reassign's config reload rides in the same delta.
     expectParsedEqual(
       deltasFrom(client, from),
-      [{ base: held, rev: held + 1, tickets: { upsert: [ticketOf(after, "01")] } }],
+      [
+        {
+          base: held,
+          rev: held + 1,
+          tickets: { upsert: [ticketOf(after, "01")] },
+          state: { config: after.state.config },
+          log: { append: ["config reloaded: assign"], total: after.state.log.length },
+          set: { seq: expect.any(Number) },
+        },
+      ],
       "the deltas",
     );
     expect(client.pushed?.snapshot).toEqual(after);

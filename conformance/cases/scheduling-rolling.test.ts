@@ -121,6 +121,7 @@ conformance(
     world.stubs.script("02", { statuses: ["keep", "done"], exitCodes: [3, 0] });
     const server = await t.start(world);
 
+    await until(() => snapshot(server), (s) => running(world, s, "01"), { what: "01 to run", ms: 30_000 });
     const crashed = await until(() => snapshot(server), (s) => interrupted(s, "02", "crash"), {
       what: "02's crash Interrupt",
       ms: 30_000,
