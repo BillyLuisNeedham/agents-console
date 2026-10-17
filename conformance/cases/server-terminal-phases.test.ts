@@ -7,7 +7,7 @@
  *
  * A drive is killed here the way the engine test kills it: the Ticket's
  * harness binary is not on the server's PATH, so its launch fails inside
- * the super-step.
+ * the Tick.
  */
 
 import { expect } from "bun:test";
@@ -48,8 +48,8 @@ conformance(
   "dead drives report themselves › running frames, then one dead frame last, one errors.jsonl line naming the missing binary, and pool dead: last in the pool log",
   async (t) => {
     // 01 runs on the opencode stub, held until a socket watches; 02 waits on
-    // it and runs on claude, which is not there, so the second super-step's
-    // launch kills the drive.
+    // it and runs on claude, which is not there, so its launch, once 01 has
+    // merged, kills the drive.
     const world = t.world({
       tickets: [ticket("01"), ticket("02", { blockedBy: "01" })],
       config: { ...CONFIG, assign: { "01": { harness: "opencode" } } },

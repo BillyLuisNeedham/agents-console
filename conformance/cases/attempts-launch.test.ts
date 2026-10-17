@@ -14,6 +14,7 @@ import { conformance } from "../harness/case.ts";
 import { anyIsoTime, expectJsonlEqual, expectParsedEqual } from "../harness/equal.ts";
 import type { Http } from "../harness/http.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import type { World } from "../harness/world.ts";
 
 /** A ready Ticket `<id>-t.md` titled `T<id>`. */
@@ -150,8 +151,9 @@ conformance("attempts", "a missing, unparseable or statusless Outcome is a crash
     { what: "three crash Interrupts" },
   );
   const runs = join(world.pool, "runs");
+  // Each Interrupt is raised at its Attempt's exit, so their order is exit order, not Ticket order.
   expectParsedEqual(
-    state.state.interrupts,
+    [...state.state.interrupts].sort((a, b) => a.ticketId.localeCompare(b.ticketId)),
     Object.entries(reasons).map(([id, [reason, exists]]) => ({
       ticketId: id,
       kind: "crash",
@@ -167,10 +169,12 @@ conformance("attempts", "a missing, unparseable or statusless Outcome is a crash
 conformance("attempts", "a headless pool never calls herdr, even with a daemon on its socket", async (t) => {
   const world = t.world({ tickets: [ready("01")], config: { defaults: { harness: "claude", model: "m" } } });
   const herdr = await t.herdr(world);
+  const tip = world.git(["rev-parse", "HEAD"]).trim();
   const server = await t.start(world, { herdr });
 
   await eventsEnded(world, "01");
   await until(() => snapshot(server.http), (snap) => snap?.phase === "quiescent", { what: "the pool to settle" });
+  const { path: worktree, branch } = ticketWorktree(world.repo, "01");
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), [
     { at: anyIsoTime(), attempt: 1, kind: "scheduled", payload: {} },
     {
@@ -180,16 +184,17 @@ conformance("attempts", "a headless pool never calls herdr, even with a daemon o
       // No pane_id, tab_id or terminal_error: a headless pool records no pane facts at all.
       payload: {
         argv: claudeArgv(world, "01"),
-        cwd: world.repo,
-        branch: null,
-        commitSha: world.git(["rev-parse", "HEAD"]).trim(),
-        env: { PWD: world.repo },
+        cwd: worktree,
+        branch,
+        commitSha: tip,
+        env: { PWD: worktree },
         harness: "claude",
         model: "m",
         pid: expect.any(Number),
       },
     },
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 0, status: "done", logTail: [], outcomeExists: true } },
+    { at: anyIsoTime(), attempt: 1, kind: "merged", payload: {} },
   ], "runs/01.events.jsonl");
   expect(herdr.calls).toEqual([]);
 });
@@ -287,7 +292,7 @@ conformance("attempts", "a resolver Attempt records its spawn and nothing after 
         "approve to commit it and continue, or reject to resolve by hand.",
     },
   ], "the Interrupts");
-  // The merge hold keeps the pool waiting here, so this is all the log will hold.
+  // The Interrupt is raised once the resolver has spawned, so this is all the log will hold.
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), resolverEvents(world, key), "runs/01.events.jsonl");
 });
 
@@ -320,21 +325,23 @@ conformance("attempts", "a resolver that exits non-zero is named as the crash's 
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), resolverEvents(world, key), "runs/01.events.jsonl");
 });
 
-/** The spawned event of a terminal-backed launch that fell back to headless. */
+/** The spawned event of a terminal-backed launch that fell back to headless, in the worktree whose trust claude's absent config left unseeded. */
 function fallbackSpawned(world: World, terminalError: string): unknown {
+  const { path: worktree, branch } = ticketWorktree(world.repo, "01");
   return {
     at: anyIsoTime(),
     attempt: 1,
     kind: "spawned",
     payload: {
       argv: claudeArgv(world, "01"),
-      cwd: world.repo,
-      branch: null,
+      cwd: worktree,
+      branch,
       commitSha: world.git(["rev-parse", "HEAD"]).trim(),
-      env: { PWD: world.repo },
+      env: { PWD: worktree },
       harness: "claude",
       model: "m",
       pid: expect.any(Number),
+      folder_trust: `skipped: ${join(world.claudeConfig, ".claude.json")} does not exist`,
       pane_id: null,
       tab_id: null,
       terminal_error: terminalError,
@@ -343,11 +350,12 @@ function fallbackSpawned(world: World, terminalError: string): unknown {
 }
 
 async function expectFallbackRan(world: World, terminalError: string): Promise<void> {
-  await until(() => readStateLine(world.pool, "01-t.md"), (line) => line.status === "done", { what: "01 done" });
+  await until(() => readEvents(world.pool, "01"), (events) => events.some((e) => e.kind === "merged"), { what: "01's merge" });
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), [
     { at: anyIsoTime(), attempt: 1, kind: "scheduled", payload: {} },
     fallbackSpawned(world, terminalError),
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 0, status: "done", logTail: [], outcomeExists: true } },
+    { at: anyIsoTime(), attempt: 1, kind: "merged", payload: {} },
   ], "runs/01.events.jsonl");
   // The headless batch argv ran: the stub saw -p and the prompt.
   const calls = world.stubs.calls();
@@ -390,7 +398,7 @@ conformance("attempts", "a wrapper herdr will not take falls back to headless an
 });
 
 // engine.test.ts:3538 spawn pump teardown
-conformance("attempts", "a grandchild holding the harness's stdout does not hold up the next super-step", async (t) => {
+conformance("attempts", "a grandchild holding the harness's stdout does not hold up the Ticket that waits on it", async (t) => {
   const world = t.world({
     tickets: [ready("01"), ready("02", "01")],
     config: { defaults: { harness: "opencode", model: "m" } },

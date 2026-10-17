@@ -3,7 +3,7 @@
  * (ADR-0036). An answer is accepted first (its `answered` event, then its
  * record in runs/queued-answers.json) and processed after; a server that
  * goes down between the two leaves the record pending, and the next boot
- * drains it at its first boundary without anyone answering again. One that
+ * drains it at its first Tick without anyone answering again. One that
  * goes down after the processing finds the answer already in the last
  * checkpoint. Ticket C05 of the inventory's split
  * (docs/research/rust-port/test-inventory.md): each case names the engine
@@ -201,8 +201,8 @@ restartCase("an answer processed before a SIGKILL is still answered at the next 
     config: CONFIG,
   });
   const release = join(world.root, "release-01");
-  // The resumed attempt holds its super-step open, so the kill lands after
-  // the answer is processed and before the next boundary.
+  // The resumed attempt stays up until released, so the kill lands after
+  // the answer is processed and before the attempt ends.
   world.stubs.launches("01", [
     { status: "checkpoint", brief: "pick a name" },
     { status: "keep", run: waitScript(release) },

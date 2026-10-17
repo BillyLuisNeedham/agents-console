@@ -10,11 +10,15 @@
  * Ticket C06 of the inventory's split (docs/research/rust-port/
  * test-inventory.md): each case names the engine test it carries over.
  *
+ * Every Ticket the engine launches runs in a worktree, so only an Attempt a
+ * stopped older server left running in the pool checkout can hold its gate.
+ * The gate cases write that Attempt's events by hand.
+ *
  * The pools are terminal-backed on one fake herdr, alive across both servers
  * of a case. Ticket 01's stub claude reads the prompt typed into its pane,
  * writes the checkpoint it is scripted with, and stays up the way an
  * interactive harness does; the case then plays the agent in the pane and
- * writes each later Outcome itself. A lone Ticket runs in the pool checkout.
+ * writes each later Outcome itself.
  */
 
 import { expect } from "bun:test";
@@ -51,6 +55,9 @@ const BRIEF = "\n\n---\n\n## Brief\n\nask me";
 function pause() {
   return { status: "checkpoint", brief: "ask me", hold: 150 } as const;
 }
+
+/** The checkpoint Outcome an agent writes when it has a question. */
+const CHECKPOINT = { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" };
 
 /** A frame both claude's and opencode's readiness patterns match, with claude's idle prompt. */
 const BOTH_READY = "Claude Code v · Ask anything\n❯ ";
@@ -181,6 +188,19 @@ function spawnedIn(world: World, worktree: string, branch: string, paneId: strin
   };
 }
 
+/**
+ * Ticket 01 as a stopped older server left it: in progress, its Attempt 1 running in the pool checkout
+ * on main, in pane p-01 of tab t-01, which the fake lists in the Pool workspace the first boot makes (w1).
+ * The first server re-adopts it, and an Outcome written for it ends it.
+ */
+async function leftInCheckout(world: World, herdr: HerdrProcess): Promise<void> {
+  writeEvents(world, "01", [
+    { attempt: 1, kind: "scheduled", payload: {} },
+    { attempt: 1, kind: "spawned", payload: spawnedIn(world, world.repo, "main", "p-01", "t-01") },
+  ]);
+  await herdr.control("injectPane", "p-01", { tabId: "t-01", cwd: world.repo, workspaceId: "w1" });
+}
+
 /** Make Ticket `id`'s pool worktree and branch, as the engine makes them for an Attempt. */
 function makeWorktree(world: World, id: string): { path: string; branch: string } {
   const { path, branch } = ticketWorktree(world.repo, id);
@@ -268,11 +288,11 @@ restartCase(
   "a merge held at the pool checkout's gate is recorded at once, kept out across a restart, and redone once the Continued attempt ends",
   async (t) => {
     // What the first server boots on: 02's Attempt was launched into its
-    // worktree by a server before, and its pane still runs there; 01 is
-    // ready, so it runs alone, in the pool checkout.
+    // worktree by a server before, and its pane still runs there; 01 was
+    // left running in the pool checkout.
     const world = t.world({
       tickets: [
-        ticket("01", "a", { body: BODY }),
+        ticket("01", "a", { status: "in-progress", body: BODY }),
         ticket("02", "b", { status: "in-progress", body: "# 02\n\nWork on 02." }),
       ],
       config: TERMINAL,
@@ -282,14 +302,14 @@ restartCase(
       { attempt: 1, kind: "scheduled", payload: {} },
       { attempt: 1, kind: "spawned", payload: spawnedIn(world, worktree.path, worktree.branch, "p-02", "t-02") },
     ]);
-    world.stubs.script("01", pause());
     const herdr = await t.herdr(world, { rendered: CLAUDE_READY });
-    // In the Pool workspace the first boot will create (the fake's first, w1).
+    await leftInCheckout(world, herdr);
     await herdr.control("injectPane", "p-02", { tabId: "t-02", cwd: worktree.path, workspaceId: "w1" });
     const first = await startLeg(t, world, 0, { herdr });
     await untilLogged(first, "ticket 02: attempt 1 re-adopted from live pane p-02; waiting on its exit");
+    await untilLogged(first, "ticket 01: attempt 1 re-adopted from live pane p-01; waiting on its exit");
+    writeOutcome(world, "01.outcome.json", CHECKPOINT);
     const paneId = await untilHeld(first, "01");
-    expect(eventsOf(world, "01", "spawned")[0]!.payload.cwd).toBe(world.repo);
     await keepTalking(first, herdr, paneId, join(world.pool, "runs", "01.outcome.json"));
 
     // 02 ends done with work on its branch while 01 talks in the checkout:
@@ -325,14 +345,16 @@ restartCase(
 restartCase(
   "a merge a stop dropped at the pool checkout's gate is redone after the restart once the Continued attempt ends",
   async (t) => {
-    const world = t.world({ tickets: [ticket("01", "a", { body: BODY })], config: TERMINAL });
-    world.stubs.script("01", pause());
+    const world = t.world({ tickets: [ticket("01", "a", { status: "in-progress", body: BODY })], config: TERMINAL });
     // The Conversation talks on opencode, its stub held in its pane; the
     // Ticket it proposes runs on claude and commits its work.
     world.stubs.script("_opencode", { hold: 150 });
     world.stubs.script("conv-1-spawn-1", { work: { file: "side.txt", line: "side", message: "side work" } });
     const herdr = await t.herdr(world, { rendered: BOTH_READY });
+    await leftInCheckout(world, herdr);
     const first = await startLeg(t, world, 0, { herdr });
+    await untilLogged(first, "ticket 01: attempt 1 re-adopted from live pane p-01; waiting on its exit");
+    writeOutcome(world, "01.outcome.json", CHECKPOINT);
     const paneId = await untilHeld(first, "01");
     await keepTalking(first, herdr, paneId, join(world.pool, "runs", "01.outcome.json"));
     const started = await first.http.post("/api/conversations", { title: "Spawner", assign: { harness: "opencode" } });

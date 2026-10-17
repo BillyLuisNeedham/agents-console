@@ -2,8 +2,10 @@
  * Verify rounds across a stop and start, seen from outside the server
  * (ADR-0036): a paused round's Candidates, a human selection Interrupt and a
  * grader's complaint all come back at the next boot and stay answerable,
- * and a grader Ticket an earlier run left on disk resolves from its build
- * Ticket's Assignment at boot. Ticket C05 of the inventory's split
+ * a grader Ticket an earlier run left on disk resolves from its build
+ * Ticket's Assignment at boot, and a round whose Candidates all ended
+ * before the stop is graded at the next boot, never fanned out again.
+ * Ticket C05 of the inventory's split
  * (docs/research/rust-port/test-inventory.md): each case names the engine
  * test it carries over.
  *
@@ -19,12 +21,13 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
-import { readEvents, readStateLine } from "../harness/pool-files.ts";
+import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { takeover } from "../harness/takeover.ts";
 import type { World } from "../harness/world.ts";
 import {
   answer,
   approveReview,
+  poolLog,
   quiescentWith,
   restartCase,
   settle,
@@ -87,7 +90,7 @@ takeover(
         run: after(world, "exited", 1),
         work: { file: "cand-2.txt", message: "cand-2" },
       });
-      world.stubs.script("01-grader-2", { grade: { score: 7, verdict: "pass", reasons: "fine" } });
+      world.stubs.script("01-grader-2", { run: after(world, "graded", 1), grade: { score: 7, verdict: "pass", reasons: "fine" } });
     },
     // Nothing to drive: the round pauses on its own, and stopPoint waits for it.
     async reach() {},
@@ -154,7 +157,7 @@ restartCase("a grader's complaint is raised again from the Ticket file's Brief w
   expect(flagged.state.interrupts[0]!.body).toContain("work is incomplete");
   await first.stop();
 
-  // Killed before the boundary write, say: the state line and the Brief the
+  // Killed before its checkpoint write, say: the state line and the Brief the
   // engine wrote into the Ticket file are all there is.
   rmSync(join(world.pool, "console.db"), { force: true });
   const launched = world.stubs.calls().length;
@@ -165,6 +168,41 @@ restartCase("a grader's complaint is raised again from the Ticket file's Brief w
   expect(statusesOf(raised)["01"]).toBe("checkpoint");
   expect(world.stubs.calls()).toHaveLength(launched);
 });
+
+restartCase("a round stopped after every Candidate exited is graded once at the next boot, not fanned out again", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(2) });
+  world.stubs.script("01.attempt-1", { work: { file: "cand-1.txt", message: "cand-1" } });
+  world.stubs.script("01.attempt-2", { work: { file: "cand-2.txt", message: "cand-2" } });
+  const graders = ["01-grader-1", "01-grader-2"].map((key) => world.stubs.hold(key, grade(8)));
+  const first = await startLeg(t, world, 0);
+  // Both Candidates exited and their graders launched, held before they grade.
+  await until(
+    () => world.stubs.calls().map((call) => call.key),
+    (keys) => keys.includes("01-grader-1") && keys.includes("01-grader-2"),
+    { what: "both graders launched", ms: 30_000 },
+  );
+  expect(eventsOf(world, "01", "exited").map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+  await first.stop();
+  const before = world.stubs.calls().length;
+  const scheduled = eventsOf(world, "01", "scheduled");
+  expect(scheduled.map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+
+  const second = await startLeg(t, world, 1);
+  for (const held of graders) await held.release(30_000);
+  await approveReview(second);
+
+  expect(await poolLog(second)).toContain(
+    "ticket 01: every candidate of its verify round ended before a restart; the round is graded, not fanned out again",
+  );
+  const rerun = world.stubs.calls().slice(before).map((call) => call.key);
+  expect(rerun.filter((key) => key.startsWith("01.attempt-"))).toEqual([]);
+  expect(rerun.filter((key) => key.includes("-grader-")).sort()).toEqual(["01-grader-1", "01-grader-2"]);
+  expect(eventsOf(world, "01", "scheduled")).toEqual(scheduled);
+  expect(eventsOf(world, "01", "graded").map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+  expect(eventsOf(world, "01", "merged").map(([attempt]) => attempt)).toEqual([1]);
+  expect(inCheckout(world, "cand-1.txt")).toBe(true);
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+}, { timeoutMs: 120_000 });
 
 // engine/engine.test.ts:3354
 takeover("restart", "a human selection Interrupt is kept pending and answerable across each takeover", {

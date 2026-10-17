@@ -19,7 +19,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
-import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
+import { expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
 import { readEvents, readTicketFile } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 import { conversationRecord, flagValue } from "./config-support.ts";
@@ -31,12 +31,11 @@ import {
   settle,
   startLeg,
   statusesOf,
-  untilState,
 } from "./restart-support.ts";
 import { GOOD_BODY, eventsOf, hasTicket, heldSpawnsFile, ledger, proposal, ticket, withCaps } from "./spawns-support.ts";
 
 /**
- * A spawned Ticket's file as the engine writes it at the boundary
+ * A spawned Ticket's file as the engine writes it at a Tick
  * (writeSpawnTicket in engine/engine.ts), at a status: the status is the
  * only byte a run changes after.
  */
@@ -51,8 +50,8 @@ function spawnedFile(
     `<!-- state: id=${id} blocked-by=${options.blockedBy ?? "none"} status=${options.status ?? "ready"} ` +
     `spawned-by=${parentId}${assign} -->\n\n` +
     `# ${id}: ${title}\n\n` +
-    `**Spawned by** ticket ${parentId} (ADR-0010): the engine wrote this ticket at the super-step boundary from ` +
-    "the attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, " +
+    `**Spawned by** ticket ${parentId} (ADR-0010): the engine wrote this ticket at a Tick from the ` +
+    "attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, " +
     "verifies, and may itself spawn, and the operator can edit or kill it before it schedules.\n\n" +
     `${options.body ?? GOOD_BODY}\n`
   );
@@ -160,7 +159,7 @@ function ledgerText(sections: { tickets: string[]; pending?: string[]; held?: st
     "",
     "## Pending spawns",
     "",
-    "Proposals that land at the next super-step boundary.",
+    "Proposals that land at the next Tick.",
     "",
     ...table("| id | parent | kind | title | summary |", sections.pending),
     "",
@@ -336,71 +335,45 @@ restartCase("Held spawn ids survive a restart and a discarded one is never issue
 // ---------------------------------------------------------------------------
 
 // engine/spawn-proposals.test.ts:169
-restartCase("Pending and held proposals taken in one write keep their ids across a stop, and land in order after it", async (t) => {
-  const world = t.world({ tickets: [ticket("01"), ticket("02")], config: CONFIG });
-  world.stubs.script("01", { spawn: [proposal("A"), proposal("B", { overlaps: ["02"] }), proposal("C")] });
-  // 02 keeps the super-step open, so the proposals wait for a boundary.
-  const sibling = world.stubs.hold("02");
-  const first = await startLeg(t, world, 0);
-  const taken = await untilState(
-    first,
-    "A and C pending, B held, 02 in flight",
-    (s) =>
-      s.pendingSpawns.length === 2 &&
-      s.heldSpawns.length === 1 &&
-      s.state.tickets.find((each) => each.id === "02")?.liveAttempt !== null,
-  );
-  expect(taken.pendingSpawns.map((p) => [p.id, p.title])).toEqual([
-    ["proposal-1", "A"],
-    ["proposal-3", "C"],
-  ]);
-  expect(taken.heldSpawns.map((h) => [h.id, h.title, h.reason, h.overlaps])).toEqual([
-    ["proposal-2", "B", "overlaps", ["02"]],
-  ]);
-  await first.stop();
-
-  // What the stop left: the ids in proposal order, pending and held alike.
-  expectParsedEqual(
-    heldSpawnsFile(world),
-    {
-      seq: 3,
-      proposalFrom: 0,
-      pending: [
-        { id: "proposal-1", parentId: "01", origin: "ticket", proposal: proposal("A"), at: anyIsoTime() },
-        { id: "proposal-3", parentId: "01", origin: "ticket", proposal: proposal("C"), at: anyIsoTime() },
-      ],
-      held: [
-        {
-          id: "proposal-2",
-          parentId: "01",
-          origin: "ticket",
-          proposal: proposal("B", { overlaps: ["02"] }),
-          at: anyIsoTime(),
-          reason: "overlaps",
-        },
-      ],
-      recovered: [],
+// A Pending spawn lands at the Tick after its take (ADR-0040), so a stop
+// between the two is seeded: runs/held-spawns.json as a stop left it.
+conformance("restart", "Pending and held proposals a stop left in one write keep their ids, and land in order at the first Tick", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01", "none", "done"), ticket("02")],
+    config: CONFIG,
+    poolFiles: {
+      "runs/held-spawns.json": proposalsFile({
+        seq: 3,
+        proposalFrom: 0,
+        pending: [
+          { id: "proposal-1", parentId: "01", origin: "ticket", proposal: proposal("A"), at: "t0" },
+          { id: "proposal-3", parentId: "01", origin: "ticket", proposal: proposal("C"), at: "t0" },
+        ],
+        held: [
+          {
+            id: "proposal-2",
+            parentId: "01",
+            origin: "ticket",
+            proposal: proposal("B", { overlaps: ["02"] }),
+            at: "t0",
+            reason: "overlaps",
+          },
+        ],
+        recovered: [],
+      }),
     },
-    "runs/held-spawns.json after the stop",
+  });
+  const server = await t.start(world);
+  const rest = await quiet(
+    server,
+    "the pool at rest with A and C landed and B held",
+    (s) => statusOf(s, "02") === "done" && statusOf(s, "01-spawn-2") === "done",
   );
-
-  // The restarted server's first boundary lands the Pending spawns in the
-  // order they were taken; the held one waits for the operator.
-  const second = await startLeg(t, world, 1);
-  const landed = await untilState(
-    second,
-    "A and C landed, B still held",
-    (s) => statusOf(s, "01-spawn-1") !== undefined && statusOf(s, "01-spawn-2") !== undefined,
-  );
-  expect(landed.pendingSpawns).toEqual([]);
-  expect(landed.heldSpawns.map((h) => [h.id, h.title, h.reason])).toEqual([["proposal-2", "B", "overlaps"]]);
+  expect(rest.pendingSpawns).toEqual([]);
+  expect(rest.heldSpawns.map((h) => [h.id, h.title, h.reason])).toEqual([["proposal-2", "B", "overlaps"]]);
   expect(eventsOf(world, "01", "spawn-adopted").map((e) => e.payload)).toEqual([
     { adopted: ["01-spawn-1", "01-spawn-2"], fromPending: ["proposal-1", "proposal-3"] },
   ]);
-
-  await sibling.release();
-  const rest = await quiet(second, "the pool at rest with B held", (s) => statusOf(s, "02") === "done");
-  expect(rest.heldSpawns.map((h) => h.id)).toEqual(["proposal-2"]);
   expect(statusesOf(rest)).toEqual({ "01": "done", "01-spawn-1": "done", "01-spawn-2": "done", "02": "done" });
   for (const [id, title] of [["01-spawn-1", "A"], ["01-spawn-2", "C"]] as const) {
     expectSameBytes(readTicketFile(world.pool, `${id}.md`), spawnedFile(id, "01", title, { status: "done" }), `issues/${id}.md`);
@@ -408,7 +381,7 @@ restartCase("Pending and held proposals taken in one write keep their ids across
 });
 
 // engine/engine.test.ts:9398
-conformance("restart", "a Pending spawn left in runs/held-spawns.json lands at the first boundary", async (t) => {
+conformance("restart", "a Pending spawn left in runs/held-spawns.json lands at the first Tick", async (t) => {
   const world = t.world({
     tickets: [ticket("01", "none", "done")],
     config: CONFIG,

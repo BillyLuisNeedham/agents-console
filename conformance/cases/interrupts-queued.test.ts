@@ -1,31 +1,32 @@
 /**
- * Queued answers and the accept/process split (ADR-0004), seen from outside
- * the server (ADR-0036): an answer that lands while a super-step is in
- * flight is accepted at once (202, its `answered` event and its record in
- * runs/queued-answers.json) and processed only at the next super-step
- * boundary, in submission order, its state made durable before anything
- * else is scheduled; the snapshot carries it as a Queued answer meanwhile; a
- * retried answer is acknowledged without a second record, and a different
- * one for the same Ticket is refused. Ticket C08 of the inventory's split
+ * Queued answers and the accept/process split (ADR-0004, as ADR-0040 amends
+ * it), seen from outside the server (ADR-0036): an answer is accepted at once
+ * (202, its `answered` event and its record in runs/queued-answers.json) and
+ * processed at the next Tick, which runs at once unless a job is mid-flight.
+ * So an answer given while another Ticket runs relaunches its Ticket beside
+ * it, the answers processed in submission order and made durable; the 202
+ * given while the drive runs carries the answer as a Queued answer; a retried
+ * answer is acknowledged without a second record; and records a stopped
+ * server left unprocessed are drained by the next server's first Tick, in
+ * their order. Ticket C08 of the inventory's split
  * (docs/research/rust-port/test-inventory.md): each case names the engine
  * test it carries over, or the uncovered behaviour it pins.
  *
- * A super-step is held in flight by a Ticket whose stub is held open
+ * A sibling is kept running by a Ticket whose stub is held open
  * (`world.stubs.hold`) until the case releases it; a held stub waits as long
- * as the case needs, where `waitFor` gives up after ten seconds.
+ * as the case needs, where `waitFor` gives up after ten seconds. A Queued
+ * answer lasts one Tick, so how long one is seen waiting is not observable
+ * and no case here asserts it.
  */
 
 import { expect } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PushedSnapshot } from "../../protocol/protocol.ts";
 import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
-import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
-import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
 import { resume, settle, snapshot, statuses, type ResumeBody } from "../harness/pool-run.ts";
-import { readCheckpoints, readEvents, readStateLine, readTicketFile, until } from "../harness/pool-files.ts";
+import { readCheckpoints, readEvents, readTicketFile, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 
 const CONFIG = { defaults: { harness: "claude", model: "m" } } satisfies PoolConfig;
@@ -48,7 +49,6 @@ const eventKinds = (world: World, id: string): string[] => readEvents(world.pool
 const answered = (world: World, id: string) => readEvents(world.pool, id).filter((e) => e.kind === "answered");
 const interrupted = (s: EnrichedSnapshot, id: string, kind = "checkpoint"): boolean =>
   s.state.interrupts.some((i) => i.ticketId === id && i.kind === kind);
-const queuedIds = (s: EnrichedSnapshot): string[] => s.state.queuedAnswers.map((a) => a.ticketId);
 
 /** runs/queued-answers.json, parsed. */
 interface QueueFile {
@@ -80,35 +80,22 @@ async function untilLaunched(
   return until(() => snapshot(server), also, { what, ms: 30_000 });
 }
 
-/** Every version a socket was pushed, in order, each its whole snapshot. */
-function pushedVersions(socket: SocketClient): EnrichedSnapshot[] {
-  const versions: EnrichedSnapshot[] = [];
-  let held: PushedSnapshot | null = null;
-  for (const frame of socket.frames) {
-    if (frame.type === "snapshot") {
-      held = frame.snapshot === null ? null : { rev: frame.rev, logTotal: frame.logTotal, snapshot: frame.snapshot };
-    } else if (frame.type === "delta" && held !== null) {
-      held = applySnapshotDelta(held, frame.delta);
-    } else {
-      continue;
-    }
-    if (held !== null) versions.push(held.snapshot);
-  }
-  return versions;
-}
+/** Whether a Ticket's held sibling is still running: launched, with no `exited` event. */
+const stillRunning = (world: World, id: string): boolean =>
+  launches(world).includes(id) && !eventKinds(world, id).includes("exited");
 
-/**
- * The first version pushed on a socket, from the `from`th on, that `match`
- * holds of, waited for.
- */
-async function pushedWhen(
-  socket: SocketClient,
-  match: (s: EnrichedSnapshot) => boolean,
-  what: string,
-  from = 0,
-): Promise<EnrichedSnapshot> {
-  const versions = await until(() => pushedVersions(socket).slice(from), (all) => all.some(match), { what, ms: 30_000 });
-  return versions.find(match)!;
+/** Wait until `id` has launched `n` times. */
+const untilLaunchedTimes = (world: World, id: string, n: number): Promise<string[]> =>
+  until(() => launches(world), (got) => got.filter((key) => key === id).length === n, {
+    what: `${id} to launch ${n} times`,
+    ms: 30_000,
+  });
+
+/** An `answered` event appended as acceptance appends one: on the Ticket's latest attempt. */
+function appendAnswered(world: World, id: string, payload: Record<string, unknown>): void {
+  const attempt = Math.max(0, ...readEvents(world.pool, id).map((event) => event.attempt));
+  const event = { at: new Date().toISOString(), attempt, kind: "answered", payload };
+  appendFileSync(join(world.pool, "runs", `${id}.events.jsonl`), `${JSON.stringify(event)}\n`);
 }
 
 /**
@@ -128,63 +115,52 @@ function awaitGate(gate: string): string {
 // engine/engine.test.ts:12263
 conformance(
   "interrupts",
-  "answers accepted mid-super-step are queued and drained in submission order at the boundary",
+  "answers given while a sibling runs are processed at once, in submission order, and relaunch their Tickets beside it",
   async (t) => {
-    const world = t.world({
-      tickets: [ticket("01", "a"), ticket("02", "b"), ticket("03", "c"), ticket("04", "d", { blockedBy: "03" })],
-      config: CONFIG,
-    });
+    const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b"), ticket("03", "c")], config: CONFIG });
     world.stubs.script("01", { statuses: ["checkpoint", "done"] });
     world.stubs.script("02", { statuses: ["checkpoint", "done"] });
-    const held = world.stubs.hold("04");
+    const held = world.stubs.hold("03");
     const server = await t.start(world);
-    await untilLaunched(server, world, ["04"], (s) => interrupted(s, "01") && interrupted(s, "02"), "01 and 02 at their checkpoints");
+    await untilLaunched(server, world, ["03"], (s) => interrupted(s, "01") && interrupted(s, "02"), "01 and 02 at their checkpoints");
 
     await accept(server, { ticketId: "02", note: "answered first" });
     await accept(server, { ticketId: "01", note: "answered second" });
 
-    // Accepted at once: the answered events and the queued records landed
-    // while 04 holds the super-step open, and nothing relaunched.
-    expect(eventKinds(world, "02")).toEqual(["scheduled", "spawned", "exited", "checkpoint", "answered"]);
-    expect(readEvents(world.pool, "02").at(-1)!.payload).toEqual({ kind: "checkpoint" });
-    const queue = queueFile(world);
-    expect(queue.answers.map((a) => [a.ticketId, a.kind, a.processedAt])).toEqual([
-      ["02", "checkpoint", null],
-      ["01", "checkpoint", null],
+    const relaunched = await until(
+      () => snapshot(server),
+      (s) => statuses(s)["01"] === "done" && statuses(s)["02"] === "done",
+      { what: "01 and 02 run again to done", ms: 30_000 },
+    );
+    expect(stillRunning(world, "03")).toBe(true);
+    expect(launches(world).filter((key) => key !== "03").sort()).toEqual(["01", "01", "02", "02"]);
+    expect(relaunched.state.queuedAnswers).toEqual([]);
+    const log = relaunched.state.log;
+    const at = (line: string): number => log.indexOf(line);
+    expect(at("interrupt answered for 02 (checkpoint): resumed")).toBeGreaterThan(-1);
+    expect(at("interrupt answered for 01 (checkpoint): resumed")).toBeGreaterThan(at("interrupt answered for 02 (checkpoint): resumed"));
+    const lastStart = (id: string): number => Math.max(...log.map((line, i) => (line.startsWith(`start ${id} at `) ? i : -1)));
+    expect(lastStart("01")).toBeGreaterThan(at("interrupt answered for 01 (checkpoint): resumed"));
+    expect(lastStart("02")).toBeGreaterThan(at("interrupt answered for 02 (checkpoint): resumed"));
+    const kinds01 = eventKinds(world, "01");
+    expect(kinds01.indexOf("answered")).toBeLessThan(kinds01.lastIndexOf("spawned"));
+    expect(queueFile(world).answers.map((a) => [a.ticketId, a.kind, a.processedAt !== null])).toEqual([
+      ["02", "checkpoint", true],
+      ["01", "checkpoint", true],
     ]);
-    expect(launches(world).slice(0, 3).sort()).toEqual(["01", "02", "03"]);
-    expect(launches(world).slice(3)).toEqual(["04"]);
-    const waiting = await snapshot(server);
-    expect(queuedIds(waiting)).toEqual(["02", "01"]);
-    expect(statuses(waiting)).toMatchObject({ "01": "checkpoint", "02": "checkpoint" });
 
     await held.release();
     const reviewed = await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
-    expect(launches(world).slice(4).sort()).toEqual(["01", "02"]);
-    const log = reviewed.state.log;
-    const at = (line: string): number => log.indexOf(line);
-    const exited04 = log.findIndex((line) => line.startsWith("ticket 04: exited"));
-    expect(exited04).toBeGreaterThan(-1);
-    expect(at("interrupt answered for 02 (checkpoint): resumed")).toBeGreaterThan(exited04);
-    expect(at("interrupt answered for 01 (checkpoint): resumed")).toBeGreaterThan(at("interrupt answered for 02 (checkpoint): resumed"));
-    expect(at("super-step 3: 01, 02")).toBeGreaterThan(at("interrupt answered for 01 (checkpoint): resumed"));
-    // The answered event comes before the Attempt it let run.
-    const kinds01 = eventKinds(world, "01");
-    expect(kinds01.indexOf("answered")).toBeLessThan(kinds01.lastIndexOf("spawned"));
-    expect(queueFile(world).answers.every((a) => a.processedAt !== null)).toBe(true);
-    expect(reviewed.state.queuedAnswers).toEqual([]);
+    expect(statuses(reviewed)).toEqual({ "01": "done", "02": "done", "03": "done" });
   },
 );
 
 // engine/engine.test.ts:12351
 conformance(
   "interrupts",
-  "drained answers are persisted before the next super-step is scheduled",
+  "processed answers are persisted while the Attempts they relaunched still run",
   async (t) => {
-    const world = t.world({
-      tickets: [ticket("01", "a"), ticket("02", "b"), ticket("03", "c"), ticket("04", "d", { blockedBy: "03" })],
-      config: CONFIG,
-    });
+    const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b"), ticket("03", "c")], config: CONFIG });
     // The re-runs of 01 and 02 hold until the case has read console.db.
     const rerun = join(world.root, "release-reruns");
     for (const id of ["01", "02"]) {
@@ -196,70 +172,76 @@ conformance(
 
     await accept(server, { ticketId: "02", note: "answered first" });
     await accept(server, { ticketId: "01", note: "answered second" });
-    await held.release();
+    await untilLaunchedTimes(world, "01", 2);
+    await untilLaunchedTimes(world, "02", 2);
 
-    // The boundary drained both answers and scheduled the re-runs, which
-    // now hold: the newest checkpoint row already has the answers applied.
-    await until(() => launches(world), (got) => got.filter((key) => key === "01" || key === "02").length === 4, {
-      what: "the re-runs of 01 and 02",
-      ms: 30_000,
-    });
-    const persisted = readCheckpoints(world.pool).at(-1)!.state as {
-      tickets: Record<string, string>;
-      interrupts: unknown[];
-      log: string[];
-    };
-    expect(persisted.tickets["01"]).toBe("ready");
-    expect(persisted.tickets["02"]).toBe("ready");
-    expect(persisted.interrupts).toEqual([]);
-    expect(persisted.log).toContain("interrupt answered for 02 (checkpoint): resumed");
-    expect(persisted.log).toContain("interrupt answered for 01 (checkpoint): resumed");
+    const rows = readCheckpoints(world.pool).map(
+      (row) => row.state as { tickets: Record<string, string>; interrupts: unknown[]; log: string[] },
+    );
+    const answeredRow = rows.find(
+      (row) =>
+        row.log.includes("interrupt answered for 02 (checkpoint): resumed") &&
+        row.log.includes("interrupt answered for 01 (checkpoint): resumed"),
+    );
+    expect(answeredRow).toBeDefined();
+    expect(answeredRow!.interrupts).toEqual([]);
+    // A drained answer puts its Ticket back to ready, and the Tick's launch
+    // moves it on; which of the two a row catches depends on the Tick.
+    expect(["ready", "in-progress"]).toContain(answeredRow!.tickets["01"]!);
+    expect(["ready", "in-progress"]).toContain(answeredRow!.tickets["02"]!);
 
     writeFileSync(rerun, "go");
+    await held.release();
     const reviewed = await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
-    expect(statuses(reviewed)).toEqual({ "01": "done", "02": "done", "03": "done", "04": "done" });
-    expect(launches(world).slice(0, 3).sort()).toEqual(["01", "02", "03"]);
-    expect(launches(world).slice(3).sort()).toEqual(["01", "02", "04"]);
+    expect(statuses(reviewed)).toEqual({ "01": "done", "02": "done", "03": "done" });
     expect(queueFile(world).answers.every((a) => a.processedAt !== null)).toBe(true);
   },
 );
 
-// engine/engine.test.ts:12422
+// engine/engine.test.ts:12897 and 12422, with the uncovered behaviour of engine/server.ts:1943.
 conformance(
   "interrupts",
-  "a Queued answer is pushed on the socket at acceptance and gone once the boundary processes it",
+  "an answer given while a sibling runs comes back in its 202 as a Queued answer, then is processed while the sibling still runs",
   async (t) => {
     const world = t.world({
-      tickets: [ticket("01", "a"), ticket("02", "b"), ticket("03", "c", { blockedBy: "02" })],
+      tickets: [ticket("01", "a", { body: "# 01\n\n## Brief\n\npick a name" }), ticket("02", "b")],
       config: CONFIG,
     });
-    world.stubs.script("01", { statuses: ["checkpoint", "done"] });
-    const held = world.stubs.hold("03");
+    world.stubs.script("01", { statuses: ["checkpoint", "done"], brief: "pick a name" });
+    const held = world.stubs.hold("02");
     const server = await t.start(world);
     const socket = await t.socket(server, { visible: true });
-    await untilLaunched(server, world, ["03"], (s) => interrupted(s, "01"), "01 at its checkpoint");
-    const from = pushedVersions(socket).length;
+    await untilLaunched(server, world, ["01", "02"], (s) => interrupted(s, "01"), "01 at its checkpoint");
 
-    await accept(server, { ticketId: "01", note: "go on" });
-    const queued = await pushedWhen(
-      socket,
-      (s) => queuedIds(s).includes("01"),
-      "a version carrying 01's Queued answer",
-      from,
+    const reply = await accept(server, { ticketId: "01", note: "the name is Foo" });
+    expect(reply.state.queuedAnswers.map((a) => [a.ticketId, a.kind])).toEqual([["01", "checkpoint"]]);
+    expect(interrupted(reply, "01")).toBe(true);
+    expect(answered(world, "01")).toHaveLength(1);
+
+    const processed = await until(() => snapshot(server), (s) => statuses(s)["01"] === "done", {
+      what: "01 to run again to done",
+      ms: 30_000,
+    });
+    expect(stillRunning(world, "02")).toBe(true);
+    expect(processed.state.queuedAnswers).toEqual([]);
+    expect(interrupted(processed, "01")).toBe(false);
+    expect(queueFile(world).answers.map((a) => [a.ticketId, a.processedAt !== null])).toEqual([["01", true]]);
+    expectSameBytes(
+      readTicketFile(world.pool, "01-a.md"),
+      `${marker("01", "none", "done")}\n\n# 01\n\n---\n\n## Brief\n\npick a name\n\n## Resume note\n\nthe name is Foo\n`,
+      "issues/01-a.md",
     );
-    expect(queued.state.queuedAnswers.map((a) => [a.ticketId, a.kind])).toEqual([["01", "checkpoint"]]);
-    expect(interrupted(queued, "01")).toBe(true);
 
     await held.release();
-    await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
-    const settled = await pushedWhen(
-      socket,
-      (s) => s.phase === "quiescent" && interrupted(s, REVIEW, "review"),
-      "the resting version pushed",
+    const reviewed = await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
+    expect(statuses(reviewed)).toEqual({ "01": "done", "02": "done" });
+    await socket.waitFor(
+      () => socket.pushed !== null && interrupted(socket.pushed.snapshot as EnrichedSnapshot, REVIEW, "review"),
+      { what: "the Review pushed on the socket" },
     );
-    expect(settled.state.queuedAnswers).toEqual([]);
-    expect(interrupted(settled, "01")).toBe(false);
-    expect(statuses(settled)).toEqual({ "01": "done", "02": "done", "03": "done" });
+    const pushed = socket.pushed!.snapshot as EnrichedSnapshot;
+    expect(pushed.state.queuedAnswers).toEqual([]);
+    expect(interrupted(pushed, "01")).toBe(false);
   },
 );
 
@@ -319,7 +301,6 @@ conformance(
     await accept(server, { ticketId: "01", note: "carry on" });
     expect(answered(world, "01")).toHaveLength(1);
     expect(queueFile(world).answers).toHaveLength(1);
-    expect(queuedIds(await snapshot(server))).toEqual(["01"]);
 
     await held.release();
     const reviewed = await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
@@ -333,48 +314,42 @@ conformance(
   },
 );
 
-// engine/engine.test.ts:12897, with the uncovered behaviour of engine/engine.ts:5470-5477 and
-// engine/server.ts:1943: a different answer for a Ticket with one queued is a 409.
+// Uncovered behaviour: engine/queued-answers.ts, the drain's order. A record
+// lasts one Tick, so its order is seeded on disk with no server running.
 conformance(
   "interrupts",
-  "an answer accepted while a sibling still runs waits as a Queued answer, refuses a second one, and is processed at the boundary",
+  "Queued answers a stopped server left unprocessed are drained by the next server's first Tick, in submission order",
   async (t) => {
-    const world = t.world({
-      tickets: [ticket("01", "a", { body: "# 01\n\n## Brief\n\npick a name" }), ticket("02", "b")],
-      config: CONFIG,
-    });
-    world.stubs.script("01", { statuses: ["checkpoint", "done"], brief: "pick a name" });
-    const held = world.stubs.hold("02");
-    const server = await t.start(world);
-    const socket = await t.socket(server, { visible: true });
-    // 01's checkpoint is raised at its exit, while 02 still runs.
-    await untilLaunched(server, world, ["01", "02"], (s) => interrupted(s, "01"), "01 at its checkpoint");
+    const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b")], config: CONFIG });
+    world.stubs.script("01", { statuses: ["checkpoint", "done"] });
+    world.stubs.script("02", { statuses: ["checkpoint", "done"] });
+    const first = await t.start(world);
+    await settle(first, (s) => interrupted(s, "01") && interrupted(s, "02"), { what: "01 and 02 at their checkpoints" });
+    await first.stop();
 
-    const reply = await accept(server, { ticketId: "01", note: "the name is Foo" });
-    expect(queuedIds(reply)).toEqual(["01"]);
-    expect(interrupted(reply, "01")).toBe(true);
-    const queued = await pushedWhen(socket, (s) => queuedIds(s).includes("01"), "a version carrying 01's Queued answer");
-    expect(queued.state.queuedAnswers.map((a) => [a.ticketId, a.kind])).toEqual([["01", "checkpoint"]]);
-    expect(queued.state.interrupts).toEqual([{ ticketId: "01", kind: "checkpoint", body: "pick a name" }]);
-    expect(answered(world, "01")).toHaveLength(1);
-    expect(queueFile(world).answers.map((a) => [a.ticketId, a.processedAt])).toEqual([["01", null]]);
-    // Queued, not processed: the state line still reads checkpoint.
-    expect(readStateLine(world.pool, "01-a.md").status).toBe("checkpoint");
+    appendAnswered(world, "02", { kind: "checkpoint" });
+    appendAnswered(world, "01", { kind: "checkpoint" });
+    const at = new Date().toISOString();
+    const records = [
+      { seq: 1, ticketId: "02", kind: "checkpoint", note: "answered first", at, processedAt: null },
+      { seq: 2, ticketId: "01", kind: "checkpoint", note: "answered second", at, processedAt: null },
+    ];
+    writeFileSync(join(world.pool, "runs", "queued-answers.json"), JSON.stringify({ nextSeq: 3, answers: records }, null, 2));
 
-    const close = await resume(server, { ticketId: "01", action: "close", note: "drop it" });
-    expect(close.status).toBe(409);
-    expectParsedEqual(close.text, { error: "answer: ticket 01 already has an answer queued" }, "the 409");
-    expect(answered(world, "01")).toHaveLength(1);
-    expect(queueFile(world).answers).toHaveLength(1);
-
-    await held.release();
-    const reviewed = await settle(server, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
+    const second = await t.start(world);
+    const reviewed = await settle(second, (s) => interrupted(s, REVIEW, "review"), { what: "the Review" });
     expect(statuses(reviewed)).toEqual({ "01": "done", "02": "done" });
-    expect(queueFile(world).answers[0]!.processedAt).not.toBeNull();
-    expectSameBytes(
-      readTicketFile(world.pool, "01-a.md"),
-      `${marker("01", "none", "done")}\n\n# 01\n\n---\n\n## Brief\n\npick a name\n\n## Resume note\n\nthe name is Foo\n`,
-      "issues/01-a.md",
+    expect(launches(world).sort()).toEqual(["01", "01", "02", "02"]);
+    const log = reviewed.state.log;
+    expect(log.indexOf("interrupt answered for 02 (checkpoint): resumed")).toBeGreaterThan(-1);
+    expect(log.indexOf("interrupt answered for 01 (checkpoint): resumed")).toBeGreaterThan(
+      log.indexOf("interrupt answered for 02 (checkpoint): resumed"),
     );
+    expect(queueFile(world).answers.map((a) => [a.seq, a.ticketId, a.processedAt !== null])).toEqual([
+      [1, "02", true],
+      [2, "01", true],
+    ]);
+    expect(answered(world, "01")).toHaveLength(1);
+    expect(answered(world, "02")).toHaveLength(1);
   },
 );

@@ -71,8 +71,8 @@ conformance("formats", "an Attempt's events are one JSON object per line, served
   await untilStatus(world, "01-t.md", "done");
   const text = await until(
     () => readFileSync(runs(world, "01.events.jsonl"), "utf8"),
-    (body) => body.includes('"exited"'),
-    { what: "01's exited event" },
+    (body) => body.includes('"merged"'),
+    { what: "01's merged event" },
   );
   const lines = text.split("\n");
   expect(lines.at(-1)).toBe("");
@@ -84,6 +84,7 @@ conformance("formats", "an Attempt's events are one JSON object per line, served
     ["scheduled", 1],
     ["spawned", 1],
     ["exited", 1],
+    ["merged", 1],
   ]);
   for (const e of written) expect(e.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   expectParsedEqual((await events(server.http, "01")).events, written, "GET /api/events?ticket=01's events");

@@ -20,8 +20,8 @@ const DEFAULTS = { harness: "claude", model: "m" };
 
 /**
  * Put a gate in front of a stub binary: each launch is keyed by the base name
- * of its working directory (a Ticket's worktree is named for its id; a lone
- * Ticket runs in the checkout, `repo`), may write an Outcome and may wait for
+ * of its working directory (a Ticket's worktree is named for its id), may
+ * write an Outcome and may wait for
  * a release file before the stub proper runs. The stub's own `waitFor` gives
  * up after ten seconds; this gate holds until the case releases it or its
  * world is deleted.
@@ -112,15 +112,11 @@ async function startRig(t: Case): Promise<CaseServer> {
   return server;
 }
 
-/** A pool whose Ticket 01 proposes two follow-ups while 02, in the same
- *  super-step, is held open: both wait as Pending spawns until 02 is
- *  released. */
-async function startPendingRig(t: Case): Promise<{ server: CaseServer; release: () => void }> {
+/** A pool whose one Ticket proposes two follow-ups, both landed at the Tick
+ *  after its exit. */
+async function startLandedRig(t: Case): Promise<CaseServer> {
   const world = t.world({
-    tickets: [
-      { file: "01-a.md", marker: READY("01") },
-      { file: "02-b.md", marker: READY("02") },
-    ],
+    tickets: [{ file: "01-a.md", marker: READY("01") }],
     config: { defaults: DEFAULTS },
   });
   world.stubs.script("01", {
@@ -129,14 +125,9 @@ async function startPendingRig(t: Case): Promise<{ server: CaseServer; release: 
       { title: "Drop", body: BODY },
     ],
   });
-  // Two ready Tickets run in worktrees named for their ids.
-  const held = gate(world, { "02": { hold: true } });
   const server = await t.start(world);
-  await until(() => snapshot(server), (s) => s.pendingSpawns.length >= 2, {
-    ms: 30_000,
-    what: "the pending spawns",
-  });
-  return { server, release: () => held.release("02") };
+  await settled(server, (s) => s.state.tickets.some((ticket) => ticket.id === "01-spawn-2"), "the spawns to land");
+  return server;
 }
 
 // engine/spawn-routes.test.ts:69
@@ -217,66 +208,25 @@ conformance("spawns", "POST /api/spawns/held/discard › discards a held spawn a
 });
 
 // engine/spawn-routes.test.ts:177
-conformance(
-  "spawns",
-  "pending spawns on the snapshot › carries every Pending spawn until the boundary lands it",
-  async (t) => {
-    const { server, release } = await startPendingRig(t);
-    expect((await snapshot(server)).pendingSpawns).toEqual([
-      {
-        id: "proposal-1",
-        parentId: "01",
-        origin: "ticket",
-        kind: "ticket",
-        title: "Keep back",
-        body: BODY,
-        blockedBy: [],
-        blocks: null,
-        overlaps: [],
-        at: expect.any(String),
-      },
-      expect.objectContaining({ id: "proposal-2", title: "Drop" }),
-    ]);
-    release();
-    const after = await settled(
-      server,
-      (s) => s.state.tickets.some((ticket) => ticket.id === "01-spawn-2"),
-      "the boundary to land the spawns",
-    );
-    expect(after.pendingSpawns).toEqual([]);
-    expect(after.state.tickets.map((ticket) => ticket.id)).toContain("01-spawn-2");
-  },
-);
+conformance("spawns", "pending spawns on the snapshot › lands every Pending spawn at the next Tick", async (t) => {
+  const server = await startLandedRig(t);
+  const after = await snapshot(server);
+  expect(after.pendingSpawns).toEqual([]);
+  expect(after.state.tickets.map((ticket) => ticket.id)).toEqual(expect.arrayContaining(["01-spawn-1", "01-spawn-2"]));
+});
 
 // engine/spawn-routes.test.ts:202
 conformance(
   "spawns",
-  "POST /api/spawns/pending/hold and /discard › holds one and discards another before the boundary, and refuses both once it has landed",
+  "POST /api/spawns/pending/hold and /discard › answers a 409 for a spawn already held",
   async (t) => {
-    const { server, release } = await startPendingRig(t);
-
-    const hold = await server.http.post("/api/spawns/pending/hold", { id: "proposal-1" });
-    expect(hold.status).toBe(200);
-    expect(hold.json<object>()).toEqual({ id: "proposal-1" });
-    expect((await snapshot(server)).heldSpawns.map((h) => [h.id, h.reason])).toEqual([["proposal-1", "operator"]]);
-
-    const again = await server.http.post("/api/spawns/pending/hold", { id: "proposal-1" });
-    expect(again.status).toBe(409);
-    expect(again.json<{ reason: string }>().reason).toBe("spawn proposal-1 is already held");
-
-    const discard = await server.http.post("/api/spawns/pending/discard", { id: "proposal-2" });
-    expect(discard.status).toBe(200);
-    expect((await snapshot(server)).pendingSpawns).toEqual([]);
-
-    release();
-    // 02 done, and the boundary has passed with nothing to land.
-    const after = await settled(
-      server,
-      (s) => s.state.tickets.find((ticket) => ticket.id === "02")?.status === "done",
-      "02 to finish and the pool to settle",
-    );
-    expect(after.state.tickets.map((ticket) => ticket.id)).not.toContain("01-spawn-1");
-    expect(after.heldSpawns.map((h) => h.id)).toEqual(["proposal-1"]);
+    const server = await startRig(t);
+    for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
+      const again = await server.http.post(route, { id: "proposal-2" });
+      expect(again.status).toBe(409);
+      expect(again.json<{ reason: string }>().reason).toBe("spawn proposal-2 is already held");
+    }
+    expect((await snapshot(server)).heldSpawns.map((h) => [h.id, h.reason])).toEqual([["proposal-2", "per-attempt"]]);
   },
 );
 
@@ -285,19 +235,14 @@ conformance(
   "spawns",
   "POST /api/spawns/pending/hold and /discard › answers a 409 for a spawn that has already landed",
   async (t) => {
-    const { server, release } = await startPendingRig(t);
-    release();
-    await settled(
-      server,
-      (s) => s.state.tickets.some((ticket) => ticket.id === "01-spawn-1"),
-      "the boundary to land the spawns",
-    );
-
-    const res = await server.http.post("/api/spawns/pending/discard", { id: "proposal-1" });
-    expect(res.status).toBe(409);
-    expect(res.json<{ reason: string }>().reason).toBe(
-      "no pending spawn proposal-1: it has landed or been discarded",
-    );
+    const server = await startLandedRig(t);
+    for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
+      const res = await server.http.post(route, { id: "proposal-1" });
+      expect(res.status).toBe(409);
+      expect(res.json<{ reason: string }>().reason).toBe(
+        "no pending spawn proposal-1: it has landed or been discarded",
+      );
+    }
   },
 );
 
@@ -354,7 +299,7 @@ conformance(
     world.git(["worktree", "add", "-q", "-b", "desk", desk]);
     // 01's TUI writes a checkpoint Outcome and stays up.
     gate(world, {
-      repo: {
+      "01": {
         hold: true,
         outcome: {
           path: join(world.pool, "runs", "01.outcome.json"),

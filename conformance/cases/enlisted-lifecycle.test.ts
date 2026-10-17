@@ -597,8 +597,8 @@ conformance(
     await first.stop();
 
     const second = await t.start(world, { herdr });
-    // A lone ticket resumes after the restart: it still gets a worktree
-    // forked from the target, and its merge still lands on the target.
+    // 01 resumes after the restart: it still gets a worktree forked from the
+    // target, and its merge still lands on the target.
     expect((await resume(second, "01")).status).toBe(202);
     const call = await releaseAttempt(world, herdr, "01", (launch) => {
       expect(realpathSync(launch.cwd)).not.toBe(realpathSync(world.repo));

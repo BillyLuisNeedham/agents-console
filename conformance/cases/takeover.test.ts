@@ -31,8 +31,8 @@ async function snapshotUntil(leg: Leg<unknown>, done: (snapshot: EnrichedSnapsho
 }
 
 /**
- * The pending Interrupts as `<ticket id>:<kind>`, sorted: Attempts of one
- * super-step end in whatever order they race to.
+ * The pending Interrupts as `<ticket id>:<kind>`, sorted: Attempts running
+ * side by side end in whatever order they race to.
  */
 function interrupts(snapshot: EnrichedSnapshot): string[] {
   return snapshot.state.interrupts.map((interrupt) => `${interrupt.ticketId}:${interrupt.kind}`).sort();
@@ -124,8 +124,9 @@ takeover<StubHold>("restart", "a terminal-backed Attempt live in its pane is re-
       join(leg.world.pool, "runs", "01.outcome.json"),
       JSON.stringify({ status: "done", summary: "worked in the pane", commitSha: null }),
     );
+    // The merge closes 01's tab before the Review, which takes the held
+    // stub with it: nothing is left to release.
     await snapshotUntil(leg, quiescentWith("REVIEW:review"), "the run's Review");
-    await leg.prepared.release();
   },
   takeover: {
     // A server that finds the Attempt's pane live re-adopts it, starting
@@ -195,7 +196,7 @@ function rerunAfterStop(seen: Observation, id: string, file: string): Observatio
   };
 }
 
-takeover<StubHold>("restart", "a Queued answer and a pending Interrupt survive a takeover with a sibling Attempt in flight", {
+takeover<StubHold>("restart", "an answered Interrupt and a pending one survive a takeover with a sibling Attempt in flight", {
   world: {
     tickets: [
       { file: "01-first.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->", body: "# First\n\nAsk, then finish." },
@@ -207,7 +208,8 @@ takeover<StubHold>("restart", "a Queued answer and a pending Interrupt survive a
   prepare(world) {
     world.stubs.script("01", { statuses: ["checkpoint", "done"], brief: "brief-01" });
     world.stubs.script("03", { statuses: ["checkpoint", "done"], brief: "brief-03" });
-    // 02 keeps the super-step open, so the answer to 01 queues.
+    // 02 stays in flight while the answer to 01 is processed beside it. A
+    // Queued answer lasts one Tick, so no stop point can catch one waiting.
     return world.stubs.hold("02");
   },
   async reach(leg) {
@@ -223,15 +225,17 @@ takeover<StubHold>("restart", "a Queued answer and a pending Interrupt survive a
       await snapshotUntil(
         leg,
         (snapshot) =>
-          snapshot.state.queuedAnswers.length === 1 &&
-          interrupts(snapshot).join(" ") === "01:checkpoint 03:checkpoint" &&
-          ticketIn(snapshot, "02").liveAttempt !== null,
-        "01's answer queued behind 02's Attempt",
+          statuses(snapshot).join(" ") === "01:done 02:in-progress 03:checkpoint" &&
+          snapshot.state.queuedAnswers.length === 0 &&
+          interrupts(snapshot).join(" ") === "03:checkpoint" &&
+          ticketIn(snapshot, "02").liveAttempt !== null &&
+          ticketIn(snapshot, "01").mergeState === null,
+        "01 answered and done beside 02's Attempt, 03's checkpoint pending",
       );
       return;
     }
-    // The stop killed 02's Attempt, so the boot puts 02 back to ready, and
-    // its first boundary drains the answer to 01: both run, and 03 is left.
+    // The stop killed 02's Attempt, so the boot puts 02 back to ready and
+    // runs it again; 01's answer is never processed twice, and 03 is left.
     await releaseWhenHeld(leg, "02");
     await snapshotUntil(
       leg,
@@ -265,13 +269,13 @@ function settled(snapshot: EnrichedSnapshot): boolean {
 }
 
 const FOLLOW_UPS = [
-  // Blocked by 02, so it runs after 02 on every path: alone, never beside a
-  // re-run of 02 in worktrees of their own.
+  // Blocked by 02, so it lands and waits while 02 is in flight: every path
+  // runs it after 02's merge.
   { title: "Follow up first", body: "Carry the first thread on once the second Ticket is in.", blockedBy: ["02"] },
   { title: "Follow up second", body: "Carry the second thread on, past the per-attempt cap." },
 ];
 
-takeover<StubHold>("restart", "a Pending spawn lands and a Held spawn stays held across a takeover, then is Adopted", {
+takeover<StubHold>("restart", "a landed spawn waits on its blocker and a Held spawn stays held across a takeover, then is Adopted", {
   world: {
     tickets: [
       { file: "01-first.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->", body: "# First\n\nPropose two." },
@@ -280,8 +284,9 @@ takeover<StubHold>("restart", "a Pending spawn lands and a Held spawn stays held
     config: { ...DEFAULTS, spawnCaps: { perAttempt: 1 } },
   },
   prepare(world) {
-    // One proposal fits the per-attempt cap and waits for the boundary; the
-    // other is held. 02 keeps the super-step open, so neither lands yet.
+    // One proposal fits the per-attempt cap and lands at the next Tick; the
+    // other is held. A Pending spawn lasts one Tick, so no stop point can
+    // catch one waiting.
     world.stubs.script("01", { spawn: FOLLOW_UPS });
     return world.stubs.hold("02");
   },
@@ -293,15 +298,17 @@ takeover<StubHold>("restart", "a Pending spawn lands and a Held spawn stays held
       await snapshotUntil(
         leg,
         (snapshot) =>
-          snapshot.pendingSpawns.length === 1 &&
+          statuses(snapshot).sort().join(" ") === "01-spawn-1:ready 01:done 02:in-progress" &&
+          snapshot.pendingSpawns.length === 0 &&
           snapshot.heldSpawns.length === 1 &&
-          ticketIn(snapshot, "02").liveAttempt !== null,
-        "one Pending and one Held spawn, with 02 in flight",
+          ticketIn(snapshot, "02").liveAttempt !== null &&
+          ticketIn(snapshot, "01").mergeState === null,
+        "one landed spawn waiting on 02 in flight, and one Held spawn",
       );
       return;
     }
-    // The boot puts 02 back to ready and lands the Pending spawn at its
-    // first boundary; the Held spawn waits for the operator.
+    // The boot puts 02 back to ready and runs it again, and the landed spawn
+    // after it; the Held spawn waits for the operator.
     await releaseWhenHeld(leg, "02");
     await snapshotUntil(
       leg,
@@ -310,7 +317,7 @@ takeover<StubHold>("restart", "a Pending spawn lands and a Held spawn stays held
         statuses(snapshot).sort().join(" ") === "01-spawn-1:done 01:done 02:done" &&
         snapshot.pendingSpawns.length === 0 &&
         snapshot.heldSpawns.length === 1,
-      "the Pending spawn landed and done, the Held one still held",
+      "the landed spawn done, the Held one still held",
     );
   },
   async finish(leg) {
@@ -330,17 +337,15 @@ takeover<StubHold>("restart", "a Pending spawn lands and a Held spawn stays held
     );
   },
   takeover: {
-    // A run is one boot, and the per-run count is of Spawns landed since
-    // it: a takeover's count starts again at 0.
-    atStop: (before, takeovers) =>
-      takeovers === 1 ? null : withSnapshot(before, (snapshot) => (snapshot.spawnUsage.spawnedThisRun = 0)),
-    // Uninterrupted, both Spawns land in the one run. The first takeover
-    // lands the Pending one and, when it is also the last leg, the Adopted
-    // one too; a later last leg lands only the Adopted one.
-    atEnd: (seen, takeovers) =>
+    // A run is one boot, and the per-run count is of Spawns landed since it:
+    // the first leg landed one, and no later boot lands any before the Adopt.
+    atStop: (before, takeovers) => (takeovers === 1 ? null : before),
+    // Uninterrupted, both Spawns land in the one run; taken over, the last
+    // leg lands only the Adopted one.
+    atEnd: (seen) =>
       withSnapshot(rerunAfterStop(seen, "02", "02-second.md"), (snapshot) => {
         expect(snapshot.spawnUsage.spawnedThisRun).toBe(2);
-        snapshot.spawnUsage.spawnedThisRun = takeovers === 1 ? 2 : 1;
+        snapshot.spawnUsage.spawnedThisRun = 1;
       }),
   },
 });
@@ -354,7 +359,7 @@ function commitIn(leg: Leg<unknown>, id: string, text: string): void {
   leg.world.git(["-C", launch.cwd, "commit", "-qm", `${id} edits shared.txt`]);
 }
 
-/** Ticket 02 done, its merge conflicting and waiting on the operator, the pool paused behind it. */
+/** Ticket 02 done, its merge conflicting and waiting on the operator, its dependent 03 waiting behind it. */
 function heldBehind02(snapshot: EnrichedSnapshot): boolean {
   const second = ticketIn(snapshot, "02");
   return (
@@ -367,13 +372,13 @@ function heldBehind02(snapshot: EnrichedSnapshot): boolean {
 
 takeover<{ first: StubHold; second: StubHold }>(
   "restart",
-  "a done Ticket waiting on the Merge hold keeps the pool paused across a takeover, then merges",
+  "a done Ticket whose merge conflicts keeps its dependent waiting across a takeover, then merges",
   {
     world: {
       tickets: [
         { file: "01-first.md", marker: "<!-- state: id=01 blocked-by=none status=ready -->", body: "# First\n\nEdit shared.txt." },
         { file: "02-second.md", marker: "<!-- state: id=02 blocked-by=none status=ready -->", body: "# Second\n\nEdit it too." },
-        { file: "03-third.md", marker: "<!-- state: id=03 blocked-by=01 status=ready -->", body: "# Third\n\nAfter the first." },
+        { file: "03-third.md", marker: "<!-- state: id=03 blocked-by=02 status=ready -->", body: "# Third\n\nAfter the second." },
       ],
       // No resolver: a conflict waits on the operator rather than on an Attempt.
       config: { ...DEFAULTS, resolver: "none" },
@@ -399,7 +404,7 @@ takeover<{ first: StubHold; second: StubHold }>(
       await leg.prepared.second.release();
     },
     async stopPoint(leg) {
-      await snapshotUntil(leg, heldBehind02, "02's merge conflict holding the pool");
+      await snapshotUntil(leg, heldBehind02, "02's merge conflict holding 03");
     },
     async finish(leg) {
       const launch = leg.world.stubs.calls().find((call) => call.key === "02")!;

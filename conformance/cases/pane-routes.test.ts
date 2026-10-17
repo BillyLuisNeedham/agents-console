@@ -34,9 +34,9 @@ interface Held {
 
 /**
  * Put a gate in front of a stub binary: each launch is keyed by the base name
- * of its working directory (a Ticket's worktree is named for its id; a lone
- * Ticket runs in the checkout, `repo`; `any` matches the rest), may write an
- * Outcome and may wait for a release file before the stub proper runs. The
+ * of its working directory (a Ticket's worktree is named for its id; a
+ * Ticket outside git runs in the pool directory; `any` matches the rest),
+ * may write an Outcome and may wait for a release file before the stub proper runs. The
  * stub's own `waitFor` gives up after ten seconds; this gate holds until the
  * case releases it or its world is deleted, so a terminal-backed attempt
  * stays live for as long as a case needs it.
@@ -145,12 +145,12 @@ async function livePool(t: Parameters<Parameters<typeof conformance>[2]>[0]) {
     tickets: [{ file: "01-a.md", marker: READY_01 }],
     config: { defaults: CLAUDE_DEFAULTS, terminal: "herdr" },
   });
-  const held = gate(world, { repo: { hold: true } });
+  const held = gate(world, { "01": { hold: true } });
   const herdr = await t.herdr(world, { rendered: CLAUDE_READY });
   const server = await t.start(world, { herdr });
   const paneId = await livePane(server, "01");
   await promptSubmitted(herdr);
-  return { world, herdr, server, paneId, release: () => held.release("repo") };
+  return { world, herdr, server, paneId, release: () => held.release("01") };
 }
 
 /** The route's own reads: the viewport ones (issue #122); the launch's reads are `recent`. */
@@ -208,7 +208,7 @@ conformance(
       tickets: [{ file: "01-a.md", marker: READY_01 }],
       config: { defaults: CLAUDE_DEFAULTS },
     });
-    gate(world, { repo: { hold: true } });
+    gate(world, { "01": { hold: true } });
     const herdr = await t.herdr(world, { rendered: CLAUDE_READY });
     const server = await t.start(world, { herdr });
     const live = await until(
@@ -353,7 +353,7 @@ conformance(
     });
     // Three ready Tickets run in worktrees named for their ids. 01 writes a
     // done Outcome and finishes on its own; 02 and 03 are held open, so the
-    // super-step's later emits must still carry their panes.
+    // later emits, once 01 has merged, must still carry their panes.
     gate(world, {
       "01": {
         outcome: {
@@ -405,7 +405,7 @@ conformance(
       tickets: [{ file: "01-a.md", marker: READY_01 }],
       config: { defaults: CLAUDE_DEFAULTS },
     });
-    const held = gate(world, { repo: { hold: true } });
+    const held = gate(world, { "01": { hold: true } });
     const server = await t.start(world);
 
     const live = await until(
@@ -415,7 +415,7 @@ conformance(
     );
     expect(live!.liveAttempt).toEqual({ attempt: 1, paneId: null, role: "agent", startedAt: expect.any(String) });
 
-    held.release("repo");
+    held.release("01");
     const ended = await until(
       () => ticket(server, "01"),
       (view) => view?.status === "done",
@@ -431,7 +431,7 @@ async function fallbackPool(t: Parameters<Parameters<typeof conformance>[2]>[0],
     tickets: [{ file: "01-a.md", marker: READY_01 }],
     config: { defaults: CLAUDE_DEFAULTS, terminal: "herdr" },
   });
-  const held = gate(world, { repo: { hold: true } });
+  const held = gate(world, { "01": { hold: true } });
   const herdr = await t.herdr(world, { rendered: CLAUDE_READY, fail: [method] });
   const server = await t.start(world, { herdr });
 
@@ -443,7 +443,7 @@ async function fallbackPool(t: Parameters<Parameters<typeof conformance>[2]>[0],
   );
   expect(live!.liveAttempt).toEqual({ attempt: 1, paneId: null, role: "agent", startedAt: expect.any(String) });
 
-  held.release("repo");
+  held.release("01");
   // The fallback still completes.
   const done = await until(
     () => ticket(server, "01"),
@@ -678,7 +678,7 @@ conformance(
     });
     // A stand-in TUI that writes a checkpoint Outcome and stays up.
     gate(world, {
-      repo: {
+      "01": {
         hold: true,
         outcome: {
           path: join(world.pool, "runs", "01.outcome.json"),

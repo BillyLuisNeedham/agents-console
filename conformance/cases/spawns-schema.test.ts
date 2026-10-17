@@ -132,7 +132,7 @@ conformance("spawns", "rejects a malformed spawn entry per proposal with a clear
 });
 
 // ADR-0029: a proposal may name the Tickets it blocks, or "all". The two
-// kept shapes go on to the boundary, where adoption may refuse them for
+// kept shapes go on to the next Tick, where adoption may refuse them for
 // reasons of its own; the schema's rejections are the ones with an index.
 conformance("spawns", "keeps a proposal's blocks, named or all, and rejects any other shape", async (t) => {
   const kept = [proposal("Named", { blocks: ["02", "03"] }), proposal("Everything", { blocks: "all" })];

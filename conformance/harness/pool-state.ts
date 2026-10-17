@@ -12,7 +12,7 @@ import { until } from "./pool-files.ts";
 /** The final Review's Ticket id, its Interrupt's `ticketId` (REVIEW_TICKET_ID in engine/engine.ts). */
 export const REVIEW = "REVIEW";
 
-/** The phases a drive rests in, with no super-step in flight. */
+/** The phases a drive rests in, with nothing in flight. */
 export const RESTING_PHASES = ["quiescent", "done", "dead", "stopped"] as const;
 
 /** Anything a case can send HTTP through: a CaseServer. */

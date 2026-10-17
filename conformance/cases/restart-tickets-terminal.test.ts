@@ -188,8 +188,8 @@ restartCase("a re-adopted Attempt whose TUI exited 7 while no server ran is deci
 
 // engine/attempt-ending.test.ts:405
 restartCase("a re-adopted Attempt whose TUI wrote a done Outcome while no server ran ends clean at boot and merges", async (t) => {
-  // Two Tickets in one super-step, so each Attempt works in a worktree of
-  // its own and its done ending has a branch to merge.
+  // Two Tickets, each Attempt in a worktree of its own (ADR-0040), so each
+  // done ending has a branch to merge.
   const world = t.world({
     tickets: [ticket("01", "a", { body: BODY }), ticket("02", "b", { body: "# 02\n\nWork on 02." })],
     config: TERMINAL,
@@ -245,9 +245,11 @@ function writeEvents(world: World, id: string, events: TicketEvent[]): void {
 }
 
 /**
- * The spawned event's payload for a terminal-backed claude launch in the
- * pool checkout, as the engine records one (engine/attempt-run.ts
- * spawnedPayload) from a herdr that reports no terminal id.
+ * The spawned event's payload for a terminal-backed claude launch, as the
+ * engine records one (engine/attempt-run.ts spawnedPayload) from a herdr
+ * that reports no terminal id. By default it ran in the pool checkout, as a
+ * server before ADR-0040 ran a lone Ticket; every launch since gets a
+ * worktree.
  */
 function spawnedInPane(world: World, paneId: string, tabId: string, cwd = world.repo, branch: string | null = null): Record<string, unknown> {
   return {
@@ -315,7 +317,8 @@ conformance("restart", "a live orphan pane of a resolver's Attempt keeps the hea
   // Not adopted: 01 ran again as attempt 2 in a tab of its own, and the
   // orphan's pane was never reported, typed into or closed.
   expect(cardOf(done, "01").status).toBe("done");
-  expect(eventLine(world, "01")).toEqual(["1 spawned", "1 resolver", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual(["1 spawned", "1 resolver", "2 scheduled", "2 spawned", "2 exited", "2 merged", "2 tab-closed"]);
   expect(eventsOf(world, "01", "spawned")[1]!.payload.pane_id).toBe(`${LAUNCH}:p1`);
   await herdr.settle();
   const onGhost = herdr.calls.filter((call) => call.params.pane_id === "pane-ghost").map((call) => call.method);
@@ -331,7 +334,17 @@ conformance("restart", "an orphan Attempt whose pane is gone at boot crashes on 
   const done = await approveReview(server);
   expect(cardOf(done, "01").status).toBe("done");
   expect(await poolLog(server)).toContain("ticket 01: attempt 1's pane is gone at boot; the attempt crashed and the ticket re-runs");
-  expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 crash", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual([
+    "1 scheduled",
+    "1 spawned",
+    "1 crash",
+    "2 scheduled",
+    "2 spawned",
+    "2 exited",
+    "2 merged",
+    "2 tab-closed",
+  ]);
   expect(eventsOf(world, "01", "crash")[0]!.payload).toEqual({
     code: null,
     reason: "attempt pane gone at boot reconciliation",
@@ -407,7 +420,17 @@ conformance("restart", "answering the adoption checkpoint closes the re-adopted 
   expect(eventsOf(world, "01", "exited").map((each) => each.attempt)).toEqual([2]);
   await herdr.settle();
   expect(callsOf(herdr, "pane.close").map((call) => call.params.pane_id)).toEqual(["pane-ghost"]);
-  expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 answered", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual([
+    "1 scheduled",
+    "1 spawned",
+    "1 answered",
+    "2 scheduled",
+    "2 spawned",
+    "2 exited",
+    "2 merged",
+    "2 tab-closed",
+  ]);
   // The re-adoption took the boot's reset note back off, and the abandon
   // wrote none of its own.
   expectSameBytes(readTicketFile(world.pool, "01-a.md"), `${stateLine("01", "done")}\n\n${BODY}\n`);

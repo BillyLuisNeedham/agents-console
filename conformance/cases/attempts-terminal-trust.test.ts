@@ -226,23 +226,38 @@ conformance("attempts", "the seed follows CLAUDE_CONFIG_DIR as claude does, and 
 }, { timeoutMs: 120_000 });
 
 // attempt-run.test.ts:1799 folder trust for the worktrees the engine makes (issue #127)
-conformance("attempts", "neither the operator's own checkout nor another harness's worktree is ever seeded", async (t) => {
-  // 01 runs alone, in the checkout; 02 and 03 then run on opencode in worktrees.
+conformance("attempts", "another harness's worktree is never seeded, and neither is the operator's own checkout", async (t) => {
   const world = t.world({
-    tickets: [ticket("01", "In the checkout"), ticket("02", "Opencode one", "01"), ticket("03", "Opencode two", "01")],
+    tickets: [ticket("01", "Claude"), ticket("02", "Opencode one"), ticket("03", "Opencode two")],
     config: terminalConfig("claude", { assign: { "02": { harness: "opencode" }, "03": { harness: "opencode" } } }),
   });
   writeConfig(claudeJson(world), OPERATOR_CONFIG);
-  const before = readFileSync(claudeJson(world));
   // One frame both harnesses' readiness patterns match.
   const herdr = await t.herdr(world, { rendered: `${READY.claude}\n${READY.opencode}` });
   await t.start(world, { herdr });
   for (const id of ["01", "02", "03"]) await untilTicketStatus(world, id, "done", 30_000);
 
-  expect(readFileSync(claudeJson(world)).equals(before)).toBe(true);
-  expect(spawnedPayloads(world, "01")[0]).toMatchObject({ cwd: world.repo, harness: "claude" });
+  expect(JSON.parse(readFileSync(claudeJson(world), "utf8"))).toEqual({
+    ...OPERATOR_CONFIG,
+    projects: { ...OPERATOR_CONFIG.projects, [worktree(world, "01")]: FRESH },
+  });
+  expect(spawnedPayloads(world, "01")[0]).toMatchObject({ cwd: worktree(world, "01"), harness: "claude", folder_trust: "seeded" });
   for (const id of ["02", "03"]) {
     expect(spawnedPayloads(world, id)[0]).toMatchObject({ cwd: worktree(world, id), harness: "opencode" });
+    expect(Object.keys(spawnedPayloads(world, id)[0]!)).not.toContain("folder_trust");
   }
-  for (const id of ["01", "02", "03"]) expect(Object.keys(spawnedPayloads(world, id)[0]!)).not.toContain("folder_trust");
+});
+
+// attempt-run.test.ts:1799 folder trust for the worktrees the engine makes (issue #127)
+conformance("attempts", "a claude Ticket in a pool outside git runs in the pool directory and its config is left untouched", async (t) => {
+  const world = t.world({ git: false, tickets: [ticket("01", "No worktree")], config: terminalConfig() });
+  writeConfig(claudeJson(world), OPERATOR_CONFIG);
+  const before = readFileSync(claudeJson(world));
+  const herdr = await t.herdr(world, { rendered: READY.claude });
+  await t.start(world, { herdr });
+  await untilTicketStatus(world, "01", "done", 30_000);
+
+  expect(readFileSync(claudeJson(world)).equals(before)).toBe(true);
+  expect(spawnedPayloads(world, "01")[0]).toMatchObject({ cwd: world.pool, branch: null, harness: "claude" });
+  expect(Object.keys(spawnedPayloads(world, "01")[0]!)).not.toContain("folder_trust");
 });

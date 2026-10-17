@@ -90,7 +90,7 @@ export function ticketPrompt(parts: TicketPromptParts): string {
       'make those tickets wait for it, or "blocks": "all" to make every ticket that has not started yet ' +
       "wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The " +
       "engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), writes " +
-      "the ticket files at the super-step boundary, and schedules them like any other ticket. Thin or " +
+      "the ticket files at the next Tick, and schedules them like any other ticket. Thin or " +
       "out-of-pool proposals are dropped with the reason recorded in the ticket log, and a dropped " +
       `proposal never costs your attempt its result. ${capsSentence(parts.perAttempt ?? 5, parts.perRun ?? 20)} ` +
       "You never write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.",

@@ -10,6 +10,7 @@ import { expect } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance, type Case } from "../harness/case.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import { callsOf, type HerdrProcess } from "../harness/herdr.ts";
 import {
   answerPrompt,
@@ -157,7 +158,7 @@ conformance("herdr", "the Attempt's tab is created unfocused in the Pool workspa
   await runToDone(herdr, world, "01");
 
   expect(callsOf(herdr, "tab.create").map((call) => call.params)).toEqual([
-    { label: "01 · Workspaces", focus: false, cwd: world.repo, workspace_id: "w7" },
+    { label: "01 · Workspaces", focus: false, cwd: ticketWorktree(world.repo, "01").path, workspace_id: "w7" },
   ]);
   const spawned = spawnedPayloads(world, "01")[0]!;
   expect(spawned.pane_id).toBe("w7:p1");

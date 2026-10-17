@@ -1,11 +1,11 @@
 /**
- * Spawn adoption past the first boundary: held Adopts the boundary refuses,
+ * Spawn adoption past the first Tick: held Adopts refused and landed,
  * caps from config, blocks, grandchildren, graders and head-to-head, crashed
  * and checkpoint attempts.
  */
 
 import { expect } from "bun:test";
-import type { EnrichedSnapshot, HeldSpawnResponse } from "../../protocol/wire.ts";
+import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
@@ -40,10 +40,42 @@ function loggedAt(lines: string[], text: string): number {
   return lines.findIndex((line) => line.includes(text));
 }
 
-// 02 is held on a release file so the Adopt passes its check while 02 still
-// runs; by the boundary that would land it, 02 is done and has no next
-// attempt to hold.
-conformance("spawns", "keeps a held spawn whose Adopt the boundary refuses, with the reason on it", async (t) => {
+conformance("spawns", "refuses an Adopt whose blocks names a done ticket, and keeps the spawn held", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01"), ticket("02", "01")],
+    config: withCaps({ perAttempt: 1 }),
+  });
+  world.stubs.script("01", {
+    spawn: [proposal("Adopted"), proposal("Fix before two", { blocks: ["02"] })],
+  });
+  const server = await t.start(world);
+
+  await snapshotUntil(
+    server,
+    (snap) =>
+      snap.phase === "quiescent" && statuses(snap)["02"] === "done" && snap.heldSpawns.some((h) => h.id === "proposal-2"),
+    "02 done with proposal-2 held",
+  );
+  const adopt = await server.http.post("/api/spawns/held/adopt", { id: "proposal-2" });
+  expect(adopt.status).toBe(409);
+  expect(adopt.json<{ reason: string }>()).toEqual({
+    reason: "held spawn proposal-2 cannot be adopted: blocks names done tickets, which have no next attempt to hold: 02",
+  });
+
+  const after = await snapshot(server);
+  expect(after.heldSpawns).toEqual([expect.objectContaining({ id: "proposal-2", adopting: false })]);
+  expect(hasTicket(world, "01-spawn-2.md")).toBe(false);
+  await server.stop();
+
+  const again = await t.start(world);
+  const restarted = await settled(again);
+  expect(restarted.heldSpawns.map((h) => h.id)).toEqual(["proposal-2"]);
+});
+
+// The Adopt lands at the Tick it wakes, while 02 still runs. ADR-0040 holds
+// such a proposal with the reason `started`; until that lands (slice 2) the
+// engine adds the blocker under the running Ticket, which is not interrupted.
+conformance("spawns", "lands an Adopt whose blocks names a running ticket at the next Tick", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", "01")],
     config: withCaps({ perAttempt: 1 }),
@@ -62,41 +94,23 @@ conformance("spawns", "keeps a held spawn whose Adopt the boundary refuses, with
   );
   const adopt = await server.http.post("/api/spawns/held/adopt", { id: "proposal-2" });
   expect(adopt.status).toBe(202);
-  expect(adopt.json<HeldSpawnResponse>()).toEqual({ id: "proposal-2" });
-  await snapshotUntil(
+  const landed = await snapshotUntil(
     server,
-    (snap) => snap.heldSpawns.some((h) => h.id === "proposal-2" && h.adopting),
-    "proposal-2 to show adopting",
+    (snap) => statuses(snap)["01-spawn-2"] !== undefined,
+    "01-spawn-2 landed while 02 runs",
+  );
+  expect(landed.heldSpawns).toEqual([]);
+  expect(statuses(landed)["02"]).toBe("in-progress");
+  expectSameBytes(
+    readStateLine(world.pool, "02-t.md").line,
+    "<!-- state: id=02 blocked-by=01,01-spawn-2 status=in-progress -->",
+    "02's state line",
   );
   release.release();
 
-  const reason = "blocks names done tickets, which have no next attempt to hold: 02";
-  const after = await snapshotUntil(
-    server,
-    (snap) => snap.heldSpawns.some((h) => h.adoptError !== undefined),
-    "the refused Adopt's reason on the held spawn",
-  );
-  expect(after.heldSpawns).toEqual([
-    expect.objectContaining({ id: "proposal-2", adopting: false, adoptError: reason }),
-  ]);
-  expect(hasTicket(world, "01-spawn-2.md")).toBe(false);
-  expect(eventsOf(world, "01", "spawn-rejected").at(-1)!.payload).toEqual({
-    title: "Fix before two",
-    reason,
-    fromHeld: "proposal-2",
-  });
-  expect(await poolLog(server)).toContainEqual(
-    expect.stringContaining(
-      `ticket 01: adopting held spawn proposal-2 ('Fix before two') refused: ${reason}; it stays held`,
-    ),
-  );
-  await settled(server);
-  await server.stop();
-
-  // The refusal survives a restart, and the spawn is still there to decide.
-  const again = await t.start(world);
-  const restarted = await settled(again);
-  expect(restarted.heldSpawns.map((h) => [h.id, h.adoptError])).toEqual([["proposal-2", reason]]);
+  await runAndApprove(server);
+  expect(eventKinds(world, "02").filter((kind) => kind === "spawned")).toHaveLength(1);
+  expect(readStateLine(world.pool, "01-spawn-2.md").status).toBe("done");
 });
 
 conformance(
@@ -157,8 +171,11 @@ conformance("spawns", "adds a spawn that blocks named tickets to their blocked-b
     "03's state line",
   );
   const log = await poolLog(server);
-  expect(logged(log, "super-step 2: 01-spawn-1, 03")).toBe(true);
-  expect(logged(log, "super-step 3: 02")).toBe(true);
+  const started = (id: string) => loggedAt(log, `start ${id} at `);
+  expect(started("01")).toBeGreaterThanOrEqual(0);
+  expect(started("03")).toBeGreaterThan(started("01"));
+  expect(started("01-spawn-1")).toBeGreaterThan(started("01"));
+  expect(started("02")).toBeGreaterThan(started("01-spawn-1"));
   expect(logged(log, "ticket 01: spawn 01-spawn-1 blocks 02")).toBe(true);
   expect(eventsOf(world, "01", "spawn-adopted")[0]!.payload).toEqual({
     adopted: ["01-spawn-1"],
@@ -290,11 +307,11 @@ conformance("spawns", "does not report done while a freshly spawned ready ticket
 
   await runAndApprove(server);
   const log = await poolLog(server);
-  const first = loggedAt(log, "super-step 1: 01");
-  const second = loggedAt(log, "super-step 2: 01-spawn-1");
+  const first = loggedAt(log, "start 01 at ");
+  const second = loggedAt(log, "start 01-spawn-1 at ");
   expect(first).toBeGreaterThanOrEqual(0);
   expect(second).toBeGreaterThan(first);
-  expect(eventKinds(world, "01-spawn-1")).toEqual(["scheduled", "spawned", "exited"]);
+  expect(eventKinds(world, "01-spawn-1")).toEqual(["scheduled", "spawned", "exited", "merged"]);
   expect(readStateLine(world.pool, "01-spawn-1.md").status).toBe("done");
 });
 

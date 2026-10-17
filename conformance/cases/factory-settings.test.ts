@@ -4,7 +4,7 @@
  * Pool settings (console.json), under the Line brief, each field falling
  * through on its own. The resolved Station settings reach the Ticket file the
  * engine writes and the harness it starts; Prove and Review switch off; a
- * change lands at the next super-step boundary, on the next Station Ticket
+ * change lands at the next Tick, on the next Station Ticket
  * written and never on one already written; and the settings routes read,
  * write and refuse the block at both levels.
  */
@@ -30,6 +30,7 @@ import {
   settingsOf,
   ticketOf,
   untilLaunched,
+  untilSnapshot,
   writeConfig,
 } from "./config-support.ts";
 import {
@@ -159,7 +160,7 @@ conformance("factory", "with Prove and Review both off, Implement routes straigh
   expect(readStateLine(world.pool, "r1-decide.md").line).toContain("blocked-by=r1-implement status=done station=decide");
 });
 
-conformance("factory", "a Factory settings change lands at the next boundary: the next Station Ticket written takes it, the one already written keeps what it was written with", async (t) => {
+conformance("factory", "a Factory settings change lands at the next Tick: the next Station Ticket written takes it, the one already written keeps what it was written with", async (t) => {
   const world = lineWorld(t);
   world.stubs.script("r1-implement", { waitFor: holdFile(world, "r1-implement") });
   world.stubs.script("r1-prove", PASS);
@@ -186,6 +187,14 @@ conformance("factory", "a Factory settings change lands at the next boundary: th
     defaults: { factory: { stations: { review: { drivers: "review-b" } } } },
   });
   expect(machine.status, machine.text).toBe(200);
+  // The save woke the drive, so it reloads while r1-implement still runs, which keeps its Assignment.
+  const reloaded = await untilSnapshot(
+    server,
+    (s) => logLines(s, "config reloaded").length > 0,
+    "the save's reload",
+  );
+  expect(ticketOf(reloaded, "r1-implement").liveAttempt).not.toBeNull();
+  expect(ticketOf(reloaded, "r1-implement").assignment).toMatchObject({ model: "opus" });
   release(world, "r1-implement");
 
   const atFinish = await atCheckpoint(server, "r1-finish");

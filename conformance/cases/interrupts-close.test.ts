@@ -4,17 +4,17 @@
  * POST /api/resume `action: close` is dropped where it stands. Its state
  * line reads closed, a note lands under its own heading, its branches and
  * worktrees go unmerged (what an agent wrote into the worktree copy of the
- * Ticket file is kept), a lone Ticket's commits in the pool checkout stay,
- * its engine-written judges close with it, and every dependent gets a
- * deadlock Interrupt naming it. A closed Ticket counts as finished for the
- * Review and never comes back on a reject. Ticket C08 of the inventory's
- * split (docs/research/rust-port/test-inventory.md): each case names the
- * engine test it carries over.
+ * Ticket file is kept), the work of a Ticket in a pool outside git stays
+ * where it ran, its engine-written judges close with it, and every
+ * dependent gets a deadlock Interrupt naming it. A closed Ticket counts as
+ * finished for the Review and never comes back on a reject. Ticket C08 of
+ * the inventory's split (docs/research/rust-port/test-inventory.md): each
+ * case names the engine test it carries over.
  *
  * The pool is a git checkout with the pool at `.scratch/pool`, ignored by
- * git: two Tickets ready together run in worktrees of their own, a lone one
- * runs in the checkout itself. A worktree gets a copy of its Ticket file at
- * the same path under it, `.scratch/pool/issues/<file>`.
+ * git, unless a case says otherwise: every Ticket runs in a worktree of its
+ * own (ADR-0040), which gets a copy of its Ticket file at the same path
+ * under it, `.scratch/pool/issues/<file>`.
  */
 
 import { expect } from "bun:test";
@@ -263,20 +263,19 @@ conformance("interrupts", "closing the head of a blocked chain names the closed 
 });
 
 // engine/engine.test.ts:13644
-conformance("interrupts", "a lone Ticket closed without a note keeps its work on the pool branch, and says so", async (t) => {
-  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
-  world.stubs.script("01", { status: "checkpoint", run: commitFile("one.txt", "one", "work-01") });
+conformance("interrupts", "a Ticket outside git closed without a note keeps its work where it ran, and says so", async (t) => {
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG, git: false });
+  world.stubs.script("01", { status: "checkpoint", run: "printf 'one\\n' > one.txt" });
   const server = await t.start(world);
   await untilInterrupt(server, "01", "checkpoint");
-  // A lone Ticket runs in the pool checkout itself.
-  expect(readEvents(world.pool, "01").find((e) => e.kind === "spawned")?.payload.cwd).toBe(world.repo);
+  const cwd = readEvents(world.pool, "01").find((e) => e.kind === "spawned")?.payload.cwd as string;
+  expect(cwd).toBe(world.pool);
 
   await close(server, "01");
   const review = await untilInterrupt(server, REVIEW, "review");
 
   expect(statuses(review)).toEqual({ "01": "closed" });
-  expect(existsSync(join(world.repo, "one.txt"))).toBe(true);
-  expect(onMain(world, "work-01")).toBe(true);
+  expect(readFileSync(join(cwd, "one.txt"), "utf8")).toBe("one\n");
   expect(review.state.log).toContain(
     `${closedLine("01", "checkpoint")}it ran in the pool checkout, so its work was left in place there; nothing was reset`,
   );
@@ -298,7 +297,7 @@ conformance("interrupts", "a lone Ticket closed without a note keeps its work on
 // engine/engine.test.ts:13667
 conformance(
   "interrupts",
-  "a merge-conflicted Ticket closed at its Interrupt is discarded unmerged and the hold lifts",
+  "a merge-conflicted Ticket closed at its Interrupt is discarded unmerged, and its dependent learns it never will be",
   async (t) => {
     const world = t.world({
       tickets: [ticket("01"), ticket("02"), ticket("03", { blockedBy: "02" })],
@@ -318,7 +317,7 @@ conformance(
       ].join("\n"),
     });
     const server = await t.start(world);
-    // A conflicted merge holds the pool (ADR-0014), so the run never rests.
+    // 02 is done and unmerged while its conflict waits, so the run never rests.
     await until(() => snapshot(server), (s) => interrupted(s, "02", "merge-conflict"), {
       ms: 30_000,
       what: "02's merge-conflict Interrupt",
@@ -379,7 +378,7 @@ conformance(
 // engine/engine.test.ts:13737
 conformance(
   "interrupts",
-  "a Close accepted mid-run is drained at the boundary and raises the dependent's deadlock, never ending stalled",
+  "a Close given while a sibling runs is processed at once and raises the dependent's deadlock, never ending stalled",
   async (t) => {
     const world = t.world({
       tickets: [ticket("01"), ticket("02", { blockedBy: "01" }), ticket("03"), ticket("04", { blockedBy: "03" })],
@@ -394,9 +393,12 @@ conformance(
 
     const accepted = await resume(server, { ticketId: "01", action: "close", note: "drop it" });
     expect(accepted.status).toBe(202);
-    // Queued behind the super-step 04 holds open: nothing is closed yet.
-    expect(readStateLine(world.pool, "01-t.md").status).toBe("checkpoint");
-    expect(statuses(await snapshot(server))["01"]).toBe("checkpoint");
+    const closed = await until(() => snapshot(server), (s) => interrupted(s, "02", "deadlock"), {
+      what: "02's deadlock while 04 runs",
+      ms: 30_000,
+    });
+    expect(statuses(closed)["01"]).toBe("closed");
+    expect(readEvents(world.pool, "04").map((e) => e.kind)).not.toContain("exited");
 
     await held.release();
     const after = await untilInterrupt(server, "02", "deadlock");
@@ -447,12 +449,12 @@ conformance(
 // engine/engine.test.ts:13807
 conformance(
   "interrupts",
-  "a Close behind a queued Resume and a Resume behind a queued Close are refused, and Close never answers a crash",
+  "a retried Close is acknowledged and records nothing more, and Close never answers a crash",
   async (t) => {
     const world = t.world({ tickets: [ticket("01"), ticket("02"), ticket("03")], config: CONFIG });
     world.stubs.script("01", { statuses: ["checkpoint", "done"] });
     world.stubs.script("03", { status: "checkpoint" });
-    // 02 holds the super-step open, then crashes: no Outcome, exit 1.
+    // 02 runs on beside the answers, then crashes: no Outcome, exit 1.
     const held = world.stubs.hold("02", { status: "keep", exitCode: 1 });
     const server = await t.start(world);
     await until(() => launches(world), (keys) => keys.includes("02"), { what: "02 to launch", ms: 30_000 });
@@ -462,22 +464,16 @@ conformance(
     });
 
     expect((await resume(server, { ticketId: "01", note: "go on" })).status).toBe(202);
-    const closeBehindResume = await resume(server, { ticketId: "01", action: "close", note: "drop it" });
-    expect(closeBehindResume.status).toBe(409);
-    expectParsedEqual(closeBehindResume.text, { error: "answer: ticket 01 already has an answer queued" }, "the 409 for 01");
     expect((await resume(server, { ticketId: "03", action: "close", note: "drop it" })).status).toBe(202);
-    const resumeBehindClose = await resume(server, { ticketId: "03", note: "go on" });
-    expect(resumeBehindClose.status).toBe(409);
-    expectParsedEqual(resumeBehindClose.text, { error: "answer: ticket 03 already has an answer queued" }, "the 409 for 03");
-    // A retry of the queued Close is acknowledged, and records nothing more.
     expect((await resume(server, { ticketId: "03", action: "close", note: "drop it" })).status).toBe(202);
     const queue = JSON.parse(readFileSync(join(world.pool, "runs", "queued-answers.json"), "utf8")) as {
-      answers: { ticketId: string; action?: string; processedAt: string | null }[];
+      answers: { ticketId: string; action?: string }[];
     };
-    expect(queue.answers.map((a) => [a.ticketId, a.action ?? "resume", a.processedAt])).toEqual([
-      ["01", "resume", null],
-      ["03", "close", null],
+    expect(queue.answers.map((a) => [a.ticketId, a.action ?? "resume"])).toEqual([
+      ["01", "resume"],
+      ["03", "close"],
     ]);
+    expect(readEvents(world.pool, "03").filter((e) => e.kind === "answered")).toHaveLength(1);
 
     await held.release();
     const after = await settle(

@@ -182,8 +182,10 @@ conformance(
     // Nothing held reads as an empty queue.
     expect(snapshots[0]!.state.mergeQueue).toEqual([]);
     // While the first resolver runs, the second waits behind it with
-    // nothing running, and the live attempt says it is a resolver.
-    const firstResolving = snapshots.find((s) => isResolver(cardOf(s, first)));
+    // nothing running, and the live attempt says it is a resolver. Each
+    // merge is taken on at its own Ticket's exit, so the second may join
+    // the line a moment after the first resolver is live.
+    const firstResolving = snapshots.find((s) => isResolver(cardOf(s, first)) && s.state.mergeQueue.length === 2);
     expect(firstResolving?.state.mergeQueue).toEqual([
       { ticketId: first, state: "resolving" },
       { ticketId: second, state: "queued" },
@@ -221,7 +223,13 @@ conformance(
     for (const id of ["05", "02", "09"]) world.stubs.script(`${id}.resolver`, slowGiveUp(id));
     const server = await t.start(world);
 
-    const during = await untilResolverLive(server, "05");
+    // Each merge is taken on at its Ticket's exit, so 02 and 09 join the
+    // line behind 05 while its resolver still waits for its release.
+    const during = await untilState(
+      server,
+      (s) => isResolver(cardOf(s, "05")) && s.state.mergeQueue.length === 3,
+      { ms: 20_000, what: "05's resolver live with 02 and 09 queued behind it" },
+    );
     const queue: MergeQueueEntry[] = [
       { ticketId: "05", state: "resolving" },
       { ticketId: "02", state: "queued" },

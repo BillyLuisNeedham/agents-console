@@ -39,8 +39,7 @@ async function snapshotOf(server: CaseServer): Promise<EnrichedSnapshot | null> 
 const RESTING = new Set(["quiescent", "done", "dead", "stopped"]);
 
 /**
- * The snapshot once the drive rests (no super-step in flight) and `done`
- * holds of it: the outside view of the engine test's `server.settled()`.
+ * The snapshot once the drive rests and `done` holds of it: the outside view of the engine test's `server.settled()`.
  */
 async function settled(
   server: CaseServer,
@@ -184,7 +183,7 @@ conformance("server", "pool server › carries the terminal dead phase on the sn
     config: DEFAULTS,
   });
   // The pool's harness is claude, and no claude is on the server's PATH:
-  // the launch inside the first super-step fails and kills the drive.
+  // the first Tick's launch fails and kills the drive.
   const path = world.env("").PATH!.split(":").filter((dir) => dir !== world.stubs.bin).join(":");
   if (Bun.which("claude", { PATH: path }) !== null) {
     throw new Error(`a claude outside the stubs is on ${path}; this case needs none`);
@@ -407,7 +406,8 @@ conformance(
     world.stubs.script("02", { status: "keep" });
     const server = await t.start(world);
     const first = await settled(server, (s) => s.state.interrupts.length === 2);
-    expect(first.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([
+    // Each Interrupt is raised at its Attempt's exit, so their order is the exits' order.
+    expect(first.state.interrupts.map((i) => [i.ticketId, i.kind]).sort()).toEqual([
       ["01", "checkpoint"],
       ["02", "crash"],
     ]);
@@ -512,7 +512,7 @@ conformance(
 // engine/server.test.ts:674
 conformance(
   "interrupts",
-  "pool server › carries queued answers in the 202, /api/state, and the socket while a super-step is in flight",
+  "pool server › carries a queued answer in the 202 while a sibling runs, then processes it while the sibling still runs",
   async (t) => {
     const world = t.world({
       tickets: [
@@ -524,23 +524,21 @@ conformance(
     });
     const sentinel = join(world.root, "release-03");
     world.stubs.script("01", { statuses: ["checkpoint", "done"] });
-    // Holds super-step 2 open until the sentinel appears (the stub gives up
-    // after ten seconds, well past what this case needs).
+    // Holds 03 open until the sentinel appears (the stub gives up after ten
+    // seconds, well past what this case needs).
     world.stubs.script("03", { waitFor: sentinel });
     const server = await t.start(world);
 
-    // Super-step 1 checkpoints 01 and finishes 02; super-step 2 runs 03 and
-    // holds it open, with 01's interrupt pending throughout.
     await until(
       () => snapshotOf(server),
       (s) =>
         s !== null &&
         s.state.interrupts.some((i) => i.ticketId === "01") &&
         statusOf(s, "03") === "in-progress",
-      { what: "a super-step in flight with 01's interrupt pending", ms: 30_000 },
+      { what: "03 running with 01's interrupt pending", ms: 30_000 },
     );
 
-    // The 202's snapshot: the interrupt still pending, the answer queued.
+    // The 202 is built before the next Tick runs: the interrupt still pending, the answer queued.
     const resumed = await resume(server, { ticketId: "01", action: "resume", note: "go on" });
     expect(resumed.status).toBe(202);
     const body = resumed.json<{ snapshot: EnrichedSnapshot }>();
@@ -548,30 +546,18 @@ conformance(
     expect(body.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
     expect(body.snapshot.state.queuedAnswers[0]?.kind).toBe("checkpoint");
 
-    // A Close behind the queued Resume would lose at the drain unseen, so it
-    // is refused as a conflict with the queue.
-    expect(await refusal(server, { ticketId: "01", action: "close" })).toEqual([
-      409,
-      "answer: ticket 01 already has an answer queued",
-    ]);
-
-    expect((await snapshotOf(server))!.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
-
-    // A socket opening now starts from the latest snapshot, queue included.
-    const client = await t.socket(server);
-    await client.waitFor((frame) => frame.type === "snapshot");
-    expect(client.pushed?.snapshot.state.queuedAnswers.map((a) => a.ticketId)).toEqual(["01"]);
-    client.close();
-
-    // Processing at the boundary clears the waiting state.
-    writeFileSync(sentinel, "go");
-    const cleared = await settled(
-      server,
-      (s) => statusOf(s, "03") === "done" && s.state.queuedAnswers.length === 0,
-      "the boundary to process the answer",
+    const processed = await until(
+      () => snapshotOf(server),
+      (s) => s !== null && statusOf(s, "01") === "done",
+      { what: "01 to run again to done", ms: 30_000 },
     );
+    expect(statusOf(processed!, "03")).toBe("in-progress");
+    expect(processed!.state.queuedAnswers).toEqual([]);
+    expect(processed!.state.interrupts.some((i) => i.ticketId === "01")).toBe(false);
+
+    writeFileSync(sentinel, "go");
+    const cleared = await settled(server, (s) => statusOf(s, "03") === "done", "03 to finish");
     expect(cleared.state.queuedAnswers).toEqual([]);
-    expect(cleared.state.interrupts.some((i) => i.ticketId === "01")).toBe(false);
   },
 );
 
@@ -726,7 +712,7 @@ conformance("http", "ticket events endpoint › serves a ticket's parsed events 
   const body = answer.json<TicketEventsResponse>();
   expect(body.reconstructed).toBe(false);
   expect(body.attempts).toEqual([]);
-  expect(body.events.map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited"]);
+  expect(body.events.map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited", "merged"]);
   expect(body.events[0]!.attempt).toBe(1);
   expect(typeof body.events[0]!.at).toBe("string");
   expect(body.events.find((event) => event.kind === "exited")?.payload).toEqual({

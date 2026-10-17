@@ -28,8 +28,8 @@ const HOLD_POLLS = 2400;
 /**
  * Put the gate in front of `binary` (claude by default). Each launch is
  * keyed by the base name of its working directory: a Ticket's worktree is
- * named for its id, a lone Ticket runs in the checkout (`repo`), and `any`
- * matches every launch no other rule names. A launch whose key has no rule
+ * named for its id, a Ticket of a pool outside git runs in the pool
+ * directory, and `any` matches every launch no other rule names. A launch whose key has no rule
  * goes straight to the stub.
  */
 export function holdLaunches(

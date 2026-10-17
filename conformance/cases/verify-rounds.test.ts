@@ -356,7 +356,7 @@ conformance("verify", "Adopt merges the adopted Candidate as a human selection, 
       "with the note: 2 overfits the fixture",
   );
 
-  // Only the adopted Candidate's proposal lands, at the super-step boundary.
+  // Only the adopted Candidate's proposal lands, at the next Tick.
   const issues = await until(() => issuesText(world), (text) => text.includes("From the adopted candidate"), {
     what: "the adopted candidate's spawn to land",
   });

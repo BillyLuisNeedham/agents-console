@@ -10,7 +10,7 @@
 import { expect } from "bun:test";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
-import { poolKey } from "../harness/git-pool.ts";
+import { poolKey, ticketWorktree } from "../harness/git-pool.ts";
 import { awaitPrompt, spawnedPayloads, untilTicketStatus } from "../harness/herdr-tui.ts";
 import {
   interactiveArgv,
@@ -36,7 +36,7 @@ conformance("attempts", "an Attempt's tab opens in the Pool workspace and its pa
 
   const tabs = callsOf(herdr, "tab.create");
   expect(tabs.map((call) => call.params)).toEqual([
-    { label: "01 · Tabs in the Pool workspace", focus: false, cwd: world.repo, workspace_id: "w1" },
+    { label: "01 · Tabs in the Pool workspace", focus: false, cwd: ticketWorktree(world.repo, "01").path, workspace_id: "w1" },
   ]);
   // The fake answered with root pane w1:p1 in tab w1:t1, terminal term-1.
   const spawned = spawnedPayloads(world, "01")[0]!;
@@ -160,7 +160,7 @@ conformance("attempts", "a terminal-backed Attempt opens a named unfocused tab i
   expect(herdr.calls.slice(0, 3).map((call) => [call.method, call.method === "workspace.create" ? null : call.params])).toEqual([
     ["workspace.create", null],
     ["pane.list", { workspace_id: "w1" }],
-    ["tab.create", { label: "01 · Named herdr tabs", focus: false, cwd: world.repo, workspace_id: "w1" }],
+    ["tab.create", { label: "01 · Named herdr tabs", focus: false, cwd: ticketWorktree(world.repo, "01").path, workspace_id: "w1" }],
   ]);
   // The wrapper goes as one send, text and Enter together.
   expect(sends(herdr)[0]!.params).toEqual({

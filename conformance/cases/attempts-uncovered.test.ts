@@ -10,7 +10,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { anyIsoTime, expectJsonlEqual } from "../harness/equal.ts";
-import { readStateLine, until } from "../harness/pool-files.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
+import { readEvents, until } from "../harness/pool-files.ts";
 import { batchPromptArg, ticketPrompt } from "../harness/prompts.ts";
 
 // Gap: engine/attempt-run.ts recordSpawned. A terminal-backed launch that
@@ -25,10 +26,11 @@ conformance("attempts", "a headless fallback on opencode carries the effort the 
   const herdr = await t.herdr(world, { fail: ["tab.create"] });
   await t.start(world, { herdr });
 
-  await until(() => readStateLine(world.pool, "01-first.md"), (line) => line.status === "done", {
+  await until(() => readEvents(world.pool, "01"), (events) => events.some((e) => e.kind === "merged"), {
     ms: 20_000,
-    what: "01 to finish headless",
+    what: "01 to finish headless and merge",
   });
+  const { path: worktree, branch } = ticketWorktree(world.repo, "01");
 
   const issue = join(world.pool, "issues", "01-first.md");
   const body = ticketPrompt({ agentMd: null, runs: join(world.pool, "runs"), outcome: "01" });
@@ -54,10 +56,10 @@ conformance("attempts", "a headless fallback on opencode carries the effort the 
       kind: "spawned",
       payload: {
         argv: ["opencode", "run", "--command", "implement", `${issue}\n\n<prompt>`, "--model", "m", "--variant", "minimal", "--auto"],
-        cwd: world.repo,
-        branch: null,
+        cwd: worktree,
+        branch,
         commitSha: world.git(["rev-parse", "HEAD"]).trim(),
-        env: { PWD: world.repo },
+        env: { PWD: worktree },
         harness: "opencode",
         model: "m",
         effort: "minimal",
@@ -69,5 +71,6 @@ conformance("attempts", "a headless fallback on opencode carries the effort the 
       },
     },
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 0, status: "done", logTail: [], outcomeExists: true } },
+    { at: anyIsoTime(), attempt: 1, kind: "merged", payload: {} },
   ], "runs/01.events.jsonl");
 });

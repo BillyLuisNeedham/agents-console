@@ -175,7 +175,7 @@ conformance("herdr", "a refused tab in a Pool workspace that still exists is a b
   expect(String(spawnedPayloads(world, "01")[0]!.pane_id)).toStartWith("w-launch:");
 });
 
-conformance("herdr", "two spawns refused together in one super-step mint one new Pool workspace, not two", async (t) => {
+conformance("herdr", "two spawns refused together mint one new Pool workspace, not two", async (t) => {
   const world = terminalWorld(t, {
     tickets: [readyTicket("01", "First"), readyTicket("02", "Second")],
   });

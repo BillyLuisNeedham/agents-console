@@ -1,5 +1,5 @@
 /**
- * Adopting Spawn proposals at the super-step boundary (ADR-0010, ADR-0029):
+ * Adopting Spawn proposals at the Tick after their Outcome (ADR-0010, ADR-0029, ADR-0040):
  * the Ticket files written, the Assignment a proposal requests, rejections,
  * and the Spawn caps.
  */
@@ -76,10 +76,9 @@ conformance(
       "01-spawn-2's state line",
     );
     expect(readTicketFile(world.pool, "01-spawn-1.md")).toContain("# 01-spawn-1: After two");
-    // Both ran as ordinary Tickets. A Ticket that shared its super-step ran
-    // in a worktree of the git pool, so its branch merged after it.
+    // Both ran as ordinary Tickets, each in its own worktree, merged after it.
     for (const id of ["01-spawn-1", "01-spawn-2"]) {
-      expect(eventKinds(world, id).filter((kind) => kind !== "merged")).toEqual(["scheduled", "spawned", "exited"]);
+      expect(eventKinds(world, id)).toEqual(["scheduled", "spawned", "exited", "merged"]);
     }
     expect(statuses(done)).toEqual({
       "01": "done",
@@ -175,9 +174,11 @@ conformance("spawns", "holds a proposal blocked by an in-flight ticket until the
 
   await runAndApprove(server);
   const log = await poolLog(server);
-  expect(log).toContain("super-step 1: 01");
-  expect(log).toContain("super-step 2: 02");
-  expect(log).toContain("super-step 3: 01-spawn-1");
+  const starts = ["start 01 at ", "start 02 at ", "start 01-spawn-1 at "].map((text) =>
+    log.findIndex((line) => line.startsWith(text)),
+  );
+  expect(starts.every((at) => at >= 0), log.join("\n")).toBe(true);
+  expect(starts).toEqual([...starts].sort((a, b) => a - b));
 });
 
 conformance(
@@ -261,8 +262,8 @@ conformance("spawns", "holds what the per-run cap of twenty has no room for acro
 
   const done = await runAndApprove(server, 45_000);
 
-  // Twenty files land, five per parent for whichever four parents reached
-  // the boundary first; the fifth finds no room left in the run cap.
+  // Twenty files land, five per parent for whichever four parents' proposals
+  // landed first; the fifth finds no room left in the run cap.
   const files = parents.flatMap((id) => [1, 2, 3, 4, 5, 6, 7].map((n) => `${id}-spawn-${n}.md`));
   expect(files.filter((file) => hasTicket(world, file))).toHaveLength(20);
   // Which parent found the run full is racy; that exactly one did, with

@@ -8,7 +8,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { anyIsoTime, expectJsonlEqual, expectSameBytes, expectSameFile } from "../harness/equal.ts";
-import { readStateLine, until } from "../harness/pool-files.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
+import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 
 conformance("disk", "a done outcome rewrites the Ticket's state line to status=done", async (t) => {
   const world = t.world({
@@ -31,6 +32,8 @@ conformance("disk", "a done outcome rewrites the Ticket's state line to status=d
     (marker) => marker.status === "done",
     { what: "01's marker to say done" },
   );
+  await until(() => readEvents(world.pool, "01"), (events) => events.some((e) => e.kind === "merged"), { what: "01's merge" });
+  const { path: worktree, branch } = ticketWorktree(world.repo, "01");
 
   // The stub ran once, as claude, and wrote the outcome the engine read.
   const calls = world.stubs.calls();
@@ -62,10 +65,10 @@ conformance("disk", "a done outcome rewrites the Ticket's state line to status=d
           "stream-json",
           "--verbose",
         ],
-        cwd: world.repo,
-        branch: null,
+        cwd: worktree,
+        branch,
         commitSha: head,
-        env: { PWD: world.repo },
+        env: { PWD: worktree },
         harness: "claude",
         model: "m",
         pid: expect.any(Number),
@@ -77,5 +80,6 @@ conformance("disk", "a done outcome rewrites the Ticket's state line to status=d
       kind: "exited",
       payload: { code: 0, status: "done", logTail: [], outcomeExists: true },
     },
+    { at: anyIsoTime(), attempt: 1, kind: "merged", payload: {} },
   ], "runs/01.events.jsonl");
 });

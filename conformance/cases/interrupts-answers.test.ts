@@ -9,8 +9,8 @@
  * test it carries over, or the uncovered behaviour it pins.
  *
  * The stubs on PATH play the agents. Every answer here lands on an idle pool,
- * so it is processed the moment it is accepted; answers queued behind a
- * running super-step are interrupts-queued.test.ts's.
+ * so it is processed the moment it is accepted; answers given while another
+ * Ticket runs, and Queued answers, are interrupts-queued.test.ts's.
  */
 
 import { expect } from "bun:test";
@@ -57,8 +57,7 @@ const atReview = (server: CaseServer): Promise<EnrichedSnapshot> =>
 /** The config Interrupt's body for a Ticket missing `field` (engine/engine.ts). */
 const configBody = (id: string, field: "harness" | "model"): string =>
   `ticket ${id} has no ${field}: set one in console.json (an assign entry for ${id}, or defaults.${field}) ` +
-  "and answer resume. The pool reloads console.json at the next super-step boundary and schedules the " +
-  "ticket on what it finds.";
+  "and answer resume. The pool reloads console.json at the next Tick and schedules the ticket on what it finds.";
 
 // engine/engine.test.ts:399
 conformance(

@@ -1,15 +1,17 @@
 /**
  * Verify without Jev, the fan-out (C21 of the Rust port's inventory,
  * docs/research/rust-port/test-inventory.md): `verify: N` runs N
- * same-round Attempts on their own branches, and a round with a paused or
- * crashed Candidate stops at one Interrupt instead of selecting.
+ * same-round Attempts on their own branches, all cut from the target's tip
+ * at the round's launch. The round is one group, graded once its last
+ * Candidate exits (ADR-0040), and a round with a paused or crashed
+ * Candidate stops at one Interrupt instead of selecting.
  */
 
 import { expect } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
-import { readEvents, readStateLine } from "../harness/pool-files.ts";
+import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { approveReview, settleOn, statuses } from "../harness/pool-run.ts";
 import {
   attemptBranch,
@@ -35,7 +37,7 @@ conformance("verify", "a pool with no verify key runs each Ticket once, with no 
   expect(existsSync(join(world.pool, "issues", "01-head-to-head.md"))).toBe(false);
 });
 
-conformance("verify", "verify: 3 fans out three same-round attempts on their own branches from one HEAD", async (t) => {
+conformance("verify", "verify: 3 fans out three same-round attempts on their own branches, cut from one tip at launch", async (t) => {
   const world = t.world({ tickets: [ready("01")], config: verifyConfig(3) });
   const head = world.git(["rev-parse", "HEAD"]).trim();
   // A three-way rendezvous: each attempt waits for the next to start, so
@@ -96,6 +98,36 @@ conformance("verify", "verify: 3 fans out three same-round attempts on their own
   const lastScheduled = Math.max(...events.map((e, i) => (e.kind === "scheduled" ? i : -1)));
   expect(lastScheduled).toBeLessThan(events.findIndex((e) => e.kind === "spawned"));
   expect(attemptBranches(world)).toEqual([]);
+});
+
+conformance("verify", "a verify round is graded once its last Candidate exits, not as each one does", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(3) });
+  const release = join(world.root, "release-3");
+  world.stubs.script("01.attempt-1", { work: { file: "cand-1.txt", message: "cand-1" } });
+  world.stubs.script("01.attempt-2", { work: { file: "cand-2.txt", message: "cand-2" } });
+  world.stubs.script("01.attempt-3", {
+    run: `for _ in $(seq 1 600); do [ -e '${release}' ] && break; sleep 0.05; done; [ -e '${release}' ]`,
+    work: { file: "cand-3.txt", message: "cand-3" },
+  });
+  const server = await t.start(world);
+
+  await until(
+    () => readEvents(world.pool, "01").filter((e) => e.kind === "exited").map((e) => e.attempt).sort(),
+    (exited) => exited.join(" ") === "1 2",
+    { what: "attempts 1 and 2 exited" },
+  );
+  await Bun.sleep(1_000);
+  expect(world.stubs.calls().map((call) => call.key).sort()).toEqual(["01.attempt-1", "01.attempt-2", "01.attempt-3"]);
+  expect(readEvents(world.pool, "01").some((e) => e.kind === "graded")).toBe(false);
+
+  writeFileSync(release, "");
+  const snap = await settleOn(server, "REVIEW", "review");
+  const fanned = snap.state.log.filter((line) => line.startsWith("ticket 01: verify fan-out complete:"));
+  expect(fanned).toEqual([expect.stringContaining("3 attempts exited (3 done, 0 checkpoint, 0 crash)")]);
+  expect(snap.state.log.filter((line) => line.startsWith("start "))).toEqual([expect.stringMatching(/^start 01 at [0-9a-f]{7}$/)]);
+  const keys = world.stubs.calls().map((call) => call.key);
+  expect(keys.slice(3, 6).sort()).toEqual(["01-grader-1", "01-grader-2", "01-grader-3"]);
+  expect(statuses(snap)["01"]).toBe("done");
 });
 
 conformance("verify", "verify: 1 marks the Ticket done on a passing grade and merges its attempt branch", async (t) => {

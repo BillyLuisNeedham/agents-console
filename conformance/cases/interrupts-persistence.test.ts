@@ -13,7 +13,10 @@
  * write the server tries fails with "database is locked" until the case
  * lets go. The lock is taken once 01 has launched, so after the server has
  * opened the store and read its last checkpoint at boot, and before 01 can
- * exit, so before the first super-step boundary writes anything.
+ * exit, so before the first checkpoint row is written. A Tick launches what
+ * it found eligible and then writes its row (ADR-0040), so the Tick after
+ * 01's exit starts 02 before its write is refused; the persistence
+ * Interrupt holds every launch after that until it is answered.
  */
 
 import { expect } from "bun:test";
@@ -39,8 +42,10 @@ const ready = (id: string, blockedBy = "none"): TicketSeed => ({
   marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
 });
 
-/** 01, then 02 blocked by it: the boundary after 01 is the first checkpoint write. */
+/** 01, then 02 blocked by it: the Tick that starts 02 is the first checkpoint write. */
 const CHAIN = [ready("01"), ready("02", "01")];
+/** CHAIN and 03 blocked by 02: 03 can only start after the persistence Interrupt is up. */
+const CHAIN3 = [...CHAIN, ready("03", "02")];
 
 /** Every launch's key, in launch order. */
 const launches = (world: World): string[] => world.stubs.calls().map((call) => call.key);
@@ -93,22 +98,21 @@ async function lockedAtLaunch(
 }
 
 /**
- * Wait until a Ticket's `exited` event is on disk, looking every few
- * milliseconds rather than at `until`'s pace: the retry the case lets land
- * is due within the server's backoff, a few hundred milliseconds in all.
+ * Wait until `id` has launched, looking every few milliseconds rather than
+ * at `until`'s pace: the retry the case lets land is due within the
+ * server's backoff, a few hundred milliseconds in all.
  */
-async function untilExited(world: World, id: string, ms = 30_000): Promise<void> {
+async function untilLaunchedFast(world: World, id: string, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
-  for (;;) {
-    try {
-      if (readEvents(world.pool, id).some((e) => e.kind === "exited")) return;
-    } catch {
-      // A line mid-append does not parse yet; the next look sees it whole.
-    }
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${id}'s exited event`);
+  while (!launches(world).includes(id)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${id} to launch`);
     await Bun.sleep(2);
   }
 }
+
+/** Each checkpoint row's Ticket statuses, in row order. */
+const ticketRows = (world: World): Record<string, string>[] =>
+  readCheckpoints(world.pool).map((row) => (row.state as { tickets: Record<string, string> }).tickets);
 
 /** The phase of every version a socket was pushed, in order. */
 function pushedPhases(socket: SocketClient): string[] {
@@ -134,15 +138,13 @@ const PERSISTENCE_BODY =
   "continue the run.";
 
 // engine/engine.test.ts:7033
-conformance("interrupts", "a checkpoint write refused at the boundary is retried, and the run carries on", async (t) => {
+conformance("interrupts", "a checkpoint write refused after a Tick is retried, and the run carries on", async (t) => {
   const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN);
   release();
-  // 01's exit and the boundary write after it run in one stretch of the
-  // server's event loop, so a request sent once 01's exit is on disk is
-  // answered only when that loop is next free: in the backoff after the
-  // boundary's first write attempt, which the lock refused. Letting go then
-  // leaves the retry to land.
-  await untilExited(world, "01");
+  // The Tick that starts 02 tries its row write the moment the launch is
+  // handed off, well before 02's stub has recorded itself, and the lock
+  // refuses it at once. Letting go once 02 is seen leaves a retry to land.
+  await untilLaunchedFast(world, "02");
   expect((await server.http.get("/api/state")).status).toBe(200);
   lock.release();
 
@@ -150,10 +152,8 @@ conformance("interrupts", "a checkpoint write refused at the boundary is retried
   expect(reviewed.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["REVIEW", "review"]]);
   expect(reviewed.state.log).not.toContain(`interrupt raised for ${PERSISTENCE} (persistence)`);
   expect(launches(world)).toEqual(["01", "02"]);
-  expect(reviewed.state.log).toContain("super-step 2: 02");
-  const rows = readCheckpoints(world.pool);
-  expect(rows.length).toBeGreaterThan(0);
-  expect((rows[0]!.state as { tickets: Record<string, string> }).tickets).toEqual({ "01": "done", "02": "ready" });
+  expect(reviewed.state.log.some((line) => line.startsWith("start 02 at "))).toBe(true);
+  expect(ticketRows(world).some((tickets) => tickets["01"] === "done")).toBe(true);
   expect(existsSync(join(world.pool, "runs", `${PERSISTENCE}.events.jsonl`))).toBe(false);
 
   await approveReview(server);
@@ -164,27 +164,30 @@ conformance(
   "interrupts",
   "a store that keeps refusing raises the PERSISTENCE Interrupt and stops scheduling, and a resume once it is healthy carries on",
   async (t) => {
-    const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN);
+    const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN3);
     release();
 
-    const stuck = await settle(server, (s) => s.state.interrupts.length > 0, { what: "the persistence Interrupt" });
+    const stuck = await settle(server, (s) => s.state.interrupts.length > 0 && statuses(s)["02"] === "done", {
+      what: "the persistence Interrupt with 02 done",
+    });
     expect(stuck.phase).toBe("quiescent");
     expect(stuck.state.interrupts).toEqual([{ ticketId: PERSISTENCE, kind: "persistence", body: PERSISTENCE_BODY }]);
-    expect(statuses(stuck)).toEqual({ "01": "done", "02": "ready" });
-    expect(stuck.state.log.slice(-3)).toEqual([
-      "ticket 01: exited 0, marker done",
+    expect(statuses(stuck)).toEqual({ "01": "done", "02": "done", "03": "ready" });
+    expect(stuck.state.log).toContain("ticket 01: exited 0, marker done");
+    expect(stuck.state.log.slice(-2)).toEqual([
       `interrupt raised for ${PERSISTENCE} (persistence)`,
       `pool quiescent: interrupts pending for ${PERSISTENCE}`,
     ]);
     // The state lines are written before the store is, so they moved on.
     expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
-    expect(readStateLine(world.pool, "02-t.md").status).toBe("ready");
-    expect(launches(world)).toEqual(["01"]);
+    expect(readStateLine(world.pool, "02-t.md").status).toBe("done");
+    expect(readStateLine(world.pool, "03-t.md").status).toBe("ready");
+    expect(launches(world)).toEqual(["01", "02"]);
 
-    // Healthy again: nothing has written a row, and nothing does until the
-    // Interrupt is answered.
+    // Healthy again: no row past 01's launch has been written, and none is
+    // until the Interrupt is answered.
     lock.release();
-    expect(readCheckpoints(world.pool)).toEqual([]);
+    expect(ticketRows(world).filter((tickets) => tickets["01"] === "done")).toEqual([]);
     expect((await snapshot(server)).state.interrupts.map((i) => i.ticketId)).toEqual([PERSISTENCE]);
 
     await answer(server, { ticketId: PERSISTENCE });
@@ -194,17 +197,15 @@ conformance(
     expect(reviewed.state.log).toContain(
       `interrupt answered for ${PERSISTENCE} (persistence): the drive retries the checkpoint write`,
     );
-    expect(reviewed.state.log).toContain("super-step 2: 02");
-    expect(launches(world)).toEqual(["01", "02"]);
+    expect(reviewed.state.log.some((line) => line.startsWith("start 03 at "))).toBe(true);
+    expect(launches(world)).toEqual(["01", "02", "03"]);
     expect(readEvents(world.pool, PERSISTENCE).map((e) => [e.attempt, e.kind, e.payload])).toEqual([
       [0, "answered", { kind: "persistence" }],
     ]);
-    const rows = readCheckpoints(world.pool);
-    expect(rows.length).toBeGreaterThan(0);
-    expect((rows[0]!.state as { tickets: Record<string, string> }).tickets).toEqual({ "01": "done", "02": "ready" });
+    expect(ticketRows(world).find((tickets) => tickets["01"] === "done")).toEqual({ "01": "done", "02": "done", "03": "ready" });
 
     const done = await approveReview(server);
-    expect(statuses(done)).toEqual({ "01": "done", "02": "done" });
+    expect(statuses(done)).toEqual({ "01": "done", "02": "done", "03": "done" });
   },
 );
 
@@ -214,9 +215,11 @@ conformance(
   "interrupts",
   "an answer to the PERSISTENCE Interrupt while the store still refuses is refused with the store's error, and taken once it is healthy",
   async (t) => {
-    const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN);
+    const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN3);
     release();
-    await settle(server, (s) => s.state.interrupts.length > 0, { what: "the persistence Interrupt" });
+    await settle(server, (s) => s.state.interrupts.length > 0 && statuses(s)["02"] === "done", {
+      what: "the persistence Interrupt with 02 done",
+    });
 
     const early = await resume(server, { ticketId: PERSISTENCE });
     expect(early.status).toBe(400);
@@ -224,7 +227,7 @@ conformance(
     const still = await snapshot(server);
     expect(still.phase).toBe("quiescent");
     expect(still.state.interrupts).toEqual([{ ticketId: PERSISTENCE, kind: "persistence", body: PERSISTENCE_BODY }]);
-    expect(launches(world)).toEqual(["01"]);
+    expect(launches(world)).toEqual(["01", "02"]);
     // Accepted before its processing failed: the answer is recorded, and
     // still waits to be processed.
     const queue = (): { answers: { ticketId: string; processedAt: string | null }[] } =>
@@ -237,7 +240,7 @@ conformance(
     const reviewed = await settle(server, (s) => s.state.interrupts.some((i) => i.kind === "review"), {
       what: "the Review",
     });
-    expect(launches(world)).toEqual(["01", "02"]);
+    expect(launches(world)).toEqual(["01", "02", "03"]);
     expect(reviewed.state.log).toContain(
       `interrupt answered for ${PERSISTENCE} (persistence): the drive retries the checkpoint write`,
     );

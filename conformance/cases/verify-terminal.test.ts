@@ -187,48 +187,64 @@ conformance(
 // keep-talking.test.ts:1083
 conformance(
   "verify",
-  "holds a queued Adopt while a Continued attempt works in the pool checkout, and merges it after",
+  "merges an Adopt at once beside a Continued attempt in a pane enlisted in the pool checkout",
   async (t) => {
-    const world = t.world({ tickets: [ready("01"), ready("03"), ready("02", "03")], config: terminalConfig(2) });
+    const world = t.world({ tickets: [ready("01")], config: terminalConfig(2) });
     holdTuis(world);
     const herdr = await t.herdr(world, { rendered: RENDERED });
-    const outcomes = serveOutcomes(herdr, {
-      "01.attempt-1": [CHECKPOINT],
-      "01.attempt-2": [FINISHED],
-      "03": [{ status: "done", summary: "done", commitSha: null }],
-      "02": [{ status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me too" }],
+    await herdr.control("seedAgent", {
+      paneId: "pane-main",
+      agent: "claude",
+      cwd: world.repo,
+      title: "CC on main",
+      status: "idle",
+      rendered: RENDERED,
+      tabId: "tab-main",
     });
+    const outcomes = serveOutcomes(herdr, { "01.attempt-1": [CHECKPOINT], "01.attempt-2": [FINISHED] });
     const server = await t.start(world, { herdr });
 
-    // 02 runs alone after 03, so in the pool checkout, and checkpoints there.
-    await heldPaneOf(server, "02");
-    const paused = await snapshot(server);
-    expect(paused.state.interrupts.find((i) => i.ticketId === "01")?.candidates).toEqual([2]);
-    expect(readEvents(world.pool, "02").find((e) => e.kind === "spawned")?.payload.cwd).toBe(world.repo);
-    const talk = await server.http.post("/api/keep-talking", { ticketId: "02" });
-    expect(talk.status).toBe(202);
-
-    await answer(server, { ticketId: "01", note: "the finished one", action: "adopt", attempt: 2 });
-    await Bun.sleep(500);
-    // Adopt merges, so it waits, still queued, while the checkout is held.
-    const waiting = await snapshot(server);
-    expect(ticketOf(waiting, "01").status).toBe("checkpoint");
-    expect(waiting.state.queuedAnswers.map((a) => [a.ticketId, a.action, a.attempt])).toEqual([["01", "adopt", 2]]);
-    expect(readEvents(world.pool, "01").some((e) => e.kind === "merged")).toBe(false);
-
-    writeFileSync(
-      join(world.pool, "runs", "02.outcome.json"),
-      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    const enlisted = await server.http.post("/api/enlist", { becomes: "ticket", paneId: "pane-main", title: "Talk", spec: "" });
+    expect(enlisted.status).toBe(201);
+    writeFileSync(join(world.pool, "runs", "enlist-1.outcome.json"), JSON.stringify(CHECKPOINT));
+    // The pane survey runs every 15 s.
+    await until(
+      async () => ticketOf(await snapshot(server), "enlist-1").heldPane,
+      (pane) => pane !== null,
+      { ms: 45_000, what: "enlist-1's Held pane" },
     );
+    const talk = await server.http.post("/api/keep-talking", { ticketId: "enlist-1" });
+    expect(talk.status).toBe(202);
+    const paused = await until(
+      () => snapshot(server),
+      (snap) => snap.state.interrupts.some((i) => i.ticketId === "01" && i.kind === "checkpoint"),
+      { ms: 20_000, what: "01's checkpoint" },
+    );
+    expect(paused.state.interrupts.find((i) => i.ticketId === "01")?.candidates).toEqual([2]);
+    const moved = world.git(["branch", "--show-current"]).trim();
+
+    // The enlist moved merges off the pool checkout, so the Adopt's merge
+    // has nothing to wait for while enlist-1 talks there.
+    await answer(server, { ticketId: "01", note: "the finished one", action: "adopt", attempt: 2 });
     const done = await until(
       () => snapshot(server),
       (snap) => ticketOf(snap, "01").status === "done",
       { ms: 20_000, what: "01 to be done" },
     );
-    outcomes.stop();
-
-    expect(ticketOf(done, "02").status).toBe("done");
     expect(readEvents(world.pool, "01").filter((e) => e.kind === "merged").map((e) => e.attempt)).toEqual([2]);
+    expect(ticketOf(done, "enlist-1").liveAttempt?.attempt).toBe(2);
+    expect(world.git(["branch", "--show-current"]).trim()).toBe(moved);
+
+    writeFileSync(
+      join(world.pool, "runs", "enlist-1.outcome.json"),
+      JSON.stringify({ status: "done", summary: "talked", commitSha: null }),
+    );
+    await until(
+      () => snapshot(server),
+      (snap) => ticketOf(snap, "enlist-1").status === "done",
+      { ms: 20_000, what: "enlist-1 to be done" },
+    );
+    outcomes.stop();
   },
-  { timeoutMs: 60_000 },
+  { timeoutMs: 90_000 },
 );

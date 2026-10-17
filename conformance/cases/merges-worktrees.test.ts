@@ -106,7 +106,7 @@ const POOL_NAME = 'pool="$(basename "$(dirname "$(dirname "$STUB_ISSUE")")")"';
 
 conformance(
   "merges",
-  "a multi-ticket super-step runs its Tickets at once, each in its own worktree branched from the same HEAD",
+  "independent Tickets run at once, each in its own worktree cut from the target's tip at its launch",
   async (t) => {
     const world = t.world({ tickets: [ready("01"), ready("02")], config: CONFIG });
     const head = world.git(["rev-parse", "HEAD"]).trim();
@@ -316,19 +316,23 @@ conformance(
 
 conformance(
   "merges",
-  "a single-ticket super-step runs in the main checkout with no worktree or pool branch",
+  "a lone Ticket runs in its own worktree on its pool branch, never the pool checkout, and lands on main by merge",
   async (t) => {
     const world = t.world({ tickets: [ready("01")], config: CONFIG });
+    const head = world.git(["rev-parse", "HEAD"]).trim();
     world.stubs.script("01", { run: [record("01"), commit("one.txt", "work-01")].join("\n") });
     const server = await t.start(world);
     await untilDone(server);
 
-    expect(recorded(world, "01", "cwd")).toBe(realpathSync(world.repo));
-    expect(recorded(world, "01", "branch")).toBe("main");
+    const worktree = ticketWorktree(world.repo, "01");
+    expect(recorded(world, "01", "cwd")).toBe(worktree.path);
+    expect(recorded(world, "01", "branch")).toBe(worktree.branch);
+    expect(recorded(world, "01", "head")).toBe(head);
+    expect(readEvents(world.pool, "01").map((e) => e.kind)).toContain("merged");
     expect(subjects(world.repo, "main")).toContain("work-01");
     expect(existsSync(join(world.repo, "one.txt"))).toBe(true);
     expect(poolBranches(world.repo)).toEqual([]);
-    expect(worktreeList(world.repo)).toHaveLength(1);
+    expect(worktreeList(world.repo).map((w) => w.path)).toEqual([realpathSync(world.repo)]);
   },
 );
 

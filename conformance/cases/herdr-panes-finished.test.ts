@@ -103,8 +103,8 @@ conformance(
   "herdr",
   "finished terminals › counts the tabs herdr still lists whose panes nothing is using",
   async (t) => {
-    // Five Tickets in one super-step, each in a tab of its own. A TUI that
-    // quits leaves its shell, as a real herdr pane does, so a crashed
+    // Five independent Tickets launch together, each in a tab of its own.
+    // A TUI that quits leaves its shell, as a real herdr pane does, so a crashed
     // attempt's tab stays listed.
     const { world, tui } = terminalWorld(t, {
       tickets: ["01", "02", "03", "04", "05"].map((id) => readyTicket(id, `Tab ${id}`)),
@@ -114,8 +114,7 @@ conformance(
     await Promise.all(["01", "02", "03", "04", "05"].map((id) => awaitPrompt(herdr, id, { ms: 60_000 })));
 
     // 01, 04 and 05 crash: each TUI quits with no Outcome. Their crash
-    // Interrupts wait for the super-step, which 02 holds open; the Attempts
-    // are over at once.
+    // Interrupts are raised at once, while 02 is still live.
     for (const id of ["01", "04", "05"]) quitTui(world, tui, id, 1);
     await untilSnapshot(
       server,
@@ -143,20 +142,22 @@ conformance(
   "herdr",
   "finished terminals › never counts a tab someone enlisted from, whoever opened it (review item 2)",
   async (t) => {
-    // A lone Ticket runs in the pool checkout and merges nothing, so its
-    // tab stays open once it is done, its TUI still up.
-    const { world } = terminalWorld(t, { tickets: [readyTicket("01", "Finish and stay")] });
+    // A done Ticket's merge closes its tab, so the still-open tab is written
+    // to disk beforehand instead.
+    const world = bootWorld(t, { tickets: [ticketAt("01", "done")] });
+    writeEvents(world, "01", [
+      event(1, "spawned", { argv: ["claude"], cwd: world.repo, pane_id: "p1", tab_id: "t1" }),
+      event(1, "exited", { code: 0, status: "done" }),
+    ]);
     const herdr = await fakeHerdr(t, world);
+    await herdr.control("injectPane", "p1", { tabId: "t1", cwd: world.repo });
+    await plantWitness(world, herdr);
     const server = await t.start(world, { herdr });
-    await answerPrompt(herdr, "01", doneOutcome());
-    // Nothing asks the survey to list after an attempt ends done: the count
-    // reads 1 at its next cadence.
-    await untilFinished(server, 1, 45_000);
-    const { paneId, tabId } = spawnedTerminal(world, "01");
+    expect((await untilSurveyed(server)).finishedTerminals).toBe(1);
 
     // The operator enlists the agent still live in that tab as a new Ticket.
-    await herdr.control("seedAgent", { paneId, agent: "claude", cwd: world.repo, title: "still here", status: "idle" });
-    const enlisted = await server.http.post("/api/enlist", { becomes: "ticket", paneId, title: "Theirs now", spec: "" });
+    await herdr.control("seedAgent", { paneId: "p1", agent: "claude", cwd: world.repo, title: "still here", status: "idle" });
+    const enlisted = await server.http.post("/api/enlist", { becomes: "ticket", paneId: "p1", title: "Theirs now", spec: "" });
     expect(enlisted.status).toBe(201);
     expect(await finishedNow(server)).toBe(0);
     expect(await closedFinished(server)).toBe(0);
@@ -169,9 +170,8 @@ conformance(
     });
     expect(await closedFinished(server)).toBe(0);
     expect(await finishedNow(server)).toBe(0);
-    expect(await tabCloses(herdr)).not.toContain(tabId);
+    expect(await tabCloses(herdr)).not.toContain("t1");
   },
-  { slow: true },
 );
 
 // engine/finished-terminals.test.ts:75
@@ -333,8 +333,9 @@ conformance(
   "the bulk close closes a done Ticket's tab left over a bare shell, records it and says so",
   async (t) => {
     // The TUI quits after its Outcome and the pane keeps its shell, as a
-    // real herdr pane does: a Finished terminal all the same.
-    const { world, tui } = terminalWorld(t, { tickets: [readyTicket("01", "Done and quit")] });
+    // real herdr pane does: a Finished terminal all the same. A pool outside
+    // git merges nothing, so the done Ticket's tab is not closed at a merge.
+    const { world, tui } = terminalWorld(t, { git: false, tickets: [readyTicket("01", "Done and quit")] });
     const herdr = await fakeHerdr(t, world, { holdPane: true });
     const server = await t.start(world, { herdr });
     await answerPrompt(herdr, "01", doneOutcome());

@@ -576,7 +576,7 @@ conformance("attempts", "the exited and crash events carry the log tail and outc
 // ---------------------------------------------------------------------------
 
 // engine.test.ts:5188
-conformance("attempts", "a main-checkout attempt records its spawn facts against the commit it ran at", async (t) => {
+conformance("attempts", "an attempt records its spawn facts against the commit its worktree was cut at", async (t) => {
   const world = t.world({ tickets: [ready("01")], config: { defaults: { harness: "claude", model: "m" } } });
   const head = world.git(["rev-parse", "HEAD"]).trim();
   customStub(world, "claude", [
@@ -584,16 +584,17 @@ conformance("attempts", "a main-checkout attempt records its spawn facts against
     'delegate "$@"',
   ].join("\n"));
   await t.start(world);
-  await until(() => readStateLine(world.pool, "01-t.md"), (m) => m.status === "done", { what: "01 done" });
+  await until(() => readEvents(world.pool, "01"), (events) => events.some((e) => e.kind === "merged"), { what: "01's merge" });
 
   expect(world.git(["rev-parse", "HEAD"]).trim()).not.toBe(head);
   const issue = join(world.pool, "issues", "01-t.md");
+  const worktree = join(world.repo, ".git", "pool-worktrees", poolKey(world.repo), "01");
   expect(eventsOf(world, "01", "spawned")[0]!.payload).toEqual({
     argv: ["claude", ...batchArgs("claude", "m", undefined, batchPromptArg("claude", "implement", issue, "<prompt>"))],
-    cwd: world.repo,
-    branch: null,
+    cwd: worktree,
+    branch: `pool/${poolKey(world.repo)}/01`,
     commitSha: head,
-    env: { PWD: world.repo },
+    env: { PWD: worktree },
     harness: "claude",
     model: "m",
     pid: expect.any(Number),
@@ -627,11 +628,12 @@ conformance("attempts", "a pool outside git records its own directory, a null br
 // spawn.test.ts:399
 conformance("attempts", "a spawn env equal to the server's own records no env delta", async (t) => {
   const world = t.world({ tickets: [ready("01")], config: { defaults: { harness: "claude", model: "m" } } });
-  // Launched with PWD already the checkout the lone Ticket runs in.
-  await t.start(world, { env: { PWD: world.repo } });
+  const worktree = join(world.repo, ".git", "pool-worktrees", poolKey(world.repo), "01");
+  // Launched with PWD already the worktree the Ticket will run in.
+  await t.start(world, { env: { PWD: worktree } });
   await until(() => readStateLine(world.pool, "01-t.md"), (m) => m.status === "done", { what: "01 done" });
   const spawned = eventsOf(world, "01", "spawned")[0]!;
-  expect(spawned.payload.cwd).toBe(world.repo);
+  expect(spawned.payload.cwd).toBe(worktree);
   expect(spawned.payload.env).toEqual({});
 });
 
@@ -653,7 +655,7 @@ conformance("attempts", "each worktree attempt gets PWD set to its own worktree,
   const path = join(world.stubs.bin, "opencode");
   writeFileSync(path, recorder);
   chmodSync(path, 0o755);
-  // The server's own PWD is the checkout, which no attempt runs in here.
+  // The server's own PWD is the checkout, which no attempt runs in.
   await t.start(world, { env: { PWD: world.repo } });
   for (const id of ["01", "02"]) {
     await until(() => readStateLine(world.pool, `${id}-t.md`), (m) => m.status === "done", { what: `${id} done` });

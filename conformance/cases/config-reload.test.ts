@@ -1,10 +1,12 @@
 /**
- * Config reload (ADR-0018), seen from outside the server (ADR-0036): an edit
- * to console.json made while a pool runs reaches the Tickets that have not
- * launched yet at the next super-step boundary, all of it or none of it,
- * and never moves an Attempt already in flight or a boot-only key. Each
+ * Config reload (ADR-0018, ADR-0040), seen from outside the server
+ * (ADR-0036): an edit to console.json made while a pool runs reaches the
+ * Tickets that have not launched yet at the next Tick, all of it or none of
+ * it, and never moves an Attempt already in flight or a boot-only key. A
+ * hand edit is read at the next wake (here, the held Attempt's exit); a
+ * Console route wakes the drive itself, so its edit is read at once. Each
  * case holds a stub open (the edit lands while it runs) and edits the file
- * as a person or an agent would.
+ * as a person or an agent would, or through a Console route.
  */
 
 import { expect } from "bun:test";
@@ -77,7 +79,7 @@ conformance("config", "a reload reaches a Ticket spawned by a Conversation, whic
   expect(conversation.assignment).toMatchObject({ harness: "claude", model: "conv-model" });
 });
 
-conformance("config", "an edit between super-steps reassigns a Ticket that has not run, with a reassigned event on its log", async (t) => {
+conformance("config", "a hand edit reassigns a Ticket that has not run at the next wake, with a reassigned event on its log", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: ON_A });
   world.stubs.script("01", { waitFor: holdFile(world, "01") });
   const server = await t.start(world);
@@ -90,22 +92,52 @@ conformance("config", "an edit between super-steps reassigns a Ticket that has n
   expect(modelOf(world, "02")).toBe("model-b");
   expect(done.state.log).toContain("config reloaded: defaults");
   expect(reassigned(world.pool, "02")).toEqual([A_TO_B]);
-  // 01 was not in flight at the boundary either, so it re-resolves too.
+  // The edit is read at the Tick 01's exit wakes, when 01 is no longer in
+  // flight either, so it re-resolves too.
   expect(reassigned(world.pool, "01")).toEqual([A_TO_B]);
 });
 
-conformance("config", "a Console Reassign of a waiting Ticket is picked up at the next boundary", async (t) => {
+conformance("config", "a Console Reassign of a waiting Ticket is picked up at once, while another Attempt runs", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: ON_A });
   world.stubs.script("01", { waitFor: holdFile(world, "01") });
   const server = await t.start(world);
   await untilLaunched(world, "01");
   const answer = await server.http.put("/api/reassign", { tickets: ["02"], fields: { model: "model-b", verify: null } });
   expect(answer.status).toBe(200);
+  const picked = await untilSnapshot(
+    server,
+    (s) => ticketOf(s, "02").assignment.model === "model-b",
+    "02's new Assignment on the snapshot",
+  );
+  expect(ticketOf(picked, "01").liveAttempt).not.toBeNull();
+  expect(reassigned(world.pool, "02")).toEqual([A_TO_B]);
   release(world, "01");
   await approveReview(server);
 
   expect(modelOf(world, "02")).toBe("model-b");
   expect(reassigned(world.pool, "02")).toEqual([A_TO_B]);
+});
+
+conformance("config", "a Pool settings save reloads while an Attempt runs, which keeps the Assignment it launched on", async (t) => {
+  const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: ON_A });
+  world.stubs.script("01", { waitFor: holdFile(world, "01") });
+  const server = await t.start(world);
+  await untilLaunched(world, "01");
+  const answer = await server.http.put("/api/settings/pool", { config: { defaults: ON_B.defaults } });
+  expect(answer.status).toBe(200);
+  const reloaded = await untilSnapshot(
+    server,
+    (s) => s.state.log.includes("config reloaded: defaults"),
+    "the reload's log line",
+  );
+  expect(ticketOf(reloaded, "01").liveAttempt).not.toBeNull();
+  expect(ticketOf(reloaded, "01").assignment.model).toBe("model-a");
+  expect(reassigned(world.pool, "02")).toEqual([A_TO_B]);
+  release(world, "01");
+  await approveReview(server);
+
+  expect([modelOf(world, "01"), modelOf(world, "02")]).toEqual(["model-a", "model-b"]);
+  expect(reassigned(world.pool, "01")).toEqual([]);
 });
 
 conformance("config", "an Attempt keeps the Assignment it launched on through an edit, and the next one takes the new config", async (t) => {
@@ -143,7 +175,7 @@ conformance("config", "an edit made after a Spawn is adopted, before it is ready
   expect(modelOf(world, "01-spawn-1")).toBe("model-b");
 });
 
-conformance("config", "console.json that will not parse is rejected, the old config kept, and the cause logged once across boundaries", async (t) => {
+conformance("config", "console.json that will not parse is rejected, the old config kept, and the cause logged once across Ticks", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] }), ticket("03", { blockedBy: ["02"] })],
     config: ON_A,
@@ -208,7 +240,7 @@ conformance("config", "console.json rewritten unchanged is no reload: no log lin
   expect(reassigned(world.pool, "02")).toEqual([]);
 });
 
-conformance("config", "the Spawn caps reload at the boundary, into the proposals taken after it and the next prompt", async (t) => {
+conformance("config", "the Spawn caps reload at the next Tick, into the proposals taken after it and the next prompt", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: ON_A });
   world.stubs.script("01", { waitFor: holdFile(world, "01") });
   world.stubs.script("02", {
@@ -247,7 +279,7 @@ conformance("config", "a reload whose Spawn cap is not a whole number of 0 or mo
   expect(done.spawnUsage.perRun).toBe(9);
 });
 
-conformance("config", "a Pool settings save reloads at once when no drive is in flight", async (t) => {
+conformance("config", "a Pool settings save wakes a pool at rest, whose next Tick reloads", async (t) => {
   const world = t.world({ tickets: [ticket("01")], config: ON_A });
   const server = await t.start(world);
   await untilSnapshot(
@@ -257,9 +289,12 @@ conformance("config", "a Pool settings save reloads at once when no drive is in 
   );
   const answer = await server.http.put("/api/settings/pool", { config: { spawnCaps: { perRun: 30 } } });
   expect(answer.status).toBe(200);
-  const snapshot = await snapshotOf(server);
+  const snapshot = await untilSnapshot(
+    server,
+    (s) => s.state.log.includes("config reloaded: spawnCaps"),
+    "the reload's log line",
+  );
 
-  expect(snapshot.state.log).toContain("config reloaded: spawnCaps");
   expect(snapshot.spawnUsage).toEqual({ spawnedThisRun: 0, perAttempt: 5, perRun: 30 });
 });
 
@@ -300,7 +335,7 @@ conformance("config", "a spawned Ticket is served the Assignment it inherits fro
   });
 });
 
-conformance("config", "the Steward entry reloads at the boundary, and an unknown Steward harness rejects the reload whole", async (t) => {
+conformance("config", "the Steward entry reloads at the next Tick, and an unknown Steward harness rejects the reload whole", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] }), ticket("03", { blockedBy: ["02"] })],
     config: ON_A,

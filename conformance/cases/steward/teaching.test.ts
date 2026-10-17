@@ -72,7 +72,7 @@ function stewardTeaching(p: TeachingParts): string {
 
 You are this pool's Steward: you keep its Tickets moving while the operator is away, under the orders above. Load the my-console-steward skill now: it is how to judge each Interrupt. It builds on the my-console-citizen skill, which is how to work inside this pool.
 
-You do not poll. Whenever you are waiting, the engine types a Turn here naming every pending Ticket Interrupt you may answer and have not left, and a Merge queue head that has stalled. Items that arrive together come as one Turn. The same Turn also tells you, with nothing to answer, which Tickets merged since your last Notice and when every Ticket is done and Review waits for the operator: that is how you know when orders like "watch the next super-step, then finish" are done, and can end yourself.
+You do not poll. Whenever you are waiting, the engine types a Turn here naming every pending Ticket Interrupt you may answer and have not left, and a Merge queue head that has stalled. Items that arrive together come as one Turn. The same Turn also tells you, with nothing to answer, which Tickets merged since your last Notice and when every Ticket is done and Review waits for the operator: that is how you know when orders like "watch the next merge, then finish" are done, and can end yourself.
 
 Act with this command, run in your shell:
 
@@ -82,7 +82,7 @@ Act with this command, run in your shell:
 ${close}- keep-talking <ticket> <message>: continue a checkpointed Attempt in its still-live pane; the engine types your message there after its own teaching Turn.
 - leave <ticket> <note>: leave the Interrupt to the operator. Your note is your recommendation, shown to them beside it. You are not told about that Interrupt again until it changes.
 - held adopt|discard <proposal-id>: decide a Held spawn.
-- reassign <ticket> field=value...: change a Ticket's Assignment (harness, model, effort, drivers, verify; field= clears one). The engine picks it up at the next boundary, so resume the Ticket after.
+- reassign <ticket> field=value...: change a Ticket's Assignment (harness, model, effort, drivers, verify; field= clears one). The engine picks it up at the next Tick, so resume the Ticket after.
 - state: the pending Interrupts, the Merge queue, the Pending and Held spawns, your budget left per Ticket, and whether the pool lets you Close now.
 - end [closing line]: end yourself.
 
@@ -418,7 +418,7 @@ conformance(
     const pool = sw.world.pool;
 
     // The standing orders are the opening Turn, the Steward's teaching after them.
-    const orders = "Watch the next super-step, then finish.";
+    const orders = "Watch the next merge, then finish.";
     const fromEntry = await startConversation(server, { title: "Night", role: "steward", opening: orders });
     expect(fromEntry.role).toBe("steward");
     expect(fromEntry.assignment).toMatchObject({ harness: "claude", model: "judge", effort: "high" });

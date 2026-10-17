@@ -12,7 +12,7 @@
  */
 
 import { expect } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PoolConfig } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -33,15 +33,13 @@ interface Row {
   status: string;
   title: string;
 }
-interface PendingRow {
+interface HeldRow {
   id: string;
   parent: string;
   kind?: string;
+  reason: string;
   title: string;
   body: string;
-}
-interface HeldRow extends PendingRow {
-  reason: string;
 }
 
 function cell(text: string): string {
@@ -62,7 +60,9 @@ function table(header: string[], rows: string[][]): string[] {
   ];
 }
 
-function ledger(input: { tickets?: Row[]; conversations?: Row[]; pending?: PendingRow[]; held?: HeldRow[] }): string {
+// A Pending spawn lands at the Tick after its take (ADR-0040), so no case
+// reads the ledger with one in it.
+function ledger(input: { tickets?: Row[]; conversations?: Row[]; held?: HeldRow[] }): string {
   const title = (id: string, text: string) => (text.startsWith(`${id}: `) ? text.slice(id.length + 2) : text);
   return [
     "# Spawn ledger",
@@ -82,12 +82,9 @@ function ledger(input: { tickets?: Row[]; conversations?: Row[]; pending?: Pendi
     "",
     "## Pending spawns",
     "",
-    "Proposals that land at the next super-step boundary.",
+    "Proposals that land at the next Tick.",
     "",
-    ...table(
-      ["id", "parent", "kind", "title", "summary"],
-      (input.pending ?? []).map((p) => [p.id, cell(p.parent), p.kind ?? "ticket", cell(p.title), summary(p.body)]),
-    ),
+    "_(none)_",
     "",
     "## Held spawns",
     "",
@@ -234,44 +231,6 @@ conformance("formats", "the ledger leads each row with its id, drops a title's i
   const text = readFileSync(ledgerPath(world), "utf8");
   expect(text).toContain("| 07-spawn-1 | checkpoint | Fix the lexer |");
   expect(text).toContain("| conv-1 | ended | Plan \\| then build |");
-});
-
-// spawn-ledger.test.ts:48 the Spawn ledger (issue #150) › keeps a proposal's summary to one short line
-conformance("formats", "a Pending spawn's row shows its body on one line, cut to 159 characters and an ellipsis", async (t) => {
-  const world = t.world({ tickets: [ticket("07"), ticket("08")], config: DEFAULTS });
-  const gate = join(world.root, "gate");
-  // 07 runs until the case opens the gate, so 08's proposals wait for the
-  // next super-step boundary as Pending spawns.
-  world.stubs.script("07", { waitFor: gate });
-  const long = `First line\nsecond line\n${"x".repeat(300)}`;
-  const overlapping = "Overlaps the Ticket that is still running.";
-  world.stubs.script("08", {
-    spawn: [
-      { title: "Long one", body: long },
-      { title: "Second", body: overlapping, overlaps: ["07"] },
-    ],
-  });
-  await t.start(world);
-  try {
-    await expectLedger(
-      world,
-      ledger({
-        tickets: [
-          { id: "07", status: "in-progress", title: "T07" },
-          { id: "08", status: "done", title: "T08" },
-        ],
-        pending: [{ id: "proposal-1", parent: "08", title: "Long one", body: long }],
-        held: [{ id: "proposal-2", parent: "08", reason: "overlaps 07", title: "Second", body: overlapping }],
-      }),
-    );
-    const flat = `First line second line ${"x".repeat(300)}`.slice(0, 159);
-    const pendingRow = readFileSync(ledgerPath(world), "utf8").split("\n").find((l: string) => l.startsWith("| proposal-1 "))!;
-    expect(pendingRow.endsWith(`| First line second line ${"x".repeat(136)}… |`)).toBe(true);
-    expect(pendingRow).toContain(`${flat}…`);
-    expect(pendingRow.length).toBeLessThan(220);
-  } finally {
-    writeFileSync(gate, "");
-  }
 });
 
 // gap: engine/spawn-ledger.ts:33-43 (a held row's body flattened and cut)

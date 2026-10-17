@@ -40,7 +40,7 @@ import {
 } from "./herdr-panes-support.ts";
 
 /**
- * Two Tickets in one super-step, in a fake whose panes keep their shell when
+ * Two independent Tickets, launched together, in a fake whose panes keep their shell when
  * a TUI exits: 01's TUI quits with no Outcome, leaving a Finished terminal,
  * then 02 checkpoints, and holding its pane lists both afresh.
  */

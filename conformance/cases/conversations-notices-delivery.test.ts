@@ -9,9 +9,8 @@
  * Notice dropped for a parent that ended before delivery.
  *
  * Each Notice typed or dropped is pinned byte for byte (the inventory's
- * Decided 4). A lone spawned Ticket runs in the pool checkout, on no branch
- * of its own, yet its Notice names the branch a worktree of it would have
- * had, as the Bun server writes it.
+ * Decided 4). A spawned Ticket runs in its own worktree on its pool branch,
+ * and its Notice names that branch.
  */
 
 import { expect } from "bun:test";
@@ -55,7 +54,7 @@ import {
   untilSnapshot,
 } from "./steward/pool.ts";
 
-/** The checkpoint Notice of the lone spawned Ticket these cases run. */
+/** The checkpoint Notice of the spawned Ticket these cases run. */
 function childCheckpointText(world: World, brief: string): string {
   return ticketEndedText({
     id: "conv-1-spawn-1",

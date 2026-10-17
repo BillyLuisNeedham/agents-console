@@ -359,13 +359,11 @@ the store still refuses). What follows is the part that is not a plain passing c
 
 - **A refused checkpoint write's retry** (`engine.test.ts:7033`). The row's seam, a store that fails exactly
   one write, does not exist. The case makes the store refuse from outside instead: it holds an exclusive SQLite
-  lock on `console.db` from the test process, lets 01 finish, and lets go once the server answers a request sent
-  after 01's `exited` event is on disk. On the Bun server 01's exit and the boundary write run in one stretch of
-  the event loop, so that request is answered only in the backoff after the first write, which the lock refused:
-  in the runs measured, the first checkpoint row landed about 50 ms after the release. What a case cannot show
-  from outside is that a write failed at all: a server that answers HTTP while its boundary write is still to
-  come passes it without retrying anything. The case pins what it can: no persistence Interrupt, 02 launched
-  after 01, and the first row holding `{01: done, 02: ready}`. Rust unit tests: *persist retry: a boundary
+  lock on `console.db` from the test process, lets 01 finish, and lets go once 02 has launched. The Tick that
+  starts 02 tries its row write as it hands the launch off, before 02's stub can record itself, so the release
+  comes in the backoff after a write the lock refused. What a case cannot show from outside is that a write
+  failed at all: a server that wrote its row only after 02's stub started passes it without retrying anything.
+  The case pins what it can: no persistence Interrupt, 02 launched after 01, and a row holding 01 done. Rust unit tests: *persist retry: a boundary
   checkpoint write that fails once is retried after the backoff, the next Ticket is scheduled and no persistence
   Interrupt is raised; a run to done makes seven write attempts, the failed one and six rows*, and *persistence
   Interrupt: with a store that always fails, the boundary write and the closing write each make four attempts,
@@ -548,7 +546,7 @@ all; nothing malformed).
 
 ### Where the cases reach a row differently from its wording
 
-- `engine.test.ts:7183`: a drive that dies in its first super-step is dead before a socket can open, so the
+- `engine.test.ts:7183`: a drive that dies at its first Tick is dead before a socket can open, so the
   case runs 01 on the opencode stub, held until a socket watches, and kills the drive with 02's launch on
   claude. The server coalesces frames (seen: one running snapshot, then one delta straight to dead), so the
   case asks for at least one running frame before the dead one, and nothing else.
@@ -597,8 +595,8 @@ How the cases come by a listing, which binds the Rust server:
 
 Where the cases reach a row differently from its wording:
 
-- `finished-terminals.test.ts:52`: the crash Interrupts of 01, 04 and 05 wait for their super-step, which the
-  Live attempt holds open, so the case waits for the three Attempts to end rather than for their Interrupts.
+- `finished-terminals.test.ts:52`: the case waits for the Attempts of 01, 04 and 05 to end, while the Live
+  attempt stays open, rather than for their crash Interrupts, which are raised at each exit (ADR-0040).
 - `held-panes.test.ts:78`: the headless attempt, the resolver attempt and the attempt never spawned are
   booted from events written by hand, since a terminal-backed pool runs nothing headless but a fallback and a
   resolver never checkpoints its Ticket. The fallback is a real run with `tab.create` refused.
@@ -691,7 +689,7 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
 
 ### Where the cases reach a row differently from its wording
 
-- **`engine.test.ts:10346`** (a SIGKILL mid-super-step). A SIGKILL stops nothing, so 02's held stub outlives the
+- **`engine.test.ts:10346`** (a SIGKILL while a Ticket runs). A SIGKILL stops nothing, so 02's held stub outlives the
   server in its worktree, and the next boot stops it as an orphan before it puts 02 back to ready: the "back to
   ready" line the row names is the orphan line (`... is still running from the previous engine process; stopping
   it before scheduling, ticket back to ready`), which the case pins with the stub's pid.
@@ -796,10 +794,9 @@ Where the cases reach a row differently from its wording:
 - **`notices.test.ts:139`'s seam** (a diff git cannot compute) is reached without one: the case plays an agent that
   renames its own branch before it pauses, so the branch the server names in `git diff --stat
   <target>...<branch>` no longer exists and git refuses the diff.
-- **`notices.test.ts:44`, `:130`**: a lone spawned Ticket runs in the pool checkout and never merges (see below),
-  so the case spawns two at once, which gives each a worktree, and pauses the second. Its done and checkpoint
-  Notices are each matched whole, in either order: the pause is told at its exit and the merge at the end of the
-  super-step.
+- **`notices.test.ts:44`, `:130`**: the case spawns two at once and pauses the second. Its done and checkpoint
+  Notices are each matched whole, in either order: the pause is told at the second's exit and the done at the
+  first's merge, whichever comes first (ADR-0040).
 - **`notices.test.ts:86`** and every other spawned Ticket's Notice: the title is the heading the server writes into
   a spawned Ticket's file, which leads with its id (`conv-1-spawn-2: Old idea`), not the proposal's title alone.
 - **`notices.test.ts:668`, `:744`, `:813`**: the spawned Ticket runs in a pane on the claude TUI stand-in like its

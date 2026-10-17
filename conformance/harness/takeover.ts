@@ -71,8 +71,8 @@ export interface Observation {
   files: Record<string, string>;
   /**
    * Every harness launch so far, by key and then launch number: the order
-   * launches of one super-step race in is no part of the contract, and the
-   * events give the order across super-steps.
+   * Tickets running side by side launch in is no part of the contract, and
+   * the events give the order between a Ticket and what it waits on.
    */
   launches: Launch[];
   /**
@@ -137,8 +137,9 @@ export interface TakeoverScenario<P = void> {
     /**
      * At the stop point after takeover `takeovers`, given the stop point as
      * the server before it left it. Null when the takeover moves the pool
-     * on by design (a boot drains Queued answers and lands Pending spawns
-     * at its first boundary): `stopPoint` then waits for, and so checks,
+     * on by design (a boot re-runs what the stop killed, drains Queued
+     * answers and lands Pending spawns at its first Tick): `stopPoint` then
+     * waits for, and so checks,
      * where it has moved to, and the next takeover is held to that.
      */
     atStop?(before: Observation, takeovers: number): Observation | null;
