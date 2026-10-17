@@ -1140,8 +1140,6 @@ pub fn record_adopted_exit(
         )
         .ok
     {
-        // The wake comes only once the chain settles, so a drive's closing gate can never raise the
-        // Review interrupt ahead of this merge landing.
         chain_ticket_merge(session, current, worktree, attempt, Some(what));
     } else {
         finish_adopted_finalize(session);
@@ -1149,9 +1147,6 @@ pub fn record_adopted_exit(
     Ok(())
 }
 
-/// `finishAdoptedFinalize`: the last step of an ending off the drive, or of a merge link: emit the new
-/// state and wake the drive, whose Tick persists it, so the closing gate, the Tickets it unblocks, and
-/// any queued answers see it.
 pub fn finish_adopted_finalize(session: &mut Session) {
     let phase = if session.driving {
         RunPhase::Running

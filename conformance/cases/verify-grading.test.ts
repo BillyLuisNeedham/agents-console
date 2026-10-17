@@ -140,7 +140,6 @@ conformance("verify", "writes one grader ticket per attempt with the build ticke
   expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
   expect(inCheckout(world, "cand-1.txt")).toBe(true);
   expect(inCheckout(world, "cand-2.txt")).toBe(false);
-  // One start for the round; its graders and head-to-head get none.
   expect(snap.state.log.filter((line) => line.startsWith("start "))).toEqual([expect.stringMatching(/^start 01 at [0-9a-f]{7}$/)]);
   expect(snap.state.log).toContain("ticket 01: grading 2 attempts with grader tickets 01-grader-1, 01-grader-2");
   expect(readEvents(world.pool, "01-grader-1").map((e) => e.kind)).toEqual(["scheduled", "spawned", "exited"]);

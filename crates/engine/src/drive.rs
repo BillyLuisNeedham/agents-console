@@ -1,16 +1,3 @@
-//! The drive (ADR-0040): the rolling scheduler every pool runs. The drive is a loop of Ticks; a Tick is
-//! one job on the actor that reloads the config, drains Queued answers, reconciles deadlocks, routes
-//! the Line, lands Pending spawns, starts owed grading, and launches every Ticket that may start. The
-//! drive then waits for a wake. Each launched Attempt ends in its own exit job, each verify round is
-//! graded once its last Candidate exits, and each merge runs on the merge chain. The close holds the
-//! Review gate and the phase decision; a drive's death and its settle close it out.
-//!
-//!   drive_loop -- tick --> launches --> run_launch --+ exit job: the result, a crash Interrupt,
-//!        ^                                           | the merge chained, a Candidate's ending
-//!        +------ wake.notified() <-- wake() <--------+
-//!                                     ^   ^   ^
-//!          merge landed, grading ended+   |   +-- answer, settings save, spawn, Adopt, hand merge
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -37,19 +24,11 @@ use crate::tickets::{
     CandidateEnding, TicketEnv, TicketPlan, TicketResult, attempt_env_of, plan_ticket, run_ticket,
 };
 
-/// How long shutdown waits for the drive to settle after the children are stopped.
 pub const SHUTDOWN_SETTLE_WAIT_MS: u64 = 3_000;
 
-/// The pool log line a shutdown leaves, once, when it stopped an Attempt.
 pub const SHUTDOWN_LINE: &str =
     "engine shutdown: no crash interrupts raised and nothing more launched";
 
-// ---------------------------------------------------------------------------------------------------
-// Starting, waking, settling, dying
-// ---------------------------------------------------------------------------------------------------
-
-/// `startDrive`: a drive is in flight from here; its first emit happens now. The loop's every death
-/// reports through [`report_drive_death`].
 pub fn start_drive(session: &mut Session) {
     session.driving = true;
     emit_snapshot(session, RunPhase::Running);
@@ -63,11 +42,8 @@ pub fn start_drive(session: &mut Session) {
 }
 
 impl Session {
-    /// The one way anything asks the drive to look again (ADR-0040). In flight, a permit the drive's
-    /// wait takes; idle, the Queued answers drain at once and a fresh drive starts. A pool whose store
-    /// has closed, or that is shutting down, starts nothing. A drain whose persist fails refuses here.
     pub fn wake(&mut self) -> anyhow::Result<()> {
-        self.wakes += 1;
+        self.wakes.ring();
         if self.driving {
             self.wake.notify_one();
             return Ok(());
@@ -155,11 +131,6 @@ pub fn report_drive_death(session: &mut Session, message: &str) {
     drive_turned(session);
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Eligibility: the scheduler's one rule
-// ---------------------------------------------------------------------------------------------------
-
-/// Whether a Ticket starts now, waits, or needs the operator first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eligibility {
     Start,
@@ -170,9 +141,7 @@ pub enum Eligibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitWhy {
     NotReady,
-    /// The Finish checkpoint: answered by the operator, never run (ADR-0037).
     Hold,
-    /// A grader or head-to-head judge: run by its grading flow, never launched by a Tick.
     EngineRun,
     Live,
     BlockerNotDone(String),
@@ -185,23 +154,16 @@ pub enum CheckpointWhy {
     BranchHeldAt(String),
 }
 
-/// What [`eligibility`] reads of the pool.
 pub trait PoolFacts {
     fn status(&self, id: &str) -> Option<TicketStatus>;
-    /// A hold Ticket: the Finish checkpoint.
     fn is_hold(&self, id: &str) -> bool;
     fn is_live(&self, id: &str) -> bool;
     fn in_git(&self) -> bool;
-    /// The branch reading: the Ticket's branch is gone or an ancestor of the merge target.
     fn landed(&mut self, id: &str) -> bool;
     fn missing_assignment(&self, id: &str) -> Option<&'static str>;
-    /// Where the Ticket's branch is checked out, when that is somewhere the engine cannot run it.
     fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String>;
 }
 
-/// Whether a done blocker counts as merged (ADR-0040), in this order: a hold Ticket and an engine-run
-/// Ticket by rule, since neither has a branch; every Ticket of a pool outside git; otherwise the branch
-/// reading, where a missing branch reads as landed by hand.
 pub fn merged(facts: &mut impl PoolFacts, id: &str) -> bool {
     if facts.is_hold(id) || engine_ticket_build_id(id).is_some() || !facts.in_git() {
         return true;
@@ -209,8 +171,6 @@ pub fn merged(facts: &mut impl PoolFacts, id: &str) -> bool {
     facts.landed(id)
 }
 
-/// The scheduler's rule: a Ticket starts once it is Ready, not a hold, not engine-run, not live, and
-/// each blocker is done and merged; a config gap or a branch held elsewhere raises its checkpoint.
 pub fn eligibility(facts: &mut impl PoolFacts, marker: &TicketMarker) -> Eligibility {
     let id = marker.id.as_str();
     if facts.status(id) != Some(TicketStatus::Ready) {
@@ -244,8 +204,6 @@ pub fn eligibility(facts: &mut impl PoolFacts, marker: &TicketMarker) -> Eligibi
     Eligibility::Start
 }
 
-// The pool as one Tick reads it. The branch reading is the Merge hold's derivation, behind its memo,
-// taken at most once per Tick.
 struct SessionFacts<'a> {
     session: &'a mut Session,
     unlanded: &'a mut Option<Vec<String>>,
@@ -323,7 +281,6 @@ fn held_branch_directory(session: &Session, marker: &TicketMarker) -> Option<Str
     Some(at)
 }
 
-// A pool-config gap pauses the one ticket as a config interrupt instead of ending the run.
 fn checkpoint_unassigned(
     session: &mut Session,
     marker: &TicketMarker,
@@ -412,13 +369,6 @@ fn checkpoint_held_branch(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------------------------
-// The loop
-// ---------------------------------------------------------------------------------------------------
-
-/// One Ticket's launch, planned in the Tick that found it eligible: one plan per Attempt (N for a
-/// `verify: N` round), its Assignment and environment as they stand now, and the state its prompts
-/// read upstream Outcomes from, frozen at the launch.
 pub struct Launch {
     pub marker: TicketMarker,
     pub plans: Vec<TicketPlan>,
@@ -427,26 +377,19 @@ pub struct Launch {
     pub snapshot: Arc<PoolState>,
 }
 
-/// What the drive does after a Tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
     Wait,
-    /// Nothing runs, merges, grades or can start: the drive closes.
     Close,
 }
 
-/// A Tick's result: the launches to start, what the drive does next, and whether the state moved
-/// since the store last took it.
 pub struct Tick {
     pub launches: Vec<Launch>,
     pub next: Next,
     pub changed: bool,
 }
 
-/// `driveLoop`: Ticks until one closes the drive, each followed by its launches, a checkpoint row when
-/// the state changed, and a wait for the next wake.
 pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
-    // Boot reconciliation lands before the first Tick.
     let mut reconcile = engine.call(|s| s.terminal_reconcile.clone()).await?;
     if !*reconcile.borrow() {
         engine.call(drive_turned).await?;
@@ -454,7 +397,6 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
     let _ = reconcile.wait_for(|done| *done).await;
     let wake = engine.call(|s| Arc::clone(&s.wake)).await?;
     loop {
-        // A shutdown launches nothing more and closes once the stopped Attempts' exits are recorded.
         let (stopping, running) = engine
             .call(|s| (s.children.stopping, !s.launched.is_empty()))
             .await?;
@@ -473,7 +415,6 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
         for launch in launches {
             tokio::spawn(run_launch(engine.clone(), launch));
         }
-        // An exhausted retry raises the persistence Interrupt, which holds every launch until answered.
         if changed {
             persist_with_retry(engine).await?;
         }
@@ -493,8 +434,6 @@ fn persistence_pending(session: &Session) -> bool {
         .any(|i| i.kind == InterruptKind::Persistence)
 }
 
-/// One Tick, one job. Each step is idempotent, so a spurious wake costs one job. The order is the
-/// order each step can create work for the next.
 pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     if let Some(failure) = session.drive_failure.take() {
         anyhow::bail!(failure);
@@ -517,10 +456,7 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         emit_snapshot(session, RunPhase::Running);
     }
     drive_turned(session);
-    session.wakes_seen = session.wakes;
-    // A done Ticket whose merge has not landed keeps the drive alive, as ADR-0014's hold did: the
-    // pool never reaches its Review with work unmerged, and the Merge queue watch wakes it when a
-    // merge done by hand lands.
+    session.wakes.see_all();
     let close = launches.is_empty()
         && session.launched.is_empty()
         && session.merge_line.unsettled().is_empty()
@@ -535,7 +471,6 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     })
 }
 
-// Every eligible Ticket in load order, launched; a checkpoint raised for each that needs the operator.
 fn launch_eligible(session: &mut Session) -> anyhow::Result<Vec<Launch>> {
     let mut unlanded = None;
     let mut launches = Vec::new();
@@ -562,14 +497,10 @@ fn launch_eligible(session: &mut Session) -> anyhow::Result<Vec<Launch>> {
     Ok(launches)
 }
 
-// The launch of one Ticket: every Attempt numbered and planned (a worktree cut from the target's tip
-// now), the marker in progress on disk, a scheduled event per Attempt and one `start` line, all before
-// any spawn.
 fn plan_launch(session: &mut Session, marker: &TicketMarker) -> anyhow::Result<Launch> {
     let runs = Path::new(&session.runs_dir).to_path_buf();
     let verify = verify_of(session, marker);
     if verify.is_some() {
-        // A pre-verify solo attempt's well-known log rotates before the fan-out spawns.
         ac_core::streamlog::rotate_attempt_log(
             &runs,
             &marker.id,
@@ -632,8 +563,6 @@ fn plan_launch(session: &mut Session, marker: &TicketMarker) -> anyhow::Result<L
     })
 }
 
-// A launch's Attempts, each run to its exit job. A Ticket resumed from a checkpoint launches fresh:
-// its old pane closes first (issue #139).
 async fn run_launch(engine: Engine, launch: Launch) {
     let Launch {
         marker,
@@ -657,8 +586,6 @@ async fn run_launch(engine: Engine, launch: Launch) {
     join_all(runs).await;
 }
 
-// One Attempt's exit job. A failure to run it at all, or to record its exit, kills the drive at the
-// next Tick, as a fatal stretch of the drive does.
 fn on_exit(session: &mut Session, id: &str, result: Result<TicketResult, String>) {
     if let Some(at) = session.launched.iter().position(|l| l == id) {
         session.launched.remove(at);
@@ -671,9 +598,6 @@ fn on_exit(session: &mut Session, id: &str, result: Result<TicketResult, String>
     let _ = session.wake();
 }
 
-// The proposals taken; the result applied; a Candidate's ending joins its round; a done Ticket's merge
-// chained; a checkpoint's or a crash's Interrupt raised now. A shutdown-stopped Attempt raises nothing
-// (ADR-0017).
 fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()> {
     if let Some(proposals) = result.spawn_proposals.clone().filter(|p| !p.is_empty()) {
         crate::spawns::take_spawn_proposals(
@@ -719,17 +643,10 @@ fn note_shutdown(session: &mut Session) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Grading
-// ---------------------------------------------------------------------------------------------------
-
-/// The Candidates of one verify Ticket's round, joined per Ticket: complete once every Candidate
-/// ended, then graded by one grading flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyGroup {
     pub expected: usize,
     pub ended: Vec<CandidateEnding>,
-    /// Its grading flow has started.
     pub flow: bool,
 }
 
@@ -739,9 +656,6 @@ impl VerifyGroup {
     }
 }
 
-// Step 6 of a Tick: a grading flow for each owed Continued grade and each complete verify round. A
-// round's crashed Candidates raise their crash Interrupts first, unless a Candidate checkpointed: the
-// checkpoint its grading raises owns the round then (ADR-0034).
 fn start_owed_grading(session: &mut Session) -> anyhow::Result<()> {
     let engine = session.engine();
     for owed in std::mem::take(&mut session.continued_grades) {
@@ -794,7 +708,6 @@ fn start_owed_grading(session: &mut Session) -> anyhow::Result<()> {
     Ok(())
 }
 
-// A grading flow's end: counted off, its error left for the next Tick, the drive woken.
 fn grading_ended(session: &mut Session, outcome: anyhow::Result<()>) {
     session.grading -= 1;
     if let Err(error) = outcome {
@@ -803,8 +716,6 @@ fn grading_ended(session: &mut Session, outcome: anyhow::Result<()>) {
     let _ = session.wake();
 }
 
-// Work that may merge into the pool checkout: it waits at the checkout's gate (ADR-0027) and writes
-// there until it is done. `None` when a shutdown began while it waited.
 async fn writing_in_pool_checkout<T, F>(
     engine: &Engine,
     what: String,
@@ -822,7 +733,6 @@ where
     done.map(Some)
 }
 
-// One verify round graded and decided.
 async fn verify_grade_flow(
     engine: Engine,
     marker: TicketMarker,
@@ -847,8 +757,6 @@ async fn verify_grade_flow(
         .await;
 }
 
-// A verify round's decision: lone-attempt resolution, a paused round's checkpoint, or Selection. The
-// graders run beside everything; a decision that merges waits its turn on the merge chain.
 async fn decide_round(
     engine: &Engine,
     marker: &TicketMarker,
@@ -857,7 +765,6 @@ async fn decide_round(
 ) -> anyhow::Result<()> {
     let attempts: Vec<u64> = round.iter().map(|e| e.attempt).collect();
     let grades = crate::verify::grade_round(engine, marker, &attempts).await?;
-    // A round a shutdown cut short is decided at the next boot, from its events.
     if engine.call(|s| s.children.stopping).await? {
         return Ok(());
     }
@@ -903,7 +810,6 @@ async fn decide_round(
     .await
 }
 
-// One owed Continued grade (issue #139), graded and decided as a lone attempt.
 async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::ContinuedGrade) {
     let outcome = async {
         let id = owed.ticket_id.clone();
@@ -926,7 +832,6 @@ async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::Continu
             crate::keep_talking::grade_continued_attempt(&engine, &marker, attempt, work)
         })
         .await?;
-        // A shutdown while it waited leaves the grade owed, and the next boot grades it.
         if graded.is_none() {
             engine
                 .call(move |s| s.continued_grades.insert(0, owed))
@@ -938,11 +843,6 @@ async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::Continu
     let _ = engine.call(move |s| grading_ended(s, outcome)).await;
 }
 
-/// Restart: an in-progress verify Ticket with no Interrupt gets its round back from its events file.
-/// The round is the run of `scheduled` events that ends at its last one. A round whose every Candidate
-/// ended (an `exited` or a `crash` event) is restored complete, and the first Tick grades what is
-/// ungraded and decides; true then, and the marker stays in progress. A round with a Candidate that
-/// never ended is not restored: the marker returns to Ready and the round fans out again.
 pub fn rebuild_verify_group(session: &mut Session, marker: &TicketMarker) -> bool {
     if verify_of(session, marker).is_none() {
         return false;
@@ -1032,8 +932,6 @@ fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
 // The close
 // ---------------------------------------------------------------------------------------------------
 
-/// `closeDrive`: the Review gate, the phase decision, the final persist and the settle. A wake that
-/// came after the last Tick starts the next drive.
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     // A closed ticket (issue #154) is finished too.
     let (pending, closed_ids, raised, merging_at_gate) = engine
@@ -1050,10 +948,6 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .filter(|m| s.status_of(&m.id) == Some(TicketStatus::Closed))
                 .map(|m| m.id.clone())
                 .collect();
-            // The closing gate: every ticket finished and nothing else waiting on the human raises
-            // the final Review; an approval recorded in state holds it down for good. A merge still in
-            // flight off the drive (an adopted or Continued attempt's ending) holds the gate too. In a
-            // Factory pool approving the Finish checkpoint is the Review (ADR-0037).
             let merging = s.merge_line.unsettled();
             let raise = pending.is_empty()
                 && !crate::line::is_factory_pool(s)
@@ -1074,11 +968,6 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     let mut phase = engine
         .call(move |s| {
             let pending = pending_c;
-            // Tickets whose Attempt runs outside the drive (issue #139) end on their own. So does a
-            // ticket whose merge is still in flight off the drive: its ending already landed, its
-            // merge has not (see the closing gate above). One the gate saw in flight counts even if it
-            // settled since: the gate held the Review for it, and its merge's wake starts the drive
-            // that raises it, so this one must not close the store first.
             let mut merging = s.merge_line.unsettled();
             for id in merging_at_gate {
                 if !merging.contains(&id) {
@@ -1158,9 +1047,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     engine
         .call(move |s| {
             let mut phase = phase;
-            // Something woke the drive after its last Tick: the store stays open and the next drive
-            // starts once this one settles.
-            let again = s.wakes != s.wakes_seen || spawns_await_tick(s);
+            let again = s.wakes.any_unseen() || spawns_await_tick(s);
             if again {
                 phase = RunPhase::Quiescent;
             }
@@ -1184,8 +1071,6 @@ mod tests {
 
     use super::*;
 
-    // A pool over fixed facts: statuses, the hold, the live ids, the ids whose branch has not landed,
-    // the missing Assignment fields and the held branches.
     #[derive(Default)]
     struct Facts {
         statuses: HashMap<String, TicketStatus>,
@@ -1367,15 +1252,15 @@ mod tests {
         let (publisher, _) = tokio::sync::watch::channel(None);
         let mut session = crate::testkit::bare_session(publisher);
         session.driving = true;
-        session.wakes_seen = session.wakes;
+        session.wakes.see_all();
         session.wake().unwrap();
         let waited = futures::FutureExt::now_or_never(session.wake.notified());
         assert!(
             waited.is_some(),
             "the drive's next wait takes the permit at once"
         );
-        assert_ne!(
-            session.wakes, session.wakes_seen,
+        assert!(
+            session.wakes.any_unseen(),
             "a drive closing after this wake starts the next"
         );
     }

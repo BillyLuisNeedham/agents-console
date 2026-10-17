@@ -429,8 +429,6 @@ pub async fn grade_round(
     Ok(graded)
 }
 
-// The grades a round's attempts already carry: a round a restart stopped after some were graded is
-// never graded twice.
 fn recorded_grades(session: &Session, ticket_id: &str, attempts: &[u64]) -> HashMap<u64, Grade> {
     read_events(runs(session), ticket_id)
         .iter()
@@ -443,7 +441,6 @@ fn recorded_grades(session: &Session, ticket_id: &str, attempts: &[u64]) -> Hash
         .collect()
 }
 
-// The round's attempts but `skip` graded; a grader Ticket keeps its attempt's place in the round.
 async fn grade_attempts(
     engine: &Engine,
     marker: &TicketMarker,
@@ -774,7 +771,6 @@ async fn run_graders(
             }
         }
         pending = still_pending;
-        // A shutdown stops the grader it interrupted from being re-spawned; the next boot grades it.
         if pending.is_empty() || engine.call(|s| s.children.stopping).await? {
             return Ok(grades);
         }
@@ -1088,8 +1084,6 @@ pub fn resolve_lone_attempt(
     grade: Option<&Grade>,
 ) -> anyhow::Result<()> {
     let attempt = result.attempt;
-    // A crashed attempt decided nothing; the crash interrupt raised when its round completed owns the
-    // ticket and a resume re-runs it.
     if result.status == TicketStatus::InProgress {
         return Ok(());
     }
@@ -1503,18 +1497,12 @@ fn margin_text(margin: Option<f64>) -> String {
     margin.map_or("null".to_owned(), score_text)
 }
 
-/// A Selection made and not yet completed: the attempt picked and the pool log's account of why.
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub picked: Picked,
     pub why: String,
 }
 
-/// `selectAndMergeWinner`, its first half: selecting the winner of a completed, fully graded fan-out:
-/// every attempt exited done and every grader returned a usable grade. A margin of two points or more
-/// takes the top score outright; a tighter spread calls the head-to-head ticket, whose pick decides
-/// between the top two, falling back to the deterministic order on a tie or an unusable outcome.
-/// [`finish_selection`] does the rest, on the merge chain.
 pub async fn pick_winner(
     engine: &Engine,
     marker: &TicketMarker,
@@ -1581,15 +1569,11 @@ pub async fn pick_winner(
     Ok(Selection { picked, why })
 }
 
-/// `selectAndMergeWinner`, its second half: the picked winner merges and the selection completes.
 pub fn finish_selection(
     session: &mut Session,
     marker: &TicketMarker,
     selection: Selection,
 ) -> anyhow::Result<()> {
-    // A superseded head-to-head card closes with the selection: a review reject resets its marker to
-    // ready with its build ticket's, and a re-round whose grades then decide outright never rewrites
-    // it, so without this the run could never pass Review's all-done check.
     if selection.picked.rule == SelectionRule::Outright {
         close_superseded_head_to_head(session, &marker.id)?;
     }
@@ -1699,9 +1683,6 @@ fn without_interrupt(session: &Session, dropped: &Interrupt) -> Vec<Interrupt> {
         .collect()
 }
 
-/// `candidateScore`: the score of an adopted Candidate's grade: its latest well-formed graded event on
-/// the ticket's log. The grades of a round live only in the flow that graded it, and the log is where
-/// they outlive a restart. `None` when no grade can be found.
 fn candidate_score(session: &Session, ticket_id: &str, attempt: u64) -> Option<f64> {
     read_events(runs(session), ticket_id)
         .iter()
@@ -1873,9 +1854,6 @@ fn complete_selection(
         )]),
         ..PoolUpdate::default()
     };
-    // The winner's outcome becomes the ticket's, the way a solo done attempt's does, so downstream
-    // prompts read what was actually selected. Its spawn proposals ride to a Tick's adoption
-    // buffer with it.
     if let Ok(valid) = outcome_of(session, &marker.id, attempt) {
         update.outcomes = Some(IndexMap::from([(marker.id.clone(), valid.outcome.clone())]));
         take_proposals(session, &marker.id, &valid.outcome)?;

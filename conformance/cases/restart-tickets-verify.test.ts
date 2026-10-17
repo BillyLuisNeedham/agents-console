@@ -1,21 +1,3 @@
-/**
- * Verify rounds across a stop and start, seen from outside the server
- * (ADR-0036): a paused round's Candidates, a human selection Interrupt and a
- * grader's complaint all come back at the next boot and stay answerable,
- * a grader Ticket an earlier run left on disk resolves from its build
- * Ticket's Assignment at boot, and a round whose Candidates all ended
- * before the stop is graded at the next boot, never fanned out again.
- * Ticket C05 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over.
- *
- * A round that stops at an Interrupt and resumes with nothing changed
- * between servers runs on the takeover harness (harness/takeover.ts), so it
- * is also matched against the same round run uninterrupted. Every Attempt,
- * grader and judge is the claude stub on PATH, and no server holds a
- * TypeSafe key, so grading goes through grader Tickets.
- */
-
 import { expect } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
@@ -157,8 +139,6 @@ restartCase("a grader's complaint is raised again from the Ticket file's Brief w
   expect(flagged.state.interrupts[0]!.body).toContain("work is incomplete");
   await first.stop();
 
-  // Killed before its checkpoint write, say: the state line and the Brief the
-  // engine wrote into the Ticket file are all there is.
   rmSync(join(world.pool, "console.db"), { force: true });
   const launched = world.stubs.calls().length;
   const second = await startLeg(t, world, 1);
@@ -175,7 +155,6 @@ restartCase("a round stopped after every Candidate exited is graded once at the 
   world.stubs.script("01.attempt-2", { work: { file: "cand-2.txt", message: "cand-2" } });
   const graders = ["01-grader-1", "01-grader-2"].map((key) => world.stubs.hold(key, grade(8)));
   const first = await startLeg(t, world, 0);
-  // Both Candidates exited and their graders launched, held before they grade.
   await until(
     () => world.stubs.calls().map((call) => call.key),
     (keys) => keys.includes("01-grader-1") && keys.includes("01-grader-2"),

@@ -84,11 +84,6 @@ function expectNotices(herdr: HerdrProcess, expected: string[]): void {
   typed.forEach((turn, i) => expectSameBytes(turn, expected[i]!, `Steward Notice ${i + 1}`));
 }
 
-/**
- * A Notice's heading and its items, with the names on its merged line
- * sorted. Independent Tickets raise their Interrupts at their own exits and
- * merge one by one (ADR-0040), so items from such Tickets compare as a set.
- */
 function noticeParts(turn: string): { heading: string; items: string[] } {
   const [heading, ...rest] = turn.split("\n\n");
   const merged = "Merged since your last Notice: ";
@@ -101,7 +96,6 @@ function noticeParts(turn: string): { heading: string; items: string[] } {
   return { heading: heading!, items };
 }
 
-/** Like `expectNotices`, the merged names in any order, and with `anyOrder` the items too. */
 function expectNoticeParts(herdr: HerdrProcess, expected: string[], anyOrder = false): void {
   const typed = stewardNotices(herdr);
   expect(typed.length, `the Steward Notices typed: ${JSON.stringify(typed)}`).toBe(expected.length);
@@ -501,9 +495,6 @@ conformance(
     const sw = await stewardWorld(t, { tickets: [ticket("01", "One"), ticket("02", "Two")] });
     const agents = playAgents(sw.herdr, { "01": [checkpoint("ask me")], "02": [done()] }, { held: true });
     const server = await sw.start();
-    // The case holds console.db's write lock while the Tickets run, so the
-    // engine cannot write its checkpoint row after their exits and, its
-    // retries spent, raises the persistence Interrupt.
     const store = join(sw.world.pool, "console.db");
     await until(() => existsSync(store), Boolean, { what: "console.db" });
     const lock = new Database(store);
@@ -636,11 +627,6 @@ conformance(
       "blocker 09 was closed\n" +
       "Answers: answer 03 resume [note]; or leave 03 <note> for the operator.\n" +
       "Steward budget on 03: 5 of 5 answers left.";
-    // The checkpoint and the crash are raised at their Attempts' exits and
-    // the conflict at 02's merge, in whatever order those land. The deadlock
-    // comes first at the first boot, where it was raised before anything
-    // ran, and last after the restart, which restores the others and derives
-    // it afresh.
     const others = (close: boolean): string =>
       "Ticket 01 (\"One\") is waiting at a checkpoint Interrupt.\n" +
       "Brief:\n" +
@@ -778,9 +764,6 @@ conformance(
     const sw = await stewardWorld(t, {
       tickets: [ticket("01", "One"), ticket("02", "Two"), ticket("03", "Three"), ticket("04", "Four", "03")],
     });
-    // 02 writes nothing and its pane ends: a crash, raised at its exit. 04
-    // waits for 03, so it starts once 03 has merged, and finishes only when
-    // the case writes its Outcome.
     const agents = playAgents(sw.herdr, { "01": [done()], "03": [done()] }, { held: true });
     const server = await sw.start();
     await enlistBusySteward(sw, server);

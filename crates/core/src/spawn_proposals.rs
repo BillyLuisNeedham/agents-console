@@ -1,25 +1,3 @@
-//! The Spawn proposals the engine keeps before they land (engine/spawn-proposals.ts; ADR-0029, issue
-//! #150; CONTEXT.md: Pending spawn, Held spawn). A proposal taken from an exited attempt, or from a
-//! Conversation's spawn.json, is one of two things until it lands or goes:
-//!
-//! - a **Pending spawn**: within the caps, waiting for the next Tick to land it. The
-//!   operator may Hold it or Discard it first.
-//! - a **Held spawn**: one a cap had no room for, one the proposing agent marked as overlapping work
-//!   already in the pool, or one the operator held back. It waits for the operator's Adopt (past the
-//!   caps) or Discard.
-//!
-//! Both survive a restart. The record of them is one file, `runs/held-spawns.json` (the name ADR-0029
-//! gave it, kept so a pool that held spawns before issue #150 reads unchanged), replaced whole through
-//! a rename so a crash never leaves half of it. One file keeps a proposal's move from pending to held
-//! a single write. It carries both lists, the counter the proposal ids come from (never reused, so a
-//! discarded `proposal-1` cannot come back as the name of another proposal, and an id an agent read
-//! from the Spawn ledger keeps meaning one proposal), and the keys of the pre-ADR truncations boot has
-//! already recovered, so a recovery and the holds it made land in the same write and it never runs
-//! twice.
-//!
-//! A proposal keeps its id from the moment it is taken until it lands or is discarded, whether it is
-//! pending or held. Held spawns from before issue #150 keep their `held-N` ids.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -32,7 +10,6 @@ use serde_json::Value;
 
 use crate::js;
 
-/// A proposal waiting for the next Tick to land it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingSpawn {
@@ -45,8 +22,6 @@ pub struct PendingSpawn {
     pub proposal: SpawnProposal,
     /// When it was taken from its attempt or spawn.json.
     pub at: String,
-    /// The id a Tick is landing it under, written before the ticket file is: a restart that
-    /// finds it set checks whether that ticket landed, so a crash mid-landing never lands it twice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<String>,
 }
@@ -62,8 +37,6 @@ pub struct HeldSpawn {
     pub reason: HeldSpawnReason,
     /// When it was held (for a recovered one, when the cap truncated it).
     pub at: String,
-    /// Why a Tick refused to land it: its last Adopt, or, held for "refused", its landing as a
-    /// Pending spawn. Cleared by the next Adopt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_error: Option<String>,
     /// Held for "overlaps": the ids it named that neither the pool nor any proposal of it ever had,
@@ -318,8 +291,6 @@ impl SpawnProposals {
         self.move_to_held(id, HeldSpawnReason::Operator, at, None)
     }
 
-    /// A Tick could not land a Pending spawn: held for "refused" under the same id, the reason
-    /// kept as its adoptError, in one write.
     pub fn hold_refused(
         &mut self,
         id: &str,
@@ -339,8 +310,6 @@ impl SpawnProposals {
         Ok(Some(found))
     }
 
-    /// Record the ids a Tick is about to land these Pending spawns under, in one write before any
-    /// ticket file is.
     pub fn mark_landing(&mut self, landing: &HashMap<String, String>) -> Result<(), js::FsError> {
         if landing.is_empty() {
             return Ok(());
@@ -423,8 +392,6 @@ impl SpawnProposals {
         Ok(held)
     }
 
-    /// The held ids an Adopt has queued for a Tick, in the order the operator adopted them. In
-    /// memory only: after a restart the spawn is simply held again.
     pub fn adopting(&self) -> &[String] {
         &self.adopting
     }
@@ -447,7 +414,6 @@ impl SpawnProposals {
         self.write()
     }
 
-    /// A Tick refused the Adopt: still held, the reason kept on it.
     pub fn refuse_adopt(&mut self, id: &str, reason: &str) -> Result<(), js::FsError> {
         self.adopting.retain(|a| a != id);
         let Some(held) = self.file.held.iter_mut().find(|h| h.id == id) else {
@@ -669,8 +635,6 @@ mod tests {
         assert!(reloaded.held().is_empty());
     }
 
-    // An Adopt a Tick refused leaves the spawn held with the reason (ADR-0029), kept across a
-    // restart, and the next Adopt clears it.
     #[test]
     fn records_a_refused_adopts_reason_on_the_held_spawn_until_the_next_adopt() {
         let dir = runs_dir();
@@ -794,8 +758,6 @@ mod tests {
         );
     }
 
-    // Issue #150: a proposal taken from an exited attempt is on disk at once, so a restart before the
-    // Tick finds it still pending.
     #[test]
     fn takes_proposals_as_pending_or_held_in_one_write_in_order_surviving_a_reload() {
         let dir = runs_dir();
@@ -964,8 +926,6 @@ mod tests {
         }
     }
 
-    // Issue #150 review: a Tick refusing a Pending spawn holds it, the reason kept, rather than
-    // dropping it.
     #[test]
     fn holds_a_pending_spawn_a_tick_refused_under_the_same_id_with_the_reason() {
         let dir = runs_dir();

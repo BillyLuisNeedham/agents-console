@@ -1,17 +1,3 @@
-/**
- * The rolling scheduler (ADR-0040), seen from outside the server (ADR-0036):
- * a Ticket starts the moment each of its own blockers is done and merged,
- * from the target's tip at that moment, and never waits on work it does not
- * depend on. A slow Ticket holds back nothing but its dependents, a merge
- * stuck at its conflict holds back nothing but the conflicted Ticket's
- * dependents, and an Interrupt is raised and answered while the rest of the
- * pool runs on.
- *
- * Every world is a git checkout, so each Ticket runs in its own worktree and
- * lands on main by merge. A slow Ticket is a stub held open
- * (`world.stubs.hold`) until the case releases it.
- */
-
 import { expect } from "bun:test";
 import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -33,12 +19,10 @@ const interrupted = (s: EnrichedSnapshot, id: string, kind: string): boolean =>
 const mainSha = (world: World): string => world.git(["rev-parse", "main"]).trim();
 const reviewUp = (s: EnrichedSnapshot): boolean => interrupted(s, "REVIEW", "review");
 
-/** Whether `id` is still running: launched, live on the snapshot, and with no `exited` event. */
 function running(world: World, s: EnrichedSnapshot, id: string): boolean {
   return launches(world).includes(id) && ticketOf(s, id).liveAttempt !== null && !eventKinds(world, id).includes("exited");
 }
 
-/** Bash for a stub that writes `file` in its working directory and commits it as `message`. */
 function commitFile(file: string, content: string, message: string): string {
   return [
     `printf '%s\\n' ${JSON.stringify(content)} > ${JSON.stringify(file)}`,
@@ -92,8 +76,6 @@ conformance(
       repoFiles: { "shared.txt": "base\n" },
     });
     world.stubs.script("01", { run: commitFile("shared.txt", "from-01", "work-01") });
-    // 02 commits its own line only once 01's has merged, so its merge is the
-    // one that conflicts.
     world.stubs.script("02", {
       run: [
         "for _ in $(seq 1 400); do",

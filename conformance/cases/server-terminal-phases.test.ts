@@ -1,15 +1,3 @@
-/**
- * The two terminal phases a run reports, seen from outside the server (the
- * inventory's ticket C03): `dead`, which a drive killed by an error it
- * cannot continue from reports itself with (runs/errors.jsonl, a last pool
- * log line, the dead phase on the snapshot), and `stopped`, the farewell an
- * orderly stop sends once, as the next snapshot after the run's last.
- *
- * A drive is killed here the way the engine test kills it: the Ticket's
- * harness binary is not on the server's PATH, so its launch fails inside
- * the Tick.
- */
-
 import { expect } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -47,9 +35,6 @@ conformance(
   "server",
   "dead drives report themselves › running frames, then one dead frame last, one errors.jsonl line naming the missing binary, and pool dead: last in the pool log",
   async (t) => {
-    // 01 runs on the opencode stub, held until a socket watches; 02 waits on
-    // it and runs on claude, which is not there, so its launch, once 01 has
-    // merged, kills the drive.
     const world = t.world({
       tickets: [ticket("01"), ticket("02", { blockedBy: "01" })],
       config: { ...CONFIG, assign: { "01": { harness: "opencode" } } },

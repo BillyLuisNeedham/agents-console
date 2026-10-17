@@ -38,9 +38,6 @@ async function snapshotOf(server: CaseServer): Promise<EnrichedSnapshot | null> 
 
 const RESTING = new Set(["quiescent", "done", "dead", "stopped"]);
 
-/**
- * The snapshot once the drive rests and `done` holds of it: the outside view of the engine test's `server.settled()`.
- */
 async function settled(
   server: CaseServer,
   done: (snapshot: EnrichedSnapshot) => boolean = () => true,
@@ -182,8 +179,6 @@ conformance("server", "pool server › carries the terminal dead phase on the sn
     tickets: [{ file: "01-a.md", marker: marker("01", "ready") }],
     config: DEFAULTS,
   });
-  // The pool's harness is claude, and no claude is on the server's PATH:
-  // the first Tick's launch fails and kills the drive.
   const path = world.env("").PATH!.split(":").filter((dir) => dir !== world.stubs.bin).join(":");
   if (Bun.which("claude", { PATH: path }) !== null) {
     throw new Error(`a claude outside the stubs is on ${path}; this case needs none`);
@@ -406,7 +401,6 @@ conformance(
     world.stubs.script("02", { status: "keep" });
     const server = await t.start(world);
     const first = await settled(server, (s) => s.state.interrupts.length === 2);
-    // Each Interrupt is raised at its Attempt's exit, so their order is the exits' order.
     expect(first.state.interrupts.map((i) => [i.ticketId, i.kind]).sort()).toEqual([
       ["01", "checkpoint"],
       ["02", "crash"],
@@ -524,8 +518,6 @@ conformance(
     });
     const sentinel = join(world.root, "release-03");
     world.stubs.script("01", { statuses: ["checkpoint", "done"] });
-    // Holds 03 open until the sentinel appears (the stub gives up after ten
-    // seconds, well past what this case needs).
     world.stubs.script("03", { waitFor: sentinel });
     const server = await t.start(world);
 
@@ -538,7 +530,6 @@ conformance(
       { what: "03 running with 01's interrupt pending", ms: 30_000 },
     );
 
-    // The 202 is built before the next Tick runs: the interrupt still pending, the answer queued.
     const resumed = await resume(server, { ticketId: "01", action: "resume", note: "go on" });
     expect(resumed.status).toBe(202);
     const body = resumed.json<{ snapshot: EnrichedSnapshot }>();

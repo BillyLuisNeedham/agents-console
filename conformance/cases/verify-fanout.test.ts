@@ -1,12 +1,3 @@
-/**
- * Verify without Jev, the fan-out (C21 of the Rust port's inventory,
- * docs/research/rust-port/test-inventory.md): `verify: N` runs N
- * same-round Attempts on their own branches, all cut from the target's tip
- * at the round's launch. The round is one group, graded once its last
- * Candidate exits (ADR-0040), and a round with a paused or crashed
- * Candidate stops at one Interrupt instead of selecting.
- */
-
 import { expect } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

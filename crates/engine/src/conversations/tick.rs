@@ -202,7 +202,6 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     let pending = s.spawn_proposals.pending().len() > before;
     let phase = s.current_phase();
     emit_snapshot(s, phase);
-    // The next Tick lands it.
     if pending {
         let _ = s.wake();
     }

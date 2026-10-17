@@ -188,8 +188,6 @@ restartCase("a re-adopted Attempt whose TUI exited 7 while no server ran is deci
 
 // engine/attempt-ending.test.ts:405
 restartCase("a re-adopted Attempt whose TUI wrote a done Outcome while no server ran ends clean at boot and merges", async (t) => {
-  // Two Tickets, each Attempt in a worktree of its own (ADR-0040), so each
-  // done ending has a branch to merge.
   const world = t.world({
     tickets: [ticket("01", "a", { body: BODY }), ticket("02", "b", { body: "# 02\n\nWork on 02." })],
     config: TERMINAL,
@@ -244,13 +242,6 @@ function writeEvents(world: World, id: string, events: TicketEvent[]): void {
   writeFileSync(join(runsOf(world), `${id}.events.jsonl`), events.map((each) => `${JSON.stringify(each)}\n`).join(""));
 }
 
-/**
- * The spawned event's payload for a terminal-backed claude launch, as the
- * engine records one (engine/attempt-run.ts spawnedPayload) from a herdr
- * that reports no terminal id. By default it ran in the pool checkout, as a
- * server before ADR-0040 ran a lone Ticket; every launch since gets a
- * worktree.
- */
 function spawnedInPane(world: World, paneId: string, tabId: string, cwd = world.repo, branch: string | null = null): Record<string, unknown> {
   return {
     argv: ["claude", "--model", "m", "--permission-mode", "auto"],

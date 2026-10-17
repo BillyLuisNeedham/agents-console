@@ -48,7 +48,6 @@ pub fn other_agent_in_pool_checkout(session: &Session, except_id: &str) -> Optio
     if let Some(what) = session.pool_checkout_writers.values().next() {
         return Some(what.clone());
     }
-    // Outside git every launched Attempt runs in the pool directory, from its launch on.
     if !session.git
         && let Some(id) = session.launched.iter().find(|id| *id != except_id)
     {

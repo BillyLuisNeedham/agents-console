@@ -68,7 +68,6 @@ conformance(
     expect(events[1]!.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: LAUNCH_NEVER_RAN });
     expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2", terminal_id: "term-2" });
     expect(callsOf(herdr, "tab.create")).toHaveLength(2);
-    // The botched tab is closed at the retry; the one the launch ended up in, at the merge.
     await herdr.waitForCall((call) => call.method === "tab.close");
     await herdr.settle();
     expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }, { tab_id: "w1:t2" }]);
@@ -164,7 +163,6 @@ conformance(
     expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited", "merged", "tab-closed"]);
     expect(retried.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: HARNESS_NOT_FOUND });
     expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2", terminal_id: "term-2" });
-    // The botched tab is closed at the retry; the one the launch ended up in, at the merge.
     await herdr.waitForCall((call) => call.method === "tab.close");
     await herdr.settle();
     expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }, { tab_id: "w1:t2" }]);

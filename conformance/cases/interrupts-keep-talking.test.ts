@@ -1,22 +1,3 @@
-/**
- * Keep talking and Continued attempts (issue #139, ADR-0027), seen from
- * outside the server (ADR-0036): a checkpointed terminal-backed Attempt's
- * pane is held while its Interrupt waits, POST /api/keep-talking continues it
- * in that pane as a Continued attempt at once, and the Continued attempt ends
- * on its Outcome, its pane going or its TUI exiting. Also the refusals, each
- * a 409 `reason` in the engine's own words, and the teaching Turn typed into
- * the pane, pinned byte for byte (inventory Decided 4).
- *
- * The pools are terminal-backed on the fake herdr. The stub claude reads the
- * prompt typed into its pane, writes the checkpoint Outcome it is scripted
- * with, and stays up the way an interactive harness does; the case then plays
- * the agent in the pane and writes each later Outcome itself. A Ticket runs
- * in a worktree of its own, or in the pool directory when the pool is not
- * in git (ADR-0040). The server's own timings are its real ones: the
- * Continued attempt's ending is read every 2 s and the pane survey runs every
- * 15 s, so a case that answers "before the next survey" acts at once.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -145,13 +126,6 @@ interface Talking {
   quit: string;
 }
 
-/**
- * A terminal-backed pool whose Ticket 01 checkpointed and waits with its pane
- * held. Its stub TUI stays up two minutes, or, with `quit`, until the case
- * writes the quit file. With `holdPane` the fake herdr keeps a pane open
- * after the TUI in it exits, as a real pane keeps its shell. With `git:
- * false` the pool is not in git, so 01 runs in the pool directory.
- */
 async function checkpointed(
   t: Case,
   options: { holdPane?: boolean; quit?: boolean; git?: boolean } = {},
@@ -350,8 +324,6 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
-// Issue #186: a Continued attempt's checkpoint takes its Outcome's Spawn proposals, as its done does
-// and as a launched attempt's checkpoint does; they land at the next Tick while the Ticket waits.
 conformance(
   "interrupts",
   "a Continued attempt's checkpoint Outcome takes its spawn proposals",
@@ -372,7 +344,6 @@ conformance(
     expect(interrupt.body).toBe("do the follow-up first");
     expect(readStateLine(world.pool, "01.md").status).toBe("checkpoint");
     expectParsedEqual(
-      // The next Tick may already have landed the proposal: its spawn-adopted is pinned below.
       readEvents(world.pool, "01")
         .filter((e) => e.attempt === 2 && e.kind !== "spawned" && e.kind !== "spawn-adopted")
         .map((e) => [e.kind, e.payload]),
@@ -550,7 +521,6 @@ conformance(
   "interrupts",
   "Keep talking refuses a Ticket not waiting at a checkpoint, and a Resume relaunches the checkpointed one afresh",
   async (t) => {
-    // 01 and 02 run side by side, each in its own worktree; 02 stays at work.
     const world = t.world({ tickets: [TALK_01, BUSY_02], config: TERMINAL });
     world.stubs.script("01", { ...PAUSE, hold: 120 });
     const busy = world.stubs.hold("02");
@@ -563,8 +533,6 @@ conformance(
     const resumed = await server.http.post("/api/resume", { ticketId: "01" });
     expect(resumed.status).toBe(202);
 
-    // The Resume is the answer: 01 launches afresh, in a tab of its own,
-    // while 02 still works.
     await until(
       () => readEvents(world.pool, "01").filter((e) => e.kind === "spawned"),
       (spawned) => spawned.length === 2,
@@ -577,9 +545,6 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
-// engine/keep-talking.test.ts:334, inverted by ADR-0040: a Ticket in a git pool worked in its own
-// worktree, so an enlisted pane in the pool checkout shares no tree with it. The refusal itself
-// needs a pool outside git, where nothing can be enlisted; the next case pins it with a sibling.
 conformance(
   "interrupts",
   "Keep talking continues a Ticket that worked in its worktree while an enlisted Conversation works in the pool checkout",

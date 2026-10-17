@@ -1,10 +1,3 @@
-//! The queued-answer store (engine/queued-answers.ts): every accepted Interrupt answer, persisted in
-//! submission order alongside the pool's other run artifacts (`runs/queued-answers.json`).
-//! Deliberately separate from the pool state (ADR-0004), so the queue lives on its own and survives a
-//! server restart. Acceptance enqueues; a Tick's drain marks records processed.
-//! The file is rewritten whole (tmp and rename) on every change, so a crash mid-write never tears the
-//! queue.
-
 use std::path::{Path, PathBuf};
 
 use ac_protocol::{AnswerBy, InterruptKind, QueuedAnswer, QueuedAnswerAction};

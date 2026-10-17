@@ -1,10 +1,3 @@
-/**
- * The Held and Pending spawns as the server serves and stores them:
- * runs/held-spawns.json, the views on /api/state, proposal ids, refused
- * Adopts. A Pending spawn lasts one Tick (ADR-0040), so its view is seen
- * only as it lands or is held.
- */
-
 import { expect } from "bun:test";
 import type { EnrichedSnapshot, HeldSpawnView } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -24,7 +17,6 @@ import {
   withCaps,
 } from "./spawns-support.ts";
 
-/** The refusal a Tick gives a proposal whose blocks names Ticket 02 once 02 is done. */
 const BLOCKS_DONE_02 = "blocks names done tickets, which have no next attempt to hold: 02";
 
 /** A Ticket's status on the snapshot, or undefined when the pool lacks it. */
@@ -49,9 +41,6 @@ conformance("spawns", "starts empty when the pool has never held a spawn", async
   );
 });
 
-// A refused Adopt is seeded with the server down: a live Adopt lands or is
-// refused at the Tick it wakes, too soon to watch it queued. 02, held on a
-// release file, still runs when the next Adopt passes its check.
 conformance("spawns", "keeps a refused Adopt's reason on the held spawn until the next Adopt", async (t) => {
   const file = {
     seq: 1,
@@ -157,8 +146,6 @@ conformance("spawns", "serves each held spawn as the Console shows it", async (t
   ]);
 });
 
-// B names 01 in its overlaps, so it is held between A and C: one take
-// numbers them all, and the two Pending spawns land in one write.
 conformance("spawns", "lands the pending spawns of one Outcome in one write, and refuses a discard after", async (t) => {
   const world = t.world({ tickets: [ticket("01")], config: CONFIG });
   world.stubs.script("01", { spawn: [proposal("A"), proposal("B", { overlaps: ["01"] }), proposal("C")] });
@@ -181,9 +168,6 @@ conformance("spawns", "lands the pending spawns of one Outcome in one write, and
   await settled(server);
 });
 
-// proposal-1 has landed and proposal-2 is discarded when 02's Outcome names
-// them, beside ids no proposal of this pool ever had and a Ticket it lacks.
-// 02 waits on a release file until the discard is done.
 conformance("spawns", "knows every proposal id it ever issued, and none it did not", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", "01")], config: withCaps({ perAttempt: 1 }) });
   const release = releaseFile(world, "02");
@@ -217,7 +201,6 @@ conformance("spawns", "knows every proposal id it ever issued, and none it did n
   await settled(server);
 });
 
-// The take is seeded with the server down: a live one lands at the very next Tick.
 conformance("spawns", "holds a Pending spawn the Tick refused, under the same id, with the reason", async (t) => {
   const file = {
     seq: 1,
@@ -251,10 +234,6 @@ conformance("spawns", "holds a Pending spawn the Tick refused, under the same id
   await settled(server);
 });
 
-// The pool is headless, so the Conversation Spawn is refused at its start, after its landing minted and
-// reserved its id. The refusal gives the id back, as the TypeScript server never held it, and the
-// parent's next Spawn takes the number again (NOT-PORTED.md, r-spawns). 02 waits on 01 and then on a
-// release file, so the Adopt lands at a later Tick than the refused start.
 conformance("spawns", "gives a refused Conversation Spawn's id to the parent's next Spawn", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", "01")], config: withCaps({ perAttempt: 1 }) });
   const gate = releaseFile(world, "02");

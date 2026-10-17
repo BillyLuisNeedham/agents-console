@@ -1,14 +1,3 @@
-/**
- * Config reload (ADR-0018, ADR-0040), seen from outside the server
- * (ADR-0036): an edit to console.json made while a pool runs reaches the
- * Tickets that have not launched yet at the next Tick, all of it or none of
- * it, and never moves an Attempt already in flight or a boot-only key. A
- * hand edit is read at the next wake (here, the held Attempt's exit); a
- * Console route wakes the drive itself, so its edit is read at once. Each
- * case holds a stub open (the edit lands while it runs) and edits the file
- * as a person or an agent would, or through a Console route.
- */
-
 import { expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -92,8 +81,6 @@ conformance("config", "a hand edit reassigns a Ticket that has not run at the ne
   expect(modelOf(world, "02")).toBe("model-b");
   expect(done.state.log).toContain("config reloaded: defaults");
   expect(reassigned(world.pool, "02")).toEqual([A_TO_B]);
-  // The edit is read at the Tick 01's exit wakes, when 01 is no longer in
-  // flight either, so it re-resolves too.
   expect(reassigned(world.pool, "01")).toEqual([A_TO_B]);
 });
 

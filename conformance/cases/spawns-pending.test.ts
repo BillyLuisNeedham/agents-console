@@ -1,10 +1,3 @@
-/**
- * Pending spawns between an Outcome and the Tick that lands them (ADR-0040):
- * their take and landing on the parent's log and in the Spawn ledger; the
- * Hold and Discard routes on spawns no longer pending; overlaps; caps of 0
- * (issue #150).
- */
-
 import { expect } from "bun:test";
 import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -112,8 +105,6 @@ conformance("spawns", "refuses an operator's action on a spawn that has already 
   }
 });
 
-// The agent read the ledger and judged its proposal overlapping: the
-// operator decides, not the Tick.
 conformance("spawns", "holds a proposal that names what it overlaps, with the ids on the hold", async (t) => {
   const world = t.world({ tickets: [ticket("01"), ticket("02", "01")], config: CONFIG });
   world.stubs.script("01", {
@@ -176,9 +167,6 @@ conformance("spawns", "holds a proposal whose overlaps names ids the pool never 
   );
 });
 
-// The pool moved between the take and the Tick: the spawn's blocks target
-// finished. It is held with the reason instead of dropped. The take is
-// seeded with the server down, since a live one lands at the very next Tick.
 conformance("spawns", "holds a Pending spawn the Tick can no longer land, with the reason on it", async (t) => {
   const pendingFile = {
     seq: 1,

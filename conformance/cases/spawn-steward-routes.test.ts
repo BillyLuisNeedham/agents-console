@@ -18,14 +18,6 @@ const BODY = "A body long enough to stand as a ticket.";
 const READY = (id: string) => `<!-- state: id=${id} blocked-by=none status=ready -->`;
 const DEFAULTS = { harness: "claude", model: "m" };
 
-/**
- * Put a gate in front of a stub binary: each launch is keyed by the base name
- * of its working directory (a Ticket's worktree is named for its id), may
- * write an Outcome and may wait for
- * a release file before the stub proper runs. The stub's own `waitFor` gives
- * up after ten seconds; this gate holds until the case releases it or its
- * world is deleted.
- */
 function gate(
   world: World,
   rules: Record<string, { hold?: boolean; outcome?: { path: string; json: unknown } }>,
@@ -112,8 +104,6 @@ async function startRig(t: Case): Promise<CaseServer> {
   return server;
 }
 
-/** A pool whose one Ticket proposes two follow-ups, both landed at the Tick
- *  after its exit. */
 async function startLandedRig(t: Case): Promise<CaseServer> {
   const world = t.world({
     tickets: [{ file: "01-a.md", marker: READY("01") }],

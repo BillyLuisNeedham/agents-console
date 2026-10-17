@@ -273,7 +273,6 @@ async fn a_conflicted_merge_with_no_resolver_waits_for_the_operator_and_a_resume
         "resolve the conflict and resume this ticket; the merge is re-attempted on resume.\nThe resolver agent attempted: no resolver harness available (set console.json resolver= or a ~/.issue-runner default)"
     ));
     assert!(pool.kinds(&id).contains(&TicketEventKind::MergeConflict));
-    // The Merge queue names it waiting on the operator.
     let snap = wait_for(&engine, |s| {
         s.merge_hold == std::slice::from_ref(&id)
             && s.merge_queue.first().map(|e| e.state)
@@ -434,7 +433,6 @@ async fn a_ticket_with_no_harness_waits_at_a_config_interrupt_and_a_resume_after
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_store_that_keeps_failing_raises_the_persistence_interrupt_and_an_answer_retries() {
     let pool = Pool::git(&[("01", &[])]);
-    // The launching Tick's persist fails all four attempts; the close's own persist then lands.
     pool.store
         .fail
         .store(4, std::sync::atomic::Ordering::SeqCst);
@@ -713,8 +711,6 @@ async fn a_drive_that_cannot_go_on_dies_with_a_record_and_a_dead_phase() {
     // AGENT.md is read at every spawn: a directory there fails the read and kills the drive.
     std::fs::create_dir(pool.file("AGENT.md")).unwrap();
     let engine = pool.start().await;
-    // The drive plans its first launch in the job that finds it ready, so it may already be dead
-    // when this asks: a settle then answers the dead phase, the death itself being on record.
     let settled = tokio::time::timeout(std::time::Duration::from_secs(30), engine.settled())
         .await
         .unwrap();
@@ -923,8 +919,6 @@ async fn a_verify_round_whose_every_candidate_ended_before_a_restart_is_graded_o
     verify_two(&pool);
     let candidate = |text: &str| Script::done(text).with_work(&commit("f.txt", text));
     pool.script("01", vec![candidate("one"), candidate("two")]);
-    // Attempt 2's grader grades only once the second boot is under way; a re-spawn the stopping
-    // engine makes is stopped before then.
     let second_boot = pool.file("second-boot");
     pool.script("01-grader-1", vec![graded(9)]);
     pool.script(
@@ -947,7 +941,6 @@ async fn a_verify_round_whose_every_candidate_ended_before_a_restart_is_graded_o
             .starts_with("<!-- state: id=01 blocked-by=none status=in-progress -->")
     );
 
-    // The next boot grades only attempt 2, under its own grader Ticket.
     std::fs::write(&second_boot, "").unwrap();
     let engine = pool.start().await;
     let phase = settled(&engine).await;

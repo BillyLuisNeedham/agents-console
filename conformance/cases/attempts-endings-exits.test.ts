@@ -33,7 +33,6 @@ import {
   waitForExit,
 } from "./attempts-endings-support.ts";
 
-/** The spawned event of Ticket `id`'s headless claude launch, run in its worktree on its pool branch. */
 function spawnedInWorktree(world: World, id: string): Record<string, unknown> {
   const { path, branch } = ticketWorktree(world.repo, id);
   return {

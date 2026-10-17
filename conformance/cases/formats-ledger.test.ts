@@ -60,8 +60,6 @@ function table(header: string[], rows: string[][]): string[] {
   ];
 }
 
-// A Pending spawn lands at the Tick after its take (ADR-0040), so no case
-// reads the ledger with one in it.
 function ledger(input: { tickets?: Row[]; conversations?: Row[]; held?: HeldRow[] }): string {
   const title = (id: string, text: string) => (text.startsWith(`${id}: `) ? text.slice(id.length + 2) : text);
   return [

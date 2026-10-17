@@ -1,17 +1,3 @@
-/**
- * Merges across a stop and start, seen from outside the server (ADR-0036):
- * which done Tickets a new server reads as unmerged from what the last one
- * left in the Ticket files and in git, the Merge queue it reads back, and
- * the merge checkout a dead server left registered. Ticket C05 of the
- * inventory's split (docs/research/rust-port/test-inventory.md): each case
- * names the engine test it carries over, or the uncovered behaviour it pins.
- *
- * Merged is never persisted (ADR-0014, ADR-0040): every boot derives it
- * afresh from the state lines (a done Ticket) and git (its pool branch not
- * yet in the merge target). A Ticket waits on its own blockers' merges, and
- * a pool with a done Ticket unmerged reads phase running.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -61,9 +47,6 @@ restartCase(
       config,
       repoFiles: { "shared.txt": "base\n" },
     });
-    // 01 and 02 overwrite one line, 02 only once 01's work is on main, so
-    // 02's merge always conflicts. The resolver reproduces the conflict and
-    // stages its resolution. 03 depends on 02.
     world.stubs.script("01", { run: overwriteShared("from-01", "work-01") });
     world.stubs.script("02", { run: `${waitOnMain("work-01")}\n${overwriteShared("from-02", "work-02")}` });
     world.stubs.script("02.resolver", {
@@ -75,8 +58,6 @@ restartCase(
       outcomeRaw: JSON.stringify({ resolved: true, note: "kept both lines" }),
     });
 
-    // Server one: 02's merge waits on the operator's approval, and 03 waits
-    // for it.
     const first = await startLeg(t, world, 0);
     const held = await untilState(
       first,
@@ -94,8 +75,6 @@ restartCase(
     const branch = ticketWorktree(world.repo, "02").branch;
     expect(gitIn(world.repo, ["log", "main", "--format=%s"]).split("\n")).not.toContain("work-02");
 
-    // Server two derives it afresh: 02's approval is back and alone, and 03
-    // stays ready rather than launching.
     const second = await startLeg(t, world, 1);
     const rederived = await untilState(
       second,
@@ -112,8 +91,6 @@ restartCase(
     await Bun.sleep(1_000);
     expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver"]);
 
-    // Approving lands 02's merge the way it would have on server one, and 03
-    // runs from a tip that holds it.
     await answer(second, { ticketId: "02", action: "approve" });
     const done = await approveReview(second, 60_000);
     expect(Object.fromEntries(done.state.tickets.map((each) => [each.id, each.status]))).toEqual({
@@ -155,11 +132,6 @@ conformance(
       config: { ...CONFIG, resolver: "claude" },
       repoFiles: { "shared.txt": "base\n" },
     });
-    // As an earlier server left them: 03, 07 and 09 done on branches main
-    // lacks. 07's merge was held at the pool checkout's gate when it
-    // stopped, so its events end in merge-deferred. 07 and main both changed
-    // shared.txt since, so its merge conflicts and its resolver, which waits
-    // for the case's release, keeps the merge where the queue can show it.
     doneUnmerged(world, "03");
     const seven = doneUnmerged(world, "07");
     doneUnmerged(world, "09");
@@ -190,8 +162,6 @@ conformance(
       (s) => s.state.mergeQueue.length === 3 && cardOf(s, "07").liveAttempt?.role === "resolver",
       60_000,
     );
-    // 07 is the one merge the boot took on: first. The two it never took
-    // follow, by id, and stall, with no merge Interrupt raised for any.
     expect(taken.state.mergeQueue).toEqual([
       { ticketId: "07", state: "resolving" },
       { ticketId: "03", state: "stalled" },
@@ -209,7 +179,6 @@ conformance(
       { ticketId: "09", state: "stalled" },
     ]);
 
-    // Approved, 07's merge lands, leaving the two it never took.
     await answer(server, { ticketId: "07", action: "approve" });
     const landed = await untilState(
       server,

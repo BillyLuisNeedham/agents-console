@@ -24,9 +24,6 @@ enum Accepted {
 }
 
 impl Engine {
-    /// `accept`: record an answer (ADR-0004) and wake the drive; never waits for it. An idle pool
-    /// drains it and starts a fresh drive inside this call, so the snapshot read right after holds
-    /// the processed state.
     pub async fn accept(
         &self,
         ticket_id: String,
@@ -71,7 +68,6 @@ impl Engine {
                 if record.processed_at.is_some() {
                     return Ok(Accepted::Processed);
                 }
-                // The waiter registers before the wake: an idle wake drains at once.
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 s.answer_waiters.entry(record.seq).or_default().push(tx);
                 s.wake().map_err(|e| EngineError::refused(e.to_string()))?;
@@ -92,14 +88,11 @@ impl Engine {
         settle.phase().await
     }
 
-    /// `shutdown` (ADR-0017): stop the headless attempts (TERM, the grace, then KILL), let the drive
-    /// settle (bounded), close the store, and emit the `stopped` farewell.
     pub async fn shutdown(&self, grace: Option<Duration>) {
         crate::children::stop_all(self, grace).await;
         if let Ok(settle) = self
             .call(|s| {
                 s.children.stopping = true;
-                // A drive waiting for a wake sees the stop now.
                 s.wake.notify_one();
                 s.driving.then(|| next_settle(s))
             })
@@ -167,8 +160,6 @@ impl Engine {
         crate::terminals::close_finished_terminals(self).await
     }
 
-    /// `reloadConfig` (issue #149): a Pool settings save wakes the drive, whose next Tick reloads. A
-    /// pool whose store has closed starts no drive, so it reloads here and emits.
     pub async fn reload_config(&self) {
         let _ = self
             .call(|s| -> anyhow::Result<()> {

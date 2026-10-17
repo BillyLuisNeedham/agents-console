@@ -28,9 +28,6 @@ pub fn persist(session: &mut Session) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `persistWithRetry`: a failed write retries with backoff; on success the drive carries on, and on
-/// exhaustion the persistence Interrupt is raised, which holds every launch until a human answers it,
-/// with the store still open. Never closes the store; false when the retries were exhausted.
 pub async fn persist_with_retry(engine: &Engine) -> anyhow::Result<bool> {
     let mut backoff = PERSIST_RETRY_BACKOFF_MS.iter();
     loop {
@@ -86,9 +83,6 @@ mod tests {
 
     use crate::testkit::{Pool, answer, last, settled};
 
-    // NOT-PORTED.md, interrupts "Pinned short" (engine.test.ts:7033): a checkpoint write that fails
-    // once is retried after the backoff, the next Ticket is scheduled and no persistence Interrupt is
-    // raised; the run reaches its rows as if nothing failed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_write_that_fails_once_is_retried_and_the_run_goes_on() {
         let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
@@ -122,9 +116,6 @@ mod tests {
         assert_eq!(rows.last().unwrap()["reviewApproved"], true);
     }
 
-    // NOT-PORTED.md, interrupts "Pinned short": with a store that always fails, the launching Tick's
-    // write and the closing write each make four attempts, eight in all (the persistence Interrupt holds
-    // every write between them), and the store is never closed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_that_always_fails_makes_four_attempts_per_write_and_stays_open() {
         let pool = Pool::git(&[("01", &[])]);

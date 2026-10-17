@@ -1,22 +1,3 @@
-/**
- * The merge gate (ADR-0040, amending ADR-0014) and the Merge queue it feeds
- * (issue #129), seen from outside the server (ADR-0036): the snapshot's
- * mergeQueue, the pool log, the Ticket markers, git state in the world's
- * repository, the stub launches the server made and the frames on /api/ws.
- *
- * A Ticket starts once each of its own blockers is done and merged into the
- * target, its worktree cut from the target's tip at its launch. A done
- * Ticket whose merge has not landed holds back only the Tickets that name
- * it; an unrelated Ticket starts regardless.
- *
- * A Ticket "done on an unmerged branch" is seeded before the server starts:
- * its marker says done and its pool branch, `pool/<key>/<id>`, holds a commit
- * the merge target lacks. Two Tickets conflict when both overwrite
- * shared.txt, committed in the world's first commit; the second waits until
- * the first's commit is on main before it commits, so it is always the
- * second merge that conflicts.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -60,7 +41,6 @@ function waitOnMain(subject: string): string {
   return `for _ in $(seq 1 600); do if ${seen}; then break; fi; sleep 0.05; done; ${seen}`;
 }
 
-/** Bash for a stub: wait (up to 30 s) for `path` to exist. */
 function waitFile(path: string): string {
   return `for _ in $(seq 1 600); do [ -e '${path}' ] && break; sleep 0.05; done; [ -e '${path}' ]`;
 }
@@ -102,7 +82,6 @@ function queueOf(snapshot: { state: { mergeQueue: { ticketId: string; state: str
   return snapshot.state.mergeQueue;
 }
 
-/** The Merge queue names exactly `ids`. */
 function untilQueued(server: CaseServer, ids: string[], ms = 15_000) {
   return untilState(
     server,
@@ -207,7 +186,6 @@ conformance(
 
     await untilConflict(server);
     await untilState(server, (s) => cardOf(s, "02").status === "done", { what: "02 done" });
-    // An unrelated Ticket resumed under 02's conflict starts and lands at once.
     await resume(server, "04");
     await untilLaunched(world, "04");
     const four = await untilState(server, (s) => cardOf(s, "04").status === "done" && cardOf(s, "04").mergeState === null, {
@@ -253,7 +231,6 @@ conformance(
       (s) => cardOf(s, "03").status === "done" && cardOf(s, "03").mergeState === null && queueOf(s).length === 1,
       { what: "03 done and merged, 01 alone unmerged" },
     );
-    // The engine's gate is not on the wire; the Merge queue and the card carry it.
     expect(queueOf(held)).toEqual([{ ticketId: "01", state: "stalled" }]);
     expect(cardOf(held, "01").mergeState).toBe("stalled");
     expect(cardOf(held, "02").mergeState).toBe(null);
@@ -292,7 +269,6 @@ conformance(
     await untilLaunched(world, "01-head-to-head", 30_000);
     const keys = world.stubs.calls().map((c) => c.key);
     const graded = keys.filter((key) => key.includes("grader") || key.includes("head-to-head"));
-    // Both graders, then the head-to-head their tied default grades call for.
     expect(graded.slice().sort()).toEqual(["01-grader-1", "01-grader-2", "01-head-to-head"]);
     expect(graded.at(-1)).toBe("01-head-to-head");
     expect(keys.filter((key) => key.startsWith("01") && !graded.includes(key)).length).toBe(2);
@@ -349,10 +325,6 @@ conformance(
   },
   { timeoutMs: 90_000 },
 );
-
-// The merged rule (ADR-0040), one pool per row. A done Ticket that counts as
-// merged holds back nothing; one that does not sits in the Merge queue,
-// keeps the pool running and holds back only the Tickets that name it.
 
 conformance("merges", "merged rule: a pool outside any git repository counts every done Ticket as merged", async (t) => {
   const world = t.world({ config: CONFIG });
@@ -482,7 +454,6 @@ conformance(
       (s) => s.state.interrupts.some((i) => i.ticketId === "02" && i.kind === "checkpoint"),
       { what: "02's checkpoint" },
     );
-    // The first snapshot after the reset that the drive emitted carries 01 again.
     expect(queueOf(again).map((e) => e.ticketId)).toEqual(["01"]);
   },
 );
@@ -502,7 +473,6 @@ conformance(
     expect(existsSync(loose)).toBe(true);
     world.git(["pack-refs", "--all"]);
     expect(existsSync(loose)).toBe(false);
-    // Several watch intervals: still queued, its dependent not launched.
     await Bun.sleep(2_500);
     expect(queueOf(await stateOf(server)).map((e) => e.ticketId)).toEqual(["01"]);
     expect(launches(world, "02")).toBe(0);
@@ -572,7 +542,6 @@ conformance(
     expect(queueOf(socket.pushed!.snapshot).map((e) => e.ticketId)).toEqual(["01"]);
     const pushes = () => socket.frames.filter((f) => f.type === "snapshot" || f.type === "delta").length;
     const quiet = pushes();
-    // Two and a half watch intervals.
     await Bun.sleep(5_000);
     await socket.sync();
     expect(pushes()).toBe(quiet);
@@ -627,7 +596,6 @@ conformance(
     expect(landed.phase).toBe("running");
     expect(landed.state.interrupts).toEqual([]);
 
-    // Landed, then idle: no further push.
     await Bun.sleep(300);
     await socket.sync();
     quiet = pushes();

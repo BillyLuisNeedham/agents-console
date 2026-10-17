@@ -192,7 +192,6 @@ fn hold_watch_emitted(session: &mut Session, hold: &[String]) {
                             }
                             let derived = crate::merges::merge_hold(s);
                             if s.hold_watch.changed(&derived) {
-                                // A merge done by hand may let a waiting Ticket start.
                                 let phase = s.current_phase();
                                 emit_snapshot(s, phase);
                                 let _ = s.wake();

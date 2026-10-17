@@ -35,13 +35,11 @@ import {
   writeEvents,
 } from "./herdr-panes-support.ts";
 
-/** A terminal-backed claude spawn's payload for Ticket `01` in its worktree, in pane `paneId` and tab `tabId`. */
 function inPane(world: World, paneId: string, tabId: string): Record<string, unknown> {
   const { path, branch } = ticketWorktree(world.repo, "01");
   return { argv: ["claude"], cwd: path, branch, harness: "claude", model: "m", pane_id: paneId, tab_id: tabId };
 }
 
-/** Where the fake lists the panes `inPane` names. */
 function worktreeOf01(world: World): string {
   return ticketWorktree(world.repo, "01").path;
 }

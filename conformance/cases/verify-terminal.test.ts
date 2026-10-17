@@ -207,7 +207,6 @@ conformance(
     const enlisted = await server.http.post("/api/enlist", { becomes: "ticket", paneId: "pane-main", title: "Talk", spec: "" });
     expect(enlisted.status).toBe(201);
     writeFileSync(join(world.pool, "runs", "enlist-1.outcome.json"), JSON.stringify(CHECKPOINT));
-    // The pane survey runs every 15 s.
     await until(
       async () => ticketOf(await snapshot(server), "enlist-1").heldPane,
       (pane) => pane !== null,
@@ -223,8 +222,6 @@ conformance(
     expect(paused.state.interrupts.find((i) => i.ticketId === "01")?.candidates).toEqual([2]);
     const moved = world.git(["branch", "--show-current"]).trim();
 
-    // The enlist moved merges off the pool checkout, so the Adopt's merge
-    // has nothing to wait for while enlist-1 talks there.
     await answer(server, { ticketId: "01", note: "the finished one", action: "adopt", attempt: 2 });
     const done = await until(
       () => snapshot(server),

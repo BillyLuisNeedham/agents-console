@@ -1,8 +1,3 @@
-//! Merges (engine.ts 749-890, 5887-6560, 11616-11732): the Merge hold over the engine's git probe, the
-//! merge target and its checkout, the Ticket file reconcile at merge, `mergeTicket`, the merge chain
-//! every merge into the target runs on, the failed-merge records and Interrupts, resuming a conflicted
-//! merge, and the merge resolver with its approval.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -83,9 +78,6 @@ impl MergeHoldProbe for EngineHoldProbe<'_> {
     }
 }
 
-/// `mergeHold`: the ids of done tickets whose branch has not landed in the merge target, derived on
-/// demand and never persisted: the Merge queue's tickets, and the branch reading of a blocker's
-/// merged-ness (ADR-0040). A git-less pool holds nothing; engine-run tickets never hold.
 pub fn merge_hold(session: &mut Session) -> Vec<String> {
     if !session.git {
         return Vec::new();
@@ -373,9 +365,6 @@ pub fn remove_merge_worktree(session: &Session, marker: &TicketMarker, worktree:
     git::remove_worktree(&session.cwd, worktree);
 }
 
-/// Run `job` as one link of the session's merge chain, once every merge chained before it is done: the
-/// way a verify decision that merges waits its turn behind the Ticket merges (ADR-0040). Its result
-/// comes back to the caller; the chain itself never fails.
 pub async fn in_merge_chain<T: Send + 'static>(
     engine: &Engine,
     job: impl FnOnce(&mut Session) -> anyhow::Result<T> + Send + 'static,
@@ -394,15 +383,6 @@ pub async fn in_merge_chain<T: Send + 'static>(
         .map_err(|_| anyhow::anyhow!("the merge chain dropped a link"))??
 }
 
-/// `mergeDoneTicket`: chain a done Ticket's merge onto the session's merge chain, the only queue
-/// merges into the target wait in, so two git merges never run at once on the pool checkout. Its place
-/// in the Merge queue is the moment it joins. Inside its link the merge passes the pool checkout's gate
-/// (ADR-0027), takes the target's tip for the done-Notice's range, and either lands (the merged event,
-/// the tab closed, the Conversation told, the pool log) or goes to the resolver machinery, which also
-/// runs inside the link, so nothing else lands while a resolver works. `what` words the pool log line
-/// for an Attempt that ended off the drive ("adopted attempt"), `None` for one the drive launched. The
-/// link ends in [`crate::restart::finish_adopted_finalize`], which wakes the drive; a link that fails
-/// leaves its error for the next Tick.
 pub fn chain_ticket_merge(
     session: &mut Session,
     marker: TicketMarker,
@@ -426,8 +406,6 @@ pub fn chain_ticket_merge(
     });
 }
 
-/// Chain `work` onto the session's merge chain: it starts once every link before it is done, and the
-/// next link waits for it.
 pub fn chain_link(
     session: &mut Session,
     work: impl std::future::Future<Output = ()> + Send + 'static,
@@ -459,8 +437,6 @@ async fn merge_link(
     let (merge_marker, merge_worktree) = (marker.clone(), worktree);
     let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
         let (marker, worktree) = (merge_marker, merge_worktree);
-        // Taken inside the chain, right before the merge: the target may have moved since the attempt
-        // ended, and merge_ticket removes the branch on success.
         let before_sha = merge_target_sha(s);
         let merge = merge_ticket(s, &marker, &worktree)?;
         if !merge.ok {

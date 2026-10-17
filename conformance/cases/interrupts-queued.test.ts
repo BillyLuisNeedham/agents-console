@@ -1,24 +1,3 @@
-/**
- * Queued answers and the accept/process split (ADR-0004, as ADR-0040 amends
- * it), seen from outside the server (ADR-0036): an answer is accepted at once
- * (202, its `answered` event and its record in runs/queued-answers.json) and
- * processed at the next Tick, which runs at once unless a job is mid-flight.
- * So an answer given while another Ticket runs relaunches its Ticket beside
- * it, the answers processed in submission order and made durable; the 202
- * given while the drive runs carries the answer as a Queued answer; a retried
- * answer is acknowledged without a second record; and records a stopped
- * server left unprocessed are drained by the next server's first Tick, in
- * their order. Ticket C08 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * A sibling is kept running by a Ticket whose stub is held open
- * (`world.stubs.hold`) until the case releases it; a held stub waits as long
- * as the case needs, where `waitFor` gives up after ten seconds. A Queued
- * answer lasts one Tick, so how long one is seen waiting is not observable
- * and no case here asserts it.
- */
-
 import { expect } from "bun:test";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -80,18 +59,15 @@ async function untilLaunched(
   return until(() => snapshot(server), also, { what, ms: 30_000 });
 }
 
-/** Whether a Ticket's held sibling is still running: launched, with no `exited` event. */
 const stillRunning = (world: World, id: string): boolean =>
   launches(world).includes(id) && !eventKinds(world, id).includes("exited");
 
-/** Wait until `id` has launched `n` times. */
 const untilLaunchedTimes = (world: World, id: string, n: number): Promise<string[]> =>
   until(() => launches(world), (got) => got.filter((key) => key === id).length === n, {
     what: `${id} to launch ${n} times`,
     ms: 30_000,
   });
 
-/** An `answered` event appended as acceptance appends one: on the Ticket's latest attempt. */
 function appendAnswered(world: World, id: string, payload: Record<string, unknown>): void {
   const attempt = Math.max(0, ...readEvents(world.pool, id).map((event) => event.attempt));
   const event = { at: new Date().toISOString(), attempt, kind: "answered", payload };
@@ -185,8 +161,6 @@ conformance(
     );
     expect(answeredRow).toBeDefined();
     expect(answeredRow!.interrupts).toEqual([]);
-    // A drained answer puts its Ticket back to ready, and the Tick's launch
-    // moves it on; which of the two a row catches depends on the Tick.
     expect(["ready", "in-progress"]).toContain(answeredRow!.tickets["01"]!);
     expect(["ready", "in-progress"]).toContain(answeredRow!.tickets["02"]!);
 
@@ -198,7 +172,6 @@ conformance(
   },
 );
 
-// engine/engine.test.ts:12897 and 12422, with the uncovered behaviour of engine/server.ts:1943.
 conformance(
   "interrupts",
   "an answer given while a sibling runs comes back in its 202 as a Queued answer, then is processed while the sibling still runs",
@@ -314,8 +287,6 @@ conformance(
   },
 );
 
-// Uncovered behaviour: engine/queued-answers.ts, the drain's order. A record
-// lasts one Tick, so its order is seeded on disk with no server running.
 conformance(
   "interrupts",
   "Queued answers a stopped server left unprocessed are drained by the next server's first Tick, in submission order",

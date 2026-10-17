@@ -629,7 +629,6 @@ conformance("attempts", "a pool outside git records its own directory, a null br
 conformance("attempts", "a spawn env equal to the server's own records no env delta", async (t) => {
   const world = t.world({ tickets: [ready("01")], config: { defaults: { harness: "claude", model: "m" } } });
   const worktree = join(world.repo, ".git", "pool-worktrees", poolKey(world.repo), "01");
-  // Launched with PWD already the worktree the Ticket will run in.
   await t.start(world, { env: { PWD: worktree } });
   await until(() => readStateLine(world.pool, "01-t.md"), (m) => m.status === "done", { what: "01 done" });
   const spawned = eventsOf(world, "01", "spawned")[0]!;
@@ -655,7 +654,6 @@ conformance("attempts", "each worktree attempt gets PWD set to its own worktree,
   const path = join(world.stubs.bin, "opencode");
   writeFileSync(path, recorder);
   chmodSync(path, 0o755);
-  // The server's own PWD is the checkout, which no attempt runs in.
   await t.start(world, { env: { PWD: world.repo } });
   for (const id of ["01", "02"]) {
     await until(() => readStateLine(world.pool, `${id}-t.md`), (m) => m.status === "done", { what: `${id} done` });

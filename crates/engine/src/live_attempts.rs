@@ -59,9 +59,6 @@ pub struct LiveAttempts {
 }
 
 impl LiveAttempts {
-    /// `createLiveAttempts(onChange)`: an empty registry whose changes run `on_change`, so the engine
-    /// can emit a snapshot the moment a pane becomes reachable or stops being so, instead of at the
-    /// next Tick.
     pub fn new(on_change: Option<LiveChangeHook>) -> Self {
         LiveAttempts {
             on_change,

@@ -805,7 +805,6 @@ conformance(
   async (t) => {
     const { server, id } = await stewardAtCheckpoint(
       t,
-      // 02 gets no Outcome, so its Attempt stays at work.
       { "01": [checkpoint("ask me")] },
       {
         tickets: [

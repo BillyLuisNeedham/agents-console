@@ -30,10 +30,6 @@ async function snapshotUntil(leg: Leg<unknown>, done: (snapshot: EnrichedSnapsho
   return answer.json<State>().snapshot!;
 }
 
-/**
- * The pending Interrupts as `<ticket id>:<kind>`, sorted: Attempts running
- * side by side end in whatever order they race to.
- */
 function interrupts(snapshot: EnrichedSnapshot): string[] {
   return snapshot.state.interrupts.map((interrupt) => `${interrupt.ticketId}:${interrupt.kind}`).sort();
 }
@@ -124,8 +120,6 @@ takeover<StubHold>("restart", "a terminal-backed Attempt live in its pane is re-
       join(leg.world.pool, "runs", "01.outcome.json"),
       JSON.stringify({ status: "done", summary: "worked in the pane", commitSha: null }),
     );
-    // The merge closes 01's tab before the Review, which takes the held
-    // stub with it: nothing is left to release.
     await snapshotUntil(leg, quiescentWith("REVIEW:review"), "the run's Review");
   },
   takeover: {
@@ -208,8 +202,6 @@ takeover<StubHold>("restart", "an answered Interrupt and a pending one survive a
   prepare(world) {
     world.stubs.script("01", { statuses: ["checkpoint", "done"], brief: "brief-01" });
     world.stubs.script("03", { statuses: ["checkpoint", "done"], brief: "brief-03" });
-    // 02 stays in flight while the answer to 01 is processed beside it. A
-    // Queued answer lasts one Tick, so no stop point can catch one waiting.
     return world.stubs.hold("02");
   },
   async reach(leg) {
@@ -234,8 +226,6 @@ takeover<StubHold>("restart", "an answered Interrupt and a pending one survive a
       );
       return;
     }
-    // The stop killed 02's Attempt, so the boot puts 02 back to ready and
-    // runs it again; 01's answer is never processed twice, and 03 is left.
     await releaseWhenHeld(leg, "02");
     await snapshotUntil(
       leg,
@@ -269,8 +259,6 @@ function settled(snapshot: EnrichedSnapshot): boolean {
 }
 
 const FOLLOW_UPS = [
-  // Blocked by 02, so it lands and waits while 02 is in flight: every path
-  // runs it after 02's merge.
   { title: "Follow up first", body: "Carry the first thread on once the second Ticket is in.", blockedBy: ["02"] },
   { title: "Follow up second", body: "Carry the second thread on, past the per-attempt cap." },
 ];
@@ -284,9 +272,6 @@ takeover<StubHold>("restart", "a landed spawn waits on its blocker and a Held sp
     config: { ...DEFAULTS, spawnCaps: { perAttempt: 1 } },
   },
   prepare(world) {
-    // One proposal fits the per-attempt cap and lands at the next Tick; the
-    // other is held. A Pending spawn lasts one Tick, so no stop point can
-    // catch one waiting.
     world.stubs.script("01", { spawn: FOLLOW_UPS });
     return world.stubs.hold("02");
   },
@@ -307,8 +292,6 @@ takeover<StubHold>("restart", "a landed spawn waits on its blocker and a Held sp
       );
       return;
     }
-    // The boot puts 02 back to ready and runs it again, and the landed spawn
-    // after it; the Held spawn waits for the operator.
     await releaseWhenHeld(leg, "02");
     await snapshotUntil(
       leg,
@@ -337,11 +320,7 @@ takeover<StubHold>("restart", "a landed spawn waits on its blocker and a Held sp
     );
   },
   takeover: {
-    // A run is one boot, and the per-run count is of Spawns landed since it:
-    // the first leg landed one, and no later boot lands any before the Adopt.
     atStop: (before, takeovers) => (takeovers === 1 ? null : before),
-    // Uninterrupted, both Spawns land in the one run; taken over, the last
-    // leg lands only the Adopted one.
     atEnd: (seen) =>
       withSnapshot(rerunAfterStop(seen, "02", "02-second.md"), (snapshot) => {
         expect(snapshot.spawnUsage.spawnedThisRun).toBe(2);
@@ -359,7 +338,6 @@ function commitIn(leg: Leg<unknown>, id: string, text: string): void {
   leg.world.git(["-C", launch.cwd, "commit", "-qm", `${id} edits shared.txt`]);
 }
 
-/** Ticket 02 done, its merge conflicting and waiting on the operator, its dependent 03 waiting behind it. */
 function heldBehind02(snapshot: EnrichedSnapshot): boolean {
   const second = ticketIn(snapshot, "02");
   return (

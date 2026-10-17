@@ -151,7 +151,6 @@ conformance("attempts", "a missing, unparseable or statusless Outcome is a crash
     { what: "three crash Interrupts" },
   );
   const runs = join(world.pool, "runs");
-  // Each Interrupt is raised at its Attempt's exit, so their order is exit order, not Ticket order.
   expectParsedEqual(
     [...state.state.interrupts].sort((a, b) => a.ticketId.localeCompare(b.ticketId)),
     Object.entries(reasons).map(([id, [reason, exists]]) => ({
@@ -292,7 +291,6 @@ conformance("attempts", "a resolver Attempt records its spawn and nothing after 
         "approve to commit it and continue, or reject to resolve by hand.",
     },
   ], "the Interrupts");
-  // The Interrupt is raised once the resolver has spawned, so this is all the log will hold.
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), resolverEvents(world, key), "runs/01.events.jsonl");
 });
 
@@ -325,7 +323,6 @@ conformance("attempts", "a resolver that exits non-zero is named as the crash's 
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), resolverEvents(world, key), "runs/01.events.jsonl");
 });
 
-/** The spawned event of a terminal-backed launch that fell back to headless, in the worktree whose trust claude's absent config left unseeded. */
 function fallbackSpawned(world: World, terminalError: string): unknown {
   const { path: worktree, branch } = ticketWorktree(world.repo, "01");
   return {

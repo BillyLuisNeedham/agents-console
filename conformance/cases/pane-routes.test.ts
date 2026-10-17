@@ -32,15 +32,6 @@ interface Held {
   outcome?: { path: string; json: unknown };
 }
 
-/**
- * Put a gate in front of a stub binary: each launch is keyed by the base name
- * of its working directory (a Ticket's worktree is named for its id; a
- * Ticket outside git runs in the pool directory; `any` matches the rest),
- * may write an Outcome and may wait for a release file before the stub proper runs. The
- * stub's own `waitFor` gives up after ten seconds; this gate holds until the
- * case releases it or its world is deleted, so a terminal-backed attempt
- * stays live for as long as a case needs it.
- */
 function gate(world: World, rules: Record<string, Held>, binary = "claude"): { release(key: string): void } {
   const held = join(world.root, "held");
   mkdirSync(held, { recursive: true });
@@ -351,9 +342,6 @@ conformance(
       ],
       config: { defaults: CLAUDE_DEFAULTS, terminal: "herdr" },
     });
-    // Three ready Tickets run in worktrees named for their ids. 01 writes a
-    // done Outcome and finishes on its own; 02 and 03 are held open, so the
-    // later emits, once 01 has merged, must still carry their panes.
     gate(world, {
       "01": {
         outcome: {

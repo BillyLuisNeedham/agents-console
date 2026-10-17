@@ -1,10 +1,3 @@
-//! Spawns (ADR-0010, ADR-0029, issue #150; engine.ts 10699-11616): Spawn counters, taking proposals,
-//! adoption at a Tick, the Spawn ledger refresh, and Held and Pending spawns.
-//!
-//! Every function here is the synchronous TypeScript segment it was: a plain function over the Session,
-//! called inside one actor job. Landing a Conversation Spawn is the one start that outlives its job: it
-//! is a task, as the TypeScript's un-awaited `conversations.start`.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -162,10 +155,6 @@ fn join(ids: &[&String]) -> String {
         .join(", ")
 }
 
-// `spawnProposalProblem`: why a proposal cannot be adopted into the pool as it stands, or `None` when
-// it can: a blockedBy naming a Conversation or an id outside the pool, or an assign.harness the pool
-// does not know. A Tick's adoption drops a proposal on this reason, and an operator's Adopt of a
-// Held spawn is refused on it before anything is queued.
 fn spawn_proposal_problem(
     session: &Session,
     proposal: &SpawnProposal,
@@ -266,14 +255,6 @@ fn spawn_proposal_problem(
     None
 }
 
-// `applySpawnBlocks`: a just-adopted Spawn's blocks (ADR-0029), onto the pool: the Spawn joins each
-// target's blocked-by, through the same marker write the Enlist form's Blocks uses, with the in-memory
-// marker kept in step for the eligibility this Tick computes next. "all" is every ticket not yet
-// started (ready) as the adoption lands, sibling Spawns included, excluding the Spawn itself,
-// everything it waits on, and engine-run tickets. A ticket already running is never a target and never
-// interrupted. Named targets were checked at validation; one an earlier Spawn of the same Tick
-// made a cycle of, or that the file refuses, is skipped with a log line rather than written. Returns
-// the tickets actually blocked.
 fn apply_spawn_blocks(
     session: &mut Session,
     spawn_id: &str,
@@ -366,18 +347,6 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// `takeSpawnProposals` (issue #150, on ADR-0010 and ADR-0029): the moment an Outcome becomes its
-/// ticket's, or a Conversation's spawn.json is read, each proposal is checked against the pool as it
-/// stands and settled on disk before anything else happens, so a restart before a Tick finds
-/// every one of them. A proposal the pool would reject is dropped with the reason on the parent's log
-/// (a spawn-rejected event), the parent's own result standing. One the agent marked as overlapping work
-/// in the pool is held for the operator, whatever ids the mark names. The rest meet the caps: the
-/// per-attempt cap takes the first ones in order, and the per-run cap, for a Ticket's own
-/// outcome.spawn only (a Conversation's spawn.json has none), takes what the run has room for once
-/// this run's landed Spawns and the Pending spawns already reserving room are counted. What a cap
-/// cannot take is held, in its place in the proposal's order; what it takes is a Pending spawn,
-/// landing at the next Tick unless the operator holds or discards it first. A cap of 0 holds
-/// everything.
 pub fn take_spawn_proposals(
     session: &mut Session,
     parent_id: &str,
@@ -565,9 +534,6 @@ pub fn take_spawn_proposals(
     Ok((pending, held))
 }
 
-// `heldEventEntry`: one held spawn as a spawn-held event names it: its id, title and reason, the ids
-// an overlaps hold named (and which of them the pool never knew), and why a Tick refused to land
-// a "refused" one.
 fn held_event_entry(held: &HeldSpawn) -> Value {
     let mut entry = Map::new();
     entry.insert("id".into(), json!(held.id));
@@ -590,14 +556,6 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
     Value::Object(entry)
 }
 
-// `landSpawn`: landing one proposal under its minted id: a Conversation started, or a ticket file
-// written (true, so the caller reloads the pool's markers).
-//
-// A Conversation start is a task, as the TypeScript's fire-and-forget `start`: it opens a herdr tab
-// and waits for the TUI, and this Tick is synchronous by ADR-0010's own contract. A launch failure
-// is logged on the proposing parent, the same disposition a malformed proposal gets. The id is
-// reserved with the Conversation module at once, so a second adoption before the record reaches disk
-// cannot mint it again; the start gives it back once it resolves, refused or launched.
 fn land_spawn(
     session: &mut Session,
     parent_id: &str,
@@ -659,23 +617,6 @@ struct Settled {
     at: String,
 }
 
-/// `adoptSpawnProposals`: a Tick's spawn landing (ADR-0010, extended by the Conversations ADR,
-/// ADR-0029 and issue #150): every Pending spawn, and every Held spawn the operator has adopted since,
-/// is checked again against the pool as a Tick found it, and the ones that pass are written as
-/// ordinary ticket files or started as Conversations, after which the pool's markers and assignments
-/// reload so the drive loop schedules the ticket ones like any other. Every aspect of that stays per
-/// proposal, never per batch.
-///
-/// The caps were met when each proposal was taken (`take_spawn_proposals`): a Pending spawn lands on
-/// the room it reserved, and an adopted Held spawn passes both caps, the Adopt being the decision the
-/// caps exist to ask for. A Pending spawn the pool can no longer take (a blocks target finished after
-/// it was taken) is held for "refused" instead, the reason on it, so the operator sees why and
-/// decides. A held one's Adopt is refused the same way: it stays held with the reason on it
-/// (ADR-0029).
-///
-/// Writing the files is the commit point. The Pending spawns' landing ids go on disk first, so a crash
-/// after a ticket file but before its Pending spawn is forgotten is settled at the next start
-/// (`settle_landing_spawns`) instead of landing it twice.
 pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     let pending: Vec<PendingSpawn> = session.spawn_proposals.pending().to_vec();
     let adopting: Vec<HeldSpawn> = session
@@ -687,8 +628,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     if pending.is_empty() && adopting.is_empty() {
         return Ok(());
     }
-    // Membership validates against the markers as a Tick found them, so a proposal naming
-    // another proposal's future id drops as unknown: the agent never proposes ids and cannot know one.
     let known = known_pool_ids(session)?;
     let mut counters = combined_spawn_counters(session)?;
     let mut log: Vec<String> = Vec::new();
@@ -851,8 +790,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
             },
         );
     }
-    // Blocks land once every Spawn of this Tick is in the pool, so "all" reaches a sibling adopted
-    // alongside, whichever order they came in.
     let mut blocked: Vec<(String, BlockedSpawns)> = Vec::new();
     for (parent_id, spawn_id, blocks) in &blocking {
         let targets = apply_spawn_blocks(session, spawn_id, blocks, &mut log)?;
@@ -914,11 +851,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `settleLandingSpawns`: a crash between a Pending spawn's landing mark and its forgetting
-/// (`adopt_spawn_proposals`) leaves it pending with the id it was landing under. At boot the pool says
-/// which way it went: a ticket (or Conversation) under that id landed, and the Pending spawn is
-/// forgotten with its spawn-adopted event; otherwise the mark is cleared and it lands at the next
-/// Tick, as it would have.
 pub fn settle_landing_spawns(session: &mut Session) -> anyhow::Result<()> {
     let mut log: Vec<String> = Vec::new();
     let conversations = known_conversation_ids(Path::new(&session.pool_dir))?;
@@ -936,8 +868,6 @@ pub fn settle_landing_spawns(session: &mut Session) -> anyhow::Result<()> {
         session
             .spawn_proposals
             .landed(std::slice::from_ref(&entry.id))?;
-        // The crash may have come before the landing's blocks: they go on again, the way a Tick
-        // puts them on, and a target that already waits on the Spawn is left as it is.
         let blocked = match &entry.proposal.blocks {
             Some(blocks) => apply_spawn_blocks(session, &landing, blocks, &mut log)?,
             None => Vec::new(),
@@ -1021,8 +951,6 @@ pub fn refresh_spawn_ledger_from_last(session: &mut Session) {
     refresh_spawn_ledger(session, &conversations);
 }
 
-/// `spawnsAwaitBoundary`: Pending spawns, and Held spawns an Adopt has queued, wait for a Tick to
-/// land them. A drive that closes with any leaves the next drive to land them.
 pub fn spawns_await_tick(session: &Session) -> bool {
     !session.spawn_proposals.pending().is_empty() || !session.spawn_proposals.adopting().is_empty()
 }
@@ -1037,15 +965,6 @@ fn emit_current(session: &mut Session) {
     emit_snapshot(session, phase);
 }
 
-/// `adoptHeldSpawn`: the operator's Adopt of a Held spawn (ADR-0029). It is refused up front, the
-/// spawn staying held, when the pool as it stands would reject the proposal (a blocker gone from the
-/// pool, a harness no longer known) or when the pool has finished and its store is closed, since the
-/// drive that would schedule the new ticket could not record it; a Restart reopens the pool with the
-/// spawn still held. Otherwise it queues for a Tick, past the caps: at once when the engine is
-/// idle, the way a Conversation's spawn.json is adopted, and at the next Tick when a drive is in
-/// flight. A Tick that finds the pool has moved since and refuses it leaves it held with the
-/// reason (adoptError), which the next Adopt clears. An overlaps mark is not checked again: the Adopt
-/// is the operator's answer to it.
 pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
     let Some(held) = session.spawn_proposals.get_held(id).cloned() else {
         return Err(refused(format!("no held spawn {id}")));
@@ -1073,9 +992,6 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
     session.wake().map_err(|e| refused(e.to_string()))
 }
 
-/// `discardHeldSpawn`: the operator's Discard of a Held spawn (ADR-0029): gone for good, the discard
-/// on the parent's log. One an Adopt has already queued is past discarding: a Tick is about to
-/// write it.
 pub fn discard_held_spawn(
     session: &mut Session,
     id: &str,
@@ -1122,9 +1038,6 @@ pub fn discard_held_spawn(
     Ok(())
 }
 
-// Why a Pending spawn cannot be held or discarded: it is not pending. A Tick lands pending
-// spawns synchronously, so an operator's action that arrives after it finds the spawn gone rather
-// than half landed.
 fn not_pending(session: &Session, id: &str) -> EngineError {
     refused(if session.spawn_proposals.get_held(id).is_some() {
         format!("spawn {id} is already held")
@@ -1133,9 +1046,6 @@ fn not_pending(session: &Session, id: &str) -> EngineError {
     })
 }
 
-/// `holdPendingSpawn`: the operator's Hold of a Pending spawn (issue #150): kept back from the
-/// Tick as a Held spawn, held by the operator, under the same id, so the Spawn ledger's name for
-/// it still holds. Its run room is free again until an Adopt lands it.
 pub fn hold_pending_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
     if session.spawn_proposals.get_pending(id).is_none() {
         return Err(not_pending(session, id));

@@ -1,9 +1,3 @@
-/**
- * Spawn adoption past the first Tick: held Adopts refused and landed,
- * caps from config, blocks, grandchildren, graders and head-to-head, crashed
- * and checkpoint attempts.
- */
-
 import { expect } from "bun:test";
 import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -72,9 +66,6 @@ conformance("spawns", "refuses an Adopt whose blocks names a done ticket, and ke
   expect(restarted.heldSpawns.map((h) => h.id)).toEqual(["proposal-2"]);
 });
 
-// The Adopt lands at the Tick it wakes, while 02 still runs. ADR-0040 holds
-// such a proposal with the reason `started`; until that lands (slice 2) the
-// engine adds the blocker under the running Ticket, which is not interrupted.
 conformance("spawns", "lands an Adopt whose blocks names a running ticket at the next Tick", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", "01")],

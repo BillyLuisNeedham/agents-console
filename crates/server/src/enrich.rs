@@ -49,8 +49,6 @@ pub fn enrich(
     meta: &[TicketMarker],
     pool_name: &str,
     pool_dir: &str,
-    // One row per ticket, resolved from the config file rather than from the engine's session, so a
-    // save shows on the card before a Tick that will apply it (issue #126).
     reassign: &IndexMap<String, TicketReassignEntry>,
     // The Pool title from the config file as it stands now (issue #100).
     pool_title: Option<String>,

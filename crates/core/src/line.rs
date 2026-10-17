@@ -187,9 +187,6 @@ pub fn overlay_factory(base: &mut ResolvedFactory, layer: &FactorySettings) {
     take(&mut base.finish, layer.finish.as_ref());
 }
 
-/// The two settings layers under a Line brief: the Machine defaults' `factory` and the Pool settings'.
-/// The engine reads both afresh at each Tick (ADR-0018), so a change reaches the next
-/// Station Ticket it writes and never one already written.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FactoryLayers {
     pub machine: Option<FactorySettings>,

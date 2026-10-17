@@ -103,9 +103,7 @@ conformance(
   "herdr",
   "finished terminals › counts the tabs herdr still lists whose panes nothing is using",
   async (t) => {
-    // Five independent Tickets launch together, each in a tab of its own.
-    // A TUI that quits leaves its shell, as a real herdr pane does, so a crashed
-    // attempt's tab stays listed.
+    // A real herdr pane keeps its shell after the TUI in it quits.
     const { world, tui } = terminalWorld(t, {
       tickets: ["01", "02", "03", "04", "05"].map((id) => readyTicket(id, `Tab ${id}`)),
     });
@@ -113,8 +111,6 @@ conformance(
     const server = await t.start(world, { herdr });
     await Promise.all(["01", "02", "03", "04", "05"].map((id) => awaitPrompt(herdr, id, { ms: 60_000 })));
 
-    // 01, 04 and 05 crash: each TUI quits with no Outcome. Their crash
-    // Interrupts are raised at once, while 02 is still live.
     for (const id of ["01", "04", "05"]) quitTui(world, tui, id, 1);
     await untilSnapshot(
       server,
@@ -142,8 +138,6 @@ conformance(
   "herdr",
   "finished terminals › never counts a tab someone enlisted from, whoever opened it (review item 2)",
   async (t) => {
-    // A done Ticket's merge closes its tab, so the still-open tab is written
-    // to disk beforehand instead.
     const world = bootWorld(t, { tickets: [ticketAt("01", "done")] });
     writeEvents(world, "01", [
       event(1, "spawned", { argv: ["claude"], cwd: world.repo, pane_id: "p1", tab_id: "t1" }),
@@ -332,9 +326,7 @@ conformance(
   "herdr",
   "the bulk close closes a done Ticket's tab left over a bare shell, records it and says so",
   async (t) => {
-    // The TUI quits after its Outcome and the pane keeps its shell, as a
-    // real herdr pane does: a Finished terminal all the same. A pool outside
-    // git merges nothing, so the done Ticket's tab is not closed at a merge.
+    // A real herdr pane keeps its shell after the TUI in it quits.
     const { world, tui } = terminalWorld(t, { git: false, tickets: [readyTicket("01", "Done and quit")] });
     const herdr = await fakeHerdr(t, world, { holdPane: true });
     const server = await t.start(world, { herdr });

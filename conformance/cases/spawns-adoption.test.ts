@@ -1,9 +1,3 @@
-/**
- * Adopting Spawn proposals at the Tick after their Outcome (ADR-0010, ADR-0029, ADR-0040):
- * the Ticket files written, the Assignment a proposal requests, rejections,
- * and the Spawn caps.
- */
-
 import { expect } from "bun:test";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
@@ -76,7 +70,6 @@ conformance(
       "01-spawn-2's state line",
     );
     expect(readTicketFile(world.pool, "01-spawn-1.md")).toContain("# 01-spawn-1: After two");
-    // Both ran as ordinary Tickets, each in its own worktree, merged after it.
     for (const id of ["01-spawn-1", "01-spawn-2"]) {
       expect(eventKinds(world, id)).toEqual(["scheduled", "spawned", "exited", "merged"]);
     }
@@ -262,8 +255,6 @@ conformance("spawns", "holds what the per-run cap of twenty has no room for acro
 
   const done = await runAndApprove(server, 45_000);
 
-  // Twenty files land, five per parent for whichever four parents' proposals
-  // landed first; the fifth finds no room left in the run cap.
   const files = parents.flatMap((id) => [1, 2, 3, 4, 5, 6, 7].map((n) => `${id}-spawn-${n}.md`));
   expect(files.filter((file) => hasTicket(world, file))).toHaveLength(20);
   // Which parent found the run full is racy; that exactly one did, with

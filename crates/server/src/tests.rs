@@ -512,7 +512,12 @@ async fn reassigns_from_the_file_and_answers_with_the_fresh_snapshot() {
 #[tokio::test]
 async fn wakes_the_drive_for_a_reassign_that_applied_and_not_for_one_refused() {
     let rig = rig(RigOptions::default()).await;
-    let wakes = || async { rig.engine().call(|session| session.wakes).await.unwrap() };
+    let wakes = || async {
+        rig.engine()
+            .call(|session| session.wakes.rung())
+            .await
+            .unwrap()
+    };
     let before = wakes().await;
     let (status, _) = rig
         .json(

@@ -50,8 +50,6 @@ pub async fn child_exited(mut exited: watch::Receiver<bool>) {
 #[derive(Debug, Default)]
 pub struct ChildTracker {
     live: Vec<TrackedChild>,
-    /// True once a shutdown has begun. A child that lands after this is stopped on arrival, so a
-    /// launch mid-spawn cannot fork past the shutdown.
     pub stopping: bool,
 }
 

@@ -48,7 +48,6 @@ pub use crate::snapshot::PoolState;
 /// it on the review card.
 pub const REVIEW_TICKET_ID: &str = "REVIEW";
 
-/// The persistence interrupt is run-level too: raised when the checkpoint store keeps failing.
 pub const PERSISTENCE_TICKET_ID: &str = "PERSISTENCE";
 
 /// One change to the pool state (engine.ts `PoolUpdate`). Tickets and outcomes merge by key, the log
@@ -60,8 +59,6 @@ pub struct PoolUpdate {
     pub outcomes: Option<IndexMap<String, Outcome>>,
     pub interrupts: Option<Vec<Interrupt>>,
     pub review_approved: Option<bool>,
-    /// The sanctioned way to replace the assignment slice of the live config (ADR-0018), at a Tick
-    /// only.
     pub config: Option<ac_core::config::PoolConfig>,
 }
 
@@ -157,26 +154,16 @@ pub struct Session {
     pub store: Box<dyn CheckpointStore>,
     pub store_open: bool,
     pub answers: QueuedAnswerStore,
-    /// True while a drive loop is in flight, waiting for a wake included.
     pub driving: bool,
-    /// The drive's wake (ADR-0040): a permit `notify_one` stores is never lost between a Tick and the
-    /// wait after it.
+    /// `notify_one` stores a permit when no task waits, so a wake between a Tick and the wait after it
+    /// is not lost.
     pub wake: Arc<Notify>,
-    /// Every wake so far, and the count the last Tick saw at its end: a drive that closes with the two
-    /// apart starts the next, so no wake is lost to a closing drive.
-    pub wakes: u64,
-    pub wakes_seen: u64,
-    /// The Candidates of each verify Ticket's current round, by Ticket id.
+    pub wakes: Wakes,
     pub verify_groups: HashMap<String, VerifyGroup>,
-    /// Grading flows in flight (verify rounds and Continued grades), each until its decision is done.
     pub grading: usize,
-    /// The Ticket id of every Attempt the drive launched whose exit job has not run, once per Attempt.
     pub launched: Vec<String>,
-    /// What a flow off the drive's own task failed with; the next Tick dies of it.
     pub drive_failure: Option<String>,
-    /// The state the checkpoint store last took, so a Tick writes a row only when something changed.
     pub persisted: Option<serde_json::Value>,
-    /// The shutdown line is logged once.
     pub shutdown_noted: bool,
     pub settled_phase: Option<RunPhase>,
     pub settle_waiters: Vec<SettleWaiter>,
@@ -211,8 +198,6 @@ pub struct Session {
     pub merge_chain: MergeChain,
     /// The Merge queue's in-memory line.
     pub merge_line: MergeLine,
-    /// The raw console.json text last considered at a Tick (ADR-0018); `None` when no file was
-    /// there.
     pub last_config_text: Option<String>,
     pub jev: Jev,
     /// The pool-log subscription on the Jev port, released at close.
@@ -262,7 +247,6 @@ pub struct Session {
     pub steward_notes: StewardNotes,
     /// The Steward budget used per Ticket; only Tickets with some used are kept.
     pub steward_used: IndexMap<String, u64>,
-    /// Held spawns the Steward adopted, by id, waiting for the Tick that lands them.
     pub steward_adopts: HashMap<String, String>,
     /// The pool's Line (ADR-0037), as `line.json` holds it; `None` until Start the Line.
     pub line: Option<ac_protocol::LineState>,
@@ -285,6 +269,30 @@ pub struct SessionBase {
     pub herdr_socket: String,
     pub spawn_proposals: SpawnProposals,
     pub terminal_reconcile: watch::Receiver<bool>,
+}
+
+#[derive(Debug, Default)]
+pub struct Wakes {
+    rung: u64,
+    seen: u64,
+}
+
+impl Wakes {
+    pub fn ring(&mut self) {
+        self.rung += 1;
+    }
+
+    pub fn rung(&self) -> u64 {
+        self.rung
+    }
+
+    pub fn see_all(&mut self) {
+        self.seen = self.rung;
+    }
+
+    pub fn any_unseen(&self) -> bool {
+        self.rung != self.seen
+    }
 }
 
 impl Session {
@@ -313,8 +321,7 @@ impl Session {
             store_open: true,
             driving: false,
             wake: Arc::new(Notify::new()),
-            wakes: 0,
-            wakes_seen: 0,
+            wakes: Wakes::default(),
             verify_groups: HashMap::new(),
             grading: 0,
             launched: Vec::new(),

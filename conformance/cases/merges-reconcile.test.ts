@@ -1,23 +1,3 @@
-/**
- * Ticket file reconcile at merge (#92), seen from outside the server
- * (ADR-0036). The pool's Ticket file is the file of record; an Attempt in a
- * worktree gets a seed copy of it at the same path relative to the
- * worktree, and whatever the agent adds to either copy must be in the file
- * of record once its branch merges.
- *
- * The engine places the worktree copy at the Ticket file's path relative
- * to the pool directory, under the worktree's root. That lines up with the
- * committed file only when the pool directory is the checkout root and its
- * issues/ are tracked, the layout the original engine tests used. So these
- * cases run their pool at the world's repository root (not the usual
- * gitignored .scratch/pool), with issues/ and console.json committed on
- * main before the server starts.
- *
- * Every Ticket runs in its own worktree (ADR-0040), so each has a copy to
- * reconcile. Every case runs 02 beside 01, whose file of record must come
- * through its own merge untouched but for its status.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -245,8 +225,6 @@ conformance(
     const branch = ticketWorktree(world.repo, "01").branch;
     const server = await t.start(world, { pool: world.repo });
 
-    // Up to the Review gate no Interrupt but Review is ever raised: the file
-    // says it all, and the merge lands.
     const atReview = await untilState(
       server,
       (s) => s.state.interrupts.length > 0,

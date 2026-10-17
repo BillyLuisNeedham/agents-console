@@ -1,19 +1,3 @@
-/**
- * Merges git refuses before starting, seen from outside the server
- * (ADR-0036, issue #92): an untracked file in the pool checkout that a
- * Ticket's branch would write, or a tracked file with uncommitted changes
- * there. A byte-identical untracked copy is deleted and the merge lands; a
- * differing one blocks the merge without starting it, raises a manual
- * merge-conflict Interrupt and spawns no resolver; a merge git started and
- * could not finish stays a conflict. Also the Keep talking merges (ADR-0027):
- * a Continued attempt in a pane enlisted in the pool checkout is in no
- * merge's way, and one that ends done in a worktree merges onto the target.
- *
- * The pool lives at <repo>/.scratch/pool, so "the pool checkout" is the
- * world's repository checkout, world.repo. Every Ticket runs in its own
- * worktree and merges as its Attempt exits (ADR-0040).
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -428,12 +412,9 @@ conformance(
         spec: "",
       });
       expect(enlisted.status).toBe(201);
-      // The enlist moved the pool checkout onto a pool branch of its own, so
-      // main, the target, is merged into elsewhere from here on.
       const moved = ticketWorktree(world.repo, "enlist-1").branch;
       expect(gitIn(world.repo, ["branch", "--show-current"]).trim()).toBe(moved);
       writeOutcome(world, "enlist-1", CHECKPOINT);
-      // The pane survey runs every 15 s.
       await untilState(server, (s) => s.state.tickets.find((x) => x.id === "enlist-1")?.heldPane != null, {
         ms: 45_000,
         what: "enlist-1's Held pane",

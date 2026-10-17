@@ -1,14 +1,3 @@
-//! Pool settings (issue #121; pool-settings.ts): the slice of one Pool's console.json the Console's
-//! Settings pane edits, and the only writer of that file inside the server. The file stays the source
-//! of truth (ADR-0018), so editing it by hand and editing it from the pane are the same act.
-//!
-//! Two rules shape everything here. A write is a patch, never a replacement: `assign` belongs to the
-//! Tickets, and a key this module has never heard of belongs to whoever put it there, so both survive a
-//! save untouched. And only some of what the pane edits takes effect without a Restart: the assignment
-//! slice, the Spawn caps, the Steward entry and the Factory settings reload at the next Tick, the
-//! Pool title shows the moment it is saved, and BOOT_ONLY_KEYS is the rest, which the
-//! running process froze at boot and the Console badges as such.
-
 use ac_protocol::json::{True, Unchecked};
 use ac_protocol::{
     EffectiveSettings, FactorySettings, MachineDefaultsView, PoolSettingsView, RestartResponse,

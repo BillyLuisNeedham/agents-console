@@ -1,14 +1,3 @@
-/**
- * The Factory settings (issue #187, ADR-0037), seen from outside the server:
- * the `factory` block in the Machine defaults (the world's own HOME) and the
- * Pool settings (console.json), under the Line brief, each field falling
- * through on its own. The resolved Station settings reach the Ticket file the
- * engine writes and the harness it starts; Prove and Review switch off; a
- * change lands at the next Tick, on the next Station Ticket
- * written and never on one already written; and the settings routes read,
- * write and refuse the block at both levels.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -187,7 +176,6 @@ conformance("factory", "a Factory settings change lands at the next Tick: the ne
     defaults: { factory: { stations: { review: { drivers: "review-b" } } } },
   });
   expect(machine.status, machine.text).toBe(200);
-  // The save woke the drive, so it reloads while r1-implement still runs, which keeps its Assignment.
   const reloaded = await untilSnapshot(
     server,
     (s) => logLines(s, "config reloaded").length > 0,

@@ -242,8 +242,6 @@ restartCase("a checkpoint Interrupt is raised again from the engine-written Brie
     "<!-- state: id=01 blocked-by=none status=checkpoint -->\n\n# 01\n\nWork on 01.\n\n---\n\n## Brief\n\npick a name\n",
   );
 
-  // Killed before its checkpoint write, say: no stored checkpoint survives,
-  // but the state line and the Brief the engine landed are on disk.
   rmSync(join(world.pool, "console.db"), { force: true });
   const second = await startLeg(t, world, 1);
   const raised = await settle(second, "01's checkpoint raised again", quiescentWith("01:checkpoint"));
@@ -357,16 +355,12 @@ restartCase("a server killed while one Ticket runs leaves the other done, and th
     `ticket 02: marker was in-progress and attempt 1 (pid ${orphan}) is still running from the previous engine process; ` +
       "stopping it before scheduling, ticket back to ready",
   );
-  // 01 finished before the kill, and the next server has its Outcome as
-  // the first left it.
   expect(done.state.outcomes["01"]).toEqual({ status: "done", summary: "recovered-01", commitSha: "sha-01" });
 });
 
 // engine/engine.test.ts:7226
 restartCase("a pool whose drive died on a missing harness binary runs from disk on the next server", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a", { body: "# 01\n\nDo 01." })], config: CONFIG });
-  // No claude on the first server's PATH: the first launch fails and kills
-  // the drive.
   const path = world.env("").PATH!.split(":").filter((dir) => dir !== world.stubs.bin).join(":");
   if (Bun.which("claude", { PATH: path }) !== null) {
     throw new Error(`a claude outside the stubs is on ${path}; this case needs none`);
@@ -404,9 +398,6 @@ restartCase("a pool whose store kept refusing resumes from its state lines on th
   const lock = lockStore(t, world);
   await held.release();
   const stuck = await settle(first, "the persistence Interrupt", quiescentWith(`${PERSISTENCE}:persistence`));
-  // The Interrupt holds every launch once raised. It is raised when a
-  // Tick's write fails, after that Tick's launches, so 02 may have run in
-  // the Tick that first failed; 03, a Tick later, never does.
   const atStop = statusesOf(stuck);
   expect(atStop["01"]).toBe("done");
   expect(["ready", "done"]).toContain(atStop["02"]);
@@ -415,9 +406,6 @@ restartCase("a pool whose store kept refusing resumes from its state lines on th
   await first.stop();
   lock.release();
 
-  // The state lines were written before the store refused, so disk already
-  // says 01 is done, which no stored checkpoint does: restarting from disk
-  // is the way out.
   expect(diskStatuses(world)).toEqual(atStop);
   const stored = readCheckpoints(world.pool).map((row) => (row.state as { tickets: Record<string, string> }).tickets["01"]);
   expect(stored).not.toContain("done");

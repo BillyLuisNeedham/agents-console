@@ -237,10 +237,6 @@ pub async fn pool_settings_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// Reassign (issue #126): an edit of console.json's `assign`, answered in the settings convention: 400
-/// for a refused request, 500 for a file this server can no longer read or a pool that never started.
-/// The write wakes the drive (ADR-0040), so a waiting Ticket launches on the new Assignment at the
-/// next Tick instead of when something else stirs.
 pub async fn reassign_request(server: &Server, body: Body) -> Answer {
     let written = {
         let mut inner = server.lock();

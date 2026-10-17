@@ -34,11 +34,6 @@ import {
 } from "./restart-support.ts";
 import { GOOD_BODY, eventsOf, hasTicket, heldSpawnsFile, ledger, proposal, ticket, withCaps } from "./spawns-support.ts";
 
-/**
- * A spawned Ticket's file as the engine writes it at a Tick
- * (writeSpawnTicket in engine/engine.ts), at a status: the status is the
- * only byte a run changes after.
- */
 function spawnedFile(
   id: string,
   parentId: string,
@@ -334,9 +329,6 @@ restartCase("Held spawn ids survive a restart and a discarded one is never issue
 // Pending spawns across a restart
 // ---------------------------------------------------------------------------
 
-// engine/spawn-proposals.test.ts:169
-// A Pending spawn lands at the Tick after its take (ADR-0040), so a stop
-// between the two is seeded: runs/held-spawns.json as a stop left it.
 conformance("restart", "Pending and held proposals a stop left in one write keep their ids, and land in order at the first Tick", async (t) => {
   const world = t.world({
     tickets: [ticket("01", "none", "done"), ticket("02")],

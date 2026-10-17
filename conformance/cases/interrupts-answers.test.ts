@@ -1,18 +1,3 @@
-/**
- * Raising and answering Interrupts, seen from outside the server (ADR-0036):
- * the checkpoint, crash, deadlock and config Interrupts a run raises, what
- * each carries, and what POST /api/resume does with each: a resume with a
- * note re-runs the Ticket and leaves the note in its file, a resume naming
- * nothing pending is refused, approve and reject are refused anywhere but the
- * Review gate and a merge-approval. Ticket C08 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * The stubs on PATH play the agents. Every answer here lands on an idle pool,
- * so it is processed the moment it is accepted; answers given while another
- * Ticket runs, and Queued answers, are interrupts-queued.test.ts's.
- */
-
 import { expect } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

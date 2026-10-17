@@ -248,7 +248,6 @@ conformance("attempts", "another harness's worktree is never seeded, and neither
   }
 });
 
-// attempt-run.test.ts:1799 folder trust for the worktrees the engine makes (issue #127)
 conformance("attempts", "a claude Ticket in a pool outside git runs in the pool directory and its config is left untouched", async (t) => {
   const world = t.world({ git: false, tickets: [ticket("01", "No worktree")], config: terminalConfig() });
   writeConfig(claudeJson(world), OPERATOR_CONFIG);

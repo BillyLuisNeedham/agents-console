@@ -1,24 +1,3 @@
-/**
- * The persistence Interrupt, seen from outside the server (ADR-0036): a
- * checkpoint write the store refuses is retried with backoff and the run
- * carries on once one lands; a store that keeps refusing raises the run-level
- * PERSISTENCE Interrupt and the pool waits for a human with the store still
- * open; and none of it ever reports the drive dead. Ticket C08 of the
- * inventory's split (docs/research/rust-port/test-inventory.md): each case
- * names the engine test it carries over.
- *
- * The store is console.db, a SQLite file. A case makes it refuse the way a
- * second writer would: it holds an exclusive lock on it from the test
- * process (BEGIN EXCLUSIVE in SQLite's default rollback journal), so every
- * write the server tries fails with "database is locked" until the case
- * lets go. The lock is taken once 01 has launched, so after the server has
- * opened the store and read its last checkpoint at boot, and before 01 can
- * exit, so before the first checkpoint row is written. A Tick launches what
- * it found eligible and then writes its row (ADR-0040), so the Tick after
- * 01's exit starts 02 before its write is refused; the persistence
- * Interrupt holds every launch after that until it is answered.
- */
-
 import { expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -42,9 +21,7 @@ const ready = (id: string, blockedBy = "none"): TicketSeed => ({
   marker: `<!-- state: id=${id} blocked-by=${blockedBy} status=ready -->`,
 });
 
-/** 01, then 02 blocked by it: the Tick that starts 02 is the first checkpoint write. */
 const CHAIN = [ready("01"), ready("02", "01")];
-/** CHAIN and 03 blocked by 02: 03 can only start after the persistence Interrupt is up. */
 const CHAIN3 = [...CHAIN, ready("03", "02")];
 
 /** Every launch's key, in launch order. */
@@ -97,11 +74,6 @@ async function lockedAtLaunch(
   return { world, server, lock, socket, release: () => writeFileSync(gate, "go") };
 }
 
-/**
- * Wait until `id` has launched, looking every few milliseconds rather than
- * at `until`'s pace: the retry the case lets land is due within the
- * server's backoff, a few hundred milliseconds in all.
- */
 async function untilLaunchedFast(world: World, id: string, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!launches(world).includes(id)) {
@@ -110,7 +82,6 @@ async function untilLaunchedFast(world: World, id: string, ms = 30_000): Promise
   }
 }
 
-/** Each checkpoint row's Ticket statuses, in row order. */
 const ticketRows = (world: World): Record<string, string>[] =>
   readCheckpoints(world.pool).map((row) => (row.state as { tickets: Record<string, string> }).tickets);
 
@@ -141,9 +112,6 @@ const PERSISTENCE_BODY =
 conformance("interrupts", "a checkpoint write refused after a Tick is retried, and the run carries on", async (t) => {
   const { world, server, lock, release } = await lockedAtLaunch(t, CHAIN);
   release();
-  // The Tick that starts 02 tries its row write the moment the launch is
-  // handed off, well before 02's stub has recorded itself, and the lock
-  // refuses it at once. Letting go once 02 is seen leaves a retry to land.
   await untilLaunchedFast(world, "02");
   expect((await server.http.get("/api/state")).status).toBe(200);
   lock.release();
@@ -184,8 +152,6 @@ conformance(
     expect(readStateLine(world.pool, "03-t.md").status).toBe("ready");
     expect(launches(world)).toEqual(["01", "02"]);
 
-    // Healthy again: no row past 01's launch has been written, and none is
-    // until the Interrupt is answered.
     lock.release();
     expect(ticketRows(world).filter((tickets) => tickets["01"] === "done")).toEqual([]);
     expect((await snapshot(server)).state.interrupts.map((i) => i.ticketId)).toEqual([PERSISTENCE]);

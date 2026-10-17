@@ -1,7 +1,3 @@
-//! The Config reload (ADR-0018; engine.ts 6627-7145): every Tick re-reads console.json, and when its
-//! slice changed, dry-runs every reassignable ticket's Assignment before committing anything. The pure
-//! resolution lives in `ac_core::assignment`.
-
 use std::path::Path;
 
 use serde_json::Map;
@@ -65,9 +61,6 @@ pub fn reload_config(session: &mut Session) -> anyhow::Result<()> {
     if changed.is_empty() {
         return Ok(());
     }
-    // The dry run: every id that is not a ticket is a Conversation's Assignment, carried over; every
-    // ticket with a live Attempt keeps its frozen Assignment; everything else resolves fresh against
-    // the candidate.
     let mut resolved = Assignments::new();
     for (id, assignment) in &session.assignments {
         if !session.markers.iter().any(|m| &m.id == id) {

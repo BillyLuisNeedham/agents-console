@@ -1,21 +1,3 @@
-/**
- * Scheduling and status, seen from outside the server (ADR-0036): pool
- * loading, the ready set and blocked-by, the rolling scheduler's launches
- * (ADR-0040: a Ticket starts once each of its own blockers is done and
- * merged, from the target's tip at that moment), the outcomes and config
- * channels, checkpoint rows, the Outcome contract and the engine's own
- * status writes, lifecycle events, adding blockers, the final Review and
- * deadlock. Ticket C07 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * The stubs on PATH play the agents. A sibling held open waits on a release
- * file the case writes (the stub gives up after ten seconds), which is how a
- * case observes the pool while one Ticket still runs without racing it.
- * Every world is a git checkout, so every Ticket runs in its own worktree
- * and gains a `merged` event once its branch lands on main.
- */
-
 import { expect } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -83,9 +65,7 @@ async function approve(server: CaseServer): Promise<EnrichedSnapshot> {
 const launches = (world: World): string[] => world.stubs.calls().map((call) => call.key);
 const eventKinds = (world: World, id: string): string[] => readEvents(world.pool, id).map((e) => e.kind);
 
-/** The first seven hex characters of main's tip now: what a `start <id> at <sha7>` line names. */
 const mainTip = (world: World): string => world.git(["rev-parse", "main"]).trim().slice(0, 7);
-/** The pool log's launch lines, in order. */
 const startLines = (log: string[]): string[] => log.filter((line) => line.startsWith("start "));
 
 /** The prompt a launch carried: the argument after `-p`. */
@@ -150,10 +130,6 @@ conformance("scheduling", "two Ticket files carrying one id refuse to start", as
   expect(run.stderr.split("\n")).toContain("pool load: duplicate ticket id '01'");
   expect(world.stubs.calls()).toEqual([]);
 });
-
-// ---------------------------------------------------------------------------
-// Launches and the ready set
-// ---------------------------------------------------------------------------
 
 // engine.test.ts:3427
 conformance("scheduling", "independent ready Tickets each start from main's tip and the run ends done", async (t) => {
@@ -310,8 +286,6 @@ conformance("scheduling", "a blocked-by cycle raises a deadlock per Ticket and c
   await post(server, { ticketId: "02", note: "broke the cycle" });
   const done = await settle(server, "the Review", onlyReview);
 
-  // Deadlocks are reconciled once per Tick, so where the clear lands among
-  // 01's own launch events is not part of the contract; that it lands once is.
   const kinds01 = eventKinds(world, "01");
   expect(kinds01.filter((kind) => kind !== "deadlock-cleared")).toEqual(["deadlock", "scheduled", "spawned", "exited", "merged"]);
   expect(kinds01.filter((kind) => kind === "deadlock-cleared")).toHaveLength(1);
@@ -417,7 +391,6 @@ conformance("scheduling", "console.db gains checkpoint rows as the run moves, th
   await settle(server, "the Review", onlyReview);
   await approve(server);
 
-  // No row count or index is a contract (ADR-0040): each row is found by what it holds.
   const rows = readCheckpoints(world.pool);
   expect(rows.map((row) => row.seq)).toEqual([...rows.map((row) => row.seq)].sort((a, b) => a - b));
   const state = rows.map(
@@ -947,10 +920,6 @@ conformance("scheduling", "the Review waits while another Interrupt is pending",
   expect(kinds(resumed)).toEqual(["review"]);
 });
 
-// ---------------------------------------------------------------------------
-// A result lands at the Attempt's exit, while a slow sibling still runs
-// ---------------------------------------------------------------------------
-
 // engine.test.ts:12710
 conformance("scheduling", "a crash and its Interrupt land at the Attempt's exit, while a slow sibling still runs", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b")], config: CONFIG });
@@ -968,8 +937,6 @@ conformance("scheduling", "a crash and its Interrupt land at the Attempt's exit,
   expect(eventKinds(world, "01")).toEqual(["scheduled", "spawned", "exited", "crash"]);
   expect(crashPayload(world)).toEqual({ code: 3, reason: "harness exited 3", logTail: [], outcomeExists: false });
   expectSameBytes(readStateLine(world.pool, "01-a.md").line, "<!-- state: id=01 blocked-by=none status=in-progress -->");
-  // Pushed at the crash: 01 is no longer live and its crash Interrupt is up
-  // while 02 still runs, its state line still in-progress.
   const pushed = await pushedWhen(socket, "a frame with 01's crash Interrupt", (s) => !live(s, "01") && kinds(s).includes("crash"));
   expect(statusOf(pushed, "01")).toBe("in-progress");
   expect(statusOf(pushed, "02")).toBe("in-progress");

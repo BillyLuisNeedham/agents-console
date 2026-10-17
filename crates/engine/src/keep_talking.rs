@@ -95,8 +95,6 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
         .iter()
         .find(|i| i.ticket_id == ticket_id);
     let marker = session.marker(ticket_id);
-    // The state, not the marker object: a checkpoint applied at its attempt's exit reaches the markers
-    // only at the next persist.
     let (Some(interrupt), Some(marker)) = (interrupt, marker) else {
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
     };
@@ -123,20 +121,6 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
     Ok((marker.clone(), held.clone()))
 }
 
-/// `keepTalking` (issue #139): continue a ticket's checkpointed Attempt in its Held pane as a Continued
-/// attempt. It starts at once, never queued for a Tick and never waiting on a merge, exactly as an
-/// enlist claims its pane (an exception to ADR-0004, like Enlist): the agent that holds the context is
-/// waiting in the pane now, and the operator chose to talk to it now. What makes that safe is what
-/// Keep talking does not do: it launches nothing, opens no worktree and merges nothing, so nothing a
-/// Tick serialises is touched here; the Continued attempt's ending is recorded the way an adopted
-/// attempt's is, off the drive loop, and a verify ticket's grading is a flow the next Tick starts
-/// ([`grade_continued_attempt`]).
-///
-/// The claim answers the checkpoint Interrupt (the ticket leaves Needs input), writes the marker
-/// in-progress, numbers the next Attempt, records a `spawned` event naming the same pane and tab and
-/// the attempt it continues, and registers it live on that pane, all before this resolves. The runtime
-/// then brings the pane forward, types the one teaching Turn once the agent is waiting, and watches for
-/// the ending. Resolves with the new Attempt's number.
 pub async fn keep_talking(
     engine: &Engine,
     ticket_id: String,
@@ -159,8 +143,6 @@ pub async fn keep_talking(
         .await?
 }
 
-// The claim: synchronous from the second check on, so no answer, Tick or second Keep talking can
-// land between the check and the ticket moving.
 fn claim(
     session: &mut Session,
     ticket_id: &str,
@@ -399,8 +381,6 @@ fn claim_pane(
     let mut entry = LiveAttemptEntry::new(attempt, Some(held.pane_id.clone()), held.tab_id.clone());
     entry.started_at = at;
     crate::live_attempts::register(session, ticket_id, entry);
-    // A Tick's persist (or the persistence interrupt machinery) owns store failures; a claim
-    // already made stands.
     let _ = crate::persist::persist(session);
     Ok(attempt)
 }
@@ -819,9 +799,6 @@ fn end_continued_attempt(
     Ok(())
 }
 
-/// One owed lone grade (issue #139) and its decision, run by the drive's grading flow: one round of one
-/// attempt, then the lone rules (a flag checkpoints the ticket over the same pane, a pass merges the
-/// branch the chain worked on, on the merge chain).
 pub async fn grade_continued_attempt(
     engine: &Engine,
     marker: &TicketMarker,

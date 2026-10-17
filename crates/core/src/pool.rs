@@ -403,12 +403,6 @@ pub fn known_conversation_ids(pool_dir: &Path) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// The pool's Tickets as every reader loads them: start, each Tick reload, and the server's
-/// pre-flight and per-snapshot meta. Two rules ride along with the parse, and they belong to every
-/// load or none: the pool's recorded Conversations are the known parents, and a pool with a
-/// conversations/ directory (even an empty one) loads an empty issues/ as zero Tickets.
-/// `allow_empty_issues` covers the one case that cannot infer itself: a Ticket-less pool asked to boot
-/// before its first Conversation has ever started and before the directory exists.
 pub fn load_pool_tickets(pool_dir: &Path, allow_empty_issues: bool) -> Result<Vec<TicketMarker>> {
     let known = known_conversation_ids(pool_dir)?;
     load_pool_markers(

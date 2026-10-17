@@ -1,22 +1,3 @@
-/**
- * Close (issue #154), seen from outside the server (ADR-0036): a Ticket at
- * a checkpoint, merge-conflict or deadlock Interrupt answered with
- * POST /api/resume `action: close` is dropped where it stands. Its state
- * line reads closed, a note lands under its own heading, its branches and
- * worktrees go unmerged (what an agent wrote into the worktree copy of the
- * Ticket file is kept), the work of a Ticket in a pool outside git stays
- * where it ran, its engine-written judges close with it, and every
- * dependent gets a deadlock Interrupt naming it. A closed Ticket counts as
- * finished for the Review and never comes back on a reject. Ticket C08 of
- * the inventory's split (docs/research/rust-port/test-inventory.md): each
- * case names the engine test it carries over.
- *
- * The pool is a git checkout with the pool at `.scratch/pool`, ignored by
- * git, unless a case says otherwise: every Ticket runs in a worktree of its
- * own (ADR-0040), which gets a copy of its Ticket file at the same path
- * under it, `.scratch/pool/issues/<file>`.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -317,7 +298,6 @@ conformance(
       ].join("\n"),
     });
     const server = await t.start(world);
-    // 02 is done and unmerged while its conflict waits, so the run never rests.
     await until(() => snapshot(server), (s) => interrupted(s, "02", "merge-conflict"), {
       ms: 30_000,
       what: "02's merge-conflict Interrupt",
@@ -454,7 +434,6 @@ conformance(
     const world = t.world({ tickets: [ticket("01"), ticket("02"), ticket("03")], config: CONFIG });
     world.stubs.script("01", { statuses: ["checkpoint", "done"] });
     world.stubs.script("03", { status: "checkpoint" });
-    // 02 runs on beside the answers, then crashes: no Outcome, exit 1.
     const held = world.stubs.hold("02", { status: "keep", exitCode: 1 });
     const server = await t.start(world);
     await until(() => launches(world), (keys) => keys.includes("02"), { what: "02 to launch", ms: 30_000 });

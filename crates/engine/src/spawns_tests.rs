@@ -75,9 +75,6 @@ impl CheckpointStore for HookedStore {
     }
 }
 
-// engine.test.ts "lands a spawn queued while the drive was closing, without another kick": an Adopt
-// of a Held spawn accepted while the drive is closing (after its last Tick, as the Review is
-// raised) keeps the run quiescent and starts a fresh drive that lands the spawn and runs it to done.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lands_a_spawn_queued_while_the_drive_was_closing_without_another_kick() {
     let pool = Pool::git(&[("01", &[])]);
@@ -255,8 +252,6 @@ async fn writes_the_spawn_ledger_with_every_ticket_pending_and_held_spawn() {
     );
 }
 
-// engine.test.ts "holds a Pending spawn a Tick can no longer land, with the reason on it": the
-// blocks target finished between the take and the Tick, here across a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn holds_a_pending_spawn_the_tick_can_no_longer_land_with_the_reason_on_it() {
     let pool = Pool::git(&[("01", &[]), ("02", &[])]);

@@ -1,18 +1,11 @@
-//! Folder trust for claude (issue #127, ADR-0025; claude-trust.ts): the engine vouches for the
-//! directories it makes, so an interactive claude never meets its workspace trust dialog in a pool
-//! worktree.
-//!
-//! claude keeps a per-directory record of the operator having accepted that dialog,
+//! claude keeps a per-directory record of the operator having accepted its workspace trust dialog,
 //! `projects[<absolute path>].hasTrustDialogAccepted` in `~/.claude.json`, and skips the dialog when it
-//! is true. Every pool worktree is a directory claude has never seen, so without a seed every
-//! terminal-backed claude Attempt starts on the dialog, inside the readiness wait's budget.
+//! is true.
 //!
-//! The write is add-only and mirrors claude's own: the whole file re-read, the one entry set, the result
-//! written to a sibling temp file and renamed over the original. Two-space indent and no trailing
-//! newline match claude's output, so a diff of the file shows only the entry. Seeds from this process
-//! take turns, so two Tickets launched in one Tick both land. A seed can still be lost to another claude
-//! session that read the file before it and wrote after; the pane's dialog handler (`pane_session`)
-//! remains behind the seed for that case. Nothing is ever removed.
+//! The write mirrors claude's own: the whole file re-read, the one entry set, the result written to a
+//! sibling temp file and renamed over the original. Two-space indent and no trailing newline match
+//! claude's output, so a diff of the file shows only the entry. A seed can still be lost to another
+//! claude session that read the file before it and wrote after.
 
 use std::io::Read;
 use std::sync::Mutex;
@@ -35,9 +28,7 @@ pub fn default_claude_config_path(claude_config_dir: Option<&str>, home: &str) -
     js::path_join(&[dir, ".claude.json"])
 }
 
-// The read-modify-write below is not atomic: two seeds that read the file before either renames would
-// leave only the later one's entry. This process's seeds take turns on this lock.
-static SEEDING: Mutex<()> = Mutex::new(());
+static CLAUDE_JSON_READ_MODIFY_WRITE: Mutex<()> = Mutex::new(());
 
 /// What one seed did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +80,7 @@ fn is_trusted(entry: Option<&Value>) -> bool {
 /// machine) or one that does not parse is left alone: a seed is never worth corrupting the operator's
 /// config, and the dialog handler covers the launch.
 pub fn seed_claude_folder_trust(cwd: &str, config_path: &str) -> FolderTrustSeed {
-    let _turn = SEEDING
+    let _turn = CLAUDE_JSON_READ_MODIFY_WRITE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !js::exists(config_path) {

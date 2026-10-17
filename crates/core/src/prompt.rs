@@ -107,7 +107,6 @@ pub struct PromptParts<'a> {
     pub agent_md: &'a str,
     pub upstream: &'a [Upstream<'a>],
     pub outcome_path: &'a str,
-    /// The pool's Spawn caps as this attempt's launch found them (ADR-0029).
     pub spawn_caps: SpawnCaps,
     /// The pool's Spawn ledger (issue #150): read before proposing.
     pub ledger_path: &'a str,

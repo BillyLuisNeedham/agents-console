@@ -1,6 +1,3 @@
-//! Answers (ADR-0004; engine.ts 5397-5887): accepting an answer, the drain a Tick runs that applies
-//! queued answers in submission order, processing one, and Close (issue #154).
-
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -224,9 +221,6 @@ pub fn accept_answer(
 /// before its record is marked processed. A persist failure propagates.
 pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
     for record in session.answers.pending() {
-        // An answer that merges into the pool checkout waits, still queued, while a Continued attempt
-        // works there (ADR-0027), and while a merge on the merge chain has not settled, so nothing
-        // lands beside a resolver's work. A Close merges nothing, so it never waits.
         let merges_into_checkout = record.action == Some(QueuedAnswerAction::Adopt)
             || (record.action != Some(QueuedAnswerAction::Close)
                 && matches!(
@@ -296,8 +290,6 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         }
         return reject_review(session, &pending, note);
     }
-    // The persistence interrupt belongs to the run: answering it only clears it, and the next Tick's
-    // write is the retry.
     if pending.kind == InterruptKind::Persistence {
         clear_interrupt(
             session,
@@ -710,7 +702,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on() {
         let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
-        // The launching Tick's write fails all four attempts and raises the persistence Interrupt.
         pool.store.fail.store(4, Ordering::SeqCst);
         let engine = pool.start().await;
         assert_eq!(settled(&engine).await, RunPhase::Quiescent);
