@@ -152,7 +152,7 @@ pub fn render_spawn_ledger(input: SpawnLedgerInput<'_>) -> String {
         "".into(),
         "## Pending spawns".into(),
         "".into(),
-        "Proposals that land at the next super-step boundary.".into(),
+        "Proposals that land at the next Tick.".into(),
         "".into(),
     ]);
     lines.extend(table(
@@ -282,7 +282,7 @@ mod tests {
              it lands. Never edit this file.\n\n\
              ## Tickets\n\n_(none)_\n\n\
              ## Conversations\n\n_(none)_\n\n\
-             ## Pending spawns\n\nProposals that land at the next super-step boundary.\n\n_(none)_\n\n\
+             ## Pending spawns\n\nProposals that land at the next Tick.\n\n_(none)_\n\n\
              ## Held spawns\n\nProposals waiting for the operator to adopt or discard them.\n\n_(none)_\n"
         );
     }

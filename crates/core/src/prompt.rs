@@ -107,7 +107,7 @@ pub struct PromptParts<'a> {
     pub agent_md: &'a str,
     pub upstream: &'a [Upstream<'a>],
     pub outcome_path: &'a str,
-    /// The pool's Spawn caps as this attempt's boundary left them (ADR-0029).
+    /// The pool's Spawn caps as this attempt's launch found them (ADR-0029).
     pub spawn_caps: SpawnCaps,
     /// The pool's Spawn ledger (issue #150): read before proposing.
     pub ledger_path: &'a str,
@@ -204,8 +204,8 @@ pub fn build_prompt(parts: &PromptParts<'_>) -> String {
              {SPAWN_BODY_MIN_CHARS} characters of intent for a fresh agent to work from, blockedBy \
              optional and naming the ids the follow-up must wait for. {} {SPAWN_BLOCKS_TEACHING} \
              The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes \
-             07-spawn-1), writes the ticket files at the super-step boundary, and schedules them \
-             like any other ticket. Thin or out-of-pool proposals are dropped with the reason \
+             07-spawn-1), writes the ticket files at the next Tick, and schedules them like any \
+             other ticket. Thin or out-of-pool proposals are dropped with the reason \
              recorded in the ticket log, and a dropped proposal never costs your attempt its \
              result. {} You never write pool state: no ticket files, no ids, no statuses. You \
              propose; the engine writes.",
@@ -389,8 +389,8 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
          Ticket Interrupt you may answer and have not left, and a Merge queue head that has stalled. \
          Items that arrive together come as one Turn. The same Turn also tells you, with nothing to \
          answer, which Tickets merged since your last Notice and when every Ticket is done and Review \
-         waits for the operator: that is how you know when orders like \"watch the next super-step, \
-         then finish\" are done, and can end yourself."
+         waits for the operator: that is how you know when orders like \"watch the next merge, then \
+         finish\" are done, and can end yourself."
             .to_owned(),
         String::new(),
         "Act with this command, run in your shell:".to_owned(),
@@ -421,8 +421,8 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
             .to_owned(),
         "- held adopt|discard <proposal-id>: decide a Held spawn.".to_owned(),
         "- reassign <ticket> field=value...: change a Ticket's Assignment (harness, model, effort, \
-         drivers, verify; field= clears one). The engine picks it up at the next boundary, so resume \
-         the Ticket after."
+         drivers, verify; field= clears one). The engine picks it up at the next Tick, so resume the \
+         Ticket after."
             .to_owned(),
         "- state: the pending Interrupts, the Merge queue, the Pending and Held spawns, your budget \
          left per Ticket, and whether the pool lets you Close now."
@@ -619,7 +619,7 @@ mod tests {
             spawn_caps: DEFAULT_SPAWN_CAPS,
             ledger_path: LEDGER,
         });
-        let expected = "Standing instructions for this job:\n\n_(no AGENT.md in the pool directory)_\n\n---\n\nSkills for this Issue. When the driver skill's work is done, also use these skills, in this order: tdd, code-review.\n\n---\n\nOutcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:\n\n- 00: built it (commit none)\n\n---\n\nWhen you finish, record your outcome as JSON at /p/runs/01.outcome.json: {\"status\": \"done\" or \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the sha of your commit, or null\"}. On a checkpoint, add \"brief\": \"what the human has to do next\". The engine reads this file at your exit and writes the final status to the Issue itself. Never edit the Issue's line-1 status marker; the engine owns that write.\n\nFollow-up work you discover mid-attempt is proposed, never written: add an optional \"spawn\" array to that outcome JSON, one entry per follow-up, each shaped {\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...]}, the body carrying at least 20 characters of intent for a fresh agent to work from, blockedBy optional and naming the ids the follow-up must wait for. An entry may add \"assign\": {\"harness\": \"...\", \"model\": \"...\", \"effort\": \"...\", \"drivers\": \"...\"} with only the fields the follow-up needs different; when absent it inherits your own Assignment. \"assign\" takes harness, model, effort and drivers only; a verify in it is ignored, since grading is the operator's call. A follow-up that must run before other work may add \"blocks\": [\"id\", ...] to make those tickets wait for it, or \"blocks\": \"all\" to make every ticket that has not started yet wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), writes the ticket files at the super-step boundary, and schedules them like any other ticket. Thin or out-of-pool proposals are dropped with the reason recorded in the ticket log, and a dropped proposal never costs your attempt its result. Caps apply: 5 proposals honored per attempt and 20 per run, overflow held for the operator to adopt or discard, so order your proposals most important first. You never write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.\n\nBefore you propose anything, read the Spawn ledger at /tmp/pool/runs/spawn-ledger.md: every Ticket and Conversation in the pool, and every proposal still waiting to land or held for the operator. Do not propose work it already lists. If a proposal still overlaps something there, add \"overlaps\": [\"id\", ...] naming what it overlaps: it is then held for the operator to decide instead of landing.";
+        let expected = "Standing instructions for this job:\n\n_(no AGENT.md in the pool directory)_\n\n---\n\nSkills for this Issue. When the driver skill's work is done, also use these skills, in this order: tdd, code-review.\n\n---\n\nOutcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:\n\n- 00: built it (commit none)\n\n---\n\nWhen you finish, record your outcome as JSON at /p/runs/01.outcome.json: {\"status\": \"done\" or \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the sha of your commit, or null\"}. On a checkpoint, add \"brief\": \"what the human has to do next\". The engine reads this file at your exit and writes the final status to the Issue itself. Never edit the Issue's line-1 status marker; the engine owns that write.\n\nFollow-up work you discover mid-attempt is proposed, never written: add an optional \"spawn\" array to that outcome JSON, one entry per follow-up, each shaped {\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...]}, the body carrying at least 20 characters of intent for a fresh agent to work from, blockedBy optional and naming the ids the follow-up must wait for. An entry may add \"assign\": {\"harness\": \"...\", \"model\": \"...\", \"effort\": \"...\", \"drivers\": \"...\"} with only the fields the follow-up needs different; when absent it inherits your own Assignment. \"assign\" takes harness, model, effort and drivers only; a verify in it is ignored, since grading is the operator's call. A follow-up that must run before other work may add \"blocks\": [\"id\", ...] to make those tickets wait for it, or \"blocks\": \"all\" to make every ticket that has not started yet wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), writes the ticket files at the next Tick, and schedules them like any other ticket. Thin or out-of-pool proposals are dropped with the reason recorded in the ticket log, and a dropped proposal never costs your attempt its result. Caps apply: 5 proposals honored per attempt and 20 per run, overflow held for the operator to adopt or discard, so order your proposals most important first. You never write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.\n\nBefore you propose anything, read the Spawn ledger at /tmp/pool/runs/spawn-ledger.md: every Ticket and Conversation in the pool, and every proposal still waiting to land or held for the operator. Do not propose work it already lists. If a proposal still overlaps something there, add \"overlaps\": [\"id\", ...] naming what it overlaps: it is then held for the operator to decide instead of landing.";
         assert_eq!(body, expected);
     }
 

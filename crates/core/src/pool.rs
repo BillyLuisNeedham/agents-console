@@ -403,7 +403,7 @@ pub fn known_conversation_ids(pool_dir: &Path) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// The pool's Tickets as every reader loads them: start, each boundary reload, and the server's
+/// The pool's Tickets as every reader loads them: start, each Tick reload, and the server's
 /// pre-flight and per-snapshot meta. Two rules ride along with the parse, and they belong to every
 /// load or none: the pool's recorded Conversations are the known parents, and a pool with a
 /// conversations/ directory (even an empty one) loads an empty issues/ as zero Tickets.
@@ -441,9 +441,8 @@ pub fn spawn_ticket_text(parent_id: &str, id: &str, proposal: &SpawnProposal) ->
     format!(
         "<!-- state: id={id} blocked-by={blocked_by} status=ready spawned-by={parent_id}{assign} -->\n\n\
          # {id}: {}\n\n\
-         **Spawned by** ticket {parent_id} (ADR-0010): the engine wrote this ticket at the super-step \
-         boundary from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from \
-         here on: it schedules, verifies, and may itself spawn, and the operator can edit or kill it \
+         **Spawned by** ticket {parent_id} (ADR-0010): the engine wrote this ticket at a Tick from the \
+         attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, verifies, and may itself spawn, and the operator can edit or kill it \
          before it schedules.\n\n\
          {}\n",
         js::trim(&proposal.title),
@@ -1080,7 +1079,7 @@ mod tests {
             format!(
                 "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign={token} -->\n\n\
                  # 01-spawn-1: Tidy up\n\n\
-                 **Spawned by** ticket 01 (ADR-0010): the engine wrote this ticket at the super-step boundary \
+                 **Spawned by** ticket 01 (ADR-0010): the engine wrote this ticket at a Tick \
                  from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it \
                  schedules, verifies, and may itself spawn, and the operator can edit or kill it before it schedules.\n\n\
                  Make it tidy, every file of it.\n"

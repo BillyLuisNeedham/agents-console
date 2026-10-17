@@ -62,7 +62,7 @@ pub fn is_steward_budget(value: &Value) -> bool {
 
 /// A console.json `steward` value, checked for shape: absent, or an object whose budget, where
 /// present, is a whole number of 1 or more, whose assign, where present, is an object of strings, and
-/// whose mayClose, where present, is a boolean. Boot's parse and the boundary's reload share it, so a
+/// whose mayClose, where present, is a boolean. Boot's parse and a Tick's reload share it, so a
 /// value the reload would refuse never boots. Whether the assign names a harness the pool knows is the
 /// caller's check (`config::check_steward_harness`): only the engine has the harness table.
 pub fn check_steward_config(raw: Option<&Value>) -> Result<(), ConfigError> {

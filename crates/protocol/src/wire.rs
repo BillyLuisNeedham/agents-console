@@ -52,7 +52,7 @@ wire_enum! {
         SpawnAdopted = "spawn-adopted",
         SpawnRejected = "spawn-rejected",
         /// Proposals within the caps, taken from the attempt and waiting for the
-        /// next boundary to land (issue #150): each one's proposal id and title.
+        /// next Tick to land (issue #150): each one's proposal id and title.
         SpawnPending = "spawn-pending",
         /// Proposals held for the operator rather than landed (ADR-0029, issue
         /// #150): each one's proposal id, title and reason, a cap that had no room
@@ -335,10 +335,10 @@ wire_struct! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub brief: Option<String>,
         /// Follow-up ticket proposals (ADR-0010): the agent proposes in its Outcome,
-        /// the engine writes the pool at the super-step boundary. Three states:
+        /// the engine writes the pool at a Tick. Three states:
         /// absent, the attempt proposed nothing; present and empty, the key was
         /// there and nothing survived schema validation; populated, the
-        /// well-formed proposals riding to the boundary.
+        /// well-formed proposals riding to a Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn: Option<Vec<SpawnProposal>>,
         /// A Station Ticket's typed verdict on a Line (ADR-0037), kept as the
@@ -513,7 +513,7 @@ wire_struct! {
         pub steward: Option<StewardConfig>,
         /// The Factory settings (issue #187, ADR-0037): this pool's layer, over the
         /// Machine defaults' and under a Line brief's, each field falling through
-        /// on its own. Reloaded at the super-step boundary.
+        /// on its own. Reloaded at a Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub factory: Option<Box<FactorySettings>>,
         /// Boot's Factory mode marks the pool it makes (ADR-0037): a Factory pool
@@ -697,7 +697,7 @@ wire_enum! {
     /// Why a proposal is held: which cap had no room (the attempt's, or a
     /// spawn.json's, own; or the run's), the proposing agent's own `overlaps`
     /// mark (the ids ride on the proposal), the operator's Hold of a Pending
-    /// spawn, or a Pending spawn the boundary refused to land because the pool
+    /// spawn, or a Pending spawn a Tick refused to land because the pool
     /// moved after it was taken (the reason rides as `adoptError`).
     pub enum HeldSpawnReason {
         PerAttempt = "per-attempt",
@@ -713,7 +713,7 @@ wire_enum! {
 
 wire_struct! {
     /// One Pending spawn as the Console shows it: a proposal within the caps that
-    /// lands at the next super-step boundary unless the operator Holds or
+    /// lands at the next Tick unless the operator Holds or
     /// Discards it first.
     pub struct PendingSpawnView {
         pub id: String,
@@ -756,10 +756,10 @@ wire_struct! {
         /// The ids an "overlaps" hold named that the pool never knew; empty when
         /// every one was known.
         pub unknown_overlaps: Vec<String>,
-        /// An Adopt is on its way to the boundary: the spawn is still held until
+        /// An Adopt is on its way to a Tick: the spawn is still held until
         /// the engine writes it, so a restart before then loses nothing.
         pub adopting: bool,
-        /// Why the boundary refused to land it (a blocker gone, a blocks target
+        /// Why a Tick refused to land it (a blocker gone, a blocks target
         /// finished while it waited): the spawn stayed held, or, for "refused",
         /// was held instead of landing. Absent until a refusal, and cleared by
         /// the next Adopt.
@@ -798,7 +798,7 @@ wire_enum! {
 }
 
 wire_struct! {
-    /// An accepted answer waiting for processing at the next super-step boundary (a Queued answer).
+    /// An accepted answer waiting for processing at the next Tick (a Queued answer).
     pub struct QueuedAnswer {
         pub ticket_id: String,
         /// The interrupt identity: the kind of interrupt this answer addresses.
@@ -1233,7 +1233,7 @@ wire_struct! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub terminal: Option<TerminalKind>,
         /// The machine's layer of the Factory settings (issue #187), under every
-        /// pool's; the engine reads it afresh at each super-step boundary.
+        /// pool's; the engine reads it afresh at each Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub factory: Option<Box<FactorySettings>>,
     }
@@ -1382,7 +1382,7 @@ wire_struct! {
     /// The per-ticket Reassign view the snapshot carries on every ordinary
     /// ticket (grader and head-to-head tickets are never reassignable and carry
     /// `eligible: false` with a reason). `eligible` is the server's judgement
-    /// that a write would take effect at the next boundary: no Attempt in
+    /// that a write would take effect at the next Tick: no Attempt in
     /// flight and not done. `reason` explains a false `eligible` in one line
     /// for the Detail pane. `verify` is the ticket's own verify count, which
     /// has no default and so is pinned or absent. `sources` explains the
@@ -1456,11 +1456,11 @@ wire_struct! {
         /// durable `enlisted-from` field.
         pub enlisted: bool,
         /// Reassign (issue #126): whether a write to this ticket's assign entry
-        /// would take effect at the next boundary, why not when it would not, the
+        /// would take effect at the next Tick, why not when it would not, the
         /// ticket's own verify count, and where each field of `assignment` came
         /// from. For a ticket with no Attempt in flight, `assignment` is resolved
         /// from the config file as it stands now, so a Reassign shows on the card
-        /// at once rather than at the next boundary; an in-flight ticket keeps
+        /// at once rather than at the next Tick; an in-flight ticket keeps
         /// the engine's frozen record.
         pub reassign: TicketReassignView,
         /// The Station of a Line's Ticket (ADR-0037), from the marker's durable
@@ -1496,7 +1496,7 @@ wire_struct! {
         pub spawn_usage: SpawnUsage,
         /// The Pending spawns (issue #150), oldest first, from the engine's
         /// snapshot verbatim: proposals within the caps that land at the next
-        /// super-step boundary unless the operator Holds or Discards them first.
+        /// Tick unless the operator Holds or Discards them first.
         pub pending_spawns: Vec<PendingSpawnView>,
         /// The Held spawns (issue #149, ADR-0029, widened by issue #150), oldest
         /// first, from the engine's snapshot verbatim: the proposals a Spawn cap
@@ -1680,8 +1680,8 @@ wire_struct! {
 
 wire_struct! {
     /// Keep talking (issue #139): continue a ticket's checkpointed Attempt in its
-    /// Held pane. Not a resume action: it is never queued for the super-step
-    /// boundary (ADR-0004's exception, as Enlist is), so it has its own route.
+    /// Held pane. Not a resume action: it is never queued for a Tick
+    /// (ADR-0004's exception, as Enlist is), so it has its own route.
     pub struct KeepTalkingRequest {
         pub ticket_id: String,
     }
@@ -1714,7 +1714,7 @@ wire_struct! {
 wire_struct! {
     /// Adopt or Discard one Held spawn (issue #149, ADR-0029), by its id. Adopt
     /// answers 202 once the adoption is queued (written at once on an idle pool,
-    /// at the next boundary otherwise); Discard answers 200 once it is gone. A
+    /// at the next Tick otherwise); Discard answers 200 once it is gone. A
     /// refusal is the 409 `reason` envelope the keep-talking route answers with.
     pub struct HeldSpawnRequest {
         pub id: String,
@@ -1733,7 +1733,7 @@ wire_struct! {
 // ---------------------------------------------------------------------------
 
 wire_struct! {
-    /// Hold or Discard one Pending spawn before the boundary lands it (issue
+    /// Hold or Discard one Pending spawn before a Tick lands it (issue
     /// #150), by its id. Hold answers 200 once it is a Held spawn (held by the
     /// operator, same id); Discard answers 200 once it is gone. One that has
     /// already landed, or is not pending, is refused with the 409 `reason`

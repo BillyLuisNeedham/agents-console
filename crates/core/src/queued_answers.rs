@@ -1,8 +1,7 @@
 //! The queued-answer store (engine/queued-answers.ts): every accepted Interrupt answer, persisted in
 //! submission order alongside the pool's other run artifacts (`runs/queued-answers.json`).
-//! Deliberately separate from the pool state (ADR-0004): the super-step join rebuilds state from a
-//! pre-flight snapshot and would clobber a queued-answers channel, so the queue lives on its own and
-//! survives a server restart. Acceptance enqueues; the drive's boundary drain marks records processed.
+//! Deliberately separate from the pool state (ADR-0004), so the queue lives on its own and survives a
+//! server restart. Acceptance enqueues; a Tick's drain marks records processed.
 //! The file is rewritten whole (tmp and rename) on every change, so a crash mid-write never tears the
 //! queue.
 

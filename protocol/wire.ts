@@ -51,7 +51,7 @@ export type TicketEventKind =
   | "spawn-rejected"
   /**
    * Proposals within the caps, taken from the attempt and waiting for the
-   * next boundary to land (issue #150): each one's proposal id and title.
+   * next Tick to land (issue #150): each one's proposal id and title.
    */
   | "spawn-pending"
   /**
@@ -305,10 +305,10 @@ export interface Outcome {
   brief?: string;
   /**
    * Follow-up ticket proposals (ADR-0010): the agent proposes in its Outcome,
-   * the engine writes the pool at the super-step boundary. Three states:
+   * the engine writes the pool at a Tick. Three states:
    * absent, the attempt proposed nothing; present and empty, the key was
    * there and nothing survived schema validation; populated, the
-   * well-formed proposals riding to the boundary.
+   * well-formed proposals riding to a Tick.
    */
   spawn?: SpawnProposal[];
   /**
@@ -449,7 +449,7 @@ export interface PoolConfig {
   /**
    * The Factory settings (issue #187, ADR-0037): this pool's layer, over the
    * Machine defaults' and under a Line brief's, each field falling through
-   * on its own. Reloaded at the super-step boundary.
+   * on its own. Reloaded at a Tick.
    */
   factory?: FactorySettings;
   /**
@@ -554,7 +554,7 @@ export interface HeldPaneRecord {
  * Why a proposal is held: which cap had no room (the attempt's, or a
  * spawn.json's, own; or the run's), the proposing agent's own `overlaps`
  * mark (the ids ride on the proposal), the operator's Hold of a Pending
- * spawn, or a Pending spawn the boundary refused to land because the pool
+ * spawn, or a Pending spawn a Tick refused to land because the pool
  * moved after it was taken (the reason rides as `adoptError`).
  */
 export type HeldSpawnReason =
@@ -571,7 +571,7 @@ export type HeldSpawnReason =
 
 /**
  * One Pending spawn as the Console shows it: a proposal within the caps that
- * lands at the next super-step boundary unless the operator Holds or
+ * lands at the next Tick unless the operator Holds or
  * Discards it first.
  */
 export interface PendingSpawnView {
@@ -624,12 +624,12 @@ export interface HeldSpawnView {
    */
   unknownOverlaps: string[];
   /**
-   * An Adopt is on its way to the boundary: the spawn is still held until
+   * An Adopt is on its way to a Tick: the spawn is still held until
    * the engine writes it, so a restart before then loses nothing.
    */
   adopting: boolean;
   /**
-   * Why the boundary refused to land it (a blocker gone, a blocks target
+   * Why a Tick refused to land it (a blocker gone, a blocks target
    * finished while it waited): the spawn stayed held, or, for "refused",
    * was held instead of landing. Absent until a refusal, and cleared by
    * the next Adopt.
@@ -663,7 +663,7 @@ export type MergeQueueState =
   | "queued"
   | "stalled";
 
-/** An accepted answer waiting for processing at the next super-step boundary (a Queued answer). */
+/** An accepted answer waiting for processing at the next Tick (a Queued answer). */
 export interface QueuedAnswer {
   ticketId: string;
   /** The interrupt identity: the kind of interrupt this answer addresses. */
@@ -939,7 +939,7 @@ export interface MachineDefaults {
   terminal?: "herdr";
   /**
    * The machine's layer of the Factory settings (issue #187), under every
-   * pool's; the engine reads it afresh at each super-step boundary.
+   * pool's; the engine reads it afresh at each Tick.
    */
   factory?: FactorySettings;
 }
@@ -1055,7 +1055,7 @@ export interface ReassignResponse {
  * The per-ticket Reassign view the snapshot carries on every ordinary
  * ticket (grader and head-to-head tickets are never reassignable and carry
  * `eligible: false` with a reason). `eligible` is the server's judgement
- * that a write would take effect at the next boundary: no Attempt in
+ * that a write would take effect at the next Tick: no Attempt in
  * flight and not done. `reason` explains a false `eligible` in one line
  * for the Detail pane. `verify` is the ticket's own verify count, which
  * has no default and so is pinned or absent. `sources` explains the
@@ -1131,11 +1131,11 @@ export interface EnrichedTicketState {
   enlisted: boolean;
   /**
    * Reassign (issue #126): whether a write to this ticket's assign entry
-   * would take effect at the next boundary, why not when it would not, the
+   * would take effect at the next Tick, why not when it would not, the
    * ticket's own verify count, and where each field of `assignment` came
    * from. For a ticket with no Attempt in flight, `assignment` is resolved
    * from the config file as it stands now, so a Reassign shows on the card
-   * at once rather than at the next boundary; an in-flight ticket keeps
+   * at once rather than at the next Tick; an in-flight ticket keeps
    * the engine's frozen record.
    */
   reassign: TicketReassignView;
@@ -1180,7 +1180,7 @@ export interface EnrichedSnapshot {
   /**
    * The Pending spawns (issue #150), oldest first, from the engine's
    * snapshot verbatim: proposals within the caps that land at the next
-   * super-step boundary unless the operator Holds or Discards them first.
+   * Tick unless the operator Holds or Discards them first.
    */
   pendingSpawns: PendingSpawnView[];
   /**
@@ -1328,8 +1328,8 @@ export interface TicketBodyResponse {
 
 /**
  * Keep talking (issue #139): continue a ticket's checkpointed Attempt in its
- * Held pane. Not a resume action: it is never queued for the super-step
- * boundary (ADR-0004's exception, as Enlist is), so it has its own route.
+ * Held pane. Not a resume action: it is never queued for a Tick
+ * (ADR-0004's exception, as Enlist is), so it has its own route.
  */
 export interface KeepTalkingRequest {
   ticketId: string;
@@ -1360,7 +1360,7 @@ export interface CloseFinishedTerminalsResponse {
 /**
  * Adopt or Discard one Held spawn (issue #149, ADR-0029), by its id. Adopt
  * answers 202 once the adoption is queued (written at once on an idle pool,
- * at the next boundary otherwise); Discard answers 200 once it is gone. A
+ * at the next Tick otherwise); Discard answers 200 once it is gone. A
  * refusal is the 409 `reason` envelope the keep-talking route answers with.
  */
 export interface HeldSpawnRequest {
@@ -1377,7 +1377,7 @@ export interface HeldSpawnResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Hold or Discard one Pending spawn before the boundary lands it (issue
+ * Hold or Discard one Pending spawn before a Tick lands it (issue
  * #150), by its id. Hold answers 200 once it is a Held spawn (held by the
  * operator, same id); Discard answers 200 once it is gone. One that has
  * already landed, or is not pending, is refused with the 409 `reason`
