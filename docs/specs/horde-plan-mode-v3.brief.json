@@ -1,5 +1,0 @@
-{
-  "spec": "docs/specs/horde-plan-mode-v3.md",
-  "finish": "Fast-forward the local branch feature/build-your-own-factory onto the Line's branch with `git -C /home/billy/.herdr/worktrees/agent-console/feature-build-your-own-factory merge --ff-only <the Line's branch>`. Do not push and do not open a PR.",
-  "factory": {}
-}
