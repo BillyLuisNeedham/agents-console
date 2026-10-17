@@ -1,0 +1,1867 @@
+<title>Horde Plan Mode</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: the Console's own canvas. Header bar, a node shelf, the canvas,
+   an inspector on the right, and a tabbed drawer underneath.
+   PROTOTYPE: throwaway. The Horde module in the first script block is the part
+   worth keeping. */
+:root {
+  --bg: #0b0e14;
+  --bg-panel: #12161f;
+  --bg-panel-2: #1a2030;
+  --border: #232a3b;
+  --text: #d4dae4;
+  --text-dim: #7d8597;
+  --accent: #4cc2ff;
+  --accent-purple: #a371f7;
+  --steward: #db61a2;
+  --pending: #8b949e;
+  --running: #d29922;
+  --done: #3fb950;
+  --interrupt: #f85149;
+  --mono: ui-monospace, "Liberation Mono", monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 var(--mono);
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); color: #06121c; border-color: var(--accent); font-weight: 700; }
+button.warn { border-color: var(--interrupt); color: var(--interrupt); }
+input, select, textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  min-width: 0;
+}
+.dim { color: var(--text-dim); }
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto 1fr minmax(220px, 34%);
+  padding-left: max(0px, env(safe-area-inset-left, 0px));
+  padding-right: max(0px, env(safe-area-inset-right, 0px));
+}
+
+/* Header */
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  padding: 8px max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 700; letter-spacing: .04em; }
+.brand span { color: var(--accent-purple); font-weight: 400; margin-left: 6px; text-transform: uppercase; font-size: 11px; letter-spacing: .12em; }
+#plan-name { width: 14em; }
+#prompt { flex: 1 1 18em; resize: none; height: 28px; line-height: 1.45; transition: height .12s; }
+#prompt:focus, #prompt.tall { height: 7.5em; resize: vertical; position: relative; z-index: 20; }
+@media (prefers-reduced-motion: reduce) { #prompt { transition: none; } }
+.quick { display: flex; flex-wrap: wrap; gap: 3px; }
+.quick button { font-size: 11px; padding: 0 6px; border-radius: 10px; }
+.quick button.on { border-color: var(--accent); color: var(--accent); }
+.links { display: grid; gap: 4px; }
+.linkrow { display: flex; gap: 6px; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px 2px 8px; font-size: 12px; }
+.linkrow button { font-size: 11px; padding: 0 6px; }
+.addlink { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.addlink select { max-width: 9.5em; }
+.port.open { border-style: dashed; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.saved { color: var(--done); }
+.preset-line { flex-basis: 100%; font-size: 11.5px; color: var(--text-dim); max-width: 160ch; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.preset-line[hidden] { display: none; }
+.preset-line b { color: var(--text); font-weight: 400; }
+.preset-line code { color: var(--accent); }
+.clock { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* Needs-you tray */
+.tray {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 6px 16px; min-height: 36px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.tray .label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim); }
+.ask {
+  display: inline-flex; gap: 6px; align-items: center;
+  border: 1px solid var(--interrupt); border-radius: 4px; padding: 2px 4px 2px 8px;
+  background: color-mix(in srgb, var(--interrupt) 8%, transparent);
+}
+.ask.held { border-color: var(--steward); background: color-mix(in srgb, var(--steward) 8%, transparent); }
+.ask button { padding: 1px 7px; font-size: 12px; }
+.notice { color: var(--interrupt); }
+
+/* Main row */
+main { display: grid; grid-template-columns: 132px 1fr 330px; min-height: 0; }
+.shelf { border-right: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+.shelf h3, .insp h3 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim); font-weight: 400; }
+.shelf button { text-align: left; }
+.shelf .k { display: block; font-size: 10px; color: var(--text-dim); }
+.canvas-wrap { overflow: auto; position: relative; min-width: 0; }
+.canvas { position: relative; width: 2120px; height: 560px; }
+.canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.canvas svg .elabel { pointer-events: all; cursor: pointer; }
+.empty-hint { position: absolute; left: 40px; top: 60px; max-width: 34em; color: var(--text-dim); border: 1px dashed var(--border); border-radius: 6px; padding: 16px; }
+.linking-banner { position: sticky; left: 0; top: 0; z-index: 5; background: var(--accent); color: #06121c; padding: 4px 12px; font-weight: 700; }
+
+/* Cards, after .node-card in the Console */
+.card {
+  position: absolute; width: 210px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
+  user-select: none;
+}
+.card.k-grill { border-left: 3px solid var(--accent-purple); }
+.card.k-merger { border-left: 3px solid var(--accent); }
+.card.s-running, .card.s-collecting { border-color: var(--running); }
+.card.s-needs { border-color: var(--interrupt); box-shadow: 0 0 0 1px var(--interrupt); }
+.card.s-parked { border-color: var(--accent); border-style: dashed; }
+.card.s-done { opacity: .62; }
+.card.s-halted { border-color: var(--interrupt); opacity: .7; }
+.card.sel { box-shadow: 0 0 0 3px var(--accent); }
+.card.changed .head { background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel-2)); }
+.card.linkable:hover { box-shadow: 0 0 0 2px var(--accent); cursor: crosshair; }
+.head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+  background: var(--bg-panel-2); padding: 6px 10px; border-radius: 6px 6px 0 0; cursor: grab;
+}
+.head .id { font-weight: 700; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.state { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.state.running, .state.collecting { color: var(--running); }
+.state.needs, .state.halted { color: var(--interrupt); }
+.state.parked { color: var(--accent); }
+.state.done { color: var(--done); }
+.body { padding: 7px 10px 8px; font-size: 12px; display: grid; gap: 5px; }
+.badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; outline: 1px solid var(--accent-purple); color: var(--accent-purple); border-radius: 3px; padding: 0 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-size: 10.5px; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text-dim); }
+.chip.on { color: var(--text); }
+.chip.spawn-yes { color: var(--done); border-color: color-mix(in srgb, var(--done) 40%, var(--border)); }
+.chip.spawn-ask { color: var(--steward); border-color: color-mix(in srgb, var(--steward) 40%, var(--border)); }
+.chip.merge { color: var(--accent); }
+.copies { display: flex; gap: 3px; flex-wrap: wrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--pending); }
+.dot.running { background: var(--running); }
+.dot.done { background: var(--done); }
+.dot.checkpoint, .dot.closed { background: var(--interrupt); }
+.dot.resting { background: var(--accent-purple); }
+.dot.spawned { outline: 1px solid var(--steward); outline-offset: 1px; }
+.dot.queued { background: none; border: 1px dashed var(--pending); }
+.chip.armed { color: var(--interrupt); border-color: color-mix(in srgb, var(--interrupt) 50%, var(--border)); }
+.waitfor { font-size: 11px; color: var(--running); }
+.ports { display: flex; gap: 4px; flex-wrap: wrap; border-top: 1px solid var(--border); padding: 5px 8px; }
+.port { font-size: 11px; padding: 0 6px; border-radius: 10px; background: var(--bg); }
+.port.parked { border-color: var(--accent); color: var(--accent); }
+.port.parked::after { content: " ● waiting"; }
+.port.armed { background: var(--accent); color: #06121c; }
+
+/* Inspector */
+.insp { border-left: 1px solid var(--border); padding: 10px 12px; overflow: auto; display: grid; align-content: start; gap: 12px; }
+.field { display: grid; gap: 3px; }
+.field > span { font-size: 11px; color: var(--text-dim); }
+.seg { display: flex; flex-wrap: wrap; gap: 0; }
+.seg button { border-radius: 0; margin-left: -1px; padding: 2px 8px; font-size: 12px; }
+.seg button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 4px 4px 0; }
+.seg button.on { background: var(--accent); color: #06121c; border-color: var(--accent); position: relative; }
+.help { font-size: 11px; color: var(--text-dim); }
+.copyrow { border: 1px solid var(--border); border-radius: 4px; padding: 6px; display: grid; gap: 5px; }
+.copyrow .top { display: flex; justify-content: space-between; gap: 6px; }
+.copyrow .acts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.copyrow .acts button { font-size: 11.5px; padding: 1px 6px; }
+.copyrow input[type=number] { width: 4.2em; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sep { border: 0; border-top: 1px solid var(--border); margin: 0; width: 100%; }
+
+/* Drawer */
+.drawer { border-top: 1px solid var(--border); display: grid; grid-template-rows: auto 1fr; min-height: 0; background: var(--bg-panel); }
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.tabs button { border: 0; border-radius: 0; background: none; padding: 6px 14px; color: var(--text-dim); border-bottom: 2px solid transparent; white-space: nowrap; }
+.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.pane { overflow: auto; padding: 10px max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); min-height: 0; }
+.wt { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+.wt-list { display: grid; align-content: start; gap: 4px; }
+.wt-list button { text-align: left; }
+.wt-list button.on { border-color: var(--accent); color: var(--accent); }
+.wt-body p { margin: 0 0 8px; max-width: 70ch; }
+.steps { display: grid; gap: 4px; }
+.step { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; }
+.step .n { color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; padding-top: 3px; }
+.step button { text-align: left; width: 100%; }
+.step button code { color: var(--text-dim); font-size: 11px; display: block; }
+.step.done button { opacity: .5; }
+.step.next button { border-color: var(--accent); }
+.log { display: grid; gap: 6px; }
+.log .e code { color: var(--accent); }
+.log .l { padding-left: 14px; }
+.tone-warn { color: var(--running); }
+.tone-refuse { color: var(--interrupt); }
+.tone-steward { color: var(--steward); }
+.tone-good { color: var(--done); }
+.tone-park { color: var(--accent); }
+.agent-in { display: flex; gap: 6px; }
+.agent-in input { flex: 1; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid2 > * { min-width: 0; }
+textarea.json { width: 100%; height: 190px; resize: vertical; font-size: 11.5px; }
+table { border-collapse: collapse; font-size: 12px; }
+td, th { border-bottom: 1px solid var(--border); padding: 3px 10px 3px 0; text-align: left; vertical-align: top; }
+th { color: var(--text-dim); font-weight: 400; }
+.qa { max-width: 80ch; }
+.qa p { margin: 0 0 8px; }
+
+@media (max-width: 900px) {
+  .app { grid-template-rows: auto auto minmax(420px, 1fr) auto auto; height: auto; }
+  main { grid-template-columns: 1fr; }
+  .shelf { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); }
+  .canvas-wrap { height: 460px; }
+  .insp { border-left: 0; border-top: 1px solid var(--border); }
+  .drawer { min-height: 420px; }
+  .wt, .grid2 { grid-template-columns: 1fr; }
+}
+</style>
+
+<div class="app">
+  <header>
+    <div class="brand">HORDE<span>plan mode · prototype</span></div>
+    <input id="plan-name" aria-label="Factory name">
+    <select id="preset" aria-label="Load a preset"></select>
+    <button data-cmd="new">New empty factory</button>
+    <button data-ui="save-now" title="Save this layout as a preset and show its plan file">Save</button>
+    <textarea id="prompt" rows="1" placeholder="Opening prompt for the first node… (Shift+Enter for a new line)" aria-label="Opening prompt"></textarea>
+    <button class="primary" id="run-all">Run</button>
+    <button data-cmd="reset run" title="Keep the layout, clear the run">Reset run</button>
+    <span class="clock" id="clock"></span>
+    <button data-cmd="tick" title="Advance the clock: resting copies wake (e.g. usage limit reset)">Tick clock</button>
+    <div class="preset-line" id="preset-line" hidden></div>
+  </header>
+  <div class="tray" id="tray"></div>
+  <main>
+    <div class="shelf" id="shelf"></div>
+    <div class="canvas-wrap" id="canvas-wrap"><div class="canvas" id="canvas"></div></div>
+    <div class="insp" id="insp"></div>
+  </main>
+  <div class="drawer">
+    <div class="tabs" id="tabs"></div>
+    <div class="pane" id="pane"></div>
+  </div>
+</div>
+
+<datalist id="dl-harness"><option>claude</option><option>codex</option><option>cursor</option><option>opencode</option></datalist>
+<datalist id="dl-model"><option>opus</option><option>sonnet</option><option>haiku</option><option>gpt-5.5</option><option>composer-2</option></datalist>
+<datalist id="dl-effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option></datalist>
+
+<script>
+/* ============================================================
+   Horde: the plan-mode model. Pure; no DOM. Lift this out.
+   reduce(state, action) -> state; parse(line) -> action;
+   toCommand(action) -> line. The UI and an agent both speak
+   through parse/toCommand, so anything one can do the other can.
+   ============================================================ */
+const Horde = (() => {
+  const KINDS = {
+    grill:   { label: 'Grill',   verdicts: ['done'], noun: 'slice', makes: { done: 3 }, cfg: { harness: 'claude', skill: 'my-grill-with-docs', model: 'opus', effort: 'high', spawn: 'no', checkpoint: 'wait', copies: { mode: 'one', n: 1 }, merge: 'auto' } },
+    agent:   { label: 'Agent',   verdicts: ['done'], noun: 'item', makes: {}, cfg: { harness: 'claude', skill: '', model: 'sonnet', effort: 'medium', spawn: 'ask', checkpoint: 'wait', copies: { mode: 'one', n: 1 }, merge: 'auto' } },
+    builder: { label: 'Builder', verdicts: ['done'], noun: 'item', makes: {}, cfg: { harness: 'claude', skill: 'tdd', model: 'opus', effort: 'high', spawn: 'ask', checkpoint: 'steward', copies: { mode: 'per-item', n: 3 }, merge: 'auto' } },
+    prove:   { label: 'Prove',   verdicts: ['pass', 'fail'], noun: 'failure', makes: { fail: 1 }, cfg: { harness: 'claude', skill: 'my-verify', model: 'opus', effort: 'medium', spawn: 'no', checkpoint: 'steward', copies: { mode: 'one', n: 1 }, merge: 'auto' } },
+    review:  { label: 'Review',  verdicts: ['clean', 'findings'], noun: 'finding', makes: { findings: 2 }, cfg: { harness: 'claude', skill: 'code-review', model: 'opus', effort: 'high', spawn: 'no', checkpoint: 'steward', copies: { mode: 'one', n: 1 }, merge: 'auto' } },
+    decide:  { label: 'Decide',  verdicts: ['ship', 'another-round'], noun: 'note', makes: {}, cfg: { harness: 'claude', skill: 'html', model: 'opus', effort: 'medium', spawn: 'no', checkpoint: 'wait', copies: { mode: 'one', n: 1 }, merge: 'auto' } },
+    merger:  { label: 'Merger',  verdicts: ['merged'], merger: true, noun: 'branch', makes: {}, cfg: { harness: 'claude', skill: 'resolving-merge-conflicts', model: 'opus', effort: 'high', conflict: 'resolver', of: null } },
+    gate:    { label: 'Gate',    verdicts: ['open'], gate: true, cfg: { open: 'operator', join: 'any' } },
+    finish:  { label: 'Finish',  verdicts: [], terminal: true, cfg: {} },
+  };
+  const ENUMS = {
+    spawn: ['no', 'ask', 'yes'],
+    checkpoint: ['wait', 'steward', 'continue', 'rest'],
+    merge: ['auto', 'off'],
+    conflict: ['resolver', 'wait'],
+    open: ['operator', 'steward', 'auto'],
+    join: ['any', 'all'],
+    'steward-edits': ['yes', 'no'],
+  };
+  /* Free text: any harness the machine has. These are only quick picks. */
+  const SUGGEST = {
+    harness: ['claude', 'codex', 'cursor', 'opencode'],
+    model: ['opus', 'sonnet', 'haiku', 'gpt-5.5', 'composer-2', 'kimi-k2'],
+    effort: ['low', 'medium', 'high', 'xhigh'],
+  };
+  const PLAN_FIELDS = ['steward-edits', 'author', 'source', 'note'];
+  /* What the Steward may send. Edits need "Steward may edit this plan". */
+  const EDITS = ['addNode', 'removeNode', 'set', 'link', 'unlink', 'setLoop', 'loopSteward', 'move', 'rename'];
+  const STEER = ['resume', 'adopt', 'discard', 'open'];
+  const ACTIVE = ['running', 'checkpoint', 'resting'];
+  const isAgent = k => !KINDS[k].gate && !KINDS[k].terminal && !KINDS[k].merger;
+  function fieldsFor(kind) {
+    if (KINDS[kind].gate) return ['title', 'open', 'join'];
+    if (KINDS[kind].terminal) return ['title'];
+    if (KINDS[kind].merger) return ['title', 'skill', 'harness', 'model', 'effort', 'conflict'];
+    return ['title', 'skill', 'harness', 'model', 'effort', 'spawn', 'checkpoint', 'copies', 'merge'];
+  }
+
+  /* ---------- state ---------- */
+  function freshRun() {
+    return { live: false, prompt: '', clock: 0, nodes: {}, edges: {}, held: [], spent: [], finished: false, heldSeq: 0 };
+  }
+  function emptyPlan(name = 'Untitled factory') {
+    return { name, author: '', source: '', note: '', stewardEdits: false, nodes: {}, edges: [] };
+  }
+  function empty(name = 'Untitled factory', presets = {}) {
+    return { plan: emptyPlan(name), run: freshRun(), presets, log: [], notice: null, changed: [] };
+  }
+  const rn = (s, id) => (s.run.nodes[id] ||= { status: 'idle', pass: 0, copies: [], queue: [], cap: 1, seq: 0, parked: {}, inbox: [], arrived: {}, waiting: null, made: 0, armed: false, waitingFor: [] });
+  const es = (s, id) => (s.run.edges[id] ||= { count: 0, extra: 0, stewardUsed: false });
+  const edgeId = (from, on, to) => `${from}.${on}>${to}`;
+  const capOf = e => (e.max == null ? null : e.max + (e.extra || 0));
+
+  /* ---------- the file a plan saves as ---------- */
+  function toFile(s) {
+    const p = s.plan;
+    return {
+      horde: 1,
+      name: p.name,
+      ...(p.author ? { author: p.author } : {}),
+      ...(p.source ? { source: p.source } : {}),
+      ...(p.note ? { note: p.note } : {}),
+      stewardEdits: !!p.stewardEdits,
+      nodes: Object.values(p.nodes).map(n => structuredClone(n)),
+      edges: p.edges.map(e => ({ from: e.from, on: e.on, to: e.to, ...(e.max != null ? { max: e.max } : {}), ...(e.steward ? { steward: true } : {}) })),
+    };
+  }
+  function fromFile(f) {
+    if (!f || f.horde !== 1 || !Array.isArray(f.nodes) || !Array.isArray(f.edges)) throw new Error('That is not a Horde plan file (it needs "horde": 1, nodes and edges).');
+    const nodes = {};
+    for (const n of f.nodes) {
+      if (!KINDS[n.kind]) throw new Error(`Unknown node type "${n.kind}".`);
+      if (n.id === 'plan') throw new Error('"plan" is reserved for plan settings; rename that node.');
+      nodes[n.id] = { ...structuredClone(KINDS[n.kind].cfg), ...structuredClone(n) };
+      const c = nodes[n.id].copies;
+      if (c && !(c.mode === 'one' || (c.mode === 'per-item' && (c.n === 'all' || (Number.isInteger(c.n) && c.n >= 1))))) throw new Error(`${n.id}: copies is one or per-item with a cap (a number or "all").`);
+    }
+    for (const n of Object.values(nodes)) if (n.kind === 'merger' && n.of != null && !nodes[n.of]) throw new Error(`${n.id} merges ${n.of}, which is not in the file.`);
+    const edges = f.edges.map(e => {
+      if (!nodes[e.from] || !nodes[e.to]) throw new Error(`Edge ${e.from} → ${e.to} names a node that is not in the file.`);
+      return { id: edgeId(e.from, e.on, e.to), from: e.from, on: e.on, to: e.to, max: e.max ?? null, steward: !!e.steward };
+    });
+    return { name: f.name || 'Untitled factory', author: f.author || '', source: f.source || '', note: f.note || '', stewardEdits: !!f.stewardEdits, nodes, edges };
+  }
+
+  /* ---------- reducer ---------- */
+  function say(s, text, tone = 'info') { s.log[s.log.length - 1].lines.push({ text, tone }); }
+  function refuse(s, text) { s.notice = text; say(s, text, 'refuse'); }
+
+  function reduce(state, a) {
+    const s = structuredClone(state);
+    s.notice = null;
+    s.changed = [];
+    if (!a.quiet) s.log.push({ cmd: toCommand(a), lines: [] });
+    else s.log.push({ cmd: null, lines: [] });
+    const h = H[a.type];
+    if (!h) refuse(s, `I don't know how to "${a.type}".`);
+    else if (!(a.as === 'steward' && !stewardMay(s, a))) h(s, a);
+    settle(s);
+    if (a.quiet && !s.log[s.log.length - 1].lines.length) s.log.pop();
+    return s;
+  }
+
+  /* The Steward steers the run; it edits the plan only when the plan allows it. */
+  function stewardMay(s, a) {
+    if (EDITS.includes(a.type)) {
+      if (s.plan.stewardEdits) return true;
+      refuse(s, `The Steward may not edit this plan, so "${toCommand({ ...a, as: null })}" was refused. Turn on "Steward may edit this plan" (set plan steward-edits yes) to let it.`);
+      return false;
+    }
+    if (!STEER.includes(a.type)) {
+      refuse(s, `The Steward only steers the run (resume, adopt, discard, or open a gate whose opener is steward). "${toCommand({ ...a, as: null })}" is yours to send.`);
+      return false;
+    }
+    if (a.type === 'open') {
+      const node = findNode(s, a.id);
+      if (node && KINDS[node.kind].gate && node.open !== 'steward') {
+        refuse(s, `Only you open ${a.id}: its opener is ${node.open}.`);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const findNode = (s, id) => s.plan.nodes[id];
+  function findCopy(s, copyId) {
+    const nodeId = String(copyId).split('#')[0];
+    const r = s.run.nodes[nodeId];
+    const c = r && r.copies.find(c => c.id === copyId);
+    return c ? { c, r, node: s.plan.nodes[nodeId] } : null;
+  }
+  function reachable(s, from, to) {
+    const seen = new Set([from]); const q = [from];
+    while (q.length) {
+      const x = q.shift();
+      if (x === to) return true;
+      for (const e of s.plan.edges) if (e.from === x && !seen.has(e.to)) { seen.add(e.to); q.push(e.to); }
+    }
+    return false;
+  }
+  const live = r => r.copies.filter(c => ACTIVE.includes(c.status)).length;
+  const busy = r => live(r) > 0 || r.queue.length > 0;
+  const plural = (n, w) => `${n} ${n === 1 ? w : /[^aeiou]y$/.test(w) ? w.slice(0, -1) + 'ies' : /(ch|sh|s|x)$/.test(w) ? w + 'es' : w + 's'}`;
+  const counts = r => `${live(r)} running · ${r.queue.length} queued`;
+  const capText = n => (n === Infinity ? 'all' : n);
+  function newCopy(s, id, r, item, spawned = false) {
+    return { id: `${id}#${r.pass}.${++r.seq}`, status: 'running', item, out: null, verdict: null, spawned, wakeAt: null };
+  }
+
+  /* ---------- mergers ---------- */
+  const mergerOf = (s, id) => Object.values(s.plan.nodes).find(n => n.kind === 'merger' && n.of === id);
+  const wantsMerger = n => isAgent(n.kind) && n.copies.mode === 'per-item' && n.merge === 'auto';
+  function reid(s, e, from, on) {
+    const old = e.id;
+    e.from = from; e.on = on; e.id = edgeId(from, on, e.to);
+    if (s.run.edges[old]) { s.run.edges[e.id] = s.run.edges[old]; delete s.run.edges[old]; }
+    for (const x of s.run.spent) if (x.edge === old) x.edge = e.id;
+  }
+  function placeMerger(s, id) {
+    const node = findNode(s, id), ok = KINDS[node.kind].verdicts[0];
+    let mid = `${id}-merge`, k = 1;
+    while (s.plan.nodes[mid] || mid === 'plan') mid = `${id}-merge-${++k}`;
+    s.plan.nodes[mid] = { id: mid, kind: 'merger', title: `Merge ${node.title}`, x: node.x, y: node.y + 250, ...structuredClone(KINDS.merger.cfg), of: id };
+    const outs = s.plan.edges.filter(e => e.from === id && e.on === ok);
+    for (const e of outs) {
+      if (s.plan.edges.some(x => x.id === edgeId(mid, 'merged', e.to))) { s.plan.edges = s.plan.edges.filter(x => x !== e); continue; }
+      reid(s, e, mid, 'merged');
+    }
+    s.plan.edges.push({ id: edgeId(id, ok, mid), from: id, on: ok, to: mid, max: null, steward: false });
+    s.changed.push(mid);
+    say(s, `Put down ${mid} beside ${id}: ${id} "${ok}" now goes through it${outs.length ? `, and ${mid} "merged" carries on to ${outs.map(e => e.to).join(', ')}` : ''}.`);
+    flowParked(s, id, ok, s.plan.edges.find(e => e.id === edgeId(id, ok, mid)));
+  }
+  function liftMerger(s, mid, why) {
+    const m = findNode(s, mid), src = m.of && findNode(s, m.of);
+    const ok = src ? KINDS[src.kind].verdicts[0] : null;
+    s.plan.edges = s.plan.edges.filter(e => e.to !== mid);
+    for (const e of s.plan.edges.filter(e => e.from === mid)) {
+      if (!src || s.plan.edges.some(x => x.id === edgeId(src.id, ok, e.to))) { s.plan.edges = s.plan.edges.filter(x => x !== e); continue; }
+      reid(s, e, src.id, ok);
+    }
+    s.run.spent = s.run.spent.filter(x => s.plan.edges.some(e => e.id === x.edge));
+    delete s.plan.nodes[mid];
+    delete s.run.nodes[mid];
+    if (src) s.changed.push(src.id);
+    say(s, `${why} ${src ? `${src.id}'s links go straight from it again, and its branches travel on separately.` : ''}`.trim());
+  }
+
+  /* ---------- the run ---------- */
+  function startNode(s, id, packet, opts = {}) {
+    const node = findNode(s, id), r = rn(s, id), K = KINDS[node.kind];
+    s.changed.push(id);
+    if (K.terminal) {
+      r.pass++; r.status = 'holding'; r.input = packet; r.waitingFor = [];
+      say(s, `Reached ${node.title}.`);
+      return;
+    }
+    if (K.merger) return startMerger(s, id, packet);
+    if (busy(r)) {
+      r.inbox.push(packet);
+      say(s, `${id} is still working, so the handoff from ${packet.from} waits in its inbox.`);
+      return;
+    }
+    const lostParked = Object.keys(r.parked);
+    if (lostParked.length) say(s, `${id} starts again; its earlier waiting handoff (${lostParked.join(', ')}) is replaced.`, 'warn');
+    r.pass++; r.status = 'running'; r.parked = {}; r.made = 0; r.input = packet; r.copies = []; r.queue = []; r.seq = 0;
+    const items = packet.items || [];
+    if (packet.spawned) opts = { ...opts, spawned: true };
+    if (node.copies.mode === 'per-item' && items.length && !opts.single) {
+      r.cap = node.copies.n === 'all' ? Infinity : node.copies.n;
+      const now = items.slice(0, r.cap);
+      r.queue = items.slice(r.cap);
+      for (const it of now) r.copies.push(newCopy(s, id, r, it, !!opts.spawned));
+      say(s, `${id} pass ${r.pass} starts ${plural(now.length, 'copy')}, one per item${r.queue.length ? `; the cap is ${r.cap} at once, so ${plural(r.queue.length, 'item')} queue (${counts(r)})` : ''}.`);
+    } else {
+      r.cap = node.copies.mode === 'per-item' ? (node.copies.n === 'all' ? Infinity : node.copies.n) : 1;
+      r.copies.push(newCopy(s, id, r, items.length ? items.join(', ') : null, !!opts.spawned));
+      say(s, `${id} pass ${r.pass} starts 1 copy${node.copies.mode === 'per-item' && !items.length ? ' (nothing was handed in to split, so it works on the prompt)' : ''}.`);
+    }
+  }
+
+  /* A copy left: the next queued item takes its place, in the same pass. */
+  function pullQueue(s, id) {
+    const r = rn(s, id), started = [];
+    while (r.queue.length && live(r) < r.cap) {
+      const c = newCopy(s, id, r, r.queue.shift());
+      r.copies.push(c); started.push(c);
+    }
+    if (started.length) say(s, `${started.map(c => c.id).join(', ')} picks up the next queued item (${started.map(c => c.item).join(', ')}): ${counts(r)}.`);
+  }
+
+  function nodeMaybeDone(s, id) {
+    const node = findNode(s, id), r = rn(s, id), K = KINDS[node.kind];
+    if (busy(r)) return;
+    s.changed.push(id);
+    if (r.copies.some(c => c.status === 'closed')) {
+      r.status = 'halted';
+      say(s, `${id} halted because a copy was closed. Nothing flows on from it until it runs again.`, 'warn');
+      return;
+    }
+    if (K.merger) {
+      mergeDone(s, id, `${id}: the conflict is resolved and ${plural(r.input.branches.length, 'branch')} merged into the line base.`, intoBase(r.input));
+      if (r.inbox.length && !busy(r)) startNode(s, id, r.inbox.shift());
+      return;
+    }
+    const ok = K.verdicts[0];
+    const verdict = r.copies.map(c => c.verdict).find(v => v !== ok) ?? ok;
+    const items = r.copies.flatMap(c => c.out || []);
+    const branches = r.copies.map(c => c.id);
+    r.status = 'done'; r.verdict = verdict;
+    say(s, `${id} finished: ${verdict}${items.length ? `, handing on ${plural(items.length, 'item')}` : ''}.`);
+    if (branches.length > 1 && !(verdict === ok && mergerOf(s, id))) say(s, `${id} has no merger on "${verdict}", so its ${branches.length} branches travel on separately.`, 'warn');
+    emit(s, id, verdict, { from: id, verdict, items, branches });
+    if (r.inbox.length && !busy(r)) startNode(s, id, r.inbox.shift());
+  }
+
+  function startMerger(s, id, packet) {
+    const node = findNode(s, id), r = rn(s, id);
+    if (busy(r)) {
+      r.inbox.push(packet);
+      say(s, `${id} is still resolving, so the branches from ${packet.from} wait in its inbox.`);
+      return;
+    }
+    const br = packet.branches || [];
+    r.pass++; r.input = packet; r.copies = []; r.queue = []; r.seq = 0; r.parked = {}; r.cap = 1;
+    if (br.length <= 1) return mergeDone(s, id, `${id} received a single branch from ${packet.from}, so it passes it through.`, packet, 'info');
+    if (r.armed) {
+      r.armed = false; r.status = 'running';
+      const c = newCopy(s, id, r, `conflict in ${br.join(' + ')}`);
+      c.resolver = true;
+      r.copies.push(c);
+      if (node.conflict === 'wait') {
+        c.status = 'checkpoint';
+        say(s, `${id}: merging ${plural(br.length, 'branch')} from ${packet.from} hit a conflict. Its conflict setting is wait, so ${c.id} stops at a checkpoint for you. Resume it to let it resolve, or close it.`, 'warn');
+      } else {
+        say(s, `${id}: merging ${plural(br.length, 'branch')} from ${packet.from} hit a conflict. Resolver ${c.id} runs ${node.skill || 'no skill'} on ${node.harness} · ${node.model} · ${node.effort}. Finish it with "merged" to carry on.`, 'warn');
+      }
+      return;
+    }
+    mergeDone(s, id, `${id} merged ${plural(br.length, 'branch')} from ${packet.from} into the line base.`, intoBase(packet));
+  }
+
+  /* Every way a merger's pass ends: done, verdict merged, the packet handed on. */
+  function mergeDone(s, id, line, packet, tone = 'good') {
+    const r = rn(s, id);
+    r.status = 'done'; r.verdict = 'merged';
+    say(s, line, tone);
+    emit(s, id, 'merged', { ...packet, from: id, verdict: 'merged' });
+  }
+  const intoBase = p => ({ items: p.items || [], branches: ['line base'] });
+
+  /* A handoff waiting on a node flows on along a link made since. */
+  function flowParked(s, id, verdict, edge, line) {
+    const r = s.run.nodes[id], parked = r && r.parked[verdict];
+    if (!parked) return;
+    delete r.parked[verdict];
+    if (r.status === 'parked' && !Object.keys(r.parked).length) r.status = 'done';
+    if (line) say(s, line, 'park');
+    traverse(s, edge, parked);
+  }
+
+  function emit(s, id, verdict, packet) {
+    const outs = s.plan.edges.filter(e => e.from === id && e.on === verdict);
+    if (!outs.length) {
+      const r = rn(s, id);
+      r.parked[verdict] = packet;
+      if (r.status === 'done') r.status = 'parked';
+      say(s, `Nothing follows ${id} on "${verdict}" yet, so its handoff waits here. Link a next step and it flows on.`, 'park');
+      return;
+    }
+    for (const e of outs) traverse(s, e, packet);
+  }
+
+  function traverse(s, e, packet) {
+    const st = es(s, e.id);
+    if (e.max != null && st.count >= capOf({ max: e.max, extra: st.extra })) {
+      if (e.steward && !st.stewardUsed) {
+        st.stewardUsed = true; st.extra++;
+        say(s, `The loop ${e.from} → ${e.to} has used all its passes. It is marked for the Steward, so the Steward allowed one extra pass by itself (now ${st.count + 1} of ${e.max + st.extra}). Next time it asks you.`, 'steward');
+      } else {
+        s.run.spent.push({ edge: e.id, packet });
+        say(s, `The loop ${e.from} → ${e.to} has used all ${e.max + st.extra} of its passes. The run waits for you: allow one more pass, or stop the loop.`, 'warn');
+        return;
+      }
+    }
+    st.count++;
+    s.changed.push(e.id);
+    deliver(s, e.to, packet, e.id);
+  }
+
+  function deliver(s, to, packet, via) {
+    const node = findNode(s, to);
+    if (!KINDS[node.kind].gate) return startNode(s, to, packet);
+    const r = rn(s, to);
+    s.changed.push(to);
+    r.arrived[via] = packet;
+    const incoming = s.plan.edges.filter(e => e.to === to);
+    const got = incoming.filter(e => r.arrived[e.id]).length;
+    if (node.join === 'all' && got < incoming.length) {
+      r.status = 'collecting';
+      say(s, `${to} has ${got} of ${incoming.length} inputs and waits for the rest.`);
+      return;
+    }
+    const packets = Object.values(r.arrived);
+    r.arrived = {};
+    const combined = { from: packets.map(p => p.from).join(' + '), verdict: 'open', items: packets.flatMap(p => p.items), branches: packets.flatMap(p => p.branches || []) };
+    if (node.open === 'operator') {
+      r.status = 'waiting'; r.waiting = combined;
+      say(s, `${to} is closed until you open it.`, 'warn');
+      return;
+    }
+    if (node.open === 'steward') say(s, `The Steward opened ${to} on your behalf.`, 'steward');
+    r.pass++; r.status = 'done';
+    emit(s, to, 'open', combined);
+  }
+
+  function addCopy(s, nodeId, item, why) {
+    const r = rn(s, nodeId), node = findNode(s, nodeId);
+    s.changed.push(nodeId);
+    if (busy(r)) {
+      if (node.copies.mode === 'per-item' && live(r) >= r.cap) {
+        r.queue.push(item);
+        say(s, `${why} It queues behind the cap of ${capText(r.cap)} (${counts(r)}).`, 'good');
+        return;
+      }
+      if (node.copies.mode === 'one') {
+        r.inbox.push({ from: 'spawn', items: [item], spawned: true });
+        say(s, `${why} ${nodeId} runs one copy at a time, so it waits in ${nodeId}'s inbox and runs as one more pass after this one.`, 'good');
+        return;
+      }
+      const c = newCopy(s, nodeId, r, item, true);
+      r.copies.push(c);
+      say(s, `${why} ${c.id} joins the running pass.`, 'good');
+    } else {
+      say(s, `${why} ${nodeId} had already finished, so it runs one more pass for it.`, 'good');
+      startNode(s, nodeId, { from: 'spawn', items: [item] }, { single: true, spawned: true });
+    }
+  }
+
+  /* What a Finish waits on before the run may end. A gate still
+     collecting, or a handoff waiting on a node, does not hold it. */
+  function blockers(s) {
+    const out = [];
+    for (const [id, r] of Object.entries(s.run.nodes)) {
+      for (const c of r.copies) if (ACTIVE.includes(c.status)) out.push(`${c.id} ${c.status === 'running' ? 'running' : c.status === 'checkpoint' ? 'at a checkpoint' : 'resting'}`);
+      if (r.queue.length) out.push(`${plural(r.queue.length, 'queued item')} at ${id}`);
+      if (r.inbox.length) out.push(`${plural(r.inbox.length, 'handoff')} in ${id}'s inbox`);
+      if (r.status === 'waiting') out.push(`gate ${id} to be opened`);
+    }
+    for (const h of s.run.held) out.push(`held spawn ${h.id}`);
+    for (const x of s.run.spent) out.push(`spent loop ${x.edge}`);
+    return out;
+  }
+  function settle(s) {
+    for (const n of Object.values(s.plan.nodes)) {
+      const r = s.run.nodes[n.id];
+      if (!KINDS[n.kind].terminal || !r || r.status !== 'holding') continue;
+      const b = blockers(s), prev = r.waitingFor;
+      if (!b.length) {
+        r.status = 'done'; r.waitingFor = []; s.run.finished = true; s.changed.push(n.id);
+        say(s, prev.length ? `Nothing else is running or queued, so ${n.title} completes. The run is finished.` : `Nothing else is running, so the run is finished.`, 'good');
+      } else if (b.join('|') !== prev.join('|')) {
+        r.waitingFor = b; s.changed.push(n.id);
+        say(s, `${n.title} is waiting for: ${b.join(', ')}.`, 'warn');
+      }
+    }
+  }
+
+  function parseCopies(v) {
+    if (typeof v === 'object' && v) return v;
+    const m = String(v).match(/^(one|per-item)(?::(\d+|all))?$/);
+    if (!m) return null;
+    if (m[1] === 'one') return { mode: 'one', n: 1 };
+    return { mode: 'per-item', n: m[2] === 'all' ? 'all' : Math.max(1, +(m[2] || 3)) };
+  }
+
+  const H = {
+    newEmpty(s, a) {
+      const p = s.presets;
+      Object.assign(s, empty(a.name || 'Untitled factory', p));
+      s.log = [{ cmd: 'new', lines: [] }];
+      say(s, 'Started an empty factory. Put a node down from the shelf, or load a preset.');
+    },
+    rename(s, a) { s.plan.name = a.name; say(s, `Renamed to "${a.name}".`); },
+    preset(s, a) {
+      const f = s.presets[a.name];
+      if (!f) return refuse(s, `There is no preset called "${a.name}".`);
+      s.plan = fromFile(f); s.run = freshRun();
+      say(s, `Loaded the preset "${f.name}"${f.author ? ` by ${f.author}` : ''}.`);
+    },
+    load(s, a) {
+      try { s.plan = fromFile(a.file); s.run = freshRun(); say(s, `Loaded "${s.plan.name}" from a plan file.`); }
+      catch (err) { refuse(s, err.message); }
+    },
+    savePreset(s, a) {
+      const name = a.name || s.plan.name;
+      const keep = s.presets[name] && s.presets[name].author;
+      s.presets[name] = { ...toFile(s), name, author: keep || 'Yours' };
+      say(s, `Saved this layout as the preset "${name}".`, 'good');
+    },
+    resetRun(s) { s.run = freshRun(); say(s, 'Cleared the run. The layout is untouched.'); },
+
+    addNode(s, a) {
+      const K = KINDS[a.kind];
+      if (!K) return refuse(s, `There is no node type called "${a.kind}". Try ${Object.keys(KINDS).join(', ')}.`);
+      let id = a.id;
+      if (id === 'plan') return refuse(s, '"plan" is reserved for plan settings (set plan …). Pick another id.');
+      if (id && s.plan.nodes[id]) return refuse(s, `${id} already exists.`);
+      if (!id) { id = a.kind; let n = 1; while (s.plan.nodes[id]) id = `${a.kind}-${++n}`; }
+      const count = Object.keys(s.plan.nodes).length;
+      s.plan.nodes[id] = { id, kind: a.kind, title: a.title || K.label, x: a.x ?? 40 + (count % 7) * 300, y: a.y ?? 60 + Math.floor(count / 7) * 240, ...structuredClone(K.cfg) };
+      s.changed.push(id);
+      say(s, `Put down ${a.title || K.label} as ${id}.`);
+      if (wantsMerger(s.plan.nodes[id])) placeMerger(s, id);
+    },
+    removeNode(s, a) {
+      const node = findNode(s, a.id);
+      if (!node) return refuse(s, `There is no node ${a.id}.`);
+      const m = node.kind === 'merger' ? null : mergerOf(s, a.id);
+      for (const x of [node, m].filter(Boolean)) {
+        const r = s.run.nodes[x.id];
+        if (r && (busy(r) || ['waiting', 'collecting'].includes(r.status))) return refuse(s, `${x.id} is in the middle of a pass. Close its copies or let it finish before you remove it.`);
+      }
+      if (node.kind === 'merger') {
+        const src = node.of && findNode(s, node.of);
+        if (src) src.merge = 'off';
+        return liftMerger(s, a.id, `Removed ${a.id}, so merge is off for ${node.of || 'nothing'}.`);
+      }
+      const ids = [a.id, ...(m ? [m.id] : [])];
+      for (const id of ids) { delete s.plan.nodes[id]; delete s.run.nodes[id]; }
+      const gone = s.plan.edges.filter(e => ids.includes(e.from) || ids.includes(e.to)).map(e => e.id);
+      s.plan.edges = s.plan.edges.filter(e => !gone.includes(e.id));
+      s.run.spent = s.run.spent.filter(x => !gone.includes(x.edge));
+      s.run.held = s.run.held.filter(h => h.node !== a.id);
+      say(s, `Removed ${a.id}${m ? ` and its merger ${m.id}` : ''}${gone.length ? ` and ${plural(gone.length, 'link')}` : ''}.`);
+    },
+    move(s, a) {
+      const n = findNode(s, a.id);
+      if (!n) return refuse(s, `There is no node ${a.id}.`);
+      n.x = a.x; n.y = a.y;
+    },
+    set(s, a) {
+      if (a.id === 'plan') return setPlan(s, a);
+      const node = findNode(s, a.id);
+      if (!node) return refuse(s, `There is no node ${a.id}.`);
+      if (!fieldsFor(node.kind).includes(a.field)) return refuse(s, `A ${KINDS[node.kind].label} has no "${a.field}" setting. It has: ${fieldsFor(node.kind).join(', ')}.`);
+      let v = a.value;
+      if (ENUMS[a.field] && !ENUMS[a.field].includes(v)) return refuse(s, `"${v}" is not a choice for ${a.field}. Pick one of ${ENUMS[a.field].join(', ')}.`);
+      if (a.field === 'copies') { v = parseCopies(v); if (!v) return refuse(s, 'Copies is one, or per-item:N (at most N at once) or per-item:all.'); }
+      if (['harness', 'model', 'effort'].includes(a.field) && !String(v).trim()) return refuse(s, `${a.field} cannot be empty.`);
+      const m = mergerOf(s, a.id), mr = m && s.run.nodes[m.id];
+      if (m && mr && busy(mr) && ((a.field === 'merge' && v === 'off') || (a.field === 'copies' && v.mode === 'one'))) return refuse(s, `${m.id} is resolving a merge. Let it finish before you take it away.`);
+      node[a.field] = v;
+      s.changed.push(a.id);
+      const r = s.run.nodes[a.id];
+      const later = r && busy(r) && a.field === 'copies' ? ' The running pass keeps its cap; this applies from the next pass.' : '';
+      say(s, `${a.id}: ${a.field} is now ${a.field === 'copies' ? fmtCopies(v) : v}.${later}`);
+      if (a.field === 'copies' || a.field === 'merge') {
+        if (wantsMerger(node) && !m) placeMerger(s, a.id);
+        else if (!wantsMerger(node) && m) liftMerger(s, m.id, a.field === 'merge' ? `Took ${m.id} away.` : `${a.id} runs one copy now, so ${m.id} is taken away.`);
+        else if (a.field === 'merge' && v === 'auto' && node.copies.mode === 'one') say(s, `${a.id} runs one copy, so there is nothing to merge. A merger goes down when its copies are per-item.`);
+      }
+    },
+    link(s, a) {
+      let from = findNode(s, a.from);
+      const to = findNode(s, a.to);
+      if (!from || !to) return refuse(s, `Both ends must be nodes on the canvas (${a.from} → ${a.to}).`);
+      if (!KINDS[from.kind].verdicts.includes(a.on)) return refuse(s, `${a.from} never says "${a.on}". It says ${KINDS[from.kind].verdicts.join(' or ') || 'nothing; it ends the run'}.`);
+      let on = a.on;
+      const m = mergerOf(s, a.from);
+      if (m && on === KINDS[from.kind].verdicts[0] && a.to !== m.id) {
+        say(s, `${a.from} has a merger, so this links from ${m.id} "merged" instead. Remove ${m.id} or set ${a.from} merge off to link straight from ${a.from}.`);
+        from = m; on = 'merged';
+      }
+      if (from.id === a.to) return refuse(s, `A node cannot feed itself. Loop back through another node instead.`);
+      const id = edgeId(from.id, on, a.to);
+      if (s.plan.edges.some(e => e.id === id)) return refuse(s, `That link already exists.`);
+      const back = reachable(s, a.to, from.id);
+      let max = a.max ?? null;
+      if (back && max == null) max = 2;
+      s.plan.edges.push({ id, from: from.id, on, to: a.to, max, steward: false });
+      s.changed.push(id);
+      say(s, back ? `Linked ${from.id} "${on}" back to ${a.to}. It loops, so it is capped at ${max} passes.` : `Linked ${from.id} "${on}" → ${a.to}.`);
+      flowParked(s, from.id, on, s.plan.edges.find(e => e.id === id), `${from.id}'s waiting handoff flows on to ${a.to}.`);
+    },
+    unlink(s, a) {
+      if (!s.plan.edges.some(e => e.id === a.edge)) return refuse(s, `There is no link ${a.edge}.`);
+      s.plan.edges = s.plan.edges.filter(e => e.id !== a.edge);
+      s.run.spent = s.run.spent.filter(x => x.edge !== a.edge);
+      say(s, `Removed the link ${a.edge}.`);
+    },
+    setLoop(s, a) {
+      const e = s.plan.edges.find(e => e.id === a.edge);
+      if (!e) return refuse(s, `There is no link ${a.edge}.`);
+      if (a.max == null && reachable(s, e.to, e.from)) return refuse(s, `${a.edge} loops back, and a loop always needs a cap.`);
+      if (a.max != null && (!Number.isInteger(a.max) || a.max < 1)) return refuse(s, 'A cap is a whole number of passes, 1 or more.');
+      e.max = a.max;
+      if (a.max == null) e.steward = false;
+      s.changed.push(e.id);
+      say(s, a.max == null ? `${a.edge} has no cap.` : `${a.edge} is capped at ${a.max} passes (used ${es(s, e.id).count}).`);
+    },
+    loopSteward(s, a) {
+      const e = s.plan.edges.find(e => e.id === a.edge);
+      if (!e) return refuse(s, `There is no link ${a.edge}.`);
+      if (!['yes', 'no'].includes(a.value)) return refuse(s, 'The Steward mark is yes or no.');
+      if (e.max == null) return refuse(s, `${a.edge} has no cap, so there is no extra pass to allow.`);
+      e.steward = a.value === 'yes';
+      s.changed.push(e.id);
+      say(s, e.steward ? `When ${a.edge} is spent, the Steward may allow one extra pass by itself, once. After that it asks you.` : `When ${a.edge} is spent, it asks you.`);
+    },
+
+    run(s, a) {
+      const node = findNode(s, a.id);
+      if (!node) return refuse(s, `There is no node ${a.id}.`);
+      if (KINDS[node.kind].merger) return refuse(s, `${a.id} is a merger: it runs when the node before it hands over its branches.`);
+      if (!isAgent(node.kind)) return refuse(s, `${a.id} is a ${KINDS[node.kind].label}; run an agent node instead.`);
+      const r = s.run.nodes[a.id];
+      if (r && busy(r)) return refuse(s, `${a.id} is already running.`);
+      if (a.prompt != null) s.run.prompt = a.prompt;
+      s.run.live = true;
+      startNode(s, a.id, { from: 'you', verdict: 'prompt', items: [], note: s.run.prompt });
+    },
+    runAll(s, a) {
+      /* A loop link coming back does not make a node a later step: Foggy starts at the chart its research loops back to. */
+      const loopsBack = e => e.max != null && reachable(s, e.to, e.from);
+      const entries = Object.values(s.plan.nodes).filter(n => isAgent(n.kind) && !s.plan.edges.some(e => e.to === n.id && !loopsBack(e)));
+      if (!entries.length) return refuse(s, 'There is no node to start: put an agent node down first.');
+      if (a.prompt != null) s.run.prompt = a.prompt;
+      if (!s.run.prompt) return refuse(s, 'Write an opening prompt first.');
+      s.run.live = true;
+      for (const n of entries) if (!busy(rn(s, n.id))) startNode(s, n.id, { from: 'you', verdict: 'prompt', items: [], note: s.run.prompt });
+    },
+    finish(s, a) {
+      const f = findCopy(s, a.copy);
+      if (!f) return refuse(s, `There is no copy ${a.copy}.`);
+      const { c, r, node } = f, K = KINDS[node.kind];
+      if (c.status !== 'running') return refuse(s, `${a.copy} is ${c.status}; only a running copy can finish.`);
+      if (!K.verdicts.includes(a.verdict)) return refuse(s, `${node.id} says ${K.verdicts.join(' or ')}, not "${a.verdict}".`);
+      const n = K.merger ? 0 : a.items ?? (K.makes[a.verdict] || 0);
+      c.status = 'done'; c.verdict = a.verdict;
+      if (n > 0) {
+        c.out = [];
+        for (let i = 0; i < n; i++) { r.made++; c.out.push(`${K.noun} ${r.made}${r.pass > 1 ? ` (pass ${r.pass})` : ''}`); }
+      } else c.out = c.item && !c.resolver ? [c.item] : [];
+      say(s, `${a.copy} said "${a.verdict}"${n > 0 ? ` with ${plural(n, K.noun)}` : ''}.`);
+      pullQueue(s, node.id);
+      nodeMaybeDone(s, node.id);
+    },
+    checkpoint(s, a) {
+      const f = findCopy(s, a.copy);
+      if (!f) return refuse(s, `There is no copy ${a.copy}.`);
+      const { c, node } = f;
+      if (c.status !== 'running') return refuse(s, `${a.copy} is ${c.status}; only a running copy can stop at a checkpoint.`);
+      s.changed.push(node.id);
+      switch (node.checkpoint || 'wait') {
+        case 'wait': c.status = 'checkpoint'; say(s, `${a.copy} stopped at a checkpoint and waits for you.`, 'warn'); break;
+        case 'steward': say(s, `${a.copy} stopped at a checkpoint. The Steward answered it and the copy carried on.`, 'steward'); break;
+        case 'continue': say(s, `${a.copy} stopped at a checkpoint. The engine typed "continue" and it carried on.`); break;
+        case 'rest': c.status = 'resting'; c.wakeAt = s.run.clock + 1; say(s, `${a.copy} rests until the clock ticks (say, a usage limit resets). The rest of the run carries on.`); break;
+      }
+    },
+    resume(s, a) {
+      const f = findCopy(s, a.copy);
+      if (!f) return refuse(s, `There is no copy ${a.copy}.`);
+      if (!['checkpoint', 'resting'].includes(f.c.status)) return refuse(s, `${a.copy} is ${f.c.status}; there is nothing to resume.`);
+      f.c.status = 'running'; f.c.wakeAt = null; s.changed.push(f.node.id);
+      say(s, `${a.copy} resumed${a.as === 'steward' ? ' by the Steward' : ''}.`, a.as === 'steward' ? 'steward' : 'info');
+    },
+    close(s, a) {
+      const f = findCopy(s, a.copy);
+      if (!f) return refuse(s, `There is no copy ${a.copy}.`);
+      if (!ACTIVE.includes(f.c.status)) return refuse(s, `${a.copy} is already ${f.c.status}.`);
+      f.c.status = 'closed';
+      say(s, `Closed ${a.copy}.`, 'warn');
+      pullQueue(s, f.node.id);
+      nodeMaybeDone(s, f.node.id);
+    },
+    tick(s) {
+      s.run.clock++;
+      let woke = 0;
+      for (const r of Object.values(s.run.nodes)) for (const c of r.copies) if (c.status === 'resting' && c.wakeAt <= s.run.clock) { c.status = 'running'; c.wakeAt = null; woke++; s.changed.push(c.id.split('#')[0]); }
+      say(s, `The clock is at ${s.run.clock}.${woke ? ` ${plural(woke, 'resting copy')} woke and carried on.` : ''}`);
+    },
+    spawn(s, a) {
+      const f = findCopy(s, a.copy);
+      if (!f) return refuse(s, `There is no copy ${a.copy}.`);
+      if (f.c.status !== 'running') return refuse(s, `${a.copy} is ${f.c.status}; only a running copy proposes follow-up work.`);
+      const node = f.node, mode = node.spawn || 'no';
+      if (mode === 'no') return say(s, `${node.id} may not spawn, so ${a.copy}'s proposal "${a.what}" was dropped.`, 'refuse');
+      if (mode === 'ask') {
+        const id = `h${++s.run.heldSeq}`;
+        s.run.held.push({ id, node: node.id, from: a.copy, what: a.what });
+        return say(s, `${a.copy} proposed "${a.what}". It is held as ${id} until you adopt or discard it.`, 'steward');
+      }
+      addCopy(s, node.id, a.what, `${a.copy} spawned "${a.what}".`);
+    },
+    adopt(s, a) {
+      const h = s.run.held.find(h => h.id === a.held);
+      if (!h) return refuse(s, `There is no held spawn ${a.held}.`);
+      s.run.held = s.run.held.filter(x => x !== h);
+      addCopy(s, h.node, h.what, `${a.as === 'steward' ? 'The Steward' : 'You'} adopted ${h.id}.`);
+    },
+    discard(s, a) {
+      const h = s.run.held.find(h => h.id === a.held);
+      if (!h) return refuse(s, `There is no held spawn ${a.held}.`);
+      s.run.held = s.run.held.filter(x => x !== h);
+      say(s, `${a.as === 'steward' ? 'The Steward' : 'You'} discarded ${h.id} ("${h.what}").`);
+    },
+    open(s, a) {
+      const node = findNode(s, a.id), r = s.run.nodes[a.id];
+      if (!node || !KINDS[node.kind].gate) return refuse(s, `${a.id} is not a gate.`);
+      if (!r || r.status !== 'waiting') return refuse(s, `${a.id} has nothing waiting at it${r && r.status === 'collecting' ? ' yet; it still waits for inputs' : ''}.`);
+      const p = r.waiting; r.waiting = null; r.pass++; r.status = 'done'; s.changed.push(a.id);
+      say(s, `${a.as === 'steward' ? 'The Steward' : 'You'} opened ${a.id}.`, a.as === 'steward' ? 'steward' : 'good');
+      emit(s, a.id, 'open', p);
+    },
+    allow(s, a) {
+      const x = s.run.spent.find(x => x.edge === a.edge);
+      if (!x) return refuse(s, `${a.edge} is not waiting on a spent loop.`);
+      s.run.spent = s.run.spent.filter(y => y !== x);
+      const e = s.plan.edges.find(e => e.id === a.edge), st = es(s, e.id);
+      st.extra++;
+      say(s, `You allowed one more pass round ${a.edge} (${e.max + st.extra} this run).`);
+      traverse(s, e, x.packet);
+    },
+    stop(s, a) {
+      const x = s.run.spent.find(x => x.edge === a.edge);
+      if (!x) return refuse(s, `${a.edge} is not waiting on a spent loop.`);
+      s.run.spent = s.run.spent.filter(y => y !== x);
+      const e = s.plan.edges.find(e => e.id === a.edge);
+      const r = rn(s, e.from);
+      r.parked[e.on] = x.packet; r.status = 'parked';
+      say(s, `You stopped the loop. ${e.from}'s "${e.on}" handoff waits there; link it somewhere else to carry on.`, 'park');
+    },
+    conflict(s, a) {
+      const node = findNode(s, a.id);
+      if (!node || node.kind !== 'merger') return refuse(s, `${a.id} is not a merger.`);
+      const r = rn(s, a.id);
+      if (r.armed) return refuse(s, `${a.id}'s next merge already conflicts.`);
+      r.armed = true; s.changed.push(a.id);
+      say(s, `${a.id}'s next merge of more than one branch will conflict (free play: there is no real git here).`, 'warn');
+    },
+  };
+
+  function setPlan(s, a) {
+    if (!PLAN_FIELDS.includes(a.field)) return refuse(s, `The plan has no "${a.field}" setting. It has: ${PLAN_FIELDS.join(', ')}.`);
+    const v = a.value;
+    if (a.field === 'steward-edits') {
+      if (!ENUMS['steward-edits'].includes(v)) return refuse(s, 'Steward edits is yes or no.');
+      s.plan.stewardEdits = v === 'yes';
+      return say(s, v === 'yes' ? 'The Steward may edit this plan.' : 'The Steward may not edit this plan; it only steers the run.');
+    }
+    s.plan[a.field] = v;
+    say(s, `The plan's ${a.field} is now ${v ? `"${v}"` : 'empty'}.`);
+  }
+
+  /* ---------- the command language an agent speaks ---------- */
+  const q = v => (v == null ? '' : /[\s"]/.test(String(v)) || v === '' ? `"${String(v).replace(/"/g, "'")}"` : String(v));
+  const fmtCopies = c => (c.mode === 'one' ? 'one' : `per-item:${c.n}`);
+  function toCommand(a) {
+    return (a.as === 'steward' ? 'as steward: ' : '') + command(a);
+  }
+  function command(a) {
+    switch (a.type) {
+      case 'newEmpty': return 'new' + (a.name ? ` ${q(a.name)}` : '');
+      case 'rename': return `name ${q(a.name)}`;
+      case 'preset': return `preset ${q(a.name)}`;
+      case 'load': return 'load <plan file>';
+      case 'savePreset': return `save ${q(a.name || '')}`.trim();
+      case 'resetRun': return 'reset run';
+      case 'addNode': return `add ${a.kind}${a.id ? ` as ${a.id}` : ''}${a.x != null ? ` at ${a.x} ${a.y}` : ''}${a.title ? ` ${q(a.title)}` : ''}`;
+      case 'removeNode': return `remove ${a.id}`;
+      case 'move': return `move ${a.id} ${a.x} ${a.y}`;
+      case 'set': return `set ${a.id} ${a.field} ${a.field === 'copies' && typeof a.value === 'object' ? fmtCopies(a.value) : q(a.value)}`;
+      case 'link': return `link ${a.from}.${a.on} -> ${a.to}${a.max != null ? ` max ${a.max}` : ''}`;
+      case 'unlink': return `unlink ${a.edge}`;
+      case 'setLoop': return `loop ${a.edge} max ${a.max ?? 'none'}`;
+      case 'loopSteward': return `loop ${a.edge} steward ${a.value}`;
+      case 'run': return `run ${a.id}${a.prompt != null ? ` ${q(a.prompt)}` : ''}`;
+      case 'runAll': return `run all${a.prompt != null ? ` ${q(a.prompt)}` : ''}`;
+      case 'finish': return `finish ${a.copy} ${a.verdict}${a.items != null ? ` items ${a.items}` : ''}`;
+      case 'spawn': return `spawn ${a.copy} ${q(a.what)}`;
+      case 'checkpoint': case 'resume': case 'close': return `${a.type} ${a.copy}`;
+      case 'adopt': case 'discard': return `${a.type} ${a.held}`;
+      case 'open': case 'conflict': return `${a.type} ${a.id}`;
+      case 'allow': case 'stop': return `${a.type} ${a.edge}`;
+      case 'tick': return 'tick';
+      default: return a.type;
+    }
+  }
+  function parse(line) {
+    const st = String(line).match(/^\s*as\s+steward:\s*(.*)$/i);
+    if (st) return { ...parse(st[1]), as: 'steward' };
+    const t = []; const re = /"([^"]*)"|(\S+)/g; let m;
+    while ((m = re.exec(line))) t.push(m[1] ?? m[2]);
+    const [v, ...r] = t;
+    switch (v) {
+      case 'new': return { type: 'newEmpty', name: r[0] };
+      case 'name': return { type: 'rename', name: r[0] };
+      case 'preset': return { type: 'preset', name: r.join(' ') };
+      case 'save': return { type: 'savePreset', name: r.join(' ') || undefined };
+      case 'reset': return { type: 'resetRun' };
+      case 'add': {
+        const a = { type: 'addNode', kind: r[0] };
+        for (let i = 1; i < r.length; i++) {
+          if (r[i] === 'as') a.id = r[++i];
+          else if (r[i] === 'at') { a.x = +r[++i]; a.y = +r[++i]; }
+          else a.title = r[i];
+        }
+        return a;
+      }
+      case 'remove': return { type: 'removeNode', id: r[0] };
+      case 'move': return { type: 'move', id: r[0], x: +r[1], y: +r[2] };
+      case 'set': return { type: 'set', id: r[0], field: r[1], value: r.slice(2).join(' ') };
+      case 'link': {
+        const [from, on] = (r[0] || '').split('.');
+        const a = { type: 'link', from, on, to: r[1] === '->' ? r[2] : r[1] };
+        const mi = r.indexOf('max'); if (mi > 0) a.max = +r[mi + 1];
+        return a;
+      }
+      case 'unlink': return { type: 'unlink', edge: r[0] };
+      case 'loop': return r[1] === 'steward' ? { type: 'loopSteward', edge: r[0], value: r[2] } : { type: 'setLoop', edge: r[0], max: r[2] === 'none' ? null : +r[2] };
+      case 'run': return r[0] === 'all' ? { type: 'runAll', prompt: r[1] } : { type: 'run', id: r[0], prompt: r[1] };
+      case 'finish': return { type: 'finish', copy: r[0], verdict: r[1], items: r[2] === 'items' ? +r[3] : undefined };
+      case 'spawn': return { type: 'spawn', copy: r[0], what: r.slice(1).join(' ') };
+      case 'checkpoint': case 'resume': case 'close': return { type: v, copy: r[0] };
+      case 'adopt': case 'discard': return { type: v, held: r[0] };
+      case 'open': case 'conflict': return { type: v, id: r[0] };
+      case 'allow': case 'stop': return { type: v, edge: r[0] };
+      case 'tick': return { type: 'tick' };
+      default: return { type: v || '(empty)' };
+    }
+  }
+
+  function run(state, lines) {
+    return lines.reduce((s, l) => reduce(s, parse(l)), state);
+  }
+
+  return { KINDS, ENUMS, SUGGEST, PLAN_FIELDS, fieldsFor, isAgent, empty, freshRun, reduce, parse, toCommand, toFile, fromFile, run, fmtCopies, blockers, mergerOf, ACTIVE };
+})();
+</script>
+
+<script>
+/* ============================================================
+   Presets and walkthroughs, written in the agent's own commands.
+   Each preset follows the flow its author recommends, read from
+   the author's own files (set plan source names the file).
+   ============================================================ */
+const PSTACK = { judge: 'claude-opus-5-5-xhigh', code: 'grok-4.7-xhigh-fast' };
+const at = (x, y = 60) => `at ${x} ${y}`;
+/* Sets harness and model on a list of nodes. */
+const runOn = (harness, model, ids) => ids.flatMap(id => [`set ${id} harness ${harness}`, `set ${id} model ${model}`]);
+
+const PRESET_SCRIPTS = {
+  'Factory today': [
+    'set plan author "Agent Console"', 'set plan source docs/adr/0037-the-factory-is-an-engine-owned-recipe.md',
+    'set plan note "The engine\'s fixed Line as it runs today: one Implement, Prove may loop back twice, Decide may buy one more round, and the Finish checkpoint waits for you."',
+    `add grill ${at(40)}`, `add builder as implement ${at(340)} Implement`, 'set implement copies one',
+    `add prove ${at(640)}`, `add review ${at(940)}`, `add decide ${at(1240)}`,
+    `add gate as approve ${at(1540)} "Finish checkpoint"`, `add finish ${at(1840)}`,
+    'link grill.done -> implement', 'link implement.done -> prove', 'link prove.pass -> review',
+    'link prove.fail -> implement max 2', 'link review.clean -> decide', 'link review.findings -> decide',
+    'link decide.ship -> approve', 'link decide.another-round -> implement max 1', 'link approve.open -> finish',
+  ],
+
+  /* Matt Pocock: skills/engineering/ask-matt/SKILL.md names one main flow and three on-ramps. */
+  'Matt Pocock · Main': [
+    'set plan author "Matt Pocock"', 'set plan source skills/engineering/ask-matt/SKILL.md',
+    'set plan note "You approve the seams and the ticket breakdown, implement-spec builds the ready tickets in parallel into one integration branch, then one code-review and a single fixer with no re-review loop. Not expressible here: grill, spec and tickets share one context window while prototype is a detour you /handoff out to in a fresh session and back from, the draft PR opens inside implement-spec, and retro prefers the session it looks back on."',
+    `add grill as grill-with-docs ${at(40)} "Grill with docs"`, 'set grill-with-docs skill grill-with-docs',
+    `add agent as prototype ${at(340)} Prototype`, 'set prototype skill prototype',
+    `add agent as to-spec ${at(640)} "To spec"`, 'set to-spec skill to-spec',
+    `add gate as seams ${at(940)} "Seams match? (to-spec)"`,
+    `add agent as to-tickets ${at(1240)} "To tickets"`, 'set to-tickets skill to-tickets',
+    `add gate as breakdown ${at(1540)} "Approve the breakdown"`,
+    `add builder as implementers ${at(1840)} "implement-spec: implementers"`, 'set implementers copies per-item:all', 'set implementers checkpoint wait',
+    `add review as code-review ${at(2140)} "Code review"`,
+    `add agent as fixer ${at(2440, 290)} "Fix all review issues"`, 'set fixer skill tdd', 'set fixer model opus',
+    `add agent as pr ${at(2740)} "Mark the PR ready"`, 'set pr skill pr',
+    `add agent as retro ${at(3040)} Retro`, 'set retro skill retro',
+    `add finish ${at(3340)}`,
+    'set implementers-merge title "implement-spec: merger"',
+    'link grill-with-docs.done -> prototype', 'link prototype.done -> to-spec', 'link to-spec.done -> seams',
+    'link seams.open -> to-tickets', 'link to-tickets.done -> breakdown', 'link breakdown.open -> implementers',
+    'link implementers.done -> code-review', 'link code-review.findings -> fixer', 'link code-review.clean -> pr',
+    'link fixer.done -> pr', 'link pr.done -> retro', 'link retro.done -> finish',
+  ],
+  'Matt Pocock · Quick': [
+    'set plan author "Matt Pocock"', 'set plan source skills/engineering/implement/SKILL.md',
+    'set plan note "The on-ramp when no spec is needed: implement right here, which runs tdd at pre-agreed seams and then code-review before it commits, all in one node."',
+    `add agent as implement ${at(40)} Implement`, 'set implement skill implement', 'set implement model opus', 'set implement effort high',
+    `add finish ${at(340)}`, 'link implement.done -> finish',
+  ],
+  'Matt Pocock · Bug': [
+    'set plan author "Matt Pocock"', 'set plan source skills/engineering/diagnosing-bugs/SKILL.md',
+    'set plan note "diagnosing-bugs reproduces, ranks hypotheses, fixes and adds the regression test itself, then retro runs in the same session to ask what would have prevented the bug. Where retro finds there is no good seam, the author follows up with improve-codebase-architecture, which a link cannot choose for you."',
+    `add agent as diagnose ${at(40)} "Diagnose the bug"`, 'set diagnose skill diagnosing-bugs', 'set diagnose model opus', 'set diagnose effort high',
+    `add agent as retro ${at(340)} Retro`, 'set retro skill retro',
+    `add finish ${at(640)}`, 'link diagnose.done -> retro', 'link retro.done -> finish',
+  ],
+  'Matt Pocock · Foggy': [
+    'set plan author "Matt Pocock"', 'set plan source skills/engineering/wayfinder/SKILL.md',
+    'set plan note "wayfinder charts the fog and resolves each research ticket with a subagent on the research skill, looping until no fog is left; the author gives no limit, so the loop is capped at 2. Then the main flow, with implement taking one ticket at a time (/clear between tickets, which a graph cannot say) and retro closing the loop."',
+    `add review as chart ${at(40)} "wayfinder: chart the fog"`, 'set chart skill wayfinder',
+    `add agent as research ${at(340, 290)} "wayfinder: research tickets"`, 'set research skill research', 'set research copies per-item:all',
+    `add agent as to-spec ${at(640)} "To spec"`, 'set to-spec skill to-spec',
+    `add gate as seams ${at(940)} "Seams match? (to-spec)"`,
+    `add agent as to-tickets ${at(1240)} "To tickets"`, 'set to-tickets skill to-tickets',
+    `add gate as breakdown ${at(1540)} "Approve the breakdown"`,
+    `add builder as implement ${at(1840)} "Implement, one ticket at a time"`, 'set implement skill implement', 'set implement copies per-item:1',
+    `add agent as retro ${at(2140)} Retro`, 'set retro skill retro',
+    `add finish ${at(2440)}`,
+    'link chart.findings -> research', 'link research.done -> chart max 2', 'link chart.clean -> to-spec',
+    'link to-spec.done -> seams', 'link seams.open -> to-tickets', 'link to-tickets.done -> breakdown',
+    'link breakdown.open -> implement', 'link implement.done -> retro', 'link retro.done -> finish',
+  ],
+
+  /* Pstack (Lauren Tan): skills/pstack/pstack-poteto-mode/playbooks/. Runs on Cursor. */
+  'Pstack · Feature': [
+    'set plan author "Pstack (Lauren Tan)"', 'set plan source skills/pstack/pstack-poteto-mode/playbooks/feature.md',
+    'set plan note "Start with /poteto-mode: a design arena with no human checkpoint, one owner builds (pstack-arena only when the change admits several shapes), interrogate runs only if the design is contested, and babysit runs only when you ask, retries a CI flake once and never merges. feature.md gives the verify loop no limit, so verify.fail -> build is capped at 2, and deslop and control-ui come from cursor-team-kit."',
+    `add agent as how ${at(40)} "How does it work?"`, 'set how skill pstack-how',
+    `add agent as architect ${at(340)} Architect`, 'set architect skill pstack-architect',
+    `add builder as build ${at(640)} "Build: one owner"`, 'set build copies one', 'set build skill pstack-poteto-mode',
+    `add prove as verify ${at(940)} "Verify on the matching surface"`, 'set verify skill control-ui',
+    `add agent as rebase ${at(1240)} "Rebase into small, ordered commits"`, 'set rebase skill pstack-poteto-mode',
+    `add agent as interrogate ${at(1540)} "Interrogate, if contested"`, 'set interrogate skill pstack-interrogate',
+    `add agent as deslop ${at(1840)} Deslop`, 'set deslop skill deslop',
+    `add agent as no-comments ${at(2140)} "No comments"`, 'set no-comments skill pstack-no-comments',
+    `add agent as writing ${at(2440)} "Technical writing"`, 'set writing skill pstack-technical-writing',
+    `add agent as unslop ${at(2740)} "Unslop: open the PR"`, 'set unslop skill pstack-unslop',
+    `add gate as ask-babysit ${at(3040)} "Babysit? Only when you ask"`,
+    `add prove as babysit ${at(3340)} "Babysit to READY"`, 'set babysit skill pstack-poteto-mode',
+    `add agent as ci-retry ${at(3340, 290)} "Retry the CI flake"`, 'set ci-retry skill pstack-poteto-mode',
+    `add gate as merge ${at(3640)} "Merge: only on your explicit ask"`,
+    `add finish ${at(3940)}`,
+    ...runOn('cursor', PSTACK.judge, ['how', 'architect', 'interrogate', 'writing', 'unslop', 'no-comments']),
+    ...runOn('cursor', PSTACK.code, ['build', 'verify', 'rebase', 'deslop', 'babysit', 'ci-retry']),
+    'link how.done -> architect', 'link architect.done -> build', 'link build.done -> verify',
+    'link verify.fail -> build max 2', 'link verify.pass -> rebase', 'link rebase.done -> interrogate',
+    'link interrogate.done -> deslop', 'link deslop.done -> no-comments', 'link no-comments.done -> writing',
+    'link writing.done -> unslop', 'link unslop.done -> ask-babysit', 'link ask-babysit.open -> babysit',
+    'link babysit.fail -> ci-retry', 'link ci-retry.done -> babysit max 1', 'link babysit.pass -> merge', 'link merge.open -> finish',
+  ],
+  'Pstack · Bug fix': [
+    'set plan author "Pstack (Lauren Tan)"', 'set plan source skills/pstack/pstack-poteto-mode/playbooks/bug-fix.md',
+    'set plan note "Reproduce on the matching surface first, binary-search the cause with one investigator per evidence source (the hunt runs under Cursor /loop with no stated limit, so verify loops back at most 2), architect only if the fix crosses a function boundary, and land the failing repro before the fix unless the test would be expensive. deslop and control-ui come from cursor-team-kit."',
+    `add agent as reproduce ${at(40)} "Reproduce on the surface"`, 'set reproduce skill control-ui',
+    `add agent as how ${at(340)} "How does it work?"`, 'set how skill pstack-how',
+    `add agent as why ${at(640)} "Why: one investigator per source"`, 'set why skill pstack-why', 'set why copies per-item:all',
+    `add agent as architect ${at(940)} "Architect, if it crosses a boundary"`, 'set architect skill pstack-architect',
+    `add builder as fix ${at(1240)} "Fix: one owner"`, 'set fix copies one', 'set fix skill pstack-poteto-mode',
+    `add prove as verify ${at(1540)} "Verify on the same surface"`, 'set verify skill control-ui',
+    `add agent as tdd ${at(1840)} "Failing repro commits first"`, 'set tdd skill pstack-tdd',
+    `add agent as deslop ${at(2140)} Deslop`, 'set deslop skill deslop',
+    `add agent as no-comments ${at(2440)} "No comments"`, 'set no-comments skill pstack-no-comments',
+    `add agent as writing ${at(2740)} "Technical writing"`, 'set writing skill pstack-technical-writing',
+    `add agent as unslop ${at(3040)} "Unslop: open the PR"`, 'set unslop skill pstack-unslop',
+    `add finish ${at(3340)}`,
+    ...runOn('cursor', PSTACK.judge, ['how', 'why', 'architect', 'writing', 'unslop', 'no-comments']),
+    ...runOn('cursor', PSTACK.code, ['reproduce', 'fix', 'verify', 'tdd', 'deslop', 'why-merge']),
+    'link reproduce.done -> how', 'link how.done -> why', 'link why.done -> architect', 'link architect.done -> fix',
+    'link fix.done -> verify', 'link verify.fail -> fix max 2', 'link verify.pass -> tdd', 'link tdd.done -> deslop',
+    'link deslop.done -> no-comments', 'link no-comments.done -> writing', 'link writing.done -> unslop', 'link unslop.done -> finish',
+  ],
+
+  /* PClaude: Billy's Claude Code port of Pstack, skills/pclaude/. */
+  'PClaude · Feature': [
+    'set plan author PClaude', 'set plan source skills/pclaude/pclaude-poteto-mode/playbooks/feature.md',
+    'set plan note "Pstack\'s feature playbook ported to Claude Code (a port still in progress, see PORTING.md): sonnet writes the code and opus judges, with effort left unset per models.md, verify drives the real surface with claude-in-chrome or run, and Opening a PR runs simplify before pclaude-no-comments. feature.md gives the verify loop no limit, so verify.fail -> build is capped at 2."',
+    `add agent as how ${at(40)} "How does it work?"`, 'set how skill pclaude-how',
+    `add agent as architect ${at(340)} Architect`, 'set architect skill pclaude-architect',
+    `add builder as build ${at(640)} "Build: one owner"`, 'set build copies one', 'set build skill pclaude-poteto-mode',
+    `add prove as verify ${at(940)} "Verify on the matching surface (claude-in-chrome or run)"`, 'set verify skill claude-in-chrome',
+    `add agent as rebase ${at(1240)} "Rebase into small, ordered commits"`, 'set rebase skill pclaude-poteto-mode',
+    `add agent as interrogate ${at(1540)} "Interrogate, if contested"`, 'set interrogate skill pclaude-interrogate',
+    `add agent as simplify ${at(1840)} Simplify`, 'set simplify skill simplify',
+    `add agent as no-comments ${at(2140)} "No comments"`, 'set no-comments skill pclaude-no-comments',
+    `add agent as writing ${at(2440)} "Technical writing"`, 'set writing skill pclaude-technical-writing',
+    `add agent as unslop ${at(2740)} "Unslop: open the PR"`, 'set unslop skill pclaude-unslop',
+    `add gate as ask-babysit ${at(3040)} "Babysit? Only when you ask"`,
+    `add prove as babysit ${at(3340)} "Babysit to READY"`, 'set babysit skill pclaude-poteto-mode',
+    `add agent as ci-retry ${at(3340, 290)} "Retry the CI flake"`, 'set ci-retry skill pclaude-poteto-mode',
+    `add gate as merge ${at(3640)} "Merge: only on your explicit ask"`,
+    `add finish ${at(3940)}`,
+    ...runOn('claude', 'opus', ['how', 'architect', 'interrogate', 'writing', 'unslop', 'no-comments']),
+    ...runOn('claude', 'sonnet', ['build', 'verify', 'rebase', 'simplify', 'babysit', 'ci-retry']),
+    'link how.done -> architect', 'link architect.done -> build', 'link build.done -> verify',
+    'link verify.fail -> build max 2', 'link verify.pass -> rebase', 'link rebase.done -> interrogate',
+    'link interrogate.done -> simplify', 'link simplify.done -> no-comments', 'link no-comments.done -> writing', 'link writing.done -> unslop',
+    'link unslop.done -> ask-babysit', 'link ask-babysit.open -> babysit',
+    'link babysit.fail -> ci-retry', 'link ci-retry.done -> babysit max 1', 'link babysit.pass -> merge', 'link merge.open -> finish',
+  ],
+  'PClaude · Bug fix': [
+    'set plan author PClaude', 'set plan source skills/pclaude/pclaude-poteto-mode/playbooks/bug-fix.md',
+    'set plan note "Pstack\'s bug-fix playbook ported to Claude Code (a port still in progress, see PORTING.md): reproduce and verify drive the real surface with claude-in-chrome or run, a stubborn hunt runs under Claude Code /loop, and Opening a PR runs simplify before pclaude-no-comments. The verify loop has no stated limit, so it is capped at 2."',
+    `add agent as reproduce ${at(40)} "Reproduce on the surface (claude-in-chrome or run)"`, 'set reproduce skill claude-in-chrome',
+    `add agent as how ${at(340)} "How does it work?"`, 'set how skill pclaude-how',
+    `add agent as why ${at(640)} "Why: one investigator per source"`, 'set why skill pclaude-why', 'set why copies per-item:all',
+    `add agent as architect ${at(940)} "Architect, if it crosses a boundary"`, 'set architect skill pclaude-architect',
+    `add builder as fix ${at(1240)} "Fix: one owner"`, 'set fix copies one', 'set fix skill pclaude-poteto-mode',
+    `add prove as verify ${at(1540)} "Verify on the same surface (claude-in-chrome or run)"`, 'set verify skill claude-in-chrome',
+    `add agent as tdd ${at(1840)} "Failing repro commits first"`, 'set tdd skill pclaude-tdd',
+    `add agent as simplify ${at(2140)} Simplify`, 'set simplify skill simplify',
+    `add agent as no-comments ${at(2440)} "No comments"`, 'set no-comments skill pclaude-no-comments',
+    `add agent as writing ${at(2740)} "Technical writing"`, 'set writing skill pclaude-technical-writing',
+    `add agent as unslop ${at(3040)} "Unslop: open the PR"`, 'set unslop skill pclaude-unslop',
+    `add finish ${at(3340)}`,
+    ...runOn('claude', 'opus', ['how', 'why', 'architect', 'writing', 'unslop', 'no-comments']),
+    ...runOn('claude', 'sonnet', ['reproduce', 'fix', 'verify', 'tdd', 'simplify']),
+    'link reproduce.done -> how', 'link how.done -> why', 'link why.done -> architect', 'link architect.done -> fix',
+    'link fix.done -> verify', 'link verify.fail -> fix max 2', 'link verify.pass -> tdd', 'link tdd.done -> simplify',
+    'link simplify.done -> no-comments', 'link no-comments.done -> writing', 'link writing.done -> unslop', 'link unslop.done -> finish',
+  ],
+
+  /* Addy Osmani: skills/addy/addy-using-agent-skills/SKILL.md, Lifecycle Sequence. */
+  'Addy Osmani · Commands': [
+    'set plan author "Addy Osmani"', 'set plan source skills/addy/addy-using-agent-skills/SKILL.md',
+    'set plan note "Spec first, with you approving SPEC.md and tasks/plan.md, then addy-build takes the next task red then green and stops, with a human checkpoint every 2 to 3 tasks, and simplify ends in a second review. addy-ship fans out its own three personas into GO or NO-GO, no model is named, and no loop has a limit, so every loop is capped at 2."',
+    `add agent as spec ${at(40)} "Spec"`, 'set spec skill addy-spec',
+    `add gate as confirm-spec ${at(340)} "Confirm SPEC.md"`,
+    `add agent as tasks ${at(640)} "Plan the tasks"`, 'set tasks skill addy-plan',
+    `add gate as review-plan ${at(940)} "Review tasks/plan.md"`,
+    `add builder as build ${at(1240)} "Build: next task, red then green"`, 'set build skill addy-build', 'set build copies per-item:1', 'set build checkpoint wait',
+    `add prove as test ${at(1540)} Test`, 'set test skill addy-test',
+    `add review ${at(1840)} Review`, 'set review skill addy-review',
+    `add agent as simplify ${at(2140)} Simplify`, 'set simplify skill addy-code-simplify',
+    `add review as recheck ${at(2440)} "Review the simplification"`, 'set recheck skill addy-code-review-and-quality',
+    `add decide as ship ${at(2740)} "Ship: three personas, GO or NO-GO"`, 'set ship skill addy-ship',
+    `add finish ${at(3040)}`,
+    'link spec.done -> confirm-spec', 'link confirm-spec.open -> tasks', 'link tasks.done -> review-plan',
+    'link review-plan.open -> build', 'link build.done -> test', 'link test.fail -> build max 2', 'link test.pass -> review',
+    'link review.findings -> build max 2', 'link review.clean -> simplify', 'link simplify.done -> recheck',
+    'link recheck.findings -> simplify max 2', 'link recheck.clean -> ship', 'link ship.ship -> finish', 'link ship.another-round -> build max 2',
+  ],
+  'Addy Osmani · Bug fix': [
+    'set plan author "Addy Osmani"', 'set plan source skills/addy/addy-using-agent-skills/SKILL.md',
+    'set plan note "Debug, prove it with a failing test, review, and the human makes the final call; debugging checkpoints wait for you, because it never runs commands found in error messages without your confirmation. No loop limit is stated, so review loops back at most 2."',
+    `add agent as debug ${at(40)} "Debug and recover"`, 'set debug skill addy-debugging-and-error-recovery', 'set debug checkpoint wait',
+    `add builder as tdd ${at(340)} "Test-driven fix"`, 'set tdd copies one', 'set tdd skill addy-test-driven-development',
+    `add review ${at(640)} Review`, 'set review skill addy-code-review-and-quality',
+    `add gate as final-call ${at(940)} "You make the final call"`,
+    `add finish ${at(1240)}`,
+    'link debug.done -> tdd', 'link tdd.done -> review', 'link review.findings -> tdd max 2',
+    'link review.clean -> final-call', 'link final-call.open -> finish',
+  ],
+};
+
+function buildPresets() {
+  const out = {};
+  for (const [name, lines] of Object.entries(PRESET_SCRIPTS)) {
+    const s = Horde.run(Horde.empty(name), lines);
+    out[name] = { ...Horde.toFile(s), name };
+  }
+  return out;
+}
+const BUILT_IN = buildPresets();
+
+/* A step is [label, command] or [label, command, 'refused'] for a refusal the walkthrough means to show. */
+const WALKS = [
+  {
+    title: 'Lay it out as you go',
+    desc: 'Start from nothing. Put one node down and run it before anything follows it. Putting a Builder down also puts its merger down beside it, because a Builder runs one copy per item. Link the Grill to it and the waiting handoff flows on: one copy per slice, then the merger folds the branches in and its handoff waits until you link onward.',
+    setup: ['new "Scratch"'],
+    steps: [
+      ['Put down a Grill', 'add grill'],
+      ['Run it with an opening prompt', 'run grill "Add dark mode to the settings page"'],
+      ['The Grill finishes with 3 slices', 'finish grill#1.1 done items 3'],
+      ['Put down a Builder: its merger comes with it', 'add builder'],
+      ['Link the Grill to the Builder', 'link grill.done -> builder'],
+      ['First builder copy finishes', 'finish builder#1.1 done'],
+      ['Second', 'finish builder#1.2 done'],
+      ['Third: the merger folds all three in', 'finish builder#1.3 done'],
+    ],
+  },
+  {
+    title: 'A loop with a cap',
+    desc: "Today's Factory as a plan. Prove fails, the work loops back to Implement. The loop is capped at 2 passes. On the third failure the run stops and asks you: allow one more pass (today's \"each Resume buys one fix\") or stop the loop.",
+    setup: ['preset Factory today'],
+    steps: [
+      ['Run the Grill', 'run grill "Retry a launch whose harness is missing"'],
+      ['Grill finishes with one slice', 'finish grill#1.1 done items 1'],
+      ['Implement done', 'finish implement#1.1 done'],
+      ['Prove fails: loop pass 1 of 2', 'finish prove#1.1 fail'],
+      ['Implement fixes it', 'finish implement#2.1 done'],
+      ['Prove fails again: pass 2 of 2', 'finish prove#2.1 fail'],
+      ['Implement fixes it', 'finish implement#3.1 done'],
+      ['Prove fails a third time: the loop is spent', 'finish prove#3.1 fail'],
+      ['Allow one more pass', 'allow prove.fail>implement'],
+      ['Implement fixes it', 'finish implement#4.1 done'],
+      ['Prove passes', 'finish prove#4.1 pass'],
+      ['Review is clean', 'finish review#1.1 clean'],
+      ['Decide ships', 'finish decide#1.1 ship'],
+      ['Open the Finish checkpoint', 'open approve'],
+    ],
+  },
+  {
+    title: 'Fan out, fix in parallel',
+    desc: 'A Builder runs one copy per item, at most 3 at once, and its merger takes the branches. The Grill hands over 4 slices: 3 run and 1 queues until a copy finishes. Review finds 2 problems and loops back, so the Builder runs 2 copies, one per finding. The second time Review finds 1, the single branch passes straight through the merger.',
+    setup: ['new "Fan out"', 'add grill', 'add builder', 'add review', 'link grill.done -> builder', 'link builder.done -> review', 'link review.findings -> builder', 'set builder copies per-item:3'],
+    steps: [
+      ['Run the Grill', 'run grill "Split the settings page into tabs"'],
+      ['Grill hands over 4 slices: 3 run, 1 queues', 'finish grill#1.1 done items 4'],
+      ['Copy 1 done: the queued slice starts', 'finish builder#1.1 done'],
+      ['Copy 2 done', 'finish builder#1.2 done'],
+      ['Copy 3 done', 'finish builder#1.3 done'],
+      ['Copy 4 done: the merger takes 4 branches, Review starts', 'finish builder#1.4 done'],
+      ['Review finds 2 problems', 'finish review#1.1 findings items 2'],
+      ['Fix copy 1 done', 'finish builder#2.1 done'],
+      ['Fix copy 2 done: merged, Review again', 'finish builder#2.2 done'],
+      ['Review finds 1 more: loop pass 2 of 2', 'finish review#2.1 findings items 1'],
+      ['One fix: a single branch passes through the merger', 'finish builder#3.1 done'],
+      ['Review is clean: nothing follows yet, so it waits', 'finish review#3.1 clean'],
+    ],
+  },
+  {
+    title: 'Waves',
+    desc: 'The Grill hands over 5 slices to a Builder capped at 2 at once. Watch "2 running · 3 queued" on the card drain: each time a copy finishes, the next slice starts in the same pass. Only when every slice is done does the merger take all 5 branches, and the run finishes.',
+    setup: ['new "Waves"', 'add grill at 40 60', 'add builder at 340 60', 'set builder copies per-item:2', 'add finish at 640 60', 'link grill.done -> builder', 'link builder.done -> finish'],
+    steps: [
+      ['Run the Grill', 'run grill "Move every settings tab to the new store"'],
+      ['5 slices: 2 run, 3 queue', 'finish grill#1.1 done items 5'],
+      ['Copy 1 done: slice 3 starts', 'finish builder#1.1 done'],
+      ['Copy 2 done: slice 4 starts', 'finish builder#1.2 done'],
+      ['Copy 3 done: slice 5 starts, the queue is empty', 'finish builder#1.3 done'],
+      ['Copy 4 done', 'finish builder#1.4 done'],
+      ['Copy 5 done: the merger takes 5 branches, Finish', 'finish builder#1.5 done'],
+    ],
+  },
+  {
+    title: 'Spawns: no, ask, yes',
+    desc: 'The same Builder under all three spawn settings, changed mid-run. "ask" holds the proposal for you. "no" drops it. "yes" adds a copy straight away. Proposed work is new work, so it gets its own copy and its own branch, and the merger takes them all.',
+    setup: ['new "Spawns"', 'add grill', 'add builder', 'set builder copies per-item:all', 'set builder spawn ask', 'link grill.done -> builder'],
+    steps: [
+      ['Run the Grill', 'run grill "Port the settings page"'],
+      ['It hands over 2 slices: two builders', 'finish grill#1.1 done items 2'],
+      ['Copy 1 proposes follow-up work', 'spawn builder#1.1 "Fix the flaky settings test"'],
+      ['Adopt it: a third copy joins', 'adopt h1'],
+      ['Switch spawning off', 'set builder spawn no'],
+      ['Copy 2 proposes: dropped', 'spawn builder#1.2 "Rewrite the router"'],
+      ['Switch spawning on', 'set builder spawn yes'],
+      ['Copy 2 proposes: spawned at once', 'spawn builder#1.2 "Add a changelog entry"'],
+      ['Copy 1 done', 'finish builder#1.1 done'],
+      ['Copy 2 done', 'finish builder#1.2 done'],
+      ['Copy 3 done', 'finish builder#1.3 done'],
+      ['Copy 4 done: the merger takes four branches', 'finish builder#1.4 done'],
+    ],
+  },
+  {
+    title: 'Checkpoints: rest, wait, Steward',
+    desc: "Three copies of one Builder, one per slice, each hitting a checkpoint under a different setting. 'rest' parks the copy until the clock ticks (a usage limit resetting) while the others carry on. 'wait' needs you. 'steward' is answered for you. Last, closing a copy halts the whole node, so nothing reaches the merger.",
+    setup: ['new "Checkpoints"', 'add grill', 'add builder', 'set builder checkpoint rest', 'link grill.done -> builder'],
+    steps: [
+      ['Run the Grill', 'run grill "Move settings to the new store"'],
+      ['It hands over 3 slices: three builders', 'finish grill#1.1 done items 3'],
+      ['Copy 1 hits a usage limit: it rests', 'checkpoint builder#1.1'],
+      ['Copy 2 keeps going and finishes', 'finish builder#1.2 done'],
+      ['The clock ticks: copy 1 wakes', 'tick'],
+      ['Switch to wait for me', 'set builder checkpoint wait'],
+      ['Copy 1 checkpoints: it waits for you', 'checkpoint builder#1.1'],
+      ['Resume it', 'resume builder#1.1'],
+      ['Switch to the Steward', 'set builder checkpoint steward'],
+      ['Copy 3 checkpoints: the Steward answers', 'checkpoint builder#1.3'],
+      ['Copy 1 done', 'finish builder#1.1 done'],
+      ['Close copy 3: the node halts', 'close builder#1.3'],
+    ],
+  },
+  {
+    title: 'Gates, and things that are refused',
+    desc: 'Two builders feed one gate that waits for both and then for you. Along the way, try things that should not work. At the end the gate opens onto Finish while API runs again: Finish waits for API, then completes by itself. The gate collecting an input that will never come does not hold it.',
+    setup: ['new "Gates"', 'add builder as api at 40 60 API', 'add builder as web at 40 300 Web', 'set api copies one', 'set web copies one', 'add gate as ship at 340 180 Ship', 'set ship join all', 'add finish at 640 180', 'link api.done -> ship', 'link web.done -> ship', 'link ship.open -> finish'],
+    steps: [
+      ['Run the API builder', 'run api "API half of the export feature"'],
+      ['Run the Web builder', 'run web "Web half of the export feature"'],
+      ['API is done: the gate has 1 of 2', 'finish api#1.1 done'],
+      ['Try to open the gate early (refused)', 'open ship', 'refused'],
+      ['Try to remove Web mid-pass (refused)', 'remove web', 'refused'],
+      ['Web is done: the gate waits for you', 'finish web#1.1 done'],
+      ['Try to finish Web twice (refused)', 'finish web#1.1 done', 'refused'],
+      ['Loop the gate back to API', 'link ship.open -> api'],
+      ['Try to take the loop cap off (refused)', 'loop ship.open>api max none', 'refused'],
+      ['Open the gate: Finish waits, because API runs again', 'open ship'],
+      ['API is done: the gate collects 1 of 2, Finish completes', 'finish api#2.1 done'],
+    ],
+  },
+  {
+    title: 'Merge conflict',
+    desc: 'A Builder\'s merger meets a conflict. There is no real git here, so you arm one with "Next merge conflicts". With conflict set to resolver, a resolver copy runs on the merger\'s own harness and model; finish it with "merged" and the run carries on. The second time, conflict is set to wait, so the merger stops at a checkpoint for you first.',
+    setup: ['new "Merge conflict"', 'add grill', 'add builder', 'add review', 'add finish', 'link grill.done -> builder', 'link builder.done -> review', 'link review.clean -> finish', 'link review.findings -> builder'],
+    steps: [
+      ['Run the Grill', 'run grill "Rename the settings store"'],
+      ['3 slices: three builders', 'finish grill#1.1 done items 3'],
+      ['Arm a conflict on the next merge', 'conflict builder-merge'],
+      ['Copy 1 done', 'finish builder#1.1 done'],
+      ['Copy 2 done', 'finish builder#1.2 done'],
+      ['Copy 3 done: the merge conflicts, the resolver runs', 'finish builder#1.3 done'],
+      ['The resolver finishes: merged, Review starts', 'finish builder-merge#1.1 merged'],
+      ['Review finds 2 problems', 'finish review#1.1 findings items 2'],
+      ['This time, wait for me on a conflict', 'set builder-merge conflict wait'],
+      ['Arm another conflict', 'conflict builder-merge'],
+      ['Fix copy 1 done', 'finish builder#2.1 done'],
+      ['Fix copy 2 done: the merger stops at a checkpoint', 'finish builder#2.2 done'],
+      ['Resume it: the resolver carries on', 'resume builder-merge#2.1'],
+      ['The resolver finishes: merged', 'finish builder-merge#2.1 merged'],
+      ['Review is clean: Finish', 'finish review#2.1 clean'],
+    ],
+  },
+  {
+    title: 'Steward powers',
+    desc: 'The Steward steers the run, and edits the plan only when you let it. Its edit is refused, then allowed after you turn on "Steward may edit this plan". The Review loop is marked so the Steward may allow one extra pass: when the loop is spent it does so once, by itself, and the next time it asks you. Allowing a pass is never the Steward\'s to send.',
+    setup: ['new "Steward"', 'add grill', 'add builder', 'add review', 'add finish', 'link grill.done -> builder', 'link builder.done -> review', 'link review.clean -> finish', 'link review.findings -> builder max 1', 'loop review.findings>builder steward yes'],
+    steps: [
+      ['The Steward changes a model (refused)', 'as steward: set builder model sonnet', 'refused'],
+      ['Let the Steward edit this plan', 'set plan steward-edits yes'],
+      ['The Steward changes the model', 'as steward: set builder model sonnet'],
+      ['Run the Grill', 'run grill "Tidy the settings copy"'],
+      ['One slice: one builder', 'finish grill#1.1 done items 1'],
+      ['Builder done: one branch passes through', 'finish builder#1.1 done'],
+      ['Review finds a problem: loop pass 1 of 1', 'finish review#1.1 findings items 1'],
+      ['Fixed', 'finish builder#2.1 done'],
+      ['Review finds another: the Steward allows one extra pass', 'finish review#2.1 findings items 1'],
+      ['Fixed', 'finish builder#3.1 done'],
+      ['Review finds a third: now it asks you', 'finish review#3.1 findings items 1'],
+      ['The Steward tries to allow a pass (refused)', 'as steward: allow review.findings>builder', 'refused'],
+      ['You allow one more pass', 'allow review.findings>builder'],
+      ['Fixed', 'finish builder#4.1 done'],
+      ['Review is clean: Finish', 'finish review#4.1 clean'],
+    ],
+  },
+];
+</script>
+
+<script>
+/* ============================================================
+   The page: a thin shell over Horde. Throwaway.
+   ============================================================ */
+let state = Horde.run(Horde.empty('Factory today', structuredClone(BUILT_IN)), ['preset Factory today']);
+state.log = [];
+const ui = { sel: null, linking: null, tab: 'walk', walk: 0, step: 0, agentErr: '', sendAs: 'you' };
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const K = Horde.KINDS;
+
+function dispatch(a) { state = Horde.reduce(state, a); if (ui.sel && ui.sel.kind === 'node' && !state.plan.nodes[ui.sel.id]) ui.sel = null; render(); }
+function send(line) { dispatch(Horde.parse(line)); }
+
+const liveCount = r => r.copies.filter(c => Horde.ACTIVE.includes(c.status)).length;
+const copiesText = c => (c.mode === 'one' ? '×1' : `per item ≤${c.n}`);
+
+function nodeState(id) {
+  const r = state.run.nodes[id], n = state.plan.nodes[id];
+  if (n && K[n.kind].merger && r && r.armed && r.status !== 'running') return { cls: 'needs', text: 'next merge conflicts' };
+  if (!r) return { cls: 'idle', text: 'not run' };
+  if (r.status === 'holding') return { cls: 'needs', text: `waiting for ${r.waitingFor.length}` };
+  if (r.copies.some(c => c.status === 'checkpoint')) return { cls: 'needs', text: n && K[n.kind].merger ? 'conflict · needs you' : 'needs you' };
+  if (r.status === 'waiting') return { cls: 'needs', text: 'closed · open me' };
+  if (r.status === 'collecting') return { cls: 'collecting', text: 'collecting' };
+  if (r.status === 'running') {
+    if (n && K[n.kind].merger) return { cls: 'running', text: 'resolving a conflict' };
+    return { cls: 'running', text: r.queue.length ? `${liveCount(r)} running · ${r.queue.length} queued` : `running ${liveCount(r)}/${r.copies.length}` };
+  }
+  if (r.status === 'parked') return { cls: 'parked', text: 'done · waiting' };
+  if (state.run.spent.some(x => state.plan.edges.find(e => e.id === x.edge)?.from === id)) return { cls: 'needs', text: 'loop spent' };
+  if (r.status === 'halted') return { cls: 'halted', text: 'halted' };
+  if (r.status === 'done') return { cls: 'done', text: r.verdict ? `done · ${r.verdict}` : 'done' };
+  return { cls: 'idle', text: r.status };
+}
+
+function render() {
+  $('plan-name').value = state.plan.name;
+  $('clock').textContent = `clock ${state.run.clock}`;
+  if (document.activeElement !== $('prompt')) $('prompt').value = state.run.prompt;
+  renderPresets(); renderTray(); renderShelf(); renderCanvas(); renderInsp(); renderDrawer();
+}
+
+function presetGroups() {
+  const groups = {};
+  for (const [name, f] of Object.entries(state.presets)) (groups[f.author || 'Yours'] ||= []).push(name);
+  return groups;
+}
+function renderPresets() {
+  $('preset').innerHTML = `<option value="">Load a preset…</option>` + Object.entries(presetGroups()).map(([author, names]) =>
+    `<optgroup label="${esc(author)}">${names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}</optgroup>`).join('');
+  const p = state.plan;
+  $('preset-line').innerHTML = p.source || p.note
+    ? `${p.author ? `<b>${esc(p.author)}</b> · ` : ''}${p.source ? `<code>${esc(p.source)}</code> · ` : ''}<span>${esc(p.note)}</span>`
+    : '';
+  $('preset-line').hidden = !(p.source || p.note);
+  $('preset-line').title = p.note ? `${p.note} (in full on the Plan file tab)` : '';
+}
+
+function renderTray() {
+  const asks = [];
+  for (const [id, r] of Object.entries(state.run.nodes)) {
+    const merger = state.plan.nodes[id] && K[state.plan.nodes[id].kind].merger;
+    for (const c of r.copies) if (c.status === 'checkpoint') asks.push(`<span class="ask">${esc(c.id)} ${merger ? 'hit a merge conflict' : 'at a checkpoint'} <button data-cmd="resume ${c.id}">Resume</button><button data-cmd="close ${c.id}">Close</button></span>`);
+    if (r.status === 'waiting') asks.push(`<span class="ask">${esc(id)} is closed <button data-cmd="open ${id}">Open</button></span>`);
+  }
+  for (const h of state.run.held) asks.push(`<span class="ask held">${esc(h.id)} from ${esc(h.from)}: "${esc(h.what)}" <button data-cmd="adopt ${h.id}">Adopt</button><button data-cmd="discard ${h.id}">Discard</button></span>`);
+  for (const x of state.run.spent) asks.push(`<span class="ask">loop ${esc(x.edge)} spent <button data-cmd="allow ${x.edge}">Allow one more</button><button data-cmd="stop ${x.edge}">Stop loop</button></span>`);
+  const holding = Object.entries(state.run.nodes).filter(([, r]) => r.status === 'holding').map(([id, r]) => `<span class="tone-warn">${esc(state.plan.nodes[id]?.title || id)} waiting for: ${esc(r.waitingFor.join(', '))}</span>`).join('');
+  const notice = state.notice ? `<span class="notice">✕ ${esc(state.notice)}</span>` : '';
+  const done = state.run.finished ? `<span class="tone-good">Run finished.</span>` : '';
+  $('tray').innerHTML = `<span class="label">Needs you</span>${asks.join('') || '<span class="dim">nothing</span>'}${holding}${done}${notice}`;
+}
+
+function renderShelf() {
+  const desc = { grill: 'talk it through', agent: 'any skill', builder: 'writes code, per item', prove: 'pass / fail', review: 'clean / findings', decide: 'ship / again', merger: 'folds branches in', gate: 'join + approve', finish: 'ends the run' };
+  $('shelf').innerHTML = `<h3>Put down</h3>` + Object.entries(K).map(([k, v]) => `<button data-cmd="add ${k}">${v.label}<span class="k">${desc[k]}</span></button>`).join('');
+}
+
+function cardHtml(n) {
+  const st = nodeState(n.id), r = state.run.nodes[n.id];
+  const kind = K[n.kind];
+  const chips = [];
+  if (Horde.isAgent(n.kind)) {
+    chips.push(`<span class="chip spawn-${n.spawn}">spawn ${n.spawn}</span>`);
+    chips.push(`<span class="chip">checkpoint ${n.checkpoint}</span>`);
+    chips.push(`<span class="chip on">${copiesText(n.copies)}</span>`);
+    if (n.copies.mode !== 'one') { const m = Horde.mergerOf(state, n.id); chips.push(`<span class="chip merge">${m ? `⋈ ${esc(m.id)}` : 'no merger'}</span>`); }
+  } else if (kind.merger) {
+    chips.push(`<span class="chip on">merges ${esc(n.of || 'what comes in')}</span>`, `<span class="chip">conflict: ${n.conflict}</span>`);
+    if (r && r.armed) chips.push(`<span class="chip armed">next merge conflicts</span>`);
+  } else if (kind.gate) {
+    chips.push(`<span class="chip on">opens: ${n.open}</span>`, `<span class="chip">join ${n.join}</span>`);
+  }
+  const sub = Horde.isAgent(n.kind) || kind.merger ? `<span class="dim">${esc(n.skill || 'no skill')}</span><span class="dim">${esc(n.harness)} · ${esc(n.model)} · ${esc(n.effort)}</span>` : `<span class="dim">${kind.gate ? 'no agent' : 'end of the run'}</span>`;
+  const queue = r && (r.queue.length || (n.copies && n.copies.mode === 'per-item' && r.status === 'running')) ? ` · ${liveCount(r)} running · ${r.queue.length} queued` : '';
+  const dots = r && r.copies.length ? `<div class="copies" title="copies this pass">${r.copies.map(c => `<span class="dot ${c.status}${c.spawned ? ' spawned' : ''}" title="${esc(c.id)}: ${c.status}"></span>`).join('')}${r.queue.map(() => '<span class="dot queued" title="queued"></span>').join('')}<span class="dim" style="font-size:10.5px">pass ${r.pass}${queue}</span></div>` : '';
+  const waiting = r && r.status === 'holding' ? `<div class="waitfor">waiting for: ${esc(r.waitingFor.join(', '))}</div>` : '';
+  const ports = kind.verdicts.length ? `<div class="ports">${kind.verdicts.map(v => {
+    const parked = r && r.parked[v];
+    const armed = ui.linking && ui.linking.from === n.id && ui.linking.on === v;
+    const linked = state.plan.edges.some(e => e.from === n.id && e.on === v);
+    return `<button class="port${parked ? ' parked' : ''}${armed ? ' armed' : ''}${linked ? '' : ' open'}" data-port="${n.id}.${v}" data-ui="port" title="Link: click this, then click the node that follows when it says ${v}">${v} →</button>`;
+  }).join('')}</div>` : '';
+  const cls = ['card', `k-${n.kind}`, `s-${st.cls === 'collecting' ? 'collecting' : st.cls}`];
+  if (ui.sel && ui.sel.kind === 'node' && ui.sel.id === n.id) cls.push('sel');
+  if (state.changed.includes(n.id)) cls.push('changed');
+  if (ui.linking && ui.linking.from !== n.id) cls.push('linkable');
+  return `<div class="${cls.join(' ')}" data-node="${n.id}" style="left:${n.x}px;top:${n.y}px">
+    <div class="head" data-drag="${n.id}"><span class="id">${esc(n.title)}</span><span class="state ${st.cls}">${st.text}</span></div>
+    <div class="body"><div class="row"><span class="badge">${kind.label}</span><span class="dim">${esc(n.id)}</span></div>${sub}<div class="chips">${chips.join('')}</div>${dots}${waiting}</div>
+    ${ports}</div>`;
+}
+
+function renderCanvas() {
+  const nodes = Object.values(state.plan.nodes);
+  const c = $('canvas');
+  c.style.width = Math.max(2120, ...nodes.map(n => n.x + 320)) + 'px';
+  c.style.height = Math.max(560, ...nodes.map(n => n.y + 290)) + 'px';
+  const banner = ui.linking ? `<div class="linking-banner">Linking ${esc(ui.linking.from)} "${esc(ui.linking.on)}": click the node that follows. Esc cancels.</div>` : '';
+  const hint = nodes.length ? '' : `<div class="empty-hint"><b>An empty factory.</b><br>Put a node down from the shelf on the left. You can run it straight away and decide what follows once you see what it hands over. To link two nodes, click a verdict chip at the bottom of a card (like <b>done →</b>) and then the next node, or use Links in the inspector. When you like the shape, press <b>Save</b>.</div>`;
+  c.innerHTML = banner + `<svg id="edges"><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7d8597"></path></marker><marker id="arr-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4cc2ff"></path></marker></defs></svg>` + hint + nodes.map(cardHtml).join('');
+  drawEdges();
+}
+
+function drawEdges() {
+  const svg = $('edges'); if (!svg) return;
+  const base = $('canvas').getBoundingClientRect();
+  [...svg.querySelectorAll('.e')].forEach(x => x.remove());
+  let out = '';
+  for (const e of state.plan.edges) {
+    const pe = document.querySelector(`[data-port="${e.from}.${e.on}"]`);
+    const te = document.querySelector(`[data-node="${e.to}"]`);
+    if (!pe || !te) continue;
+    const p = pe.getBoundingClientRect(), t = te.getBoundingClientRect();
+    const sx = p.left + p.width / 2 - base.left, sy = p.bottom - base.top;
+    const srcCard = pe.closest('.card').getBoundingClientRect();
+    const below = t.top >= srcCard.bottom - 2 && Math.abs(t.left - srcCard.left) < 60;
+    const back = !below && t.left - base.left < sx - 30;
+    let d, mx, my;
+    if (below) {
+      /* a merger sits right under its node: drop straight down into it */
+      const ty = t.top - base.top, dy = Math.max(20, (ty - sy) / 2);
+      d = `M${sx},${sy} C${sx},${sy + dy} ${sx},${ty - dy} ${sx},${ty}`;
+      [mx, my] = [sx, (sy + ty) / 2];
+    } else if (!back) {
+      const src = pe.closest('.card').getBoundingClientRect();
+      const fx = src.right - base.left, fy = p.top + p.height / 2 - base.top;
+      const tx = t.left - base.left, ty = t.top - base.top + 16;
+      const k = Math.max(30, (tx - fx) / 2);
+      d = `M${sx + p.width / 2},${fy} L${fx},${fy} C${fx + k},${fy} ${tx - k},${ty} ${tx},${ty}`;
+      [mx, my] = bez([fx, fy], [fx + k, fy], [tx - k, ty], [tx, ty]);
+    } else {
+      const tx = t.left - base.left + t.width / 2 + 30, ty = t.bottom - base.top;
+      const drop = 60 + (Math.abs(sx - tx) / 1600) * 110;
+      d = `M${sx},${sy} C${sx},${sy + drop} ${tx},${ty + drop} ${tx},${ty}`;
+      [mx, my] = bez([sx, sy], [sx, sy + drop], [tx, ty + drop], [tx, ty]);
+    }
+    const st = state.run.edges[e.id];
+    const hot = state.changed.includes(e.id);
+    const spent = state.run.spent.some(x => x.edge === e.id);
+    const sel = ui.sel && ui.sel.kind === 'edge' && ui.sel.id === e.id;
+    const extra = st && st.extra ? ` +${st.extra}` : '';
+    const label = `${e.on}${e.max != null ? ` · ${st ? st.count : 0}/${e.max}${extra}${e.steward ? ' · S' : ''}` : st && st.count ? ` · ×${st.count}` : ''}`;
+    const col = spent ? '#f85149' : hot || sel ? '#4cc2ff' : '#3a4560';
+    out += `<path class="e" d="${d}" fill="none" stroke="${col}" stroke-width="${sel ? 2.5 : 1.6}" ${back ? 'stroke-dasharray="5 4"' : ''} marker-end="url(#${hot || sel ? 'arr-hot' : 'arr'})"></path>`;
+    const w = label.length * 6.1 + 10;
+    out += `<g class="e elabel" data-edge="${esc(e.id)}"><title>${e.steward ? 'S: the Steward may allow one extra pass' : esc(e.id)}</title><rect x="${mx - w / 2}" y="${my - 9}" width="${w}" height="18" rx="9" fill="#12161f" stroke="${col}"></rect><text x="${mx}" y="${my + 4}" text-anchor="middle" font-size="10" fill="${spent ? '#f85149' : '#d4dae4'}" font-family="ui-monospace, Liberation Mono, monospace">${esc(label)}</text></g>`;
+  }
+  svg.insertAdjacentHTML('beforeend', out);
+}
+function bez(a, b, c, d, t = 0.5) {
+  const u = 1 - t;
+  return [0, 1].map(i => u * u * u * a[i] + 3 * u * u * t * b[i] + 3 * u * t * t * c[i] + t * t * t * d[i]);
+}
+
+function seg(id, field, value, choices) {
+  return `<div class="seg">${choices.map(c => `<button class="${c === value ? 'on' : ''}" data-cmd="set ${id} ${field} ${c}">${c}</button>`).join('')}</div>`;
+}
+const HELP = {
+  spawn: { no: 'Proposals are dropped.', ask: 'Proposals wait in Needs you for Adopt or Discard.', yes: 'Proposals become a new copy at once (or queue behind the cap).' },
+  checkpoint: { wait: 'The copy stops and waits for you.', steward: 'The Steward answers on your behalf.', continue: 'The engine types "continue" and it carries on.', rest: 'The copy sleeps until the clock ticks; the rest carry on.' },
+  open: { operator: 'Waits for you to open it.', steward: 'The Steward opens it for you.', auto: 'Opens as soon as its inputs arrive.' },
+  conflict: { resolver: 'A resolver copy runs on this merger\'s harness and model; finishing it with "merged" carries on.', wait: 'Stops at a checkpoint for you.' },
+};
+
+function renderInsp() {
+  const el = $('insp');
+  if (ui.sel && ui.sel.kind === 'edge') {
+    const e = state.plan.edges.find(e => e.id === ui.sel.id);
+    if (!e) { ui.sel = null; return renderInsp(); }
+    const st = state.run.edges[e.id];
+    el.innerHTML = `<h3>Link</h3><div><b>${esc(e.from)}</b> says <b>${esc(e.on)}</b> → <b>${esc(e.to)}</b></div>
+      <div class="field"><span>Passes allowed${e.max == null ? ' (no cap)' : ''} · used ${st ? st.count : 0}${st && st.extra ? ` · ${st.extra} extra this run` : ''}</span>
+      <div class="row"><input type="number" min="1" id="edge-max" value="${e.max ?? ''}" placeholder="none" style="width:6em"><button data-ui="edge-max" data-edge="${esc(e.id)}">Set cap</button><button data-cmd="loop ${e.id} max none">No cap</button></div>
+      <span class="help">A link that loops back always keeps a cap. When the cap is used up, the run asks you before going round again.</span></div>
+      ${e.max != null ? `<div class="field"><span>The Steward may allow one extra pass</span>${`<div class="seg">${['yes', 'no'].map(v => `<button class="${(e.steward ? 'yes' : 'no') === v ? 'on' : ''}" data-cmd="loop ${e.id} steward ${v}">${v}</button>`).join('')}</div>`}
+      <span class="help">${e.steward ? `When the cap is spent, the Steward allows one more pass by itself, once${st && st.stewardUsed ? ' (used this run)' : ''}. After that it asks you.` : 'When the cap is spent, it always asks you.'}</span></div>` : ''}
+      <button class="warn" data-cmd="unlink ${e.id}">Remove link</button>`;
+    return;
+  }
+  const n = ui.sel && state.plan.nodes[ui.sel.id];
+  if (!n) {
+    const s = state.run, p = state.plan;
+    el.innerHTML = `<h3>Factory</h3><div class="help">Click a node to set it up and drive its copies. Click a verdict chip (like <b>done →</b>) and then another node to link them. Drag a node by its head. Click a link's label to cap its loop.</div>
+      <div class="field"><span>Steward may edit this plan</span>${seg('plan', 'steward-edits', p.stewardEdits ? 'yes' : 'no', ['yes', 'no'])}<span class="help">${p.stewardEdits ? 'The Steward may add, remove, set, link, unlink, loop, move and name.' : 'The Steward only steers the run: resume, adopt, discard, and open a gate whose opener is steward.'}</span></div>
+      <hr class="sep"><h3>Run</h3><table>
+      <tr><th>Nodes</th><td>${Object.keys(p.nodes).length}</td></tr>
+      <tr><th>Running</th><td>${Object.values(s.nodes).filter(r => r.status === 'running').length}</td></tr>
+      <tr><th>Waiting handoffs</th><td>${Object.entries(s.nodes).filter(([, r]) => Object.keys(r.parked).length).map(([id]) => esc(id)).join(', ') || '—'}</td></tr>
+      <tr><th>Held spawns</th><td>${s.held.length}</td></tr>
+      <tr><th>Spent loops</th><td>${s.spent.length}</td></tr>
+      <tr><th>Finished</th><td>${s.finished ? 'yes' : Object.values(s.nodes).some(r => r.status === 'holding') ? 'Finish is waiting' : 'no'}</td></tr></table>`;
+    return;
+  }
+  const kind = K[n.kind], r = state.run.nodes[n.id];
+  let cfg = `<h3>${kind.label} · ${esc(n.id)}</h3>
+    <label class="field"><span>Title</span><input id="f-title" data-field="title" value="${esc(n.title)}"></label>`;
+  const runsOn = () => `<label class="field"><span>Skill (driver)</span><input id="f-skill" data-field="skill" value="${esc(n.skill)}"></label>
+      ${['harness', 'model', 'effort'].map(f => `<label class="field"><span>${f[0].toUpperCase() + f.slice(1)}</span><input id="f-${f}" data-field="${f}" value="${esc(n[f])}" list="dl-${f}">
+        <div class="quick">${Horde.SUGGEST[f].map(c => `<button type="button" class="${c === n[f] ? 'on' : ''}" data-cmd="set ${n.id} ${f} ${c}">${c}</button>`).join('')}</div></label>`).join('')}`;
+  if (Horde.isAgent(n.kind)) {
+    const m = Horde.mergerOf(state, n.id);
+    const per = n.copies.mode === 'per-item';
+    cfg += runsOn() + `
+      <div class="field"><span>May it spawn follow-up work?</span>${seg(n.id, 'spawn', n.spawn, Horde.ENUMS.spawn)}<span class="help">${HELP.spawn[n.spawn]}</span></div>
+      <div class="field"><span>When a copy checkpoints</span>${seg(n.id, 'checkpoint', n.checkpoint, Horde.ENUMS.checkpoint)}<span class="help">${HELP.checkpoint[n.checkpoint]}</span></div>
+      <div class="field"><span>Copies</span><div class="row"><div class="seg"><button class="${per ? '' : 'on'}" data-cmd="set ${n.id} copies one">one</button><button class="${per ? 'on' : ''}" data-cmd="set ${n.id} copies per-item:${per ? n.copies.n : 3}">per-item</button></div>
+        ${per ? `<span class="dim">at once</span><input type="number" min="1" id="f-copies-n" value="${n.copies.n === 'all' ? '' : n.copies.n}" placeholder="all" style="width:4.5em" data-copies="1" title="How many copies run at once"><button class="${n.copies.n === 'all' ? 'on' : ''}" data-cmd="set ${n.id} copies per-item:all">all</button>` : ''}</div>
+        <span class="help">${per ? `One copy per item handed in (slices, tickets, findings), ${n.copies.n === 'all' ? 'all at once' : `at most ${n.copies.n} at once; the rest queue and start as copies finish`}. Never two copies on the same item.` : 'One copy, whatever it is handed.'}</span></div>
+      ${per ? `<div class="field"><span>Merger</span>${seg(n.id, 'merge', n.merge, Horde.ENUMS.merge)}<span class="help">${m ? `${esc(m.id)} folds every branch into the line base. Remove it or set merge off to let the branches travel on separately.` : 'No merger: the branches travel on separately.'}</span></div>` : ''}`;
+  } else if (kind.merger) {
+    cfg += runsOn() + `
+      <div class="field"><span>On a conflict</span>${seg(n.id, 'conflict', n.conflict, Horde.ENUMS.conflict)}<span class="help">${HELP.conflict[n.conflict]}</span></div>
+      <div class="help">Merges ${n.of ? `the branches of <b>${esc(n.of)}</b>` : 'the branches of whatever links into it'} into the line base. A single branch passes through.</div>`;
+  } else if (kind.gate) {
+    cfg += `<div class="field"><span>Who opens it</span>${seg(n.id, 'open', n.open, Horde.ENUMS.open)}<span class="help">${HELP.open[n.open]}</span></div>
+      <div class="field"><span>Inputs</span>${seg(n.id, 'join', n.join, Horde.ENUMS.join)}<span class="help">${n.join === 'all' ? 'Waits until every incoming link has delivered.' : 'Any one incoming link is enough.'}</span></div>`;
+  } else if (kind.terminal) {
+    cfg += `<div class="help">Reaching Finish ends the run only once nothing else is running, queued, at a checkpoint, held, spent or waiting at a closed gate.</div>`;
+  }
+  if (kind.verdicts.length) {
+    const outs = state.plan.edges.filter(e => e.from === n.id);
+    const others = Object.values(state.plan.nodes).filter(o => o.id !== n.id);
+    cfg += `<hr class="sep"><h3>Links: what comes next</h3><div class="links">
+      ${outs.map(e => `<div class="linkrow"><span>says <b>${esc(e.on)}</b> → ${esc(state.plan.nodes[e.to].title)}${e.max != null ? ` <span class="dim">· cap ${e.max}${e.steward ? ' · Steward +1' : ''}</span>` : ''}</span><span><button data-ui="sel-edge" data-edge="${esc(e.id)}">Edit</button> <button data-cmd="unlink ${e.id}">✕</button></span></div>`).join('') || `<span class="help">Nothing follows yet. Whatever it hands over will wait on it until you link a next step.</span>`}
+      ${others.length ? `<div class="addlink"><span class="dim">when it says</span><select id="link-on">${kind.verdicts.map(v => `<option>${v}</option>`).join('')}</select><span class="dim">go to</span><select id="link-to">${others.map(o => `<option value="${o.id}">${esc(o.title)} (${o.id})</option>`).join('')}</select><button class="primary" data-ui="add-link" data-id="${n.id}">Link</button></div>` : `<span class="help">Put another node down to link to it.</span>`}
+      <span class="help">On the canvas: click a verdict chip like <b>${esc(kind.verdicts[0])} →</b>, then click the next node.</span></div>`;
+  }
+  let runHtml = `<hr class="sep"><h3>This run</h3>`;
+  if (Horde.isAgent(n.kind)) {
+    const canRun = !(r && (r.copies.some(c => Horde.ACTIVE.includes(c.status)) || r.queue.length));
+    runHtml += `<div class="row"><button class="primary" ${canRun ? '' : 'disabled'} data-ui="run-node" data-id="${n.id}">Run this node</button><span class="help">uses the opening prompt</span></div>`;
+  } else if (kind.merger) {
+    runHtml += `<div class="row"><button data-cmd="conflict ${n.id}" ${r && r.armed ? 'disabled' : ''}>Next merge conflicts</button><span class="help">${r && r.armed ? 'armed: the next merge of two or more branches conflicts' : 'free play: there is no real git here'}</span></div>`;
+  }
+  if (r) {
+    runHtml += `<div class="help">Pass ${r.pass} · ${esc(nodeState(n.id).text)}${r.input && r.input.items && r.input.items.length ? ` · handed: ${esc(r.input.items.join(', '))}` : ''}${r.inbox.length ? ` · ${r.inbox.length} in inbox` : ''}</div>`;
+    if (r.queue.length || (Horde.isAgent(n.kind) && n.copies.mode === 'per-item' && r.copies.length)) runHtml += `<div class="help"><b>${liveCount(r)} running · ${r.queue.length} queued</b>${r.queue.length ? `: ${esc(r.queue.join(', '))}` : ''}</div>`;
+    if (r.status === 'holding') runHtml += `<div class="tone-warn">Waiting for: ${esc(r.waitingFor.join(', '))}. It completes by itself once these clear.</div>`;
+    for (const [v, p] of Object.entries(r.parked)) runHtml += `<div class="tone-park">Waiting handoff on "${esc(v)}": ${esc(p.items.join(', ') || 'no items')}. Link ${esc(v)} → somewhere to pass it on.</div>`;
+    if (r.status === 'waiting') runHtml += `<button class="primary" data-cmd="open ${n.id}">Open gate</button>`;
+    for (const c of r.copies) {
+      const live = c.status === 'running';
+      const makes = v => (kind.makes[v] != null ? kind.makes[v] : 0);
+      runHtml += `<div class="copyrow"><div class="top"><b>${esc(c.id)}${c.spawned ? ' <span class="tone-steward">spawned</span>' : ''}${c.resolver ? ' <span class="tone-warn">resolver</span>' : ''}</b><span class="state ${c.status === 'checkpoint' ? 'needs' : c.status === 'done' ? 'done' : c.status === 'running' ? 'running' : ''}">${c.status}${c.verdict ? ` · ${c.verdict}` : ''}</span></div>
+        <div class="help">${c.item ? `works on: ${esc(c.item)}` : 'works on: the opening prompt'}${c.out && c.out.length ? ` · hands on: ${esc(c.out.join(', '))}` : ''}</div>
+        ${live ? `<div class="acts">${kind.verdicts.map(v => `<button data-ui="finish" data-copy="${c.id}" data-verdict="${v}">${v}</button>`).join('')}
+          ${kind.merger ? '' : `<label class="dim" title="How many items this verdict hands on (slices, findings). 0 passes on what it was given.">items <input type="number" min="0" id="items-${esc(c.id)}" value="${makes(kind.verdicts.find(v => kind.makes[v]) || kind.verdicts[0])}"></label>`}</div>
+          <div class="acts"><button data-cmd="checkpoint ${c.id}">Checkpoint</button>${kind.merger ? '' : `<button data-ui="spawn" data-copy="${c.id}">Propose spawn</button>`}<button data-cmd="close ${c.id}">Close</button></div>` : ''}
+        ${c.status === 'checkpoint' || c.status === 'resting' ? `<div class="acts"><button data-cmd="resume ${c.id}">Resume</button><button data-cmd="close ${c.id}">Close</button></div>` : ''}</div>`;
+    }
+  }
+  el.innerHTML = cfg + runHtml + `<hr class="sep"><button class="warn" data-cmd="remove ${n.id}">Remove node</button>`;
+}
+
+const TABS = [['walk', 'Walkthroughs'], ['agent', 'Agent'], ['file', 'Plan file'], ['state', 'State'], ['log', 'Log'], ['about', 'What this answers']];
+function renderDrawer() {
+  $('tabs').innerHTML = TABS.map(([k, l]) => `<button class="${ui.tab === k ? 'on' : ''}" data-ui="tab" data-tab="${k}">${l}</button>`).join('');
+  const p = $('pane');
+  if (ui.tab === 'walk') {
+    const w = WALKS[ui.walk];
+    p.innerHTML = `<div class="wt"><div class="wt-list">${WALKS.map((x, i) => `<button class="${i === ui.walk ? 'on' : ''}" data-ui="walk" data-i="${i}">${esc(x.title)}</button>`).join('')}</div>
+      <div class="wt-body"><p>${esc(w.desc)}</p><p class="row"><button data-ui="walk-reset">Start this walkthrough again</button><span class="dim">Each step is the same command an agent would send.</span></p>
+      <div class="steps">${w.steps.map(([label, cmd], i) => `<div class="step ${i < ui.step ? 'done' : i === ui.step ? 'next' : ''}"><span class="n">${i + 1}</span><button ${i === ui.step ? '' : 'disabled'} data-ui="step" data-i="${i}">${esc(label)}<code>${esc(cmd)}</code></button></div>`).join('')}</div>
+      ${ui.step >= w.steps.length ? `<p class="tone-good" style="margin-top:8px">Done. Keep poking at it with free play, or try the next walkthrough.</p>` : ''}</div></div>`;
+  } else if (ui.tab === 'agent') {
+    p.innerHTML = `<div class="grid2"><div><p class="dim" style="margin-top:0">An agent changes the plan and drives the run with the same commands every button sends. Type one and press Enter.</p>
+      <div class="row" style="margin-bottom:6px"><span class="dim">Send as</span><div class="seg">${['you', 'Steward'].map(v => `<button class="${ui.sendAs === v ? 'on' : ''}" data-ui="send-as" data-as="${v}">${v}</button>`).join('')}</div>
+        <span class="help">${ui.sendAs === 'Steward' ? `Sent as <code>as steward: …</code>. ${state.plan.stewardEdits ? 'This plan lets the Steward edit it.' : 'Plan edits are refused; it may resume, adopt, discard, or open a steward gate.'}` : 'Sent as you: anything goes.'}</span></div>
+      <form class="agent-in" id="agent-form"><input id="agent-line" placeholder='set builder spawn ask' autocomplete="off"><button class="primary">Send</button></form>
+      ${state.notice ? `<p class="notice">✕ ${esc(state.notice)}</p>` : ''}
+      <p class="dim">Last commands sent (by you, the Steward or the buttons):</p><div class="log">${state.log.slice(-6).reverse().map(e => `<div class="e"><code class="${/^as steward:/.test(e.cmd || '') ? 'tone-steward' : ''}">${esc(e.cmd)}</code></div>`).join('')}</div></div>
+      <div><table><tr><th>Lay out</th><td><code>add builder as fixer at 340 60 "Fixer"</code><br><code>link review.findings -> fixer max 2</code><br><code>set fixer copies per-item:4</code> · <code>per-item:all</code> · <code>one</code><br><code>set fixer spawn ask</code> · <code>set fixer checkpoint rest</code><br><code>set fixer harness cursor</code> · <code>set fixer model composer-2</code><br><code>set fixer merge off</code> · <code>set fixer-merge conflict wait</code><br><code>loop review.findings>fixer max 3</code> · <code>loop … steward yes</code><br><code>remove fixer</code> · <code>unlink e</code></td></tr>
+      <tr><th>Plan</th><td><code>set plan steward-edits yes</code> · <code>set plan note "…"</code><br><code>as steward: set fixer model sonnet</code></td></tr>
+      <tr><th>Run</th><td><code>run grill "prompt"</code> · <code>run all</code><br><code>finish grill#1.1 done items 3</code><br><code>checkpoint builder#1.2</code> · <code>resume</code> · <code>close</code> · <code>tick</code><br><code>spawn builder#1.1 "what"</code> · <code>adopt h1</code> · <code>discard h1</code><br><code>conflict builder-merge</code> · <code>finish builder-merge#1.1 merged</code><br><code>open approve</code> · <code>allow e</code> · <code>stop e</code></td></tr>
+      <tr><th>Files</th><td><code>save "My setup"</code> · <code>preset Matt Pocock · Main</code> · <code>new</code> · <code>name "x"</code></td></tr></table></div></div>`;
+  } else if (ui.tab === 'file') {
+    const pl = state.plan;
+    p.innerHTML = `<div class="grid2"><div><p class="dim" style="margin-top:0">This is the whole saved factory: a small JSON file you can keep in git. Edit it and load it back, or paste one in.</p>
+      <textarea class="json" id="file-text" spellcheck="false">${esc(JSON.stringify(Horde.toFile(state), null, 2))}</textarea>
+      <div class="row"><button data-ui="copy-file">Copy</button><button data-ui="load-file">Load from text</button><span id="file-msg" class="dim"></span></div></div>
+      <div>${pl.source || pl.note ? `<table class="about-plan"><tr><th>Author</th><td>${esc(pl.author || '—')}</td></tr><tr><th>Source</th><td><code>${esc(pl.source || '—')}</code></td></tr><tr><th>Note</th><td>${esc(pl.note || '—')}</td></tr></table>` : ''}
+      <div class="row" style="margin:8px 0"><span class="dim">Steward may edit this plan</span>${seg('plan', 'steward-edits', pl.stewardEdits ? 'yes' : 'no', ['yes', 'no'])}</div>
+      ${ui.justSaved ? `<p class="saved" style="margin-top:0">Saved "${esc(ui.justSaved)}" as a preset. In the real thing this writes the plan file on the left into the repo, e.g. <code>.horde/${esc(ui.justSaved.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}.json</code>.</p>` : ''}<p class="dim" style="margin-top:0">Presets in this session (not saved anywhere: it is a prototype).</p>
+      <div class="row"><input id="save-name" placeholder="Name for this setup" value="${esc(pl.name)}"><button class="primary" data-ui="save-preset">Save as preset</button></div>
+      <table style="margin-top:8px">${Object.entries(presetGroups()).map(([author, names]) => `<tr><th colspan="3">${esc(author)}</th></tr>` + names.map(name => { const f = state.presets[name]; return `<tr><td>${esc(name)}</td><td class="dim">${f.nodes.length} nodes · ${f.edges.length} links</td><td><button data-cmd='preset ${esc(name)}'>Load</button></td></tr>`; }).join('')).join('')}</table></div></div>`;
+  } else if (ui.tab === 'state') {
+    const rows = Object.values(state.plan.nodes).map(n => {
+      const r = state.run.nodes[n.id];
+      return `<tr><td>${esc(n.id)}</td><td>${esc(nodeState(n.id).text)}</td><td>${r ? r.pass : 0}</td><td>${r ? r.copies.map(c => `${esc(c.id)} ${c.status}`).join('<br>') : '—'}</td><td>${r ? r.queue.length : 0}</td><td>${r ? Object.entries(r.parked).map(([v, p]) => `${v}: ${esc(p.items.join(', ') || '—')}`).join('<br>') || '—' : '—'}</td><td>${r ? r.inbox.length : 0}</td></tr>`;
+    }).join('');
+    const erows = state.plan.edges.map(e => { const st = state.run.edges[e.id]; return `<tr><td>${esc(e.id)}</td><td>${st?.count || 0}</td><td>${e.max == null ? 'no cap' : `${e.max}${st && st.extra ? ` +${st.extra}` : ''}`}</td><td>${e.steward ? 'Steward +1' : ''}</td><td>${state.run.spent.some(x => x.edge === e.id) ? '<span class="tone-refuse">spent, waiting</span>' : ''}</td></tr>`; }).join('');
+    p.innerHTML = `<div class="grid2"><div style="overflow-x:auto"><table><tr><th>Node</th><th>State</th><th>Pass</th><th>Copies</th><th>Queued</th><th>Waiting handoff</th><th>Inbox</th></tr>${rows}</table></div>
+      <div style="overflow-x:auto"><table><tr><th>Link</th><th>Used</th><th>Cap</th><th></th><th></th></tr>${erows}</table>
+      <p class="dim">Held spawns: ${state.run.held.map(h => `${esc(h.id)} (${esc(h.what)})`).join(', ') || 'none'} · clock ${state.run.clock} · Steward edits: ${state.plan.stewardEdits ? 'yes' : 'no'} · prompt: ${esc(state.run.prompt || '—')}</p></div></div>`;
+  } else if (ui.tab === 'log') {
+    p.innerHTML = `<div class="log">${state.log.slice().reverse().map(e => `<div class="e"><code class="${/^as steward:/.test(e.cmd || '') ? 'tone-steward' : ''}">› ${esc(e.cmd)}</code>${e.lines.map(l => `<div class="l tone-${l.tone}">${esc(l.text)}</div>`).join('')}</div>`).join('') || '<span class="dim">Nothing yet.</span>'}</div>`;
+  } else {
+    p.innerHTML = `<div class="qa"><p><b>Question.</b> If the Factory stops being a fixed run of Stations and becomes a plan you lay out yourself, does this model hold together? A plan is nodes and links. Each node says whether it may spawn (no, ask, yes), what happens when a copy checkpoints (wait, Steward, continue, rest), and whether it runs one copy or one copy per item handed in. Copies split one plan into chunks and never duplicate work: a cap says how many run at once, the rest queue and start in waves. A node that runs per item gets its own merger node, which folds the branches into the line base and runs a resolver (or waits for you) on a conflict. Links carry a verdict, and loops always carry a cap. Gates join inputs and wait for someone to open them. Finish waits until nothing else is running.</p>
+      <p><b>v3 settles:</b> no best-of-N; the merger as a node you can remove; Finish waiting for everything else; the Steward's plan edits opt-in per plan, and an opt-in extra pass per loop; presets that follow each author's own recommended flow, with the source file and a note on what the graph cannot say.</p>
+      <p><b>Not modelled:</b> real agents, real git (conflicts are armed by hand), spawn caps, the Grill as a Conversation, Prove checking merged work, persistence. ADR-0037 rejected a user-defined Station graph; this prototype tests whether reversing it is worth it.</p></div>`;
+  }
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click', ev => {
+  const t = ev.target.closest('[data-cmd],[data-ui],[data-node],[data-edge]');
+  if (!t) return;
+  if (t.dataset.cmd) { if (ui.linking) ui.linking = null; return send(t.dataset.cmd); }
+  const u = t.dataset.ui;
+  if (u === 'port') { const [from, on] = t.dataset.port.split('.'); ui.linking = ui.linking && ui.linking.from === from && ui.linking.on === on ? null : { from, on }; ev.stopPropagation(); return render(); }
+  if (u === 'tab') { ui.tab = t.dataset.tab; ui.justSaved = null; return renderDrawer(); }
+  if (u === 'send-as') { ui.sendAs = t.dataset.as; return renderDrawer(); }
+  if (u === 'walk') { ui.walk = +t.dataset.i; return startWalk(); }
+  if (u === 'walk-reset') return startWalk();
+  if (u === 'step') { const [, cmd] = WALKS[ui.walk].steps[+t.dataset.i]; ui.step++; return send(cmd); }
+  if (u === 'run-node') return send(`run ${t.dataset.id} "${($('prompt').value || '').replace(/"/g, "'")}"`);
+  if (u === 'finish') {
+    const inp = document.getElementById(`items-${t.dataset.copy}`);
+    const n = inp ? Math.max(0, parseInt(inp.value || '0', 10)) : null;
+    return send(`finish ${t.dataset.copy} ${t.dataset.verdict}${n == null ? '' : ` items ${n}`}`);
+  }
+  if (u === 'spawn') { const what = ['Fix a flaky test', 'Add a missing migration', 'Tidy the error messages', 'Write docs for the new flag'][Math.floor(Math.random() * 4)]; return send(`spawn ${t.dataset.copy} "${what}"`); }
+  if (u === 'edge-max') { const v = $('edge-max').value; return send(`loop ${t.dataset.edge} max ${v === '' ? 'none' : v}`); }
+  if (u === 'copy-file') { const txt = $('file-text').value; navigator.clipboard?.writeText(txt).then(() => { $('file-msg').textContent = 'Copied.'; }, () => { $('file-text').select(); $('file-msg').textContent = 'Selected; press Ctrl+C.'; }); return; }
+  if (u === 'load-file') { try { dispatch({ type: 'load', file: JSON.parse($('file-text').value) }); } catch (err) { $('file-msg').textContent = 'That is not valid JSON: ' + err.message; } return; }
+  if (u === 'add-link') return send(`link ${t.dataset.id}.${$('link-on').value} -> ${$('link-to').value}`);
+  if (u === 'sel-edge') { ui.sel = { kind: 'edge', id: t.dataset.edge }; return render(); }
+  if (u === 'save-now') { send(`save ${JSON.stringify(state.plan.name.replace(/"/g, "'"))}`); ui.tab = 'file'; ui.justSaved = state.plan.name; return renderDrawer(); }
+  if (u === 'save-preset') return send(`save "${($('save-name').value || state.plan.name).replace(/"/g, "'")}"`);
+  if (t.dataset.edge && !t.dataset.ui && !t.dataset.cmd) { ui.sel = { kind: 'edge', id: t.dataset.edge }; return render(); }
+  if (t.dataset.node) {
+    if (ui.linking) { const { from, on } = ui.linking; ui.linking = null; if (from !== t.dataset.node) return send(`link ${from}.${on} -> ${t.dataset.node}`); return render(); }
+    if (dragMoved) return;
+    ui.sel = { kind: 'node', id: t.dataset.node }; return render();
+  }
+});
+$('canvas-wrap').addEventListener('click', ev => { if (ev.target.id === 'canvas' || ev.target.id === 'canvas-wrap' || ev.target.tagName === 'svg') { ui.sel = null; ui.linking = null; render(); } });
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && ui.linking) { ui.linking = null; render(); } });
+document.addEventListener('change', ev => {
+  const t = ev.target;
+  if (t.dataset.field && ui.sel) send(`set ${ui.sel.id} ${t.dataset.field} "${t.value.replace(/"/g, "'")}"`);
+  if (t.dataset.copies && ui.sel) send(`set ${ui.sel.id} copies per-item:${t.value === '' ? 'all' : Math.max(1, parseInt(t.value, 10) || 1)}`);
+  if (t.id === 'plan-name') send(`name "${t.value.replace(/"/g, "'")}"`);
+  if (t.id === 'preset' && t.value) send(`preset ${t.value}`);
+  if (t.id === 'prompt') state.run.prompt = t.value;
+});
+document.addEventListener('submit', ev => {
+  if (ev.target.id !== 'agent-form') return;
+  ev.preventDefault();
+  const line = $('agent-line').value.trim();
+  if (line) send(ui.sendAs === 'Steward' && !/^as\s+steward:/i.test(line) ? `as steward: ${line}` : line);
+  ui.tab = 'agent'; renderDrawer();
+  setTimeout(() => $('agent-line')?.focus(), 0);
+});
+$('prompt').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); $('run-all').click(); }
+});
+$('run-all').addEventListener('click', () => send(`run all "${($('prompt').value || '').replace(/"/g, "'")}"`));
+
+/* drag a card by its head */
+let drag = null, dragMoved = false;
+document.addEventListener('pointerdown', ev => {
+  const h = ev.target.closest('[data-drag]');
+  if (!h || ui.linking) return;
+  const card = h.parentElement;
+  drag = { id: h.dataset.drag, card, sx: ev.clientX, sy: ev.clientY, x: card.offsetLeft, y: card.offsetTop };
+  dragMoved = false;
+});
+document.addEventListener('pointermove', ev => {
+  if (!drag) return;
+  const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy;
+  if (Math.abs(dx) + Math.abs(dy) > 3) dragMoved = true;
+  if (!dragMoved) return;
+  drag.card.style.left = Math.max(0, drag.x + dx) + 'px';
+  drag.card.style.top = Math.max(0, drag.y + dy) + 'px';
+  drawEdges();
+});
+document.addEventListener('pointerup', () => {
+  if (!drag) return;
+  if (dragMoved) dispatch({ type: 'move', id: drag.id, x: drag.card.offsetLeft, y: drag.card.offsetTop, quiet: true });
+  drag = null;
+  setTimeout(() => { dragMoved = false; }, 0);
+});
+
+function startWalk() {
+  const w = WALKS[ui.walk];
+  let s = Horde.empty('Walkthrough', state.presets);
+  s = Horde.run(s, w.setup);
+  s.log = [{ cmd: `— walkthrough: ${w.title} —`, lines: [] }];
+  s.notice = null; s.changed = [];
+  state = s; ui.step = 0; ui.sel = null; ui.linking = null;
+  render();
+}
+
+startWalk();
+</script>
