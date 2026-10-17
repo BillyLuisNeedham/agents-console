@@ -267,7 +267,7 @@ describe("ConsoleView: the Held spawns list (issue #149)", () => {
     line.click();
     c.q<HTMLButtonElement>('[data-key="held-spawn-held-1"] .held-spawn-adopt')!.click();
     expect(c.adopted).toEqual(["held-1"]);
-    // Once the boundary writes it, the row goes with the snapshot.
+    // Once the next Tick writes it, the row goes with the snapshot.
     c.session.setSnapshot({ ...HELD, seq: 2, heldSpawns: [] });
     expect(c.q('[data-key="held-spawn-held-1"]')).toBeNull();
     expect(c.q(".held-spawns-empty")).not.toBeNull();
@@ -306,7 +306,7 @@ describe("ConsoleView: Pending spawns in the list, on the canvas and in the Deta
   it("draws a faded card whose Detail shows the proposal and shares the list's decisions", () => {
     const c = mountConsole(PENDING);
     const card = c.q<HTMLElement>('.spawn-card[data-key="spawn:proposal-1"]')!;
-    expect(card.textContent).toContain("lands next boundary");
+    expect(card.textContent).toContain("lands next Tick");
     c.session.select("spawn:proposal-1");
     expect(c.q(".detail-title")?.textContent).toBe("proposal-1");
     const detail = c.q<HTMLElement>(".spawn-detail")!;

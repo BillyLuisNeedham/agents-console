@@ -1,7 +1,7 @@
 /**
  * The Spawns list (CONTEXT.md: Pending spawn, Held spawn; issues #149 and
  * #150, ADR-0029): what the canvas header's Spawn caps line opens. Two
- * sections: the Pending spawns, each landing at the next boundary unless the
+ * sections: the Pending spawns, each landing at the next Tick unless the
  * operator Holds or Discards it first, and the Held spawns, each waiting for
  * the operator's Adopt or Discard. One module owns the whole session state:
  * whether the list is open, which bodies are expanded, which Discard is
@@ -11,7 +11,7 @@
  * state follows it across a Hold.
  *
  * The spawns themselves are read from the snapshot, never cached here: an
- * Adopt shows as the engine's `adopting` until the boundary writes the
+ * Adopt shows as the engine's `adopting` until the next Tick writes the
  * ticket and the row goes, and a Hold or Discard shows with the snapshot the
  * engine pushes once it is done. Discard is final, so it asks first, inline,
  * the way the header's Stop does (issue #97). The Detail of a spawn's faded
@@ -35,7 +35,7 @@ export type PendingSpawnHandler = (id: string) => Promise<PendingSpawnResponse>;
 export interface HeldSpawnsOptions {
   onAdopt: HeldSpawnHandler;
   onDiscard: HeldSpawnHandler;
-  /** Hold a Pending spawn back from the boundary (issue #150). */
+  /** Hold a Pending spawn back from the next Tick (issue #150). */
   onHold: PendingSpawnHandler;
   /** Discard a Pending spawn before it lands (issue #150). */
   onDiscardPending: PendingSpawnHandler;
@@ -103,7 +103,7 @@ export class HeldSpawnsStore {
     await this.decide(id, "adopt", "held");
   }
 
-  /** Hold a Pending spawn back from the boundary (issue #150). */
+  /** Hold a Pending spawn back from the next Tick (issue #150). */
   async hold(id: string): Promise<void> {
     await this.decide(id, "hold", "pending");
   }
@@ -188,7 +188,7 @@ export class HeldSpawnsStore {
         h(
           "div",
           { class: "held-spawns-note dim", key: "pending-note" },
-          "proposals within the caps. Each lands at the next boundary unless you Hold it (it waits for you) or Discard it.",
+          "proposals within the caps. Each lands at the next Tick unless you Hold it (it waits for you) or Discard it.",
         ),
         pending.length === 0
           ? h("div", { class: "held-spawns-empty", key: "pending-empty" }, "no pending spawns")
@@ -279,12 +279,12 @@ export class HeldSpawnsStore {
     state: SpawnState,
   ): (HTMLElement | null)[] {
     // This tab's own refusal is the newer news; the engine's is from a
-    // boundary that refused an Adopt queued earlier, or refused to land the
+    // Tick that refused an Adopt queued earlier, or refused to land the
     // spawn while it was pending (issue #150).
     const failure =
       this.failures.get(row.id) ??
       ("adoptError" in row && row.adoptError && !row.adopting
-        ? `${row.reason === REFUSED_AT_LANDING ? "the boundary could not land it" : "last Adopt refused"}: ${row.adoptError}`
+        ? `${row.reason === REFUSED_AT_LANDING ? "the Tick could not land it" : "last Adopt refused"}: ${row.adoptError}`
         : null);
     return [
       this.renderActions(row, state),
@@ -332,7 +332,7 @@ export class HeldSpawnsStore {
             {
               class: "btn held-spawn-hold",
               type: "button",
-              title: "keep it back from the boundary until you Adopt it",
+              title: "keep it back from the next Tick until you Adopt it",
               disabled: busy,
               onclick: () => void this.hold(row.id),
             },

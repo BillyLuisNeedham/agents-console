@@ -695,7 +695,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     id: "spawn:proposal-1",
     proposalId: "proposal-1",
     state: "pending",
-    label: "lands next boundary",
+    label: "lands next Tick",
     title: "Write the migration guide",
     parentCardId: "ticket:01",
     parentId: "01",
@@ -728,7 +728,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     const pending = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
     expect(pending.classList.contains("spawn-card-pending")).toBe(true);
     expect(pending.dataset.nodeId).toBe("spawn:proposal-1");
-    expect(pending.querySelector(".spawn-card-label")?.textContent).toBe("lands next boundary");
+    expect(pending.querySelector(".spawn-card-label")?.textContent).toBe("lands next Tick");
     expect(pending.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
     const held = root.querySelector<HTMLElement>('[data-key="spawn:proposal-2"]')!;
     expect(held.classList.contains("spawn-card-held")).toBe(true);

@@ -2044,7 +2044,7 @@ body {
 }
 
 /* The answered-and-waiting row: the same moment as the Detail's queued
-   interrupt box, greyed in place until the boundary drains it. The ticket id
+   interrupt box, greyed in place until the next Tick drains it. The ticket id
    stays clickable; selecting the card is navigation, not an answer. */
 .needs-input-row-waiting {
   opacity: 0.6;

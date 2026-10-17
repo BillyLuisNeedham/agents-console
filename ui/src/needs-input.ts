@@ -5,7 +5,7 @@
  * per-row answer errors) and renders the rows from the projection, following
  * the canvas/detail/drawers split. A row whose interrupt has a matching
  * Queued answer greys out in place as "answered · waiting", its actions
- * disabled, until the super-step boundary drains it (ADR-0004); the
+ * disabled, until the next Tick drains it (ADR-0004); the
  * collapsed tray leaves a badge reading "needs input · N". A row answers
  * through the promise seam the composition wires once: the handler resolves
  * when the engine accepts the answer and rejects when it does not, so a
@@ -98,7 +98,7 @@ export interface NeedsInputFailure {
 
 /**
  * The waiting line a row renders, or null while the row is open: a matching
- * Queued answer means the answer is accepted and held for the boundary. A
+ * Queued answer means the answer is accepted and held for the next Tick. A
  * Close waiting says so (issue #154).
  */
 export function waitingStatus(row: NeedsInputRow): string | null {
@@ -547,7 +547,7 @@ export class NeedsInputTray {
   // that grows with the answer and scrolls past its cap; plain Enter is a
   // newline, and nothing in the row submits on a key. A waiting row greys
   // out in place: the answer is recorded, so its note, expand and actions
-  // disable and the waiting line stands in, until the boundary snapshot
+  // disable and the waiting line stands in, until the next Tick's snapshot
   // drops the row. A failed answer adds an inline mark under the row with
   // its retry. A checkpoint row whose Held pane is alive also offers Keep
   // talking after its form's actions (issue #139), with a refusal's reason

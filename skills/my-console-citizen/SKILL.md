@@ -12,7 +12,7 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states four thing
 - your own **Assignment**: the harness, model, effort and drivers you run on. An enlisted pane names a harness and often no model, because herdr found you as you are.
 - the pool **defaults**: the Assignment a follow-up runs on when nobody says otherwise.
 - the **spawn path**: the file you write proposals to, and its JSON shape.
-- the **Spawn ledger**: `runs/spawn-ledger.md` in the pool, which the engine keeps current. It lists every Ticket and Conversation in the pool, every proposal waiting for the next boundary (a Pending spawn), and every proposal waiting for the operator (a Held spawn).
+- the **Spawn ledger**: `runs/spawn-ledger.md` in the pool, which the engine keeps current. It lists every Ticket and Conversation in the pool, every proposal waiting for the next Tick (a Pending spawn), and every proposal waiting for the operator (a Held spawn).
 
 ## Proposing a follow-up
 
@@ -24,7 +24,7 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states four thing
    - `effort` is the harness's own word (claude: low, medium, high, xhigh, max), passed through as written; leave it out for the harness's default.
    - You cannot tell, or the defaults name no model: ask the operator in this pane before you write the file. The operator is in the room; a guess costs a wasted Attempt.
 4. `blockedBy` names Tickets only, never a Conversation.
-5. Write the file. Within the pool's Spawn caps the proposal waits as a Pending spawn and lands at the next super-step boundary, where the engine assigns the id and writes the ticket; the operator may hold or discard it before then. Beyond a cap it is held for the operator, and a cap of 0 holds every proposal. You never write under `issues/`, never set a status, never pick an id.
+5. Write the file. Within the pool's Spawn caps the proposal waits as a Pending spawn and lands at the next Tick, where the engine assigns the id and writes the ticket; the operator may hold or discard it before then. Beyond a cap it is held for the operator, and a cap of 0 holds every proposal. You never write under `issues/`, never set a status, never pick an id.
 
 ## Ending
 

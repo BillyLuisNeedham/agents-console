@@ -974,11 +974,11 @@ describe("Detail: the Steward (ADR-0030)", () => {
     const closing = { ...interrupt(true)!, closing: true };
     const r = paintProgress(detailView({ status: "checkpoint", interrupt: closing }));
     expect(r.root.querySelector(".interrupt-waiting")?.textContent).toBe(
-      "closing · waiting for the next super-step boundary",
+      "closing · waiting for the next Tick",
     );
     const plain = paintProgress(detailView({ status: "checkpoint", interrupt: interrupt(true) }));
     expect(plain.root.querySelector(".interrupt-waiting")?.textContent).toBe(
-      "answered · waiting for the next super-step boundary",
+      "answered · waiting for the next Tick",
     );
   });
 

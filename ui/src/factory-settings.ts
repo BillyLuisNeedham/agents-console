@@ -7,7 +7,7 @@
  * value: the pool's falls to the machine's, the machine's to the built-in
  * settings, and a Line brief may still override either for its own Line.
  * Changes reach the next Station Ticket the engine writes, at the next
- * super-step boundary (ADR-0018), never one already written.
+ * Tick (ADR-0040), never one already written.
  */
 
 import type { FactorySettings, StationSettings } from "./project";

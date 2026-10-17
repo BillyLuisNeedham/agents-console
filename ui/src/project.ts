@@ -148,7 +148,7 @@ export interface InterruptView extends Interrupt {
    * than resuming into a fresh Attempt. Null wherever it is not offered:
    * every other kind, a headless or closed pane, and an answer already
    * queued. It is not one of the form's actions because it is not an
-   * answer: it never queues for the boundary, so the tray's "resume all"
+   * answer: it never queues for the next Tick, so the tray's "resume all"
    * never fires it.
    */
   keepTalking: KeepTalkingView | null;
@@ -378,14 +378,14 @@ const isStringList = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
 
 // The Spawn proposal events (issues #149 and #150, ADR-0029), each as one
-// readable line: "2 spawns pending for the next boundary: 'A', 'B'", "2
+// readable line: "2 spawns pending for the next Tick: 'A', 'B'", "2
 // spawns held (per-run cap): 'A', 'B'", "1 spawn held (overlaps 02): 'A'",
 // "landed 03-spawn-1 from proposal-4", "adopted 03-spawn-1 from held-1 ·
 // 03-spawn-1 blocks 04, 05", "pending spawn 'A' discarded". A pre-ADR
 // adoption carries a `truncated` count instead of holding, and says so. Like
 // the reassignment line, a payload of the wrong shape decodes to null. Of
 // the spawn-rejected events, only a held spawn's refused Adopt and a Pending
-// spawn the boundary could no longer take are worded: the rest are an
+// spawn the next Tick could no longer take are worded: the rest are an
 // Outcome's own proposals, which the plain row covers.
 function spawnFromPayload(kind: string, payload: Record<string, unknown>): string | null {
   if (kind === "spawn-pending") {
@@ -399,7 +399,7 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
       titles.push(`'${title}'`);
     }
     const count = pending.length === 1 ? "1 spawn" : `${pending.length} spawns`;
-    return `${count} pending for the next boundary: ${titles.join(", ")}`;
+    return `${count} pending for the next Tick: ${titles.join(", ")}`;
   }
   if (kind === "spawn-held") {
     const held = payload.held;
@@ -454,7 +454,7 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
     const { title, reason, fromHeld, fromPending } = payload;
     if (typeof title !== "string" || typeof reason !== "string") return null;
     if (typeof fromPending === "string") {
-      return `pending spawn '${title}' rejected at the boundary: ${reason}`;
+      return `pending spawn '${title}' rejected at the Tick: ${reason}`;
     }
     if (typeof fromHeld !== "string") return null;
     return `adopting held spawn '${title}' refused: ${reason}; still held`;
@@ -1272,7 +1272,7 @@ export interface SpawnCardView {
   id: string;
   proposalId: string;
   state: "pending" | "held";
-  /** "lands next boundary", or "held · <reason>". */
+  /** "lands next Tick", or "held · <reason>". */
   label: string;
   title: string;
   /** The card the proposal came from: a ticket's or a Conversation's. */
@@ -1318,7 +1318,7 @@ export interface PoolView {
 
 /**
  * The Spawn caps line (issue #149): "Spawns 3/20 this run · 5 per attempt",
- * with "· N pending" while Pending spawns wait for the boundary (issue #150)
+ * with "· N pending" while Pending spawns wait for the next Tick (issue #150)
  * and "· N held" while Held spawns wait for the operator. `warn` while the
  * run is at or over its cap, or anything is held: either way the next
  * proposal, or one already made, needs the operator. A Pending spawn alone
@@ -1925,7 +1925,7 @@ function projectSpawnCard(
     state,
     label:
       state === "pending"
-        ? "lands next boundary"
+        ? "lands next Tick"
         : `held · ${heldReasonCopy(
             (spawn as HeldSpawnView).reason,
             spawn.overlaps,
@@ -2004,7 +2004,7 @@ type SpawnProposalView = PendingSpawnView | HeldSpawnView;
 /** How the list, the faded card and the timeline name why a spawn is held:
  *  a cap, the proposing agent's overlaps mark (with what it named, and
  *  which of those the pool never knew), the operator's Hold, or a Pending
- *  spawn the boundary could not land (with why, where it is shown inline)
+ *  spawn the Tick could not land (with why, where it is shown inline)
  *  (issue #150). */
 export function heldReasonCopy(
   reason: HeldSpawnReason,
@@ -2031,7 +2031,7 @@ export function heldReasonCopy(
   }
 }
 
-/** The list's reason copy for a Pending spawn the boundary could not land:
+/** The list's reason copy for a Pending spawn the Tick could not land:
  *  the row shows why beside its buttons. */
 export const REFUSED_AT_LANDING = heldReasonCopy("refused");
 
@@ -2077,9 +2077,9 @@ export type PendingSpawnRow = SpawnRowBase;
 export interface HeldSpawnRow extends SpawnRowBase {
   /** "per-attempt cap", "per-run cap", "overlaps 02" or "held by operator". */
   reason: string;
-  /** An Adopt is on its way to the boundary: nothing more to decide. */
+  /** An Adopt is on its way to the next Tick: nothing more to decide. */
   adopting: boolean;
-  /** Why the boundary refused the last Adopt (the pool moved while it
+  /** Why the Tick refused the last Adopt (the pool moved while it
    *  waited); null until a refusal, and cleared by the next Adopt. */
   adoptError: string | null;
 }
@@ -2865,7 +2865,7 @@ export interface SpawnDetailView {
   kind: "spawn";
   proposalId: string;
   state: "pending" | "held";
-  /** "lands next boundary", or "held · <reason>", as the card says. */
+  /** "lands next Tick", or "held · <reason>", as the card says. */
   label: string;
   title: string;
   parentId: string;

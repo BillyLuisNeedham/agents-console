@@ -642,7 +642,7 @@ describe("SettingsStore.render", () => {
     expect(root.querySelector('[data-key="pool-spawnsPerRun"]')?.textContent).toContain(
       "since this Console boot",
     );
-    // They reload at the next boundary: never badged for a Restart.
+    // They reload at the next Tick: never badged for a Restart.
     expect(root.querySelector('[data-key="pool-spawnsPerAttempt"] .settings-badge')).toBeNull();
     expect(root.querySelector('[data-key="pool-spawnsPerRun"] .settings-badge')).toBeNull();
   });

@@ -330,7 +330,7 @@ export class Detail {
       h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
     );
     // Answered-and-waiting: the answer is recorded and will be applied at the
-    // next super-step boundary, so the form steps aside for the waiting line.
+    // next Tick, so the form steps aside for the waiting line.
     // The interrupt stays on the card until processing clears it.
     if (interrupt.queued) {
       box.append(
@@ -338,7 +338,7 @@ export class Detail {
           "div",
           { class: "interrupt-waiting" },
           (interrupt.closing ? "closing" : "answered") +
-            " · waiting for the next super-step boundary",
+            " · waiting for the next Tick",
         ),
       );
       return box;
@@ -1078,7 +1078,7 @@ export class Detail {
   // -------------------------------------------------------------------------
 
   // The ticket's Assignment, editable when the engine says a write would
-  // take effect at the next boundary and read-only with its one-line reason
+  // take effect at the next Tick and read-only with its one-line reason
   // when it would not. Each field carries the pill that says where its value
   // came from, so the operator can see at a glance whether editing the pool
   // defaults would move this ticket or whether it is pinned away from them.

@@ -11,7 +11,7 @@
  * Each has its own Save, its own dirty flag and its own inline status, so a
  * refused machine write never loses a pool edit. The assignment slice, the
  * Spawn caps, the Steward entry and the Factory settings take effect through
- * the engine's Config reload at the next super-step boundary; the boot-only keys carry a "restart to apply" badge
+ * the engine's Config reload at the next Tick; the boot-only keys carry a "restart to apply" badge
  * until the Restart in the footer hands off to Boot.
  */
 
@@ -868,7 +868,7 @@ export class SettingsStore {
         }),
         badges.has("port"),
       ),
-      // The Spawn caps (issue #149, ADR-0029) reload at the next boundary,
+      // The Spawn caps (issue #149, ADR-0029) reload at the next Tick,
       // or at once on an idle pool, so they carry no badge.
       this.renderCapField("spawnsPerAttempt", "spawns per attempt", DEFAULT_SPAWN_CAPS.perAttempt),
       this.renderCapField(
@@ -1024,7 +1024,7 @@ export class SettingsStore {
 
   /**
    * The Steward entry (ADR-0030): its budget, its Assignment, and whether it
-   * may Close (issue #154). All reload at the next boundary, like the Spawn
+   * may Close (issue #154). All reload at the next Tick, like the Spawn
    * caps, so none carries a badge.
    * The Assignment's empty fields show the pool defaults they fall to, the
    * Steward resolving its own entry ahead of them the way the resolver does.
@@ -1133,7 +1133,7 @@ export class SettingsStore {
    * Line's two limits and the default Finish. Every empty field inherits, and
    * its placeholder shows what it inherits: the pool's the machine's layer
    * over the built-in settings, the machine's the built-in settings. They
-   * reload at the next boundary and reach the next Station Ticket written, so
+   * reload at the next Tick and reach the next Station Ticket written, so
    * none carries a badge.
    */
   private renderFactoryFields(form: "pool" | "machine", data: SettingsResponse): HTMLElement[] {

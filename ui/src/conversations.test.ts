@@ -285,7 +285,7 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
   it("starts the Steward with its standing orders as the opening and only the fields filled in", async () => {
     const { tray, startCalls, startDeferreds } = trayHarness();
     tray.openStewardForm();
-    tray.setStewardField("orders", "watch the next super-step, then end yourself; you may push");
+    tray.setStewardField("orders", "watch the next Tick, then end yourself; you may push");
     tray.setStewardField("model", " opus ");
     const submitted = tray.submitSteward();
     expect(tray.isStewardSubmitting).toBe(true);
@@ -293,7 +293,7 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
       {
         title: "Steward",
         role: "steward",
-        opening: "watch the next super-step, then end yourself; you may push",
+        opening: "watch the next Tick, then end yourself; you may push",
         assign: { model: "opus" },
       },
     ]);

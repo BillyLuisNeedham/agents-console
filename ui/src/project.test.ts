@@ -283,7 +283,7 @@ describe("projectPool", () => {
           ticket("C", { status: "checkpoint", blockedBy: ["B"] }),
           ticket("D", { status: "ready", blockedBy: ["B"] }),
         ],
-        log: ["super-step 1: A"],
+        log: ["start A at abc1234"],
         outcomes: { A: { status: "done", summary: "done A", commitSha: "abc" } },
         interrupts: [{ ticketId: "C", kind: "checkpoint", body: "brief" }],
         config: {},
@@ -309,7 +309,7 @@ describe("projectPool", () => {
     expect(c && c.kind === "ticket" ? c.interrupt?.kind : null).toBe("checkpoint");
     const d = view.cards.find((c) => c.id === "ticket:D");
     expect(d && d.kind === "ticket" ? d.status : null).toBe("ready");
-    expect(view.log).toEqual(["super-step 1: A"]);
+    expect(view.log).toEqual(["start A at abc1234"]);
   });
 
   it("attaches the outcome to a done ticket", () => {
@@ -665,7 +665,7 @@ describe("projectNeedsInput", () => {
     expect(rows[1].interrupt.queued).toBe(false);
   });
 
-  it("drops a waiting row when the boundary snapshot drains the queued answer", () => {
+  it("drops a waiting row when the next Tick's snapshot drains the queued answer", () => {
     const waiting = snapshot({
       state: {
         tickets: [ticket("A")],
@@ -674,7 +674,7 @@ describe("projectNeedsInput", () => {
       },
     });
     expect(projectNeedsInput(projectPool(waiting).cards)).toHaveLength(1);
-    // The boundary applies the queued answer: the interrupt and its queued
+    // The next Tick applies the queued answer: the interrupt and its queued
     // record both drop, and the waiting row goes with them.
     const drained = snapshot({
       state: {
@@ -1833,18 +1833,18 @@ describe("projectTimeline", () => {
       "done",
     );
     expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
-      "2 spawns pending for the next boundary: 'Fix the login test', 'Write the docs'",
+      "2 spawns pending for the next Tick: 'Fix the login test', 'Write the docs'",
       "1 spawn held (overlaps 02, proposal-1): 'Again'",
       "1 spawn held (held by operator): 'Write the docs'",
       "1 spawn held (refused at landing: blocks names done tickets: 04): 'Late'",
       "1 spawn held (overlaps 99 (99 not in the pool)): 'Maybe'",
       "landed 03-spawn-1 from proposal-1 · 03-spawn-1 blocks 04",
       "pending spawn 'Stale' discarded",
-      "pending spawn 'Late' rejected at the boundary: blockedBy names tickets outside the pool: 09",
+      "pending spawn 'Late' rejected at the Tick: blockedBy names tickets outside the pool: 09",
     ]);
   });
 
-  it("names both caps when one boundary held spawns under each", () => {
+  it("names both caps when one Tick held spawns under each", () => {
     const view = projectTimeline(
       response([
         event(1, "spawn-held", {
@@ -3790,7 +3790,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     expect(
       spawns.map((c) => c.kind === "spawn" && [c.id, c.state, c.label, c.title, c.parentCardId]),
     ).toEqual([
-      ["spawn:proposal-1", "pending", "lands next boundary", "Write the migration guide", "ticket:01"],
+      ["spawn:proposal-1", "pending", "lands next Tick", "Write the migration guide", "ticket:01"],
       ["spawn:proposal-2", "held", "held · held by operator", "Fix the flaky login test", "ticket:02"],
     ]);
   });
@@ -3891,7 +3891,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
       kind: "spawn",
       proposalId: "proposal-1",
       state: "pending",
-      label: "lands next boundary",
+      label: "lands next Tick",
       title: "Write the migration guide",
       parentId: "01",
       body: "Document every renamed flag.",
@@ -3954,11 +3954,11 @@ describe("projectHeldSpawns (issue #149)", () => {
     expect(row?.kind).toBe("conversation");
   });
 
-  it("marks one whose Adopt is on its way to the boundary", () => {
+  it("marks one whose Adopt is on its way to the next Tick", () => {
     expect(projectHeldSpawns([heldSpawn({ adopting: true })], NOW)[0]?.adopting).toBe(true);
   });
 
-  it("carries why the boundary refused the last Adopt, and null before any refusal", () => {
+  it("carries why the Tick refused the last Adopt, and null before any refusal", () => {
     const [refused, fresh] = projectHeldSpawns(
       [heldSpawn({ adoptError: "blocker 09 is gone" }), heldSpawn({ id: "held-2" })],
       NOW,
@@ -4178,12 +4178,12 @@ describe("the Steward (ADR-0030)", () => {
       expect(
         stewardLines([
           event("reassign-requested", { fields: { model: "opus", effort: null }, ...by }),
-          event("end-requested", { closing: "the super-step is done", ...by }),
+          event("end-requested", { closing: "the pool is done", ...by }),
           event("end-requested", { closing: null }),
         ]),
       ).toEqual([
         "the Steward reassigned: model opus · effort cleared",
-        "the Steward ended itself: the super-step is done",
+        "the Steward ended itself: the pool is done",
         null,
       ]);
     });
