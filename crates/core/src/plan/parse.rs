@@ -186,7 +186,7 @@ pub(super) fn read_lossless(value: &Value) -> Result<LosslessDraft, Vec<PlanProb
 /// The file read field by field, so one bad node or edge is one problem and the rest still count.
 fn read(value: &Value) -> Read {
     let mut problems = Vec::new();
-    let mut unnamed = false;
+    let mut blank_name = None;
     let mut draft = Draft {
         meta: PlanMeta::default(),
         nodes: Vec::new(),
@@ -220,8 +220,11 @@ fn read(value: &Value) -> Read {
         _ => false,
     };
     if !named {
-        problems.push(at_plan("a Plan needs a `name`".to_owned()));
-        unnamed = matches!(file.get("name"), None | Some(Value::String(_)));
+        let problem = at_plan("a Plan needs a `name`".to_owned());
+        if matches!(file.get("name"), None | Some(Value::String(_))) {
+            blank_name = Some(problem.clone());
+        }
+        problems.push(problem);
     }
     let mut text = |key: &str| match file.get(key) {
         None | Some(Value::Null) => None,
@@ -283,7 +286,9 @@ fn read(value: &Value) -> Read {
             }
         }
     }
-    let lossless = problems.len() == usize::from(unnamed);
+    let lossless = problems
+        .iter()
+        .all(|problem| Some(problem) == blank_name.as_ref());
     Read {
         draft,
         problems,
