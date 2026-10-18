@@ -26,7 +26,7 @@ import type {
   TicketLogResponse,
 } from "../src/project";
 import type { LogPush } from "../../protocol/protocol.ts";
-import type { PlanDraftResponse, PlanEditFile, PlanFile } from "../../protocol/wire.ts";
+import type { LineGraphView, LineNodeView, PlanDraftResponse, PlanEditFile, PlanFile } from "../../protocol/wire.ts";
 import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -48,11 +48,65 @@ const STEWARD = "steward-1";
 const STEWARD_NOTE =
   "Recommend resume with: keep the old endpoint behind the flag until the migration lands, then delete it in a follow-up ticket.";
 /** A Line's Tickets (ADR-0039), the Line at its Finish with Decide's pass 1
- *  report written: the header strip, the cards' node labels and the report's
- *  frame in the Decide Ticket's Detail. */
+ *  report written: the header's Line button, the cards' node labels and the
+ *  report's frame in the Decide Ticket's Detail. */
 const FINISH_TICKET = "finish-1";
 const DECIDE_TICKET = "decide-1";
 const LINE_NODES = ["implement", "prove", "review", "decide", "finish"] as const;
+/**
+ * The Line's live graph (ADR-0039): Implement is a per-item node on its
+ * second pass with a done copy, two running and three queued behind the cap,
+ * Prove's fail loop has been taken once of two, Review parked its findings
+ * with no edge to take them, and the Finish refuses while two copies run.
+ */
+const LINE_KIND = { implement: "agent", prove: "prove", review: "review", decide: "decide", finish: "finish" } as const;
+const IMPLEMENT_COPIES = ["implement-1", "implement-2", "implement-3"];
+function liveLine(): LineGraphView {
+  const view = (id: string, verdicts: string[], overrides: Partial<LineNodeView> = {}): LineNodeView => ({
+    id,
+    verdicts,
+    passes: 1,
+    tickets: [],
+    queued: 0,
+    inbox: 0,
+    parked: [],
+    arrived: [],
+    ...overrides,
+  });
+  return {
+    plan: {
+      horde: 1,
+      name: "Factory today",
+      nodes: LINE_NODES.map((id, i) => ({
+        kind: LINE_KIND[id],
+        id,
+        title: id,
+        x: i * 260,
+        y: 0,
+        ...(id === "implement" ? { copies: { perItem: 2 } } : {}),
+      })) as PlanFile["nodes"],
+      edges: [
+        { from: "implement", on: "done", to: "prove" },
+        { from: "prove", on: "pass", to: "review" },
+        { from: "prove", on: "fail", to: "implement", cap: { max: 2, stewardExtra: true } },
+        { from: "review", on: "clean", to: "decide" },
+        { from: "decide", on: "ship", to: "finish" },
+      ],
+    },
+    rev: 1,
+    status: "finishing",
+    waitingFor: ["implement-2", "implement-3"],
+    nodes: [
+      view("implement", ["done"], { passes: 2, pass: 2, tickets: IMPLEMENT_COPIES, queued: 3 }),
+      view("prove", ["pass", "fail"]),
+      view("review", ["clean", "findings"], { parked: ["findings"] }),
+      view("decide", ["ship"]),
+      view("finish", [], { passes: 0 }),
+    ],
+    edges: [{ edge: { from: "prove", on: "fail", to: "implement" }, count: 1, max: 2, bought: 0 }],
+  };
+}
+
 /** A Line's Conversation pass (ADR-0039) whose End the engine refuses with a
  *  reason as long as a real one, so the card and the Detail offer End as closed. */
 const GRILL = "grill-1";
@@ -142,6 +196,10 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         mergeState: node === "implement" ? "awaiting-approval" : null,
       }),
     ),
+    // The Implement node's second pass: two copies running beside the first.
+    ...IMPLEMENT_COPIES.slice(1).map((id) =>
+      ticket(id, { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
+    ),
     // Extra interrupted tickets so the Needs input tray overflows its max-height.
     ...Array.from({ length: 12 }, (_, i) =>
       ticket(`t-${i + 8}`, { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
@@ -198,25 +256,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // The Steward has answered the selected ticket twice since the operator
     // last did (ADR-0030), so its Detail shows the budget line.
     stewardBudget: { budget: 5, used: { [SELECTED_TICKET]: 2 } },
-    line: {
-      plan: {
-        horde: 1,
-        name: "Factory today",
-        nodes: LINE_NODES.map((id, i) => ({
-          kind: id === "prove" || id === "review" || id === "decide" ? id : ("agent" as const),
-          id,
-          title: id,
-          x: i * 200,
-          y: 0,
-        })),
-        edges: [],
-      },
-      rev: 1,
-      status: "finishing",
-      waitingFor: [],
-      nodes: [],
-      edges: [],
-    },
+    line: liveLine(),
     state: {
       tickets,
       conversations: [
@@ -1059,17 +1099,17 @@ function layoutChecks(name: string): void {
   } else {
     push("canvas header holds its width", "no canvas header", "");
   }
-  // The Line strip (ADR-0037) sits in the header's lines and ellipsises
+  // The Line button (ADR-0037) sits in the header's lines and ellipsises
   // there, never pushing past the header's edge.
-  const strip = q<HTMLElement>(".canvas-lines .canvas-line-strip");
+  const open = q<HTMLElement>(".canvas-lines .canvas-line-open");
   push(
-    "line strip in the header",
-    !strip
-      ? "no .canvas-line-strip"
-      : header && strip.getBoundingClientRect().right > header.getBoundingClientRect().right + 1
-        ? `strip ends at ${Math.round(strip.getBoundingClientRect().right)}, past the header's ${Math.round(header.getBoundingClientRect().right)}`
+    "line button in the header",
+    !open
+      ? "no .canvas-line-open"
+      : header && open.getBoundingClientRect().right > header.getBoundingClientRect().right + 1
+        ? `button ends at ${Math.round(open.getBoundingClientRect().right)}, past the header's ${Math.round(header.getBoundingClientRect().right)}`
         : null,
-    `"${strip?.textContent}" in ${Math.round(strip?.getBoundingClientRect().width ?? 0)}px`,
+    `"${open?.textContent}" in ${Math.round(open?.getBoundingClientRect().width ?? 0)}px`,
   );
   // A Line Ticket's label rides its card's head beside the id and the
   // state word: the head holds the card's width, nothing in it past its edge.
@@ -1146,6 +1186,9 @@ async function layoutMain(): Promise<void> {
   await settleAll();
   layoutChecks(`layout ${width}, no steward`);
   await plansLayoutChecks(`layout ${width}, plans view`);
+  q<HTMLButtonElement>(".plans-close")?.click();
+  await settleAll();
+  await lineLayoutChecks(`layout ${width}, line view`);
   publish("done");
 }
 
@@ -1570,6 +1613,226 @@ async function plansChecks(): Promise<void> {
   );
 }
 
+const lineCard = (id: string) => q<HTMLElement>(`.line-pane .plan-node[data-node="${id}"]`);
+const lineDot = (id: string) => q<HTMLElement>(`.line-pane .plan-dot[data-card="ticket:${id}"]`);
+const lineEdge = (key: string) => q<SVGGElement>(`.line-pane .plan-edges [data-key="edge:${key}"]`);
+
+async function openLine(): Promise<void> {
+  if (!q(".line-pane")) q<HTMLButtonElement>(".canvas-line-open")?.click();
+  await settleAll();
+}
+
+/** The Line a pass later: one copy finished, the queue shrank, a new copy started. */
+function lineMovedOn(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  return {
+    ...snap,
+    seq: 500,
+    line: {
+      ...line,
+      nodes: line.nodes.map((n) =>
+        n.id === "implement" ? { ...n, tickets: [...n.tickets, "implement-4"], queued: 2 } : n,
+      ),
+    },
+    state: {
+      ...snap.state,
+      tickets: [
+        ...snap.state.tickets.map((t) => (t.id === "implement-2" ? { ...t, status: "done" as const, liveAttempt: null } : t)),
+        ticket("implement-4", { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
+      ],
+    },
+  };
+}
+
+/** A tap as the browser sends it: the pointer pair, then the click it makes. */
+function tap(el: Element): void {
+  const p = middle(el);
+  pointer("pointerdown", el, p.x, p.y);
+  pointer("pointerup", el, p.x, p.y);
+  (el as HTMLElement).click();
+}
+
+async function lineChecks(): Promise<void> {
+  const name = "line view";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openLine();
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  const world = q<HTMLElement>(".line-pane .plan-world");
+  const cards = root.querySelectorAll(".line-pane .plan-node").length;
+  const edges = root.querySelectorAll(".line-pane .plan-edges .plan-edge").length;
+  const implement = lineCard("implement");
+  const running = implement?.querySelectorAll(".plan-dot-running").length;
+  const queued = implement?.querySelectorAll(".plan-dot-queued").length;
+  const label = lineEdge("prove.fail>implement")?.querySelector("text")?.textContent;
+  push(
+    "the Line opens as its live graph",
+    viewport && world && cards === 5 && edges === 5 && running === 2 && queued === 3 && label === "fail · 1/2 · S"
+      ? null
+      : `${cards} cards, ${edges} edges, ${running} running and ${queued} queued dots, loop label ${label}`,
+    `${cards} cards, ${edges} edges, 2 running and 3 queued dots, loop "${label}"`,
+  );
+  if (!viewport || !world) return;
+  const states = LINE_NODES.map((id) => `${id}: ${lineCard(id)?.querySelector(".plan-node-state")?.textContent}`).join(", ");
+  const parked = lineCard("review")?.querySelector(".plan-port-parked")?.textContent;
+  push(
+    "each card reads its state, and a parked verdict looks parked",
+    lineCard("finish")?.querySelector(".plan-node-state")?.textContent === "waiting for 2" && parked === "● findings"
+      ? null
+      : `${states}; parked port ${parked}`,
+    states,
+  );
+
+  stage = `${name}: render survival`;
+  const r = viewport.getBoundingClientRect();
+  const x = r.right - 20;
+  const y = r.bottom - 20;
+  pointer("pointerdown", viewport, x, y);
+  pointer("pointermove", viewport, x - 30, y - 20);
+  pointer("pointermove", viewport, x - 80, y - 50);
+  pointer("pointerup", viewport, x - 80, y - 50);
+  const pan = world.style.transform;
+  const runningDot = lineDot("implement-2");
+  const kept: [string, Element | null][] = [
+    ["implement card", lineCard("implement")],
+    ["finish card", lineCard("finish")],
+    ["a running dot", runningDot],
+    ["a queued dot", q(".line-pane .plan-dot-queued")],
+    ["the loop edge", lineEdge("prove.fail>implement")],
+    ["the loop label", lineEdge("prove.fail>implement")?.querySelector(".plan-edge-label") ?? null],
+  ];
+  const gone = () => kept.filter(([, el]) => !el?.isConnected).map(([what]) => what);
+  for (let i = 0; i < 5; i++) render();
+  await settle();
+  const lost = gone();
+  push(
+    "graph nodes, dots and edge labels keep their identity across same-model renders",
+    lost.length ? `lost ${lost.join(", ")}` : null,
+    `${kept.length} elements the same after 5 renders`,
+  );
+  push(
+    "line canvas pan survives same-model renders",
+    world.style.transform === pan ? null : `${pan} became ${world.style.transform}`,
+    `held ${pan}`,
+  );
+
+  const next = lineMovedOn(current);
+  session.setSnapshot(next);
+  render();
+  await settle();
+  const same = gone();
+  const doneDot = lineDot("implement-2")?.classList.contains("plan-dot-done");
+  const fresh = lineDot("implement-4");
+  const nowQueued = lineCard("implement")?.querySelectorAll(".plan-dot-queued").length;
+  const text = lineCard("implement")?.querySelector(".plan-node-state")?.textContent;
+  push(
+    "a pushed Line delta repaints the dots and keeps the graph",
+    same.length
+      ? `lost ${same.join(", ")}`
+      : lineDot("implement-2") !== runningDot
+        ? "the finished copy's dot was replaced"
+        : !doneDot || !fresh?.classList.contains("plan-dot-running") || nowQueued !== 2 || text !== "2 running · 2 queued"
+          ? `finished dot done ${doneDot}, new dot ${!!fresh}, ${nowQueued} queued, state "${text}"`
+          : world.style.transform !== pan
+            ? `pan ${pan} became ${world.style.transform}`
+            : null,
+    'implement-2 turned done in the same node, implement-4 appeared, 2 queued, "2 running · 2 queued", pan held',
+  );
+
+  stage = `${name}: copy click-through`;
+  const target = lineDot("implement-3");
+  if (!target) {
+    push("a tap on a copy dot opens that Ticket", "no dot for implement-3", "");
+    return;
+  }
+  const before = world.style.transform;
+  tap(target);
+  await settleAll();
+  const title = () => q(".detail-open .detail-title")?.textContent ?? null;
+  const selected = () =>
+    q<HTMLElement>(`.node-card[data-node-id="${card("implement-3")}"]`)?.classList.contains("node-card-selected") ?? false;
+  push(
+    "a tap on a copy dot opens that Ticket's Detail and selects its card",
+    title() === "implement-3" && selected() && q(".line-pane") && lineDot("implement-3")?.classList.contains("plan-dot-selected")
+      ? null
+      : `Detail "${title()}", card selected ${selected()}, view open ${!!q(".line-pane")}`,
+    "the Detail shows implement-3 beside the open Line view, its card selected",
+  );
+  push(
+    "a tap on a copy dot does not pan the graph",
+    world.style.transform === before ? null : `${before} became ${world.style.transform}`,
+    "the pan held",
+  );
+  tap(lineDot("implement-3")!);
+  await settleAll();
+  push(
+    "a second tap on the same dot keeps the Detail open",
+    title() === "implement-3" && selected() ? null : `Detail "${title()}", card selected ${selected()}`,
+    "still open on implement-3",
+  );
+  session.select(null);
+  await settleAll();
+}
+
+/**
+ * The Line view at the narrow window: its head holds one line, and each live
+ * card's text stays inside its card, nothing clipped by the card's fixed height.
+ */
+async function lineLayoutChecks(name: string): Promise<void> {
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  await openLine();
+  const head = q<HTMLElement>(".line-head");
+  if (!head) {
+    push("line head on one line", "no .line-head", "");
+    return;
+  }
+  const kids = [...head.children].map((k) => k.getBoundingClientRect());
+  const centres = kids.map((k) => k.top + k.height / 2);
+  const outside = kids.filter((k) => k.right > head.getBoundingClientRect().right + 1);
+  push(
+    "line head on one line",
+    kids.length < 3
+      ? `${kids.length} parts in the head`
+      : Math.max(...centres) - Math.min(...centres) > 3
+        ? `parts wrap: centres ${centres.map(Math.round).join(", ")}`
+        : outside.length
+          ? `${outside.length} parts past the head's right edge`
+          : null,
+    `${kids.length} parts on one line in ${head.clientWidth}px`,
+  );
+  const cards = [...root.querySelectorAll<HTMLElement>(".line-pane .plan-node")];
+  const spilled: string[] = [];
+  for (const el of cards) {
+    const box = el.getBoundingClientRect();
+    const body = el.querySelector<HTMLElement>(".plan-node-body");
+    const outsideKids = [...el.querySelectorAll<HTMLElement>(".plan-node-head > *, .plan-node-body *, .plan-ports > *")].filter((kid) => {
+      const k = kid.getBoundingClientRect();
+      return k.left < box.left - 1 || k.right > box.right + 1 || k.top < box.top - 1 || k.bottom > box.bottom + 1;
+    });
+    const clipped = [...el.querySelectorAll<HTMLElement>(".plan-node-state, .plan-live-summary")].filter(
+      (kid) => kid.scrollWidth > kid.clientWidth + 1,
+    );
+    if (clipped.length) spilled.push(`${el.dataset.node} (${clipped.map((k) => `"${k.textContent}" cut`).join(", ")})`);
+    else if (outsideKids.length || (body && body.scrollHeight > body.clientHeight + 1)) {
+      spilled.push(`${el.dataset.node} (${outsideKids.map((k) => k.className).join(", ") || `body ${body?.scrollHeight} > ${body?.clientHeight}`})`);
+    }
+  }
+  push(
+    "live card text stays inside its card, state word and pass summary uncut",
+    cards.length !== LINE_NODES.length ? `${cards.length} cards` : spilled.length ? `spilled: ${spilled.join("; ")}` : null,
+    `${cards.length} cards, every part inside its box`,
+  );
+  const world = q<HTMLElement>(".line-pane .plan-world");
+  const title = q<HTMLElement>(".line-pane .plan-node-title");
+  if (world && title) {
+    const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
+    push("line card text is readable at the fit zoom", onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`, `card titles are ${onScreen.toFixed(1)}px on screen`);
+  }
+}
+
 async function plansLayoutChecks(name: string): Promise<void> {
   const push = (assertion: string, failure: string | null, ok: string) =>
     report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
@@ -1690,6 +1953,7 @@ async function main(): Promise<void> {
   await closeSelectedChecks();
   await settingsTyping();
   await plansChecks();
+  await lineChecks();
   await lineConversationChecks();
 
   for (const selector of DEAD_SELECTORS) {
