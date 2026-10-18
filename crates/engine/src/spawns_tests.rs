@@ -434,6 +434,32 @@ fn holding_or_discarding_a_pending_spawn_frees_the_run_room_it_reserved() {
 }
 
 #[test]
+fn a_conversation_spawn_the_pool_cannot_host_is_rejected_in_the_tick_that_adopts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({}));
+    let proposals =
+        vec![serde_json::from_value(proposal("Talk", json!({ "kind": "conversation" }))).unwrap()];
+    crate::spawns::take_spawn_proposals(
+        &mut session,
+        "01",
+        proposals,
+        ac_protocol::SpawnKind::Conversation,
+    )
+    .unwrap();
+
+    crate::spawns::adopt_spawn_proposals(&mut session).unwrap();
+
+    assert_eq!(
+        parent_events(dir.path(), TicketEventKind::SpawnRejected),
+        [json!({
+            "title": "Talk",
+            "reason": r#"conversation start failed: conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")"#
+        })]
+    );
+    assert!(crate::conversations::reserved_ids(&session).is_empty());
+}
+
+#[test]
 fn a_queued_adopt_the_tick_refuses_keeps_the_spawn_held_with_the_reason_on_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = session_in(dir.path(), json!({ "perAttempt": 0 }));
