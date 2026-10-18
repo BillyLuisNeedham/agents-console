@@ -3721,10 +3721,15 @@ textarea.steward-orders {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 5px 10px;
+  gap: 2px;
+  padding: 5px 8px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.plan-shelf .btn {
+  padding: 2px 4px;
+  font-size: 10px;
 }
 
 .plan-shelf-label {

@@ -1524,6 +1524,17 @@ async function plansLayoutChecks(name: string): Promise<void> {
       `${tools.length} tools in ${head.clientWidth}px`,
     );
   }
+  const shelf = q<HTMLElement>(".plans-pane .plan-shelf");
+  if (shelf) {
+    const tools = [...shelf.querySelectorAll<HTMLElement>(".btn")];
+    const rows = new Set(tools.map((t) => Math.round(t.getBoundingClientRect().top)));
+    const off = tools.filter((t) => overflowOf(t, shelf) !== null);
+    push(
+      "plans shelf on one line",
+      tools.length < 8 ? `${tools.length} tools` : rows.size > 1 ? `${rows.size} rows` : off.length ? `off the line: ${off.map((t) => t.textContent).join(", ")}` : null,
+      `${tools.length} tools in ${shelf.clientWidth}px`,
+    );
+  }
   const world = q<HTMLElement>(".plans-pane .plan-world");
   const title = q<HTMLElement>(".plans-pane .plan-node-title");
   if (world && title) {
