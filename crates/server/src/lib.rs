@@ -14,7 +14,8 @@ pub mod server;
 pub mod ui;
 
 pub use server::{
-    PoolServerOptions, RestartHandOff, SNAPSHOT_COALESCE, Server, Starter, StopHandOff,
+    LineBoot, LineBootHandOff, LineBootRefusal, PoolServerOptions, RestartHandOff,
+    SNAPSHOT_COALESCE, Server, Starter, StopHandOff,
 };
 
 #[cfg(test)]

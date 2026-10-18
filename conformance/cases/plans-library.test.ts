@@ -170,7 +170,7 @@ conformance("plans", "saving an invalid Plan is refused as 400, writing nothing"
 
 conformance("plans", "a slug that is not a Plan slug is refused as 400 on every route, touching nothing outside the library", async (t) => {
   const { world, server } = await plansPool(t);
-  const slugs = ["BAD", "-leading", "a.b", "x".repeat(65), "validate", "..%2Fescape"];
+  const slugs = ["BAD", "-leading", "a.b", "x".repeat(65), "validate", "edit", "boot", "..%2Fescape"];
 
   for (const slug of slugs) {
     for (const [method, body] of [["GET", undefined], ["PUT", smallPlan()], ["DELETE", undefined]] as const) {

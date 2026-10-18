@@ -263,6 +263,14 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(routes::plan_validate_request(body));
         }
+        ("/api/plans/edit", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_edit_request(body));
+        }
+        ("/api/plans/boot", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_boot_request(&server, body).await);
+        }
         ("/api/plans", &Method::GET) => return http_of(routes::plans_list_request(&server)),
         (plan_path, _) if plan_path.starts_with("/api/plans/") => {
             let slug = decode_component(&plan_path["/api/plans/".len()..]);

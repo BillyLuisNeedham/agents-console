@@ -7,7 +7,15 @@
 
 import { expect } from "bun:test";
 import { join } from "node:path";
-import type { PlanEdgeFile, PlanFile, PlanNodeFile, PlanProblem, PlanProblemAt } from "../../protocol/wire.ts";
+import type {
+  PlanDraftResponse,
+  PlanEdgeFile,
+  PlanEditFile,
+  PlanFile,
+  PlanNodeFile,
+  PlanProblem,
+  PlanProblemAt,
+} from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
 import type { World } from "../harness/world.ts";
@@ -134,3 +142,29 @@ export async function validateBoth(server: CaseServer, socket: SocketClient, dra
   expect(reply.result.problems).toEqual(problems);
   return problems;
 }
+
+/**
+ * `plans.edit` over HTTP and on the socket, which must agree: the draft the
+ * edits make, as both answered it.
+ */
+export async function editBoth(server: CaseServer, socket: SocketClient, draft: unknown, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
+  const http = await server.http.post("/api/plans/edit", { plan: draft, edits });
+  expect(http.status, http.text).toBe(200);
+  const reply = await socket.request("plans.edit", { plan: draft as PlanFile, edits });
+  if (!reply.ok) throw new Error(`plans.edit was refused: ${JSON.stringify(reply.refusal)}`);
+  const answer = http.json<PlanDraftResponse>();
+  expect(reply.result).toEqual(answer);
+  return answer;
+}
+
+/** `plans.edit` refused over HTTP and on the socket alike: the reason both gave. */
+export async function editRefusedBoth(server: CaseServer, socket: SocketClient, draft: unknown, edits: PlanEditFile[]): Promise<string> {
+  const http = await server.http.post("/api/plans/edit", { plan: draft, edits });
+  expect(http.status, http.text).toBe(400);
+  const reason = http.json<{ reason: string }>().reason;
+  const reply = await socket.request("plans.edit", { plan: draft as PlanFile, edits });
+  expect(reply.ok).toBe(false);
+  if (!reply.ok) expect(reply.refusal).toEqual({ reason, status: 400 });
+  return reason;
+}
+

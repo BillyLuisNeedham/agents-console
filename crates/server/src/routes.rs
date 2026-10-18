@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 use ac_core::config::read_config;
 use ac_core::js;
 use ac_core::machine_defaults::write_machine_defaults;
-use ac_core::plan::Plan;
 use ac_core::plan::library::{self, LibraryError};
+use ac_core::plan::{Plan, PlanEdit};
 use ac_core::pool_settings::{relaunch_port, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
@@ -21,14 +21,14 @@ use ac_protocol::json::Unchecked;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanResponse, PlanSaveResponse,
-    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, RunPhase,
-    StartConversationRequest,
+    LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest, PlanDraftResponse,
+    PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse, PlanValidateResponse,
+    PlansListResponse, RequestKind, ResumeAction, RunPhase, StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
 use crate::reassign::{ReassignContext, ReassignError, ReassignOutcome, write_reassign};
-use crate::server::{Inner, Server, live_attempt_ids};
+use crate::server::{Inner, LineBoot, LineBootRefusal, Server, live_attempt_ids};
 
 /// Which key a refusal's reason goes under over HTTP: the older routes say `error`, the Conversation
 /// routes and those after them `reason`.
@@ -365,6 +365,89 @@ pub fn plan_validate_request(body: Body) -> Answer {
     match checked {
         Ok(problems) => Answer::ok(200, &PlanValidateResponse { problems }),
         Err(err) => Answer::refused(400, Field::Reason, err),
+    }
+}
+
+/// POST /api/plans/edit: typed edits on a draft, answered with the draft they make. Writes nothing. A
+/// body that is not `{plan, edits}`, an edit that cannot be read or misses, or a draft the edits
+/// would drop or rewrite is refused whole.
+pub fn plan_edit_request(body: Body) -> Answer {
+    let refused = |reason: String| Answer::refused(400, Field::Reason, reason);
+    let request: PlanEditRequest = match plans_request(body) {
+        Ok(request) => request,
+        Err(err) => return refused(err),
+    };
+    let edited = PlanEdit::read_all(&request.edits)
+        .and_then(|edits| Plan::edit_draft(&request.plan.value, &edits));
+    match edited {
+        Ok(edited) => Answer::ok(
+            200,
+            &PlanDraftResponse {
+                plan: edited.file,
+                problems: edited.problems,
+                notes: edited.notes,
+                verdicts: edited
+                    .verdicts
+                    .into_iter()
+                    .map(|(id, verdicts)| PlanNodeVerdicts {
+                        id,
+                        verdicts: verdicts.iter().map(|v| v.as_str().to_owned()).collect(),
+                    })
+                    .collect(),
+            },
+        ),
+        Err(problems) => {
+            let messages: Vec<_> = problems.into_iter().map(|p| p.message).collect();
+            refused(format!(
+                "plans: the edits cannot be made: {}",
+                messages.join("; ")
+            ))
+        }
+    }
+}
+
+/// A Plan verb's body read as its request type.
+fn plans_request<T: serde::de::DeserializeOwned>(body: Body) -> Result<T, String> {
+    body.and_then(|body| serde_json::from_value(body).map_err(|err| format!("plans: {err}")))
+}
+
+/// POST /api/plans/boot: Boot, detached, for a new Line on a saved Plan. Every refusal comes before
+/// anything is started: the work (400), then the Plan's load (404, 400, 422), then a server with no
+/// way to start Boot (409), then a pool in no git checkout (409).
+pub async fn plan_boot_request(server: &Server, body: Body) -> Answer {
+    let refused = |status: u16, reason: String| Answer::refused(status, Field::Reason, reason);
+    let request: PlanBootRequest = match plans_request(body) {
+        Ok(request) => request,
+        Err(err) => return refused(400, err),
+    };
+    let work = request.work.trim();
+    if work.is_empty() {
+        return refused(
+            400,
+            "plans: a Line needs its work: an issue number or what to build".to_owned(),
+        );
+    }
+    if work.starts_with("--") {
+        return refused(
+            400,
+            format!("plans: the work `{work}` starts with `--`, which Boot would read as a flag"),
+        );
+    }
+    if let Err(err) = library::load(&server.0.home, &request.slug) {
+        return library_refusal(err);
+    }
+    let Some(hand_off) = server.0.on_line_boot.clone() else {
+        return refused(409, "plans: this server cannot start Boot".to_owned());
+    };
+    let boot = LineBoot {
+        plan: request.slug,
+        work: work.to_owned(),
+    };
+    match tokio::task::spawn_blocking(move || hand_off(&boot)).await {
+        Ok(Ok(started)) => Answer::ok(200, &started),
+        Ok(Err(LineBootRefusal::NoCheckout(reason))) => refused(409, reason),
+        Ok(Err(LineBootRefusal::Launch(reason))) => refused(500, reason),
+        Err(err) => refused(500, format!("plans: {err}")),
     }
 }
 
@@ -1075,9 +1158,8 @@ pub async fn socket_request(
                 .ok_or_else(|| "plan is required".to_owned()),
         ),
         RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
-        RequestKind::PlansEdit | RequestKind::PlansBoot => {
-            Answer::refused(404, Field::Reason, "plans: not built yet")
-        }
+        RequestKind::PlansEdit => plan_edit_request(body()),
+        RequestKind::PlansBoot => plan_boot_request(server, body()).await,
         RequestKind::LogRead => {
             let mut inner = server.lock();
             log_request(
