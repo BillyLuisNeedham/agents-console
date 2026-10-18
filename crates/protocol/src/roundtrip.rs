@@ -339,7 +339,7 @@ fn every_string_union_reads_its_own_strings() {
             Value::String(kind.as_str().to_string())
         );
     }
-    assert_eq!(TicketEventKind::ALL.len(), 36);
+    assert_eq!(TicketEventKind::ALL.len(), 37);
     assert_eq!(
         TicketStatus::parse("in-progress"),
         Some(TicketStatus::InProgress)

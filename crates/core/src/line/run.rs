@@ -520,24 +520,6 @@ impl LineRun {
         Ok(run)
     }
 
-    /// What a Plan holds that this build cannot run yet: per-item copies and Mergers. Line start
-    /// refuses a Plan with any.
-    pub fn unsupported(plan: &Plan) -> Vec<String> {
-        plan.nodes()
-            .filter_map(|node| match &node.body {
-                NodeBody::Ticket(t) if matches!(t.copies, Copies::PerItem { .. }) => Some(format!(
-                    "node {} makes one copy per item, which this build cannot run yet",
-                    node.id
-                )),
-                NodeBody::Merger(_) => Some(format!(
-                    "node {} is a Merger, which this build cannot run yet",
-                    node.id
-                )),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// Facts not yet absorbed, in Plan-node order then copy order. Never mutates.
     pub fn observe(&self, facts: &dyn LineFacts) -> Vec<LineEvent> {
         let mut events = Vec::new();

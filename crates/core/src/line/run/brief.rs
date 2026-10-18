@@ -7,11 +7,8 @@ use serde::Deserialize;
 
 use super::Item;
 use crate::js;
+use crate::outcome::{ITEM_BODY_MAX, ITEM_TITLE_MAX, ITEMS_MAX};
 use crate::plan::{Assign, FinishAct, NodeBody, NodeId, Plan};
-
-const ITEMS_MAX: usize = 64;
-const TITLE_MAX: usize = 200;
-const BODY_MAX: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LineBrief {
@@ -96,14 +93,17 @@ impl LineBrief {
         let mut items = Vec::new();
         for (i, item) in file.items.into_iter().enumerate() {
             let title = js::trim(&item.title).to_owned();
-            if title.is_empty() || title.chars().count() > TITLE_MAX {
+            if title.is_empty() || title.chars().count() > ITEM_TITLE_MAX {
                 return Err(format!(
-                    "item {} needs a title of 1 to {TITLE_MAX} characters",
+                    "item {} needs a title of 1 to {ITEM_TITLE_MAX} characters",
                     i + 1
                 ));
             }
-            if item.body.len() > BODY_MAX {
-                return Err(format!("item {}'s body is over {BODY_MAX} bytes", i + 1));
+            if item.body.len() > ITEM_BODY_MAX {
+                return Err(format!(
+                    "item {}'s body is over {ITEM_BODY_MAX} bytes",
+                    i + 1
+                ));
             }
             items.push(Item {
                 title,

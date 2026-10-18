@@ -19,7 +19,7 @@ use ac_core::line::run::{
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
-use ac_core::plan::{NodeBody, Plan, SpawnPolicy};
+use ac_core::plan::{Conflict, MergerNode, NodeBody, Plan, SpawnPolicy};
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_io::git;
 use ac_protocol::{
@@ -506,13 +506,6 @@ pub fn begin_line(
             problems.join("; ")
         ))
     })?;
-    let unsupported = LineRun::unsupported(&plan);
-    if !unsupported.is_empty() {
-        return Err(EngineError::refused(format!(
-            "the Line cannot begin: {}",
-            unsupported.join("; ")
-        )));
-    }
     if let Some(problem) = unknown_harness(session, &plan) {
         return Err(EngineError::refused(format!(
             "the Line cannot begin: {problem}"
@@ -563,6 +556,10 @@ fn unknown_harness(session: &Session, plan: &Plan) -> Option<String> {
             NodeBody::Conversation(c) => &c.assign,
             NodeBody::Ticket(t) => &t.assign,
             NodeBody::Finish(f) => &f.assign,
+            NodeBody::Merger(MergerNode {
+                conflict: Conflict::Resolver(assign),
+                ..
+            }) => assign,
             NodeBody::Merger(_) | NodeBody::Gate(_) => return None,
         };
         let harness = assign.harness.as_deref()?;

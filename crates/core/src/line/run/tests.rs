@@ -61,6 +61,7 @@ impl Pool {
                 commit_sha: None,
                 brief: brief.map(str::to_owned),
                 spawn: None,
+                items: None,
                 verdict,
             },
         );
@@ -1133,7 +1134,6 @@ fn a_handoff_to_a_live_conversation_pass_queues_the_next_pass() {
             {"from": "talk", "on": "done", "to": "finish"}
         ]),
     );
-    assert!(LineRun::unsupported(&talks).is_empty());
     let (mut run, mut pool) = work_run(talks);
     assert_eq!(written(&tick(&mut run, &mut pool)), ["left-1", "right-1"]);
     pool.agent("left-1");
@@ -1251,21 +1251,6 @@ fn verdicts_are_read_by_kind() {
     assert!(
         pr.no_verdict_brief("the verdict has no url")
             .starts_with("no verdict\n\n")
-    );
-}
-
-#[test]
-fn line_start_names_what_this_build_cannot_run() {
-    assert!(LineRun::unsupported(&factory_today()).is_empty());
-    let addy = PRESETS.iter().find(|p| p.slug == "addy-commands").unwrap();
-    let problems = LineRun::unsupported(&Plan::parse(addy.json).unwrap());
-    assert!(
-        problems.iter().any(|p| p.contains("one copy per item")),
-        "{problems:?}"
-    );
-    assert!(
-        problems.iter().any(|p| p.contains("is a Merger")),
-        "{problems:?}"
     );
 }
 

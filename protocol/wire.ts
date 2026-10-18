@@ -56,6 +56,12 @@ export type TicketEventKind =
   | "spawn-adopted"
   | "spawn-rejected"
   /**
+   * An Outcome `items` entry dropped for being outside the bounds, by reason
+   * and index (no index when the key itself was malformed). The attempt
+   * still ends as its Outcome says.
+   */
+  | "item-rejected"
+  /**
    * Proposals within the caps, taken from the attempt and waiting for the
    * next Tick to land (issue #150): each one's proposal id and title.
    */
@@ -318,6 +324,12 @@ export interface Outcome {
    * well-formed proposals riding to a Tick.
    */
   spawn?: SpawnProposal[];
+  /**
+   * The pieces of work a Line node taught to make Items hands on, one Copy
+   * each downstream. Absent, present and empty, and populated mean what
+   * they do for `spawn`; entries outside the bounds were dropped.
+   */
+  items?: LineItem[];
   /**
    * A Line Ticket's typed verdict (ADR-0037, ADR-0039), kept as the agent
    * wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
