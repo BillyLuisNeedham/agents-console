@@ -4100,6 +4100,27 @@ button.plan-dot::after {
   background: transparent;
 }
 
+.plan-copies-done,
+.plan-copies-more {
+  box-sizing: border-box;
+  flex-shrink: 0;
+  height: 14px;
+  padding: 0 4px;
+  border: 1px solid var(--status-done);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 12px;
+  color: var(--status-done);
+  background: none;
+}
+
+.plan-copies-more {
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+}
+
 .plan-dot-selected,
 .plan-hold-selected {
   box-shadow: 0 0 0 2px var(--accent);

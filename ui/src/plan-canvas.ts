@@ -13,6 +13,7 @@ import {
   fitView,
   freeSpot,
   hitNode,
+  labelBox,
   projectPlan,
   type DrawnEdge,
   type DrawnNode,
@@ -22,8 +23,6 @@ import {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const DRAG_THRESHOLD = 4;
-const LABEL_CHAR_WIDTH = 6.2;
-const LABEL_PADDING = 12;
 export const VIEW_ORIGIN: Point = { x: 24, y: 24 };
 
 export type PlanSelection = { kind: "node"; id: string } | { kind: "edge"; key: EdgeKey } | null;
@@ -394,7 +393,6 @@ export class PlanCanvas {
         card.classList.add("plan-node-dragging");
       }
       for (const edge of drawing.edges) {
-        if (edge.edge.from !== g.id && edge.edge.to !== g.id) continue;
         const el = viewport.querySelector(`[data-key="edge:${CSS.escape(edgeDomKey(edge))}"]`);
         if (el) paintEdge(el, edge);
       }
@@ -524,13 +522,8 @@ export class PlanCanvas {
   }
 }
 
-function labelBox(edge: DrawnEdge): { x: number; y: number; width: number } {
-  const width = edge.label.length * LABEL_CHAR_WIDTH + LABEL_PADDING;
-  return { x: edge.route.label.x - width / 2, y: edge.route.label.y - 9, width };
-}
-
 function renderEdge(edge: DrawnEdge, selected: boolean, live: LiveEdge | undefined): SVGElement {
-  const box = labelBox(edge);
+  const box = labelBox(edge.label, edge.route.label);
   return svg(
     "g",
     {
@@ -555,7 +548,7 @@ function renderEdge(edge: DrawnEdge, selected: boolean, live: LiveEdge | undefin
             ? `${edgeKeyText(edge.edge)}: spent, held by ${live.hold.id}`
             : edgeKeyText(edge.edge),
       ),
-      svg("rect", { ...box, height: 18, rx: 9 }),
+      svg("rect", { ...box, rx: 9 }),
       svg("text", { x: edge.route.label.x, y: edge.route.label.y + 3.5, "text-anchor": "middle" }, edge.label),
     ),
   );
@@ -563,7 +556,7 @@ function renderEdge(edge: DrawnEdge, selected: boolean, live: LiveEdge | undefin
 
 function paintEdge(el: Element, edge: DrawnEdge): void {
   el.querySelector(".plan-edge-path")?.setAttribute("d", edge.route.d);
-  const box = labelBox(edge);
+  const box = labelBox(edge.label, edge.route.label);
   const rect = el.querySelector("rect");
   rect?.setAttribute("x", String(box.x));
   rect?.setAttribute("y", String(box.y));

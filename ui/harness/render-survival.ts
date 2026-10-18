@@ -1073,6 +1073,25 @@ function overflowOf(el: HTMLElement, container: HTMLElement): string | null {
     : `scrollWidth ${el.scrollWidth} > clientWidth ${el.clientWidth}, or ${Math.round(e.left)}-${Math.round(e.right)} outside ${Math.round(c.left)}-${Math.round(c.right)}`;
 }
 
+const overlaps = (a: DOMRect, b: DOMRect): boolean =>
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+function labelCollisions(pane: string): string | null {
+  const cards = [...root.querySelectorAll<HTMLElement>(`${pane} .plan-node`)];
+  const labels = [...root.querySelectorAll<SVGGElement>(`${pane} .plan-edge-label`)];
+  const meets: string[] = [];
+  labels.forEach((label, i) => {
+    const box = label.querySelector("rect")!.getBoundingClientRect();
+    for (const card of cards) {
+      if (overlaps(box, card.getBoundingClientRect())) meets.push(`${label.dataset.edge} under ${card.dataset.node}`);
+    }
+    for (const other of labels.slice(i + 1)) {
+      if (overlaps(box, other.querySelector("rect")!.getBoundingClientRect())) meets.push(`${label.dataset.edge} on ${other.dataset.edge}`);
+    }
+  });
+  return labels.length === 0 ? "no edge labels" : meets.length ? meets.join("; ") : null;
+}
+
 /**
  * The canvas header and the Conversations tray's head and Steward box hold
  * their width: the header's tools wrap rather than run off its right edge,
@@ -1189,6 +1208,7 @@ async function layoutMain(): Promise<void> {
   q<HTMLButtonElement>(".plans-close")?.click();
   await settleAll();
   await lineLayoutChecks(`layout ${width}, line view`);
+  await crowdedLineChecks(`layout ${width}, crowded line`);
   publish("done");
 }
 
@@ -1831,6 +1851,163 @@ async function lineLayoutChecks(name: string): Promise<void> {
     const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
     push("line card text is readable at the fit zoom", onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`, `card titles are ${onScreen.toFixed(1)}px on screen`);
   }
+  const labelCount = root.querySelectorAll(".line-pane .plan-edge-label").length;
+  push("line edge labels clear every card and each other", labelCollisions(".line-pane"), `${labelCount} labels clear`);
+}
+
+const CROWD = 40;
+const LATE_CHECKPOINT = 37;
+const crowdId = (i: number): string => `build-1.${i + 1}`;
+const crowdStatus = (i: number): EnrichedTicketState["status"] =>
+  i === LATE_CHECKPOINT ? "checkpoint" : i % 4 === 0 && i < 30 ? "done" : i < 35 ? "in-progress" : "ready";
+
+function crowdedLineOn(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const node = (kind: "agent" | "merger" | "finish", id: string, x: number) =>
+    ({
+      kind,
+      id,
+      title: id,
+      x,
+      y: 60,
+      ...(id === "tasks" ? { makesItems: true } : {}),
+      ...(id === "build" ? { copies: { perItem: "all" } } : {}),
+      ...(kind === "merger" ? { of: "build" } : {}),
+    }) as PlanFile["nodes"][number];
+  const view = (id: string, verdicts: string[], overrides: Partial<LineNodeView> = {}): LineNodeView => ({
+    id,
+    verdicts,
+    passes: 1,
+    tickets: [],
+    queued: 0,
+    inbox: 0,
+    parked: [],
+    arrived: [],
+    ...overrides,
+  });
+  const copies = Array.from({ length: CROWD }, (_, i) => crowdId(i));
+  const line: LineGraphView = {
+    plan: {
+      horde: 1,
+      name: "Forked",
+      nodes: [node("agent", "tasks", 0), node("agent", "build", 300), node("merger", "build-merge", 600), node("finish", "finish", 900)],
+      edges: [
+        { from: "tasks", on: "done", to: "build" },
+        { from: "tasks", on: "done", to: "finish" },
+        { from: "build", on: "done", to: "build-merge" },
+        { from: "build-merge", on: "done", to: "finish" },
+      ],
+    },
+    rev: 1,
+    status: "running",
+    waitingFor: [],
+    nodes: [
+      view("tasks", ["done"]),
+      view("build", ["done"], { pass: 1, tickets: copies, queued: 3 }),
+      view("build-merge", ["done"], { passes: 0 }),
+      view("finish", [], { passes: 0 }),
+    ],
+    edges: [],
+  };
+  return {
+    ...snap,
+    seq: 900,
+    line,
+    state: {
+      ...snap.state,
+      tickets: [
+        ...snap.state.tickets,
+        ...copies.map((id, i) =>
+          ticket(id, {
+            node: "build",
+            status: crowdStatus(i),
+            liveAttempt: crowdStatus(i) === "in-progress" ? agentAttempt(1, null) : null,
+          }),
+        ),
+      ],
+    },
+  };
+}
+
+async function crowdedLineChecks(name: string): Promise<void> {
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const before = current;
+  session.setSnapshot(crowdedLineOn(before));
+  render();
+  await settleAll();
+
+  const build = () => lineCard("build");
+  const drawn = (): string[] =>
+    [...(build()?.querySelectorAll<HTMLElement>(".plan-dot[data-card]") ?? [])].map((d) => d.dataset.card!.replace("ticket:", ""));
+  const spilled = (): string[] => {
+    const row = build()?.querySelector<HTMLElement>(".plan-copies")?.getBoundingClientRect();
+    const parts = [...(build()?.querySelectorAll<HTMLElement>(".plan-dot, .plan-copies-done, .plan-copies-more") ?? [])];
+    return !row || parts.length === 0
+      ? ["no copy row"]
+      : parts
+          .filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.left < row.left - 1 || r.right > row.right + 1 || r.top < row.top - 1 || r.bottom > row.bottom + 1;
+          })
+          .map((el) => el.className);
+  };
+  const active = Array.from({ length: CROWD }, (_, i) => i)
+    .filter((i) => crowdStatus(i) !== "done")
+    .map(crowdId);
+  const folded = CROWD - active.length;
+  const pill = build()?.querySelector(".plan-copies-done");
+  const hidden = active.filter((id) => !drawn().includes(id));
+  push(
+    "a crowded card folds its done copies into a count and hides the rest behind +N",
+    pill?.textContent === String(folded) && hidden.length > 0 && build()?.querySelector(".plan-copies-more")?.textContent === `+${hidden.length}`
+      ? null
+      : `done pill "${pill?.textContent}", ${hidden.length} hidden, button "${build()?.querySelector(".plan-copies-more")?.textContent}"`,
+    `${folded} done in the pill, ${hidden.length} behind +${hidden.length}`,
+  );
+  push(
+    "the checkpointed copy past the old row's end is a dot",
+    drawn().includes(crowdId(LATE_CHECKPOINT)) ? null : `drawn: ${drawn().join(", ")}`,
+    `${crowdId(LATE_CHECKPOINT)} is drawn`,
+  );
+
+  const out = new Set(spilled());
+  const reached = new Set<string>();
+  let taps = 0;
+  for (; taps < CROWD && !hidden.every((id) => reached.has(id)); taps++) {
+    const more = build()?.querySelector<HTMLElement>(".plan-copies-more");
+    if (!more) break;
+    tap(more);
+    await settleAll();
+    const opened = q(".detail-open .detail-title")?.textContent;
+    if (opened) reached.add(opened);
+    for (const el of spilled()) out.add(el);
+  }
+  push(
+    "every dot and pill sits inside its card's copy row, at every step of the walk",
+    out.size ? `outside: ${[...out].join("; ")}` : null,
+    `${taps} taps, every part inside`,
+  );
+  const missed = hidden.filter((id) => !reached.has(id));
+  push(
+    "every copy not drawn opens by tapping +N again and again",
+    missed.length ? `never opened: ${missed.join(", ")} after ${taps} taps` : null,
+    `all ${hidden.length} hidden copies opened in ${taps} taps`,
+  );
+
+  session.select(null);
+  await settleAll();
+  const tasksLabels = ["tasks.done>build", "tasks.done>finish"].map((key) => lineEdge(key)?.querySelector<SVGGElement>(".plan-edge-label"));
+  const texts = tasksLabels.map((label) => label?.querySelector("text")?.textContent);
+  push(
+    "the fork's two done labels out of tasks are both drawn and clear",
+    tasksLabels.some((label) => !label) || texts.some((t) => t !== "done") ? `labels ${JSON.stringify(texts)}` : labelCollisions(".line-pane"),
+    "both labels read done, clear of every card and of each other",
+  );
+
+  session.setSnapshot(before);
+  render();
+  await settleAll();
 }
 
 async function plansLayoutChecks(name: string): Promise<void> {
@@ -1878,6 +2055,8 @@ async function plansLayoutChecks(name: string): Promise<void> {
       `card titles are ${onScreen.toFixed(1)}px on screen`,
     );
   }
+  const labelCount = root.querySelectorAll(".plans-pane .plan-edge-label").length;
+  push("plans edge labels clear every card and each other", labelCollisions(".plans-pane"), `${labelCount} labels clear`);
   const side = q<HTMLElement>(".plans-side");
   const fields = [...root.querySelectorAll<HTMLElement>(".plans-side .plan-field, .plans-side .plan-link-row, .plans-side .plan-check")];
   const spilled = side ? fields.filter((f) => overflowOf(f, side) !== null) : [];
