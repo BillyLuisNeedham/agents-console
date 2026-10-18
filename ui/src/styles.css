@@ -386,16 +386,25 @@ body {
   color: var(--status-running);
 }
 
-/* The Line strip (#187, ADR-0037): where a pool's Line stands, after
-   the Spawn caps line in its type, present only once the Line has started. */
-.canvas-line-strip {
+/* The Line button (ADR-0037): where a pool's Line stands, after the Spawn caps
+   line in its type, present only once the Line has started; it opens the Line
+   view, the Plan drawn with the run's state. */
+.canvas-line-open {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-dim);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
   font-family: var(--mono);
   font-size: 12px;
+  cursor: pointer;
+}
+
+.canvas-line-open:hover {
+  text-decoration: underline;
 }
 
 .canvas-tools {
@@ -3968,6 +3977,209 @@ textarea.steward-orders {
 .plan-port-open {
   border-style: dashed;
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* The Line view (ADR-0039): the same canvas, read-only, with the run's state
+   on each card. A tone colours the card's border and its state word. */
+.plan-canvas-live .plan-node,
+.plan-canvas-live .plan-port,
+.plan-canvas-live .plan-edge-label {
+  cursor: default;
+}
+
+.plan-node-live .plan-node-head {
+  gap: 4px;
+  padding: 0 8px;
+}
+
+.plan-node-state {
+  min-width: 0;
+  max-width: 66%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.plan-live-summary {
+  font-size: 10.5px;
+}
+
+.plan-state-running,
+.plan-state-collecting {
+  color: var(--status-running);
+}
+
+.plan-state-needs {
+  color: var(--interrupt);
+}
+
+.plan-state-parked {
+  color: var(--accent);
+}
+
+.plan-state-done {
+  color: var(--status-done);
+}
+
+.plan-live-running,
+.plan-live-collecting {
+  border-color: var(--status-running);
+}
+
+.plan-live-needs {
+  border-color: var(--interrupt);
+  box-shadow: 0 0 0 1px var(--interrupt);
+}
+
+.plan-live-parked {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.plan-live-done {
+  opacity: 0.62;
+}
+
+.plan-live-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 14px;
+}
+
+.plan-copies {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 2px;
+  overflow: hidden;
+}
+
+.plan-dot {
+  position: relative;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--status-pending);
+}
+
+button.plan-dot {
+  cursor: pointer;
+}
+
+button.plan-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+}
+
+.plan-dot-running {
+  background: var(--status-running);
+}
+
+.plan-dot-done {
+  background: var(--status-done);
+}
+
+.plan-dot-checkpoint,
+.plan-dot-closed {
+  background: var(--interrupt);
+}
+
+.plan-dot-queued {
+  border: 1px dashed var(--status-pending);
+  background: transparent;
+}
+
+.plan-dot-selected,
+.plan-hold-selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.plan-hold {
+  flex: 0 1 auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--interrupt);
+  background: none;
+  border: 1px solid var(--interrupt);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.plan-port-parked {
+  border-style: dashed;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.plan-edge-spent .plan-edge-path,
+.plan-edge-spent .plan-edge-label rect {
+  stroke: var(--interrupt);
+}
+
+.plan-edge-spent .plan-edge-label text {
+  fill: var(--interrupt);
+}
+
+.line-pane {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color-scheme: dark;
+}
+
+.line-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.line-headline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.line-waiting {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.line-close {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .plan-inspector {

@@ -365,9 +365,9 @@ export interface CanvasModel {
   /** The Spawn caps line (issue #149), beside the Merge queue line; a
    *  button that opens the Held spawns list. Null before the first snapshot. */
   spawnLine: SpawnLineView | null;
-  /** The Line strip (ADR-0037), after the Spawn caps line: where the
-   *  pool's Line stands. Null before Start the Line. */
-  lineStrip: string | null;
+  /** The Line button (ADR-0039), after the Spawn caps line: where the
+   *  pool's Line stands, opening the Line view. Null in a pool that runs no Line. */
+  line: { headline: string } | null;
   /** The header's "Close N finished terminals" control (issue #139). */
   closeTerminals: CloseTerminalsView;
 }
@@ -449,6 +449,7 @@ export class Canvas {
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
   private readonly onOpenPlans: () => void;
+  private readonly onOpenLine: () => void;
   private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string, close?: boolean) => void;
@@ -478,6 +479,7 @@ export class Canvas {
      *  Always offered; a headless pool has settings too. */
     onOpenSettings: () => void;
     onOpenPlans: () => void;
+    onOpenLine: () => void;
     /** The header's Spawn caps line (issue #149): opens the Held spawns list. */
     onOpenHeldSpawns: () => void;
     /** The header's "reset layout" button, after the canvas has restored its
@@ -507,6 +509,7 @@ export class Canvas {
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
     this.onOpenPlans = options.onOpenPlans;
+    this.onOpenLine = options.onOpenLine;
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
     this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
@@ -1043,12 +1046,17 @@ export class Canvas {
               model.spawnLine.text,
             )
           : null,
-        model.lineStrip
+        model.line
           ? h(
-              "span",
-              // The strip ellipsises in a narrow header, so the hover says it whole.
-              { class: "canvas-line-strip", title: model.lineStrip },
-              model.lineStrip,
+              "button",
+              {
+                class: "canvas-line-open",
+                type: "button",
+                // The label ellipsises in a narrow header, so the hover says it whole.
+                title: `${model.line.headline} (open the Line)`,
+                onclick: () => this.onOpenLine(),
+              },
+              model.line.headline,
             )
           : null,
         model.error ? h("span", { class: "error-inline" }, model.error) : null,

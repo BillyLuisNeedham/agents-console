@@ -24,6 +24,7 @@ import {
   type RequestResult,
   type SnapshotDelta,
 } from "../../protocol/protocol.ts";
+import { projectLine } from "./line-projection";
 import { LogPane, type LogPaneState } from "./log-pane";
 import { answered, applyOverlays, type Overlay } from "./optimistic";
 import {
@@ -1057,7 +1058,9 @@ export class ConsoleSession {
       terminalBacked: snapshot ? isTerminalBacked(snapshot.state.config) : false,
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
-      lineStrip: this.view?.lineStrip ?? null,
+      line: snapshot?.line
+        ? projectLine(snapshot.line, snapshot.state.tickets, snapshot.state.conversations, this.selectedId)
+        : null,
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,
       detailTabs:
