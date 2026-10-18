@@ -1,17 +1,17 @@
 /**
- * Boot's Factory mode (issue #187, ADR-0037, ADR-0038), run as a process:
- * it cuts `line/<slug>` from its Line base (issue #193: the branch the
- * operator's checkout has out, unless --from names another) into a worktree
- * of its own under `.scratch/lines/`, leaving that checkout's branch alone,
- * and makes the Factory pool inside that worktree, so the pool's target
- * branch is the Line's. Given a ready brief it commits the brief and
- * its spec onto the Line branch and starts Round 1 at once, asking nothing;
- * asked for the work, it opens the Grill with the work as its first Turn.
+ * Boot's Line mode on a Plan (ADR-0037, ADR-0038, ADR-0039), run as a process: `--plan <slug>` loads
+ * a Preset or a library Plan, Boot cuts `line/<slug>` from its Line base (issue #193: the branch
+ * the operator's checkout has out, unless --from names another) into a worktree of its own under
+ * `.scratch/lines/`, leaving that checkout's branch alone, makes the pool inside that worktree and
+ * begins the Line on the Plan through POST /api/line. Given a ready brief it commits the brief and
+ * its spec onto the Line branch first and asks nothing; asked for the work, it opens the Grill with
+ * the work as its first Turn. `--brief` alone runs the factory-today Preset.
  */
 
 import { expect } from "bun:test";
 import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { LineFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { cliWorld, type CliWorld } from "../harness/cli.ts";
 import { startHerdr } from "../harness/herdr.ts";
@@ -19,7 +19,7 @@ import { until } from "../harness/pool-files.ts";
 
 const MACHINE = { harness: "claude", model: "m", drivers: "implement" };
 const SPEC = "# A Continued attempt's checkpoint drops its spawns (issue #186)\n\nThe spec.\n";
-const BRIEF = { spec: "pilots/186.md", finish: "draft-pr", factory: {} };
+const BRIEF = { spec: "pilots/186.md", finish: "draft-pr" };
 
 /**
  * A checkout with a feature branch out, one commit ahead of main, and the pilot's brief and spec beside
@@ -43,14 +43,17 @@ function gitIn(w: CliWorld, dir: string, args: string[]): string {
 
 const readJson = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
 
-conformance("cli", "Boot --brief cuts the Line from the current branch into its own worktree, commits the spec and brief there and starts Round 1, asking nothing", async (t) => {
+conformance("cli", "Boot --plan --brief cuts the Line from the current branch into its own worktree, commits the spec and brief there and begins the Line on the Plan, asking nothing", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
   w.write("repo/steward.json", JSON.stringify({ steward: { budget: 10, mayAdoptLineSpawns: true } }));
 
   const run = await w.run(
     "boot",
-    ["--brief", "pilots/186.brief.json", "--title", "Pilot 186", "--config", "steward.json", "--no-open", "--port", "0"],
+    [
+      "--plan", "factory-today", "--brief", "pilots/186.brief.json", "--title", "Pilot 186",
+      "--config", "steward.json", "--no-open", "--port", "0",
+    ],
     { cwd: repo },
   );
   expect(run.code, run.stderr).toBe(0);
@@ -59,9 +62,9 @@ conformance("cli", "Boot --brief cuts the Line from the current branch into its 
   const base = gitIn(w, repo, ["rev-parse", "feature/x"]);
   expect(run.stdout).toContain(`line: cut line/186 from feature/x (${base.slice(0, 7)}) at ${tree}\n`);
   expect(run.stdout).toContain("line: committed docs/specs/186.brief.json and its spec onto line/186\n");
-  expect(run.stdout).toContain("line: started; Round 1's r1-implement is written\n");
+  expect(run.stdout).toContain('line: begun on the Plan factory-today ("Factory today")\n');
+  expect(run.stdout).not.toContain("no --plan");
 
-  // The checkout Boot ran from keeps its branch; the Line has a worktree of its own.
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
   expect(gitIn(w, tree, ["branch", "--show-current"])).toBe("line/186");
   expect(gitIn(w, tree, ["log", "-1", "--format=%s"])).toBe("Write down the spec and the Line brief for line/186");
@@ -72,38 +75,37 @@ conformance("cli", "Boot --brief cuts the Line from the current branch into its 
   });
   expect(gitIn(w, repo, ["show", "line/186:docs/specs/186.md"])).toBe(SPEC.trimEnd());
 
-  // The pool lives inside the Line's worktree, so its target branch is the Line's.
   const pool = join(tree, ".scratch", "186");
-  expect(readJson(join(pool, "console.json"))).toMatchObject({
+  const config = readJson(join(pool, "console.json"));
+  expect(config).toMatchObject({
     title: "Pilot 186",
     terminal: "herdr",
     steward: { budget: 10, mayAdoptLineSpawns: true },
-    // Marked a Factory pool: it raises no run-wide Review (ADR-0037).
-    factoryPool: true,
-    // The Line base, chosen once: the branch it was cut from and the commit it was cut at.
     lineBase: { ref: "feature/x", commit: base },
   });
-  expect(readJson(join(pool, "line.json"))).toMatchObject({
-    briefPath: "docs/specs/186.brief.json",
-    brief: { spec: "docs/specs/186.md", finish: "draft-pr" },
-    round: 1,
-    station: "implement",
-    ticket: "r1-implement",
-    branch: "line/186",
-    base: { ref: "feature/x", commit: base },
+  expect(config).not.toHaveProperty("factoryPool");
+  const line = readJson(join(pool, "line.json")) as LineFile;
+  expect(line).toMatchObject({
+    horde: 1,
+    places: { branch: "line/186", base: { ref: "feature/x", commit: base }, spec: "docs/specs/186.md" },
   });
-  expect(readFileSync(join(pool, "issues", "r1-implement.md"), "utf8").split("\n", 1)[0]).toContain(
-    "id=r1-implement blocked-by=none",
+  expect(line.plan.name).toBe("Factory today");
+  expect(line.plan.nodes.find((n) => n.id === "finish")).toMatchObject({ act: "draft-pr" });
+  const implement = await until(
+    () => readFileSync(join(pool, "issues", "implement-1.md"), "utf8"),
+    (text) => text.length > 0,
+    { what: "implement-1 to be written" },
   );
-  expect(readFileSync(join(pool, "issues", "r1-implement.md"), "utf8")).toContain(" station=implement ");
+  expect(implement.split("\n", 1)[0]).toContain("id=implement-1 blocked-by=none");
+  expect(implement.split("\n", 1)[0]).toContain(" node=implement ");
 
-  // A Line branch is never reused: the same brief again is a Line of its own.
+  // A Line branch is never reused: the same brief again is a Line of its own, on the default Plan.
   const again = await w.run("boot", ["--brief", "pilots/186.brief.json", "--no-steward", "--no-open", "--port", "0"], {
     cwd: repo,
   });
   expect(again.code, again.stderr).toBe(0);
-  // --no-steward: Boot starts none and says nothing of one.
   expect(`${again.stdout}${again.stderr}`).not.toContain("steward");
+  expect(again.stdout).toContain("no --plan: the Line runs the factory-today Preset\n");
   expect(again.stdout).toContain(`line: cut line/186-2 from feature/x (${base.slice(0, 7)}) at `);
   expect(readJson(join(repo, ".scratch", "lines", "186-2", ".scratch", "186-2", "console.json"))).toMatchObject({
     title: "A Continued attempt's checkpoint drops its spawns (issue #186)",
@@ -111,17 +113,16 @@ conformance("cli", "Boot --brief cuts the Line from the current branch into its 
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 });
 
-conformance("cli", "Boot --factory asks for the work, cuts the Line and opens the Grill with the issue as its first Turn", async (t) => {
+conformance("cli", "Boot --plan asks for the work, cuts the Line, begins it on the work and opens the Grill with the issue as its first Turn", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
-  // A claude that holds its pane as a TUI would, and a herdr where the server looks for one.
   writeFileSync(join(w.bin, "claude"), "#!/bin/sh\nexec sleep 150\n");
   chmodSync(join(w.bin, "claude"), 0o755);
   const herdr = await startHerdr(w.env(), { rendered: "Claude Code v · Ask anything\n❯ " });
   t.defer(() => herdr.stop());
   symlinkSync(herdr.socketPath, w.path("no-herdr.sock"));
 
-  const run = await w.run("boot", ["--factory", "--no-open", "--port", "0"], {
+  const run = await w.run("boot", ["--plan", "factory-today", "--no-open", "--port", "0"], {
     cwd: repo,
     answers: [["the piece of work", "#186"]],
     timeoutMs: 60_000,
@@ -131,22 +132,22 @@ conformance("cli", "Boot --factory asks for the work, cuts the Line and opens th
   expect(run.prompts[1]).toBe("title for the Line's pool [Issue #186]");
   const base = gitIn(w, repo, ["rev-parse", "feature/x"]);
   expect(run.stdout).toContain(`line: cut line/186 from feature/x (${base.slice(0, 7)}) at `);
+  expect(run.stdout).toContain('line: begun on the Plan factory-today ("Factory today")\n');
   expect(run.stdout).toContain("grill: conv-1 opened with the work as its first Turn");
-  // The Steward is on by default in a Factory pool, started after the Grill.
-  expect(run.stdout).toContain("steward: conv-2 on duty; it never answers the Finish checkpoint\n");
+  expect(run.stdout).toContain("steward: conv-2 on duty; it never answers the Finish\n");
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 
   const pool = join(repo, ".scratch", "lines", "186", ".scratch", "186");
   expect(readJson(join(pool, "console.json"))).toMatchObject({
     title: "Issue #186",
     terminal: "herdr",
-    factoryPool: true,
     lineBase: { ref: "feature/x", commit: base },
   });
-  expect(existsSync(join(pool, "line.json"))).toBe(false);
+  expect(readJson(join(pool, "line.json"))).toMatchObject({ places: { branch: "line/186", work: "#186" } });
+  expect(existsSync(join(pool, "issues", "implement-1.md"))).toBe(false);
   const steward = readFileSync(join(pool, "conversations", "conv-2.md"), "utf8");
   expect(steward.split("\n", 1)[0]).toContain(" role=steward ");
-  expect(steward).toContain("Steward this Factory pool's Line while the operator is away");
+  expect(steward).toContain("Steward this pool's Line while the operator is away");
   const record = readFileSync(join(pool, "conversations", "conv-1.md"), "utf8");
   expect(record.split("\n", 1)[0]).toContain(" role=grill ");
   expect(record).toContain("# Grill: Issue #186\n");
@@ -156,18 +157,25 @@ conformance("cli", "Boot --factory asks for the work, cuts the Line and opens th
     { what: "the Grill's first Turn" },
   );
   expect(typed[0]!.startsWith("The piece of work for this Line is issue #186.")).toBe(true);
-  // The Grill hears the Line base it was cut from.
   expect(typed[0]).toContain(`This Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`);
-  expect(typed[0]).toContain("the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.brief.json`");
+  expect(typed[0]).toContain("write the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.grill-1.brief.json`");
 });
 
-conformance("cli", "Boot's Factory mode refuses no work unattended and a brief whose spec is nowhere, before cutting anything", async (t) => {
+conformance("cli", "Boot's Line mode refuses --factory, an unknown Plan, no work unattended and a brief whose spec is nowhere, before cutting anything", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
 
-  const noWork = await w.run("boot", ["--factory", "--yes", "--no-open"], { cwd: repo });
+  const factory = await w.run("boot", ["--factory", "--yes", "--no-open"], { cwd: repo });
+  expect(factory.code).toBe(1);
+  expect(factory.stderr.split("\n", 1)[0]).toBe("unknown flag --factory");
+
+  const unknown = await w.run("boot", ["--plan", "nope", "--work", "#1", "--yes", "--no-open"], { cwd: repo });
+  expect(unknown.code).toBe(1);
+  expect(unknown.stderr).toStartWith("--plan nope: ");
+
+  const noWork = await w.run("boot", ["--plan", "factory-today", "--yes", "--no-open"], { cwd: repo });
   expect(noWork.code).toBe(1);
-  expect(noWork.stderr).toBe("Factory mode needs the work: --work <issue number or text>, or --brief <path>\n");
+  expect(noWork.stderr).toBe("Line mode needs the work: --work <issue number or text>, or --brief <path>\n");
 
   w.write("repo/pilots/lost.brief.json", JSON.stringify({ spec: "nowhere.md" }));
   const lost = await w.run("boot", ["--brief", "pilots/lost.brief.json", "--no-open"], { cwd: repo });

@@ -244,7 +244,7 @@ conformance("config", "a Pool settings save refuses a Steward may Close that is 
   expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, steward: { mayClose: true } });
 });
 
-// The Factory's steward.mayAdoptLineSpawns (issue #187, ADR-0037) is saved the way mayClose is.
+// The Line's steward.mayAdoptLineSpawns (issue #187, ADR-0037) is saved the way mayClose is.
 conformance("config", "a Pool settings save keeps Steward may adopt Line spawns when true, leaves it out when false, and refuses anything else", async (t) => {
   const { world, server } = await settledPool(t, { ...DEFAULTS, steward: { budget: 3 } });
   const steward = () => readConsoleJson(world.pool)!.steward;
