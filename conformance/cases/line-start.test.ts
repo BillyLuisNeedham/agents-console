@@ -3,7 +3,8 @@
  * slug or as a file, into line.json with the Line brief or the work it is given, writes no Ticket
  * itself, and the first tick writes the entry node's Ticket with its node and Assignment on the
  * state line. It refuses with the reason, writing nothing, a Plan that is invalid or that this
- * build cannot run, a harness the machine lacks, a missing or invalid brief, and a second Line.
+ * build cannot run, a harness the machine lacks, a missing or invalid brief, and a second Line. A
+ * Conversation node anywhere in the Plan begins.
  *
  * The stubs on PATH play the Ticket nodes.
  */
@@ -145,4 +146,42 @@ conformance("line", "a Plan file whose entry is a Ticket node begins on the work
   expect(file).toContain("## Note for this node\n\none small step");
   expect(file).not.toContain("## The spec");
   await hold.release();
+});
+
+conformance("line", "a Conversation node after the start of a Plan begins, and a pass the pool cannot host is recorded crashed and hands on closed", async (t) => {
+  const world = lineWorld(t, null);
+  const server = await t.start(world);
+  const plan = {
+    horde: 1,
+    name: "Build then talk",
+    nodes: [
+      { kind: "agent", id: "build", title: "Build", x: 0, y: 0 },
+      { kind: "conversation", id: "talk", title: "Talk", x: 0, y: 0 },
+      { kind: "finish", id: "finish", title: "Finish", x: 0, y: 0, act: "none" },
+    ],
+    edges: [
+      { from: "build", on: "done", to: "talk" },
+      { from: "talk", on: "done", to: "finish" },
+    ],
+  } as PlanFile;
+
+  await begun(server, { plan, work: "issue #186" });
+  // A headless pool cannot give the pass a pane: it is recorded crashed with why, and the Line goes on.
+  const record = join(world.pool, "conversations", "talk-1.md");
+  await until(() => existsSync(record), Boolean, { what: "talk-1's record" });
+  expect(readFileSync(record, "utf8").split("\n", 1)[0]).toBe(
+    "<!-- conversation: id=talk-1 status=crashed spawned-by=none harness= model= drivers= node=talk -->",
+  );
+  const finish = await until(
+    () => readStateLine(world.pool, "finish-1.md").line,
+    (state) => state.includes("status=checkpoint"),
+    { what: "the Finish to hold" },
+  );
+  expect(finish).toContain("node=finish hold");
+  const snap = await snapshot(server);
+  expect(snap.state.log).toContain(
+    'line: talk-1 did not open: conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")',
+  );
+  expect(snap.state.log).toContain("line: talk-1 hands on closed");
+  expect(snap.state.conversations.find((c) => c.id === "talk-1")).toMatchObject({ status: "crashed", node: "talk" });
 });

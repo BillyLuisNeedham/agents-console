@@ -2219,7 +2219,9 @@ body {
 }
 
 .conversation-end-failure {
+  margin-top: 4px;
   font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 /* The Detail's End form: the same interrupt-box shell, in the neutral
@@ -3260,27 +3262,15 @@ textarea.conversations-field {
   border-left: 3px solid var(--steward);
 }
 
-/* A Factory Line's Grill (ADR-0037): the Steward's badge and stripe in the
-   Factory's hue, so the Conversation that Start the Line hands on from is
-   told from an ordinary one. */
-.grill-badge {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border: 1px solid var(--accent-purple);
-  border-radius: 3px;
-  color: var(--accent-purple);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.conversation-card-grill {
+/* A Line's Conversation pass (ADR-0039): the Steward's stripe in the
+   Factory's hue, so a pass the Line hands on from is told from an ordinary
+   one. Its node badge is the Ticket's, below. */
+.conversation-card-node {
   border-left: 3px solid var(--accent-purple);
 }
 
-/* A Line Ticket's label (#187, ADR-0039): the Grill badge's chip in the
-   same hue, naming the Plan node the Ticket works on its card's head. It sits
+/* A Line node's label (#187, ADR-0039): a chip in the Factory's hue,
+   naming the Plan node a Ticket or Conversation works on its card's head. It sits
    against the id rather than midway along the head, and the id beside it
    keeps to one line: a long state word wraps instead. */
 .node-badge {
@@ -3302,11 +3292,6 @@ textarea.conversations-field {
 
 .ticket-card-node .node-card-state {
   text-align: right;
-}
-
-.conversation-start-line-failure {
-  margin-top: 4px;
-  font-size: 10px;
 }
 
 /* The Conversations tray's Steward box: pinned at the top of the tray as it

@@ -1003,36 +1003,217 @@ fn a_brief_sets_the_line_and_overrides_nodes_on_the_frozen_plan() {
     );
 }
 
-#[test]
-fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
-    let mut run = LineRun::start(
-        factory_today(),
-        places(),
-        LineStart::Work("fix the login".into()),
-    )
-    .unwrap();
+/// Factory today begun on `work`, its first tick taken: `grill-1` is open.
+fn grilling(work: &str) -> (LineRun, Pool, NewConversation) {
+    let mut run = LineRun::start(factory_today(), places(), LineStart::Work(work.into())).unwrap();
     let mut pool = Pool::default();
     let opened = tick(&mut run, &mut pool);
     assert_eq!(opened.effects.conversations.len(), 1);
-    assert_eq!(opened.effects.conversations[0].id, id("grill-1"));
+    let grill = opened.effects.conversations[0].clone();
+    (run, pool, grill)
+}
+
+#[test]
+fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
+    let (mut run, mut pool, grill) = grilling("#186");
+    assert_eq!(grill.id, id("grill-1"));
+    assert_eq!(grill.node, node("grill"));
+    assert_eq!(grill.title, "Grill, pass 1");
+    assert_eq!(grill.skill.as_deref(), Some("my-grill-with-docs"));
+    assert_eq!(grill.assign.model.as_deref(), Some("opus"));
+    assert!(
+        grill.opening.starts_with(
+            "You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)"
+        )
+    );
+    assert!(grill.opening.contains(
+        "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue \
+         view 186) and grill me on it.\n\nThis Line was cut from `main` at `abc123`."
+    ));
     assert_eq!(run.live_conversation(&node("grill")), Some(&id("grill-1")));
     assert_eq!(
         run.brief_path(&id("grill-1")),
         "docs/specs/demo.grill-1.brief.json"
     );
-
-    run.apply(LineEvent::ConversationEnded {
-        node: node("grill"),
-        id: id("grill-1"),
-        outcome: ConversationOutcome::Briefed(brief(r#"{"spec": "docs/specs/demo.md"}"#)),
-    })
-    .unwrap();
-    let implement = tick(&mut run, &mut pool);
-    assert_eq!(written(&implement), ["implement-1"]);
     assert!(
-        ticket(&implement, "implement-1")
-            .body
-            .contains("`docs/specs/demo.md`")
+        tick(&mut run, &mut pool).effects.conversations.is_empty(),
+        "an open pass is not opened again"
+    );
+    let (_, _, words) = grilling("tidy the header");
+    assert!(words.opening.contains(
+        "## The Line's work\n\ntidy the header\n\nThis Line was cut from `main` at `abc123`."
+    ));
+}
+
+#[test]
+fn a_brief_absorbs_its_spec_and_overrides_before_it_hands_on_done_with_its_items() {
+    let (mut run, mut pool, _) = grilling("#186");
+    let text = r#"{"spec": "docs/specs/demo.md", "pushBase": true, "finish": "pr",
+        "items": [{"title": "Parse it", "body": "the parser"}, {"title": "Print it", "body": ""}],
+        "nodes": {"implement": {"assign": {"model": "sonnet"}, "note": "keep it small"}}}"#;
+    // A brief seen before its merge landed does not count; seen merged, it is absorbed once.
+    pool.conversations.insert(
+        "grill-1".into(),
+        ConversationFact::Ended {
+            brief: brief(text),
+            merged: false,
+        },
+    );
+    assert!(written(&tick(&mut run, &mut pool)).is_empty());
+    assert_eq!(run.plan().1, 0);
+    pool.conversations.insert(
+        "grill-1".into(),
+        ConversationFact::Ended {
+            brief: brief(text),
+            merged: true,
+        },
+    );
+    let advanced = tick(&mut run, &mut pool);
+    assert_eq!(advanced.log, ["line: grill-1 hands on its brief"]);
+    assert_eq!(written(&advanced), ["implement-1"]);
+    assert_eq!(run.places.spec.as_deref(), Some("docs/specs/demo.md"));
+    assert!(run.places.push_base);
+    assert_eq!(
+        run.plan().1,
+        1,
+        "the finish and the node override are one edit"
+    );
+    assert_eq!(run.finish_act(), &FinishAct::Pr);
+    let implement = ticket(&advanced, "implement-1");
+    assert_eq!(implement.assign.model.as_deref(), Some("sonnet"));
+    assert!(implement.blocked_by.is_empty());
+    for part in [
+        "`docs/specs/demo.md`",
+        "keep it small",
+        "Parse it",
+        "the parser",
+        "Print it",
+    ] {
+        assert!(implement.body.contains(part), "{part}: {}", implement.body);
+    }
+    let again = tick(&mut run, &mut pool);
+    assert!(again.log.is_empty() && written(&again).is_empty());
+    assert_eq!(run.plan().1, 1, "absorbed once");
+}
+
+#[test]
+fn a_closed_conversation_pass_hands_closed_to_the_finish() {
+    let (mut run, mut pool, _) = grilling("#186");
+    pool.conversations.insert(
+        "grill-1".into(),
+        ConversationFact::Closed {
+            why: "ended as closed".into(),
+        },
+    );
+    let advanced = tick(&mut run, &mut pool);
+    assert_eq!(
+        advanced.log,
+        [
+            "line: grill-1 hands on closed",
+            "line: the Finish holds at finish-1"
+        ]
+    );
+    let finish = hold(&advanced, "finish-1");
+    assert!(finish.body.contains("ended as closed"), "{}", finish.body);
+    assert_eq!(run.live_conversation(&node("grill")), None);
+}
+
+#[test]
+fn a_handoff_to_a_live_conversation_pass_queues_the_next_pass() {
+    let talks = plan(
+        json!([
+            {"kind": "agent", "id": "left"},
+            {"kind": "agent", "id": "right"},
+            {"kind": "conversation", "id": "talk"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "left", "on": "done", "to": "talk"},
+            {"from": "right", "on": "done", "to": "talk"},
+            {"from": "talk", "on": "done", "to": "finish"}
+        ]),
+    );
+    assert!(LineRun::unsupported(&talks).is_empty());
+    let (mut run, mut pool) = work_run(talks);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["left-1", "right-1"]);
+    pool.agent("left-1");
+    pool.agent("right-1");
+    let first = tick(&mut run, &mut pool);
+    assert_eq!(first.effects.conversations.len(), 1);
+    assert_eq!(first.effects.conversations[0].id, id("talk-1"));
+    assert_eq!(
+        run.blockers(&pool),
+        [
+            Blocker::Conversation(id("talk-1")),
+            Blocker::Inbox {
+                node: node("talk"),
+                handoffs: 1
+            }
+        ]
+    );
+
+    let text = run.to_json();
+    assert_eq!(
+        LineRun::from_json(&text).unwrap(),
+        run,
+        "line.json keeps a live pass"
+    );
+
+    pool.conversations.insert(
+        "talk-1".into(),
+        ConversationFact::Ended {
+            brief: LineBrief::default(),
+            merged: true,
+        },
+    );
+    let second = tick(&mut run, &mut pool);
+    assert_eq!(second.effects.conversations.len(), 1);
+    assert_eq!(second.effects.conversations[0].id, id("talk-2"));
+    assert_eq!(run.live_conversation(&node("talk")), Some(&id("talk-2")));
+    assert!(!run.steward_may_answer(&id("talk-2")));
+    assert_eq!(run.node_of(&id("talk-2")), Some(&node("talk")));
+}
+
+#[test]
+fn a_brief_is_bounded_and_refuses_what_it_does_not_know() {
+    let item = |title: &str, body: &str| json!({"title": title, "body": body});
+    let parse = |value: Value| LineBrief::parse(&value.to_string());
+    let items = |n: usize| json!({"items": vec![item("t", "b"); n]});
+    assert_eq!(parse(items(64)).unwrap().items.len(), 64);
+    assert_eq!(parse(items(65)).unwrap_err(), "items holds 65: at most 64");
+    let titled = |title: String| parse(json!({"items": [item(&title, "")]}));
+    assert!(titled("x".repeat(200)).is_ok());
+    for title in [String::new(), "  ".into(), "x".repeat(201)] {
+        assert_eq!(
+            titled(title).unwrap_err(),
+            "item 1 needs a title of 1 to 200 characters"
+        );
+    }
+    let bodied = |len: usize| parse(json!({"items": [item("t", &"b".repeat(len))]}));
+    assert!(bodied(16 * 1024).is_ok());
+    assert_eq!(
+        bodied(16 * 1024 + 1).unwrap_err(),
+        "item 1's body is over 16384 bytes"
+    );
+    assert_eq!(
+        parse(json!({"spec": " "})).unwrap_err(),
+        "spec is blank: leave it out, or name the spec"
+    );
+    assert_eq!(
+        parse(json!({"finish": ""})).unwrap_err(),
+        "finish is blank: leave it out, or name the act"
+    );
+    assert!(
+        parse(json!({"factory": {}}))
+            .unwrap_err()
+            .contains("unknown field `factory`")
+    );
+    assert!(parse(json!({"items": [{"title": "t", "body": "b", "x": 1}]})).is_err());
+    assert_eq!(LineBrief::parse("[]").unwrap_err(), "not a JSON object");
+    assert!(
+        LineBrief::parse("{")
+            .unwrap_err()
+            .starts_with("not valid JSON")
     );
 }
 

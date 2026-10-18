@@ -386,7 +386,7 @@ pub fn take_spawn_proposals(
     let attempt = last_attempt(runs(session), parent_id);
     let mut log: Vec<String> = Vec::new();
     let mut taken: Vec<TakenProposal> = Vec::new();
-    // A Line Ticket or the Grill: both are inside the Line (ADR-0037).
+    // A Line Ticket or a Line Conversation pass: both are inside the Line (ADR-0037).
     let inside_line = crate::line::holds_spawns(session, parent_id);
     // Room is counted in signed numbers, which a cap fits: `spawn_caps_of` holds one at `i64::MAX`.
     let mut attempt_room = caps.per_attempt as i64;

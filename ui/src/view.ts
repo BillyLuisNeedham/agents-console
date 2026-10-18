@@ -351,11 +351,8 @@ export class ConsoleView {
       },
       onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
-      onEndConversation: (conversationId) => {
-        void this.conversationsTray.endConversation(conversationId);
-      },
-      onStartLine: (grillId) => {
-        void this.conversationsTray.startLine(grillId);
+      onEndConversation: (conversationId, close) => {
+        void this.conversationsTray.endConversation(conversationId, undefined, close);
       },
       onArmStop: () => this.headerHandlers?.onArmStop(),
       onCancelStop: () => this.headerHandlers?.onCancelStop(),
@@ -373,12 +370,6 @@ export class ConsoleView {
     return this.conversationsTray.endState();
   }
 
-  /** The Conversations store's per-Grill Start the Line state (ADR-0037),
-   *  for the pool projection beside the End state. */
-  conversationLineStartState(): Record<string, { starting: boolean; failure: string | null }> {
-    return this.conversationsTray.lineStartState();
-  }
-
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
     this.onSelectNode = handlers.onSelectNode;
     this.headerHandlers = handlers;
@@ -391,7 +382,6 @@ export class ConsoleView {
     );
     const liveConversations = new Set(model.conversationsTray.map((row) => row.id));
     this.conversationsTray.pruneEndFailures(liveConversations);
-    this.conversationsTray.pruneLineStartFailures(liveConversations);
     // A Reassign draft belongs to a ticket a write could still reach; one
     // that started an Attempt or finished loses its draft rather than
     // holding an edit that can no longer land.
@@ -409,11 +399,8 @@ export class ConsoleView {
     };
     const detailHandlers: DetailHandlers = {
       ...handlers,
-      onEndConversation: (conversationId: string, closing?: string) => {
-        void this.conversationsTray.endConversation(conversationId, closing);
-      },
-      onStartLine: (grillId: string) => {
-        void this.conversationsTray.startLine(grillId);
+      onEndConversation: (conversationId: string, closing?: string, close?: boolean) => {
+        void this.conversationsTray.endConversation(conversationId, closing, close);
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),

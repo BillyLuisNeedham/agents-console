@@ -137,6 +137,7 @@ conformance("spawns", "held spawns on the snapshot › carries every held spawn 
       overlaps: [],
       reason: "per-attempt",
       unknownOverlaps: [],
+      startedIds: [],
       at: expect.any(String),
       adopting: false,
     },

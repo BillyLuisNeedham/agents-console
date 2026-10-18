@@ -34,6 +34,7 @@
       "at": "2026-10-04T09:31:00.000Z",
       "reason": "overlaps",
       "unknownOverlaps": ["x-9"],
+      "startedIds": [],
       "adopting": false
     },
     {
@@ -49,6 +50,7 @@
       "at": "2026-10-04T09:32:00.000Z",
       "reason": "refused",
       "unknownOverlaps": [],
+      "startedIds": [],
       "adopting": true,
       "adoptError": "blocker 07 is gone"
     }

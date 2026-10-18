@@ -92,6 +92,10 @@ conformance("spawns", "holds a spawn whose blocks names a running ticket as star
     ["proposal-1", "started"],
     ["proposal-2", "started"],
   ]);
+  expect(held.heldSpawns.map((h) => [h.id, h.startedIds])).toEqual([
+    ["proposal-1", ["02"]],
+    ["proposal-2", ["02"]],
+  ]);
   expect(held.pendingSpawns).toEqual([]);
   expect(hasTicket(world, "01-spawn-1.md")).toBe(false);
   expectSameBytes(

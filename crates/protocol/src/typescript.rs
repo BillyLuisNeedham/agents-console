@@ -345,7 +345,6 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
                 exported::<LineBase>(),
                 exported::<LinePlanSource>(),
                 exported::<LineBeginRequest>(),
-                exported::<LineStartRequest>(),
                 exported::<LineResponse>(),
             ],
         ),

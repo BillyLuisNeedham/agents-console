@@ -14,8 +14,8 @@ use super::{
 };
 use crate::js;
 use crate::line::{
-    BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, EVIDENCE_SUFFIX, LINE_BRANCH_PREFIX, NO_VERDICT,
-    VERIFY_DIR, line_name_of, prove_verdict, review_verdict,
+    BRIEF_DIR, BaseBranch, EVIDENCE_SUFFIX, LINE_BRANCH_PREFIX, NO_VERDICT, VERIFY_DIR, brief_path,
+    issue_number, line_name_of, prove_verdict, review_verdict, short_commit,
 };
 use crate::plan::{
     CheckpointPolicy, EdgeKey, FinishAct, Node, NodeBody, NodeId, SpawnPolicy, TicketKind,
@@ -657,11 +657,32 @@ pub(super) fn copy_ticket(
 impl LineRun {
     /// Where a Conversation pass commits its Line brief: `docs/specs/<line>.<id>.brief.json`.
     pub fn brief_path(&self, conversation: &TicketId) -> String {
-        format!(
-            "{BRIEF_DIR}/{}.{conversation}{BRIEF_SUFFIX}",
-            line_name_of(&self.places.branch)
-        )
+        brief_path(&self.places.branch, conversation.as_str())
     }
+}
+
+// What a Conversation pass opens on: the work as the operator gave it, an issue number spelled out,
+// and the Line base it was cut from.
+fn talk_work_section(places: &LinePlaces) -> Option<String> {
+    let work = js::trim(places.work.as_deref()?);
+    let asked = match issue_number(work) {
+        Some(number) => format!(
+            "The piece of work for this Line is issue #{number}. Read it (gh issue view {number}) \
+             and grill me on it."
+        ),
+        None => work.to_owned(),
+    };
+    let cut = places.base.as_ref().map(|base| {
+        format!(
+            "This Line was cut from `{}` at `{}`.",
+            base.base_ref,
+            short_commit(&base.commit)
+        )
+    });
+    Some(format!(
+        "## The Line's work\n\n{}",
+        sections([Some(asked), cut])
+    ))
 }
 
 pub(super) fn conversation(
@@ -691,7 +712,7 @@ pub(super) fn conversation(
             node.title,
             run.brief_path(id)
         )),
-        work_section(&run.places),
+        talk_work_section(&run.places),
         items_section(&pass.input),
         halted,
         notes,

@@ -1213,13 +1213,6 @@ export interface ConversationEndView {
   failure: string | null;
 }
 
-/** Start the Line's in-flight/failure state for one Grill (ADR-0037), shared
- *  by the card and Detail the way the End view is. */
-export interface ConversationLineStartView {
-  starting: boolean;
-  failure: string | null;
-}
-
 export interface ConversationCardView {
   kind: "conversation";
   id: string;
@@ -1238,16 +1231,16 @@ export interface ConversationCardView {
   enlisted: boolean;
   /** It is the Steward (ADR-0030): the card is marked as such. */
   steward: boolean;
-  /** It is a Factory Line's Grill (ADR-0037): the card is marked as such
-   *  and, while live, offers Start the Line. */
-  grill: boolean;
+  /** The Plan node of the Line this Conversation is a pass of (ADR-0039):
+   *  the card is marked with it and, once an End is refused, offers End as
+   *  closed. */
+  node: string | null;
   /** Notices are not reaching its pane; null while they land. */
   delivery: DeliveryWarningView | null;
   /** The card's terminal surface, reused from ticket cards; present while
    *  the Conversation is live and carries a pane id. */
   terminal: TerminalSurfaceView | null;
   endView: ConversationEndView;
-  lineStart: ConversationLineStartView;
   x: number;
   y: number;
 }
@@ -1773,14 +1766,11 @@ function projectConversationEnd(
   return engineEnding ? { ...view, ending: true } : view;
 }
 
-const NO_LINE_START: ConversationLineStartView = { starting: false, failure: null };
-
 function projectConversation(
   conversation: ConversationView,
   pos: Point,
   terminal: TerminalSurfaceView | undefined,
   endings: Record<string, ConversationEndView>,
-  lineStarts: Record<string, ConversationLineStartView>,
   now: number,
 ): ConversationCardView {
   return {
@@ -1797,11 +1787,10 @@ function projectConversation(
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
     steward: conversation.role === "steward",
-    grill: conversation.role === "grill",
+    node: conversation.node ?? null,
     delivery: projectDelivery(conversation.delivery),
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id], conversation.ending),
-    lineStart: lineStarts[conversation.id] ?? NO_LINE_START,
     x: pos.x,
     y: pos.y,
   };
@@ -1834,7 +1823,6 @@ export function projectPool(
   now: number = Date.now(),
   conversationEndings: Record<string, ConversationEndView> = {},
   keepTalking: Record<string, KeepTalkingState> = {},
-  conversationLineStarts: Record<string, ConversationLineStartView> = {},
 ): PoolView {
   const tickets = snapshot.state.tickets;
   const conversations = snapshot.state.conversations;
@@ -1850,7 +1838,6 @@ export function projectPool(
         positions[conversationCardId(conversation.id)],
         terminal[conversation.id],
         conversationEndings,
-        conversationLineStarts,
         now,
       ),
     ),
@@ -1900,7 +1887,7 @@ function projectSpawnCard(
     kind: "spawn",
     id,
     proposalId: spawn.id,
-    label: `held · ${heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps)}`,
+    label: `held · ${heldSpawnReasonCopy(spawn)}`,
     title: spawn.title,
     parentCardId: spawnParentCardId(spawn, ticketIds, conversationIds) ?? START_CARD_ID,
     parentId: spawn.parentId,
@@ -1982,6 +1969,11 @@ export function heldReasonCopy(
   }
 }
 
+/** Why a Held spawn on the wire is held, as its list row and faded card say it. */
+function heldSpawnReasonCopy(spawn: HeldSpawnView): string {
+  return heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps, undefined, spawn.startedIds);
+}
+
 /** The list's reason copy for a spawn the Tick could not land: the row
  *  shows why beside its buttons. */
 export const REFUSED_AT_LANDING = heldReasonCopy("refused");
@@ -2020,7 +2012,8 @@ export interface HeldSpawnRow {
    *  null when it named nothing. */
   overlaps: string | null;
   body: string;
-  /** "per-attempt cap", "per-run cap", "overlaps 02" or "held by operator". */
+  /** "per-attempt cap", "per-run cap", "overlaps 02", "held by operator" or
+   *  "blocks 02, which has started". */
   reason: string;
   /** An Adopt is on its way to the next Tick: nothing more to decide. */
   adopting: boolean;
@@ -2051,7 +2044,7 @@ export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawn
             : null,
       overlaps: spawn.overlaps.length > 0 ? `overlaps ${spawn.overlaps.join(", ")}` : null,
       body: spawn.body,
-      reason: heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps),
+      reason: heldSpawnReasonCopy(spawn),
       adopting: spawn.adopting,
       adoptError: spawn.adoptError ?? null,
     };
@@ -2106,8 +2099,8 @@ export interface ConversationTrayRow {
   idleAge: string | null;
   /** It is the Steward (ADR-0030): the row is marked as such. */
   steward: boolean;
-  /** It is a Factory Line's Grill (ADR-0037): the row is marked as such. */
-  grill: boolean;
+  /** The Plan node of the Line it is a pass of (ADR-0039): the row is marked with it. */
+  node: string | null;
   /** Notices are not reaching its pane; null while they land. */
   delivery: DeliveryWarningView | null;
 }
@@ -2134,7 +2127,7 @@ export function projectConversationsTray(
       turn: c.turn,
       idleAge: conversationIdleAge(c.turn.idleSince, now),
       steward: c.role === "steward",
-      grill: c.role === "grill",
+      node: c.node ?? null,
       delivery: projectDelivery(c.delivery),
     }));
   return rows.sort((a, b) => {
@@ -2802,9 +2795,8 @@ export interface ConversationDetailView {
   endView: ConversationEndView;
   /** Mirrors the card's: it is the Steward (ADR-0030). */
   steward: boolean;
-  /** Mirrors the card's: it is a Factory Line's Grill (ADR-0037). */
-  grill: boolean;
-  lineStart: ConversationLineStartView;
+  /** Mirrors the card's: the Plan node of the Line it is a pass of. */
+  node: string | null;
   /** Mirrors the card's: Notices are not reaching its pane. */
   delivery: DeliveryWarningView | null;
 }
@@ -2906,8 +2898,7 @@ export function projectDetail(
       terminal: card.terminal,
       endView: card.endView,
       steward: card.steward,
-      grill: card.grill,
-      lineStart: card.lineStart,
+      node: card.node,
       delivery: card.delivery,
     };
   }

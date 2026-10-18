@@ -3385,10 +3385,33 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
-      grill: false,
-      lineStart: { starting: false, failure: null },
+      node: null,
       delivery: null,
     });
+  });
+});
+
+describe("a Line Conversation's node", () => {
+  it("rides the card, its Detail and the tray row, and is null on an ordinary Conversation", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [conversation("grill-1", { node: "grill" }), conversation("conv-2")],
+      },
+    });
+    const view = projectPool(snap);
+    const nodes = view.cards.flatMap((card) =>
+      card.kind === "conversation" ? [[card.conversationId, card.node]] : [],
+    );
+    expect(nodes).toEqual([
+      ["grill-1", "grill"],
+      ["conv-2", null],
+    ]);
+    expect((detailOf(snap, "conversation:grill-1") as { node: string | null }).node).toBe("grill");
+    expect(projectConversationsTray(snap.state.conversations).map((row) => row.node)).toEqual([
+      "grill",
+      null,
+    ]);
   });
 });
 
@@ -3672,6 +3695,7 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     blocks: null,
     overlaps: [],
     unknownOverlaps: [],
+    startedIds: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,
@@ -3743,6 +3767,16 @@ describe("the hold reasons (issue #150)", () => {
     expect(refused?.adoptError).toBe(
       "blocks names done tickets, which have no next attempt to hold: 02",
     );
+  });
+
+  it("names the Tickets a started hold found started, on the row and the faded card", () => {
+    const started = heldSpawn({ reason: "started", blocks: ["02"], startedIds: ["02"] });
+    const [row] = projectHeldSpawns([started], NOW);
+    expect(row?.reason).toBe("blocks 02, which has started");
+    const card = projectPool(
+      snapshot({ state: { tickets: [ticket("02")] }, heldSpawns: [started] }),
+    ).cards.find((c) => c.kind === "spawn");
+    expect(card?.kind === "spawn" && card.label).toBe("held · blocks 02, which has started");
   });
 });
 

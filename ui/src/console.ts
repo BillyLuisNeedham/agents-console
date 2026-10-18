@@ -20,7 +20,6 @@ import {
   endingConversation,
 } from "./optimistic";
 import type { PoolConfigPatch } from "./project";
-import { postStartLine } from "./conversations";
 import { ConsoleSession } from "./session";
 import {
   ConsoleSocket,
@@ -162,15 +161,14 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
       session.optimistic("spawns.held.discard", { id }, discardedSpawn(id)),
     onStart: (request) =>
       socket.request("conversations.start", request).then((result) => result.conversation),
-    onEnd: (id, closing) =>
+    onEnd: (id, closing, close) =>
       session
         .optimistic(
           "conversations.end",
-          closing ? { id, closing } : { id },
+          { id, closing, close },
           endingConversation(id),
         )
         .then(() => undefined),
-    onStartLine: (grillId) => postStartLine(grillId),
     onListPlans: () => socket.request("plans.list", {}),
     onGetPlan: (slug) => socket.request("plans.get", { slug }),
     onEditPlan: (plan, edits) => socket.request("plans.edit", { plan, edits }),
@@ -238,11 +236,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     renders,
     handlers,
     draw() {
-      view.render(
-        root,
-        session.model(view.conversationEndState(), view.conversationLineStartState()),
-        handlers,
-      );
+      view.render(root, session.model(view.conversationEndState()), handlers);
     },
     start() {
       // A render the operator's own press asked for is not left for the
