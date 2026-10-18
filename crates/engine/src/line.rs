@@ -1,26 +1,30 @@
 //! The pool's Line (ADR-0039): the shell around `ac_core::line::run`. The tick's Line step reads the
 //! pool into `LineFacts`, advances the run, saves `line.json` and only then writes what the run
-//! projects, each file create-if-absent by its id. Line start, the Grill bridge, the Outcome check
-//! at an attempt's exit and the answer check on a Line Ticket all come through here.
+//! projects, each file create-if-absent by its id, and opens each Conversation pass it names. Line
+//! start, the Outcome check at an attempt's exit and the answer check on a Line Ticket all come
+//! through here.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 use ac_core::assignment::{engine_ticket_build_id, resolve_unseen_assignments};
-use ac_core::events::last_attempt;
+use ac_core::conversation_record::ConversationRecord;
+use ac_core::events::{last_attempt, read_events};
 use ac_core::js;
 use ac_core::line::run::{
     Blocker, ConversationFact, ConversationOutcome, HoldAnswer, LineBrief, LineEvent, LineFacts,
     LinePlaces, LineRun, LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem,
     hold_text, ticket_text, verdict_of,
 };
-use ac_core::line::{line_base_of, save_line};
+use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
 use ac_core::plan::{NodeBody, Plan, SpawnPolicy};
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_io::git;
 use ac_protocol::{
     ConversationRole, ConversationStatus, InterruptKind, LineGraphView, Outcome, OutcomeStatus,
-    TicketStatus,
+    TicketEventKind, TicketStatus,
 };
 use serde_json::Value;
 
@@ -40,17 +44,44 @@ pub fn line_ended(session: &Session) -> bool {
 struct SessionFacts<'a> {
     session: &'a Session,
     plan: &'a Plan,
+    /// The Line's branch, which names its briefs.
+    branch: String,
     unlanded: Vec<String>,
+    /// Each pass's brief as the merge target has it, read once per advance.
+    briefs: RefCell<HashMap<String, Option<LineBrief>>>,
 }
 
 impl<'a> SessionFacts<'a> {
-    fn new(session: &'a mut Session, plan: &'a Plan) -> Self {
+    fn new(session: &'a mut Session, plan: &'a Plan, branch: String) -> Self {
         let unlanded = crate::merges::merge_hold(session);
         SessionFacts {
             session,
             plan,
+            branch,
             unlanded,
+            briefs: RefCell::default(),
         }
+    }
+
+    // The pass's brief on the merge target, valid for the Plan: its End merged. The brief path
+    // carries the pass id, so nothing else puts one there.
+    fn merged_brief(&self, id: &str) -> Option<LineBrief> {
+        if let Some(read) = self.briefs.borrow().get(id) {
+            return read.clone();
+        }
+        let session = self.session;
+        let read = session
+            .git
+            .then(|| {
+                let target = crate::merges::merge_target_branch(session);
+                let path = brief_path(&self.branch, id);
+                git::show_file(&session.cwd, &format!("{target}:{path}"))
+            })
+            .flatten()
+            .and_then(|text| LineBrief::parse(&text).ok())
+            .filter(|brief| brief_problem(self.plan, brief).is_none());
+        self.briefs.borrow_mut().insert(id.to_owned(), read.clone());
+        read
     }
 
     // The scheduler's merged rule (drive.rs `merged`): a hold, an engine-run Ticket and every
@@ -100,12 +131,24 @@ impl LineFacts for SessionFacts<'_> {
         }
     }
 
-    // The Grill stands in for an entry Conversation pass until slice 5 opens them itself.
-    fn conversation(&self, _: &TicketId) -> ConversationFact {
-        match crate::conversations::grill_id(self.session) {
-            Some(_) => ConversationFact::Open,
-            None => ConversationFact::Unopened,
-        }
+    fn conversation(&self, id: &TicketId) -> ConversationFact {
+        let session = self.session;
+        let id = id.as_str();
+        let record = crate::conversations::record_of(session, id);
+        let merged = record.as_ref().and_then(|_| self.merged_brief(id));
+        conversation_fact(
+            record.as_ref(),
+            crate::conversations::is_reserved(session, id),
+            merged,
+            |kind, key| {
+                read_events(Path::new(&session.runs_dir), id)
+                    .iter()
+                    .rfind(|e| e.kind == kind)
+                    .and_then(|e| e.payload.get(key))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            },
+        )
     }
 
     fn outcome(&self, id: &TicketId) -> Option<&Outcome> {
@@ -151,6 +194,41 @@ impl LineFacts for SessionFacts<'_> {
 
     fn runs_dir(&self) -> String {
         self.session.runs_dir.clone()
+    }
+}
+
+/// A Conversation pass as the pool shows it: a brief merged into the Line's branch is its end
+/// whatever the record says; else no record and no start in flight is unopened, a live record or a
+/// start in flight is open, and a crashed or ended one is closed, with the crash's reason or the End's
+/// closing note.
+fn conversation_fact(
+    record: Option<&ConversationRecord>,
+    reserved: bool,
+    merged: Option<LineBrief>,
+    last_said: impl Fn(TicketEventKind, &str) -> Option<String>,
+) -> ConversationFact {
+    if let Some(brief) = merged {
+        return ConversationFact::Ended {
+            brief,
+            merged: true,
+        };
+    }
+    let Some(record) = record else {
+        return if reserved {
+            ConversationFact::Open
+        } else {
+            ConversationFact::Unopened
+        };
+    };
+    match record.status {
+        ConversationStatus::Live => ConversationFact::Open,
+        ConversationStatus::Crashed => ConversationFact::Closed {
+            why: last_said(TicketEventKind::Crash, "reason").unwrap_or_else(|| "crashed".into()),
+        },
+        ConversationStatus::Ended => ConversationFact::Closed {
+            why: last_said(TicketEventKind::Ended, "closing")
+                .unwrap_or_else(|| "ended as closed".into()),
+        },
     }
 }
 
@@ -224,7 +302,38 @@ pub fn advance_line(session: &mut Session) -> anyhow::Result<()> {
         });
         session.log(format!("line: wrote {}", written.join(", ")));
     }
+    for pass in &effects.conversations {
+        open_pass(session, pass);
+    }
     raise_unraised_holds(session)
+}
+
+// A Conversation pass opens on the id the Line named, reserved in this job so the next tick reads it
+// open. A start that cannot be had is recorded crashed, which hands the pass on closed; so is one
+// whose launch never got a pane. Either way the drive wakes once the start is over.
+fn open_pass(session: &mut Session, pass: &ac_core::line::run::NewConversation) {
+    let id = pass.id.to_string();
+    let prepared = match crate::conversations::prepare_pass(session, pass) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            session.log(format!("line: {id} did not open: {}", err.message()));
+            crate::conversations::record_refused_pass(session, pass, err.message());
+            return;
+        }
+    };
+    session.log(format!("line: {id} opens"));
+    let engine = session.engine();
+    tokio::spawn(async move {
+        let started = crate::conversations::launch_prepared(&engine, prepared).await;
+        let _ = engine
+            .call(move |s| {
+                if let Err(err) = started {
+                    s.log(format!("line: {id} did not open: {}", err.message()));
+                }
+                s.wake();
+            })
+            .await;
+    });
 }
 
 fn issue_file(session: &Session, id: &str) -> std::path::PathBuf {
@@ -275,7 +384,8 @@ fn with_run<R>(
 ) -> Option<R> {
     let mut run = session.line.take()?;
     let plan = run.plan().0.clone();
-    let out = job(&mut run, &SessionFacts::new(session, &plan));
+    let branch = run.places.branch.clone();
+    let out = job(&mut run, &SessionFacts::new(session, &plan, branch));
     session.line = Some(run);
     Some(out)
 }
@@ -339,7 +449,7 @@ pub fn is_finish(session: &Session, ticket_id: &str) -> bool {
 }
 
 /// Whether what this Ticket or Conversation proposes is held for the operator (ADR-0037): a Line
-/// Ticket's spawns are, unless its node says `spawns: land`, and so are the Grill's.
+/// Ticket's spawns are, unless its node says `spawns: land`, and so are a Line Conversation pass's.
 pub fn holds_spawns(session: &Session, parent_id: &str) -> bool {
     if let Some(marker) = session.marker(parent_id)
         && let Some(node) = &marker.node
@@ -352,7 +462,7 @@ pub fn holds_spawns(session: &Session, parent_id: &str) -> bool {
         });
         return !lands;
     }
-    crate::conversations::grill_id(session).as_deref() == Some(parent_id)
+    crate::conversations::record_of(session, parent_id).is_some_and(|rec| rec.node.is_some())
 }
 
 /// The Line's graph with live state, for the snapshot and `GET /api/line`.
@@ -751,6 +861,84 @@ mod tests {
         assert!(
             super::line_ended(&session),
             "an approval with act none ends the Line"
+        );
+    }
+
+    #[test]
+    fn a_conversation_pass_reads_as_its_merged_brief_else_as_its_record() {
+        use ac_core::conversation_record::ConversationRecord;
+        use ac_core::line::run::{ConversationFact, LineBrief};
+        use ac_protocol::{ConversationStatus, TicketEventKind};
+        let record = |status| ConversationRecord {
+            id: "grill-1".into(),
+            file: "grill-1.md".into(),
+            title: "Grill, pass 1".into(),
+            opening: String::new(),
+            status,
+            spawned_by: None,
+            harness: "claude".into(),
+            model: "opus".into(),
+            effort: None,
+            drivers: "my-grill-with-docs".into(),
+            enlisted: None,
+            role: None,
+            node: Some("grill".into()),
+        };
+        let brief = LineBrief::parse(r#"{"spec": "docs/specs/x.md"}"#).unwrap();
+        let said = |kind: TicketEventKind, key: &str| match (kind, key) {
+            (TicketEventKind::Crash, "reason") => Some("pane lost without End (pane-gone)".into()),
+            _ => None,
+        };
+        let silent = |_: TicketEventKind, _: &str| None;
+        let ended = |rec: Option<&ConversationRecord>| {
+            super::conversation_fact(rec, false, Some(brief.clone()), silent)
+        };
+        let merged = ConversationFact::Ended {
+            brief: brief.clone(),
+            merged: true,
+        };
+        assert_eq!(ended(Some(&record(ConversationStatus::Ended))), merged);
+        assert_eq!(ended(Some(&record(ConversationStatus::Live))), merged);
+        assert_eq!(
+            super::conversation_fact(None, false, None, silent),
+            ConversationFact::Unopened
+        );
+        assert_eq!(
+            super::conversation_fact(None, true, None, silent),
+            ConversationFact::Open
+        );
+        let live = record(ConversationStatus::Live);
+        assert_eq!(
+            super::conversation_fact(Some(&live), false, None, silent),
+            ConversationFact::Open
+        );
+        let crashed = record(ConversationStatus::Crashed);
+        assert_eq!(
+            super::conversation_fact(Some(&crashed), false, None, said),
+            ConversationFact::Closed {
+                why: "pane lost without End (pane-gone)".into()
+            }
+        );
+        assert_eq!(
+            super::conversation_fact(Some(&crashed), false, None, silent),
+            ConversationFact::Closed {
+                why: "crashed".into()
+            }
+        );
+        let closed = record(ConversationStatus::Ended);
+        assert_eq!(
+            super::conversation_fact(Some(&closed), false, None, silent),
+            ConversationFact::Closed {
+                why: "ended as closed".into()
+            }
+        );
+        assert_eq!(
+            super::conversation_fact(Some(&closed), false, None, |_, key| {
+                (key == "closing").then(|| "not worth doing".into())
+            }),
+            ConversationFact::Closed {
+                why: "not worth doing".into()
+            }
         );
     }
 

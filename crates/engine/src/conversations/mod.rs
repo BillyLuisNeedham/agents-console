@@ -63,7 +63,7 @@ pub(crate) use end::merge_into_target;
 pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
-pub(crate) use start::{launch_prepared, prepare as prepare_start};
+pub(crate) use start::{launch_prepared, prepare as prepare_start, prepare_pass, record_refused_pass};
 
 /// How often a live Conversation's tick re-reads its pane unless a test shortens it.
 pub const CONVERSATION_POLL_MS: u64 = 2_000;
@@ -228,7 +228,7 @@ pub(crate) fn load(s: &Session) -> Vec<ConversationRecord> {
     load_conversations(&conversations_dir(s)).unwrap_or_default()
 }
 
-fn record_of(s: &Session, id: &str) -> Option<ConversationRecord> {
+pub(crate) fn record_of(s: &Session, id: &str) -> Option<ConversationRecord> {
     load(s).into_iter().find(|rec| rec.id == id)
 }
 
@@ -535,6 +535,11 @@ pub fn reserved_ids(s: &Session) -> Vec<String> {
 
 pub fn reserve(s: &mut Session, id: &str) {
     s.conversations.reserved.insert(id.to_owned());
+}
+
+/// Whether a start holding this id is still in flight.
+pub(crate) fn is_reserved(s: &Session, id: &str) -> bool {
+    s.conversations.reserved.contains(id)
 }
 
 /// The live Steward's id (ADR-0030), adopted or not yet; `None` when none is on duty.
