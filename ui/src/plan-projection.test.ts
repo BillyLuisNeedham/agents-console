@@ -127,7 +127,7 @@ describe("fitView", () => {
   });
   it("starts a Plan too wide to read whole at its left end", () => {
     const view = fitView(draw().nodes, { w: 300, h: 600 });
-    expect(view.zoom).toBe(0.5);
+    expect(view.zoom).toBe(0.8);
     expect(view.x + 40 * view.zoom).toBeGreaterThan(0);
   });
 });

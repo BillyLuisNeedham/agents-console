@@ -266,7 +266,7 @@ export function freeSpot(nodes: readonly Pick<DrawnNode, "at">[], centre: Point)
   return origin;
 }
 
-const READABLE_ZOOM = 0.5;
+const READABLE_ZOOM = 0.8;
 
 export function fitView(nodes: readonly Pick<DrawnNode, "at">[], viewport: { w: number; h: number }): ViewTransform {
   if (nodes.length === 0 || viewport.w <= 0 || viewport.h <= 0) return { x: GAP, y: GAP, zoom: 1 };

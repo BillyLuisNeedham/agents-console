@@ -1524,6 +1524,16 @@ async function plansLayoutChecks(name: string): Promise<void> {
       `${tools.length} tools in ${head.clientWidth}px`,
     );
   }
+  const world = q<HTMLElement>(".plans-pane .plan-world");
+  const title = q<HTMLElement>(".plans-pane .plan-node-title");
+  if (world && title) {
+    const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
+    push(
+      "plans card text is readable at the fit zoom",
+      onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`,
+      `card titles are ${onScreen.toFixed(1)}px on screen`,
+    );
+  }
   const side = q<HTMLElement>(".plans-side");
   const fields = [...root.querySelectorAll<HTMLElement>(".plans-side .plan-field, .plans-side .plan-link-row, .plans-side .plan-check")];
   const spilled = side ? fields.filter((f) => overflowOf(f, side) !== null) : [];
