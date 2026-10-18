@@ -62,6 +62,7 @@ pub fn held_reason_text(
     reason: HeldSpawnReason,
     overlaps: &[String],
     unknown: &[String],
+    started: &[String],
     refusal: Option<&str>,
 ) -> String {
     match reason {
@@ -76,7 +77,11 @@ pub fn held_reason_text(
         }
         HeldSpawnReason::Operator => "held by operator".to_owned(),
         HeldSpawnReason::Line => "proposed inside the Line".to_owned(),
-        HeldSpawnReason::Started => "blocks a Ticket that has started".to_owned(),
+        HeldSpawnReason::Started => match started {
+            [] => "blocks a Ticket that has started".to_owned(),
+            [one] => format!("blocks {one}, which has started"),
+            many => format!("blocks {}, which have started", many.join(", ")),
+        },
         HeldSpawnReason::Refused => match refusal {
             Some(refusal) if !refusal.is_empty() => format!("refused at landing: {refusal}"),
             _ => "refused at landing".to_owned(),
@@ -193,6 +198,7 @@ pub fn render_spawn_ledger(input: SpawnLedgerInput<'_>) -> String {
                         h.reason,
                         h.proposal.overlaps.as_deref().unwrap_or_default(),
                         h.unknown_overlaps.as_deref().unwrap_or_default(),
+                        h.started_ids.as_deref().unwrap_or_default(),
                         h.adopt_error.as_deref(),
                     )),
                     cell(&h.proposal.title),
@@ -261,6 +267,7 @@ mod tests {
             at: "2026-01-01T00:00:00.000Z".into(),
             adopt_error: None,
             unknown_overlaps: None,
+            started_ids: None,
         }
     }
 
@@ -356,19 +363,19 @@ mod tests {
     fn words_each_hold_reason_the_way_the_console_does() {
         let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            held_reason_text(HeldSpawnReason::PerAttempt, &[], &[], None),
+            held_reason_text(HeldSpawnReason::PerAttempt, &[], &[], &[], None),
             "per-attempt cap"
         );
         assert_eq!(
-            held_reason_text(HeldSpawnReason::PerRun, &[], &[], None),
+            held_reason_text(HeldSpawnReason::PerRun, &[], &[], &[], None),
             "per-run cap"
         );
         assert_eq!(
-            held_reason_text(HeldSpawnReason::Overlaps, &ids(&["02"]), &[], None),
+            held_reason_text(HeldSpawnReason::Overlaps, &ids(&["02"]), &[], &[], None),
             "overlaps 02"
         );
         assert_eq!(
-            held_reason_text(HeldSpawnReason::Operator, &[], &[], None),
+            held_reason_text(HeldSpawnReason::Operator, &[], &[], &[], None),
             "held by operator"
         );
         assert_eq!(
@@ -376,13 +383,29 @@ mod tests {
                 HeldSpawnReason::Overlaps,
                 &ids(&["02", "99"]),
                 &ids(&["99"]),
+                &[],
                 None
             ),
             "overlaps 02, 99 (99 not in the pool)"
         );
         assert_eq!(
+            held_reason_text(HeldSpawnReason::Started, &[], &[], &ids(&["02"]), None),
+            "blocks 02, which has started"
+        );
+        assert_eq!(
+            held_reason_text(
+                HeldSpawnReason::Started,
+                &[],
+                &[],
+                &ids(&["02", "03"]),
+                None
+            ),
+            "blocks 02, 03, which have started"
+        );
+        assert_eq!(
             held_reason_text(
                 HeldSpawnReason::Refused,
+                &[],
                 &[],
                 &[],
                 Some("blocks names done tickets: 02")
@@ -390,7 +413,7 @@ mod tests {
             "refused at landing: blocks names done tickets: 02"
         );
         assert_eq!(
-            held_reason_text(HeldSpawnReason::Refused, &[], &[], Some("")),
+            held_reason_text(HeldSpawnReason::Refused, &[], &[], &[], Some("")),
             "refused at landing"
         );
     }
@@ -405,12 +428,19 @@ mod tests {
         stale.unknown_overlaps = Some(vec!["99".into()]);
         let mut refused = held("proposal-8", HeldSpawnReason::Refused, "Refused");
         refused.adopt_error = Some("blocked-by names 42, which is not in the pool".into());
+        let mut started = held(
+            "proposal-9",
+            HeldSpawnReason::Started,
+            "Needs the running one",
+        );
+        started.started_ids = Some(vec!["02".into()]);
         let rows = [
             held("proposal-3", HeldSpawnReason::PerAttempt, "Cap one"),
             overlapping,
             stale,
             held("proposal-7", HeldSpawnReason::Operator, "Held back"),
             refused,
+            started,
         ];
         let text = render_spawn_ledger(SpawnLedgerInput {
             held: &rows,
@@ -430,6 +460,11 @@ mod tests {
                 "proposal-8",
                 "refused at landing: blocked-by names 42, which is not in the pool",
                 "Refused",
+            ),
+            (
+                "proposal-9",
+                "blocks 02, which has started",
+                "Needs the running one",
             ),
         ] {
             let row = format!(

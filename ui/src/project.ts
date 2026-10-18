@@ -408,7 +408,7 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
     const reasons = new Set<string>();
     for (const entry of held) {
       if (typeof entry !== "object" || entry === null) return null;
-      const { title, reason, overlaps, unknownOverlaps, refusal } = entry as Record<
+      const { title, reason, overlaps, unknownOverlaps, refusal, startedIds } = entry as Record<
         string,
         unknown
       >;
@@ -421,6 +421,7 @@ function spawnFromPayload(kind: string, payload: Record<string, unknown>): strin
           isStringList(overlaps) ? overlaps : [],
           isStringList(unknownOverlaps) ? unknownOverlaps : [],
           typeof refusal === "string" ? refusal : undefined,
+          isStringList(startedIds) ? startedIds : [],
         ),
       );
     }
@@ -2005,12 +2006,14 @@ type SpawnProposalView = PendingSpawnView | HeldSpawnView;
  *  a cap, the proposing agent's overlaps mark (with what it named, and
  *  which of those the pool never knew), the operator's Hold, or a Pending
  *  spawn the Tick could not land (with why, where it is shown inline)
- *  (issue #150). */
+ *  (issue #150), or a Pending spawn whose `blocks` named Tickets that had
+ *  started (ADR-0040). */
 export function heldReasonCopy(
   reason: HeldSpawnReason,
   overlaps: string[] = [],
   unknown: string[] = [],
   refusal?: string,
+  started: string[] = [],
 ): string {
   switch (reason) {
     case "per-attempt":
@@ -2029,7 +2032,9 @@ export function heldReasonCopy(
     case "line":
       return "proposed inside the Line";
     case "started":
-      return "blocks a Ticket that has started";
+      return started.length === 0
+        ? "blocks a Ticket that has started"
+        : `blocks ${started.join(", ")}, which ${started.length === 1 ? "has" : "have"} started`;
   }
 }
 
