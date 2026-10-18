@@ -780,6 +780,7 @@ mod tests {
                 drivers: String::new(),
                 enlisted: None,
                 role: Some(ConversationRole::Steward),
+                node: None,
             },
         )
         .unwrap();
@@ -819,6 +820,7 @@ mod tests {
                 drivers: String::new(),
                 enlisted: None,
                 role: None,
+                node: None,
             },
         )
         .unwrap();

@@ -100,6 +100,7 @@ impl Rig {
             drivers: "implement".into(),
             enlisted: None,
             role: None,
+            node: None,
         }
     }
 

@@ -166,6 +166,25 @@ pub fn line_name_of(branch: &str) -> String {
     }
 }
 
+/// Where a Line Conversation pass commits its Line brief: `docs/specs/<line>.<id>.brief.json`.
+pub fn brief_path(branch: &str, conversation: &str) -> String {
+    format!(
+        "{BRIEF_DIR}/{}.{conversation}{BRIEF_SUFFIX}",
+        line_name_of(branch)
+    )
+}
+
+/// The issue number a piece of work names, when it is only that: `186` or `#186`.
+pub fn issue_number(work: &str) -> Option<String> {
+    let digits = js::trim(work).trim_start_matches('#');
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| digits.to_owned())
+}
+
+/// A commit as the operator reads it: its first seven characters.
+pub fn short_commit(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
+
 pub mod run;
 
 #[cfg(test)]

@@ -520,8 +520,8 @@ impl LineRun {
         Ok(run)
     }
 
-    /// What a Plan holds that this build cannot run yet: per-item copies, Mergers, and Conversation
-    /// nodes that are not entries. Line start refuses a Plan with any.
+    /// What a Plan holds that this build cannot run yet: per-item copies and Mergers. Line start
+    /// refuses a Plan with any.
     pub fn unsupported(plan: &Plan) -> Vec<String> {
         plan.nodes()
             .filter_map(|node| match &node.body {
@@ -531,11 +531,6 @@ impl LineRun {
                 )),
                 NodeBody::Merger(_) => Some(format!(
                     "node {} is a Merger, which this build cannot run yet",
-                    node.id
-                )),
-                NodeBody::Conversation(_) if !plan.entries().contains(&node.id) => Some(format!(
-                    "node {} is a Conversation node after the start of the Plan, which this build \
-                     cannot run yet",
                     node.id
                 )),
                 _ => None,

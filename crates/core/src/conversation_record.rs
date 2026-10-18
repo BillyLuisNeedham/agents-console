@@ -49,6 +49,9 @@ pub struct ConversationRecord {
     /// The role it was started or Enlisted in (ADR-0030): a Steward. Absent for an ordinary
     /// Conversation, and fixed for its life.
     pub role: Option<ConversationRole>,
+    /// The Line's Conversation node it is a pass of (ADR-0039), its id the pass's (`grill-1`).
+    /// Absent for every Conversation the Line did not open.
+    pub node: Option<String>,
 }
 
 /// The line-1 marker: `<!-- conversation: id=.. status=.. -->`.
@@ -146,6 +149,9 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<ConversationRecord> {
             Some("grill") => Some(ConversationRole::Grill),
             _ => None,
         },
+        node: field(&fields, "node")
+            .filter(|node| !node.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -195,6 +201,9 @@ pub fn marker_line(rec: &ConversationRecord) -> String {
     // Written only for a Steward, so an ordinary record reads exactly as before.
     if let Some(role) = rec.role {
         fields.push(format!("role={role}"));
+    }
+    if let Some(node) = &rec.node {
+        fields.push(format!("node={node}"));
     }
     format!("<!-- conversation: {} -->", fields.join(" "))
 }
@@ -329,6 +338,7 @@ mod tests {
             drivers: "implement resolving-merge-conflicts".into(),
             enlisted: None,
             role: None,
+            node: None,
         }
     }
 
@@ -443,6 +453,33 @@ mod tests {
         let mut expected = rec.clone();
         expected.enlisted.as_mut().unwrap().tab_id = Some("none".into());
         assert_eq!(read, expected);
+    }
+
+    #[test]
+    fn round_trips_a_line_conversation_pass_by_its_node() {
+        let dir = temp();
+        let rec = ConversationRecord {
+            id: "grill-1".into(),
+            file: dir.path().join("grill-1.md"),
+            spawned_by: None,
+            node: Some("grill".into()),
+            ..record(dir.path())
+        };
+        write_conversation(dir.path(), &rec).unwrap();
+        let text = fs::read_to_string(&rec.file).unwrap();
+        assert!(
+            text.starts_with(
+                "<!-- conversation: id=grill-1 status=live spawned-by=none harness=claude \
+                 model=opus drivers=implement%20resolving-merge-conflicts node=grill -->"
+            ),
+            "{text}"
+        );
+        assert_eq!(read_conversation(&rec.file).unwrap(), rec);
+        assert_eq!(
+            next_conversation_id([&rec], |_| false),
+            "conv-1",
+            "a pass id never moves the engine's counter"
+        );
     }
 
     #[test]

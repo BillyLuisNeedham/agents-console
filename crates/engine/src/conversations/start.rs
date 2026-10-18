@@ -334,6 +334,7 @@ fn after_launch(
         drivers: p.assignment.drivers.clone(),
         enlisted: None,
         role: p.role,
+        node: None,
     };
     write_conversation(&conversations_dir(s), &record).map_err(|err| refused(err.to_string()))?;
     let id = p.id.clone();
@@ -706,6 +707,7 @@ fn enlist_record(
         drivers: DEFAULT_DRIVERS.to_owned(),
         enlisted: Some(found),
         role: req.role(),
+        node: None,
     };
     // The record lands before delivery: deliver reads it for the harness descriptor, and the card must
     // exist the moment the enlist does.
