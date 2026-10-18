@@ -317,7 +317,8 @@ export class Detail {
   // checkpoint offers one Adopt per finished Candidate (ADR-0035), scored
   // from the timeline's graded events when it has them, each sending the
   // note. A Steward note (ADR-0030) sits above the note field, with "Use as
-  // answer" to take it as the draft.
+  // answer" to take it as the draft. A waiting merge conflict says under its
+  // body how many Tickets started since it was raised (ADR-0040).
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -328,6 +329,9 @@ export class Detail {
       { class: interrupt.queued ? "interrupt-box interrupt-box-queued" : "interrupt-box" },
       h("span", { class: "interrupt-kind" }, interrupt.form.title),
       h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
+      interrupt.startedSince
+        ? h("div", { class: "interrupt-started-since" }, startedSinceLine(interrupt.startedSince))
+        : null,
     );
     // Answered-and-waiting: the answer is recorded and will be applied at the
     // next Tick, so the form steps aside for the waiting line.
@@ -1679,6 +1683,12 @@ export class Detail {
 
 function currentMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+}
+
+function startedSinceLine(count: number): string {
+  return count === 1
+    ? "1 Ticket has started since this conflict was raised."
+    : `${count} Tickets have started since this conflict was raised.`;
 }
 
 // The interrupt note's morph key, which is also how settleNoteFocus finds

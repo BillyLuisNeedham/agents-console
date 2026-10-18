@@ -1173,6 +1173,11 @@ body {
   user-select: text;
 }
 
+.interrupt-started-since {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .interrupt-note {
   background: var(--bg);
   color: var(--text);
