@@ -9,13 +9,17 @@ use super::{PRESETS, Plan};
 use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
 
+/// The words after `/api/plans/` that name verbs, not Plans. `checked_slug` refuses each, and the
+/// server routes each ahead of the slug routes.
+pub const ROUTE_WORDS: [&str; 3] = ["validate", "edit", "boot"];
+
 // The library's writers, one at a time: the server answers saves and deletes on several threads.
 static PLANS: FileLock = FileLock::new();
 
 /// Why a library call was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LibraryError {
-    /// The slug is not `[a-z0-9][a-z0-9-]{0,63}`, or is `validate`, which the routes need.
+    /// The slug is not `[a-z0-9][a-z0-9-]{0,63}`, or is one of `ROUTE_WORDS`.
     BadSlug(String),
     /// Presets are read-only: their slugs cannot be saved over or deleted.
     PresetSlug(String),
@@ -32,10 +36,14 @@ pub enum LibraryError {
 impl std::fmt::Display for LibraryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LibraryError::BadSlug(slug) => write!(
-                f,
-                "plans: `{slug}` is not a Plan slug: use up to 64 lowercase letters, digits and hyphens, starting with a letter or digit, and not `validate`"
-            ),
+            LibraryError::BadSlug(slug) => {
+                let words: Vec<_> = ROUTE_WORDS.iter().map(|word| format!("`{word}`")).collect();
+                write!(
+                    f,
+                    "plans: `{slug}` is not a Plan slug: use up to 64 lowercase letters, digits and hyphens, starting with a letter or digit, and none of {}",
+                    words.join(", ")
+                )
+            }
             LibraryError::PresetSlug(slug) => {
                 write!(f, "plans: `{slug}` is a Preset, and Presets are read-only")
             }
@@ -77,7 +85,7 @@ fn checked_slug(slug: &str) -> Result<(), LibraryError> {
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if shaped && slug != "validate" {
+    if shaped && !ROUTE_WORDS.contains(&slug) {
         Ok(())
     } else {
         Err(LibraryError::BadSlug(slug.to_owned()))

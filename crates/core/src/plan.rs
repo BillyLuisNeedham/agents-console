@@ -3,8 +3,10 @@
 //!
 //! Nothing outside this module builds a `Plan`. `Plan::parse` (a file, a request body, a Line's frozen
 //! copy) and `Plan::edit` (typed edits on a valid Plan) are the only constructors, and both end in the
-//! same `validate`, so there is one set of rules. Every problem is reported at once, each on the node
-//! or edge the editor marks. The file's serde shape is `ac_protocol::wire::PlanFile`.
+//! same `validate`, so there is one set of rules. `Plan::edit_draft` runs the same edits on a draft
+//! that need not be valid, for the editor, and judges what it makes with `Plan::check`. Every problem
+//! is reported at once, each on the node or edge the editor marks. The file's serde shape is
+//! `ac_protocol::wire::PlanFile`.
 //!
 //! A node's kind fixes its verdicts, so an edge's `on` is checked here and the run core never meets an
 //! unknown verdict. Every node whose verdicts include `closed` sends a `closed` with no edge of its own
@@ -14,7 +16,7 @@
 
 use std::num::NonZeroU32;
 
-use ac_protocol::wire::{PlanFile, PlanProblem};
+use ac_protocol::wire::{PlanEditFile, PlanFile, PlanNodeKind, PlanProblem};
 use indexmap::IndexMap;
 use serde_json::Value;
 
@@ -342,6 +344,32 @@ impl NodeBody {
         })
     }
 
+    /// The verdicts an edge out of this node may route on, a Merger's found through `node`, which
+    /// looks up its `of` node. A Merger folding nothing has none.
+    fn vocabulary<'a>(&self, node: impl Fn(&NodeId) -> Option<&'a Node>) -> &'static [Verdict] {
+        let body = match self {
+            NodeBody::Merger(merger) => node(&merger.of).map(|of| &of.body),
+            body => Some(body),
+        };
+        body.and_then(NodeBody::own_vocabulary).unwrap_or(&[])
+    }
+
+    /// The `kind` a file spells this node with.
+    fn kind(&self) -> &'static str {
+        match self {
+            NodeBody::Conversation(_) => "conversation",
+            NodeBody::Ticket(ticket) => match ticket.kind {
+                TicketKind::Agent => "agent",
+                TicketKind::Prove => "prove",
+                TicketKind::Review => "review",
+                TicketKind::Decide => "decide",
+            },
+            NodeBody::Merger(_) => "merger",
+            NodeBody::Gate(_) => "gate",
+            NodeBody::Finish(_) => "finish",
+        }
+    }
+
     fn is_per_item(&self) -> bool {
         matches!(
             self,
@@ -388,6 +416,16 @@ impl Plan {
         edit::apply(self, edits)
     }
 
+    /// Apply typed edits to a draft that need not be valid, keeping Mergers in step as `edit` does,
+    /// and answer the file it becomes with everything wrong with it. A batch is all or none: an edit
+    /// that names no node or edge, or a kind change, refuses it. So does a draft `read` could not
+    /// take in whole as written (an unreadable node, an unknown or mistyped field, an `on` that is no
+    /// verdict, a 0 cap), since editing it would drop or rewrite what someone wrote. A missing `name`
+    /// is no refusal: the file keeps reporting it.
+    pub fn edit_draft(draft: &Value, edits: &[PlanEdit]) -> Result<DraftEdited, Vec<PlanProblem>> {
+        edit::draft(draft, edits)
+    }
+
     pub fn meta(&self) -> &PlanMeta {
         &self.meta
     }
@@ -418,14 +456,8 @@ impl Plan {
 
     /// The verdicts an edge out of `node` may route on.
     pub fn vocabulary(&self, node: &NodeId) -> &'static [Verdict] {
-        let Some(node) = self.node(node) else {
-            return &[];
-        };
-        let body = match &node.body {
-            NodeBody::Merger(merger) => self.node(&merger.of).map(|of| &of.body),
-            body => Some(body),
-        };
-        body.and_then(NodeBody::own_vocabulary).unwrap_or(&[])
+        self.node(node)
+            .map_or(&[], |node| node.body.vocabulary(|id| self.node(id)))
     }
 
     /// Every edge out of `from` on `on`, in Plan order. A verdict fans out to all of them.
@@ -475,12 +507,28 @@ pub struct Edited {
     pub notes: Vec<String>,
 }
 
+/// A draft after edits: not a `Plan`, since it may be invalid, which is an editor's usual state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftEdited {
+    pub file: PlanFile,
+    /// `Plan::check` of `file`, so they are always what `plans.validate` says of it.
+    pub problems: Vec<PlanProblem>,
+    pub notes: Vec<String>,
+    /// Each node's id and the verdicts an edge out of it may route on, in file order.
+    pub verdicts: Vec<(String, &'static [Verdict])>,
+}
+
 /// The typed edit verb, shared by the Console and the Steward. There is no parser for words.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanEdit {
-    AddNode(Node),
+    /// A node of `kind` with its kind's defaults, named by the edit: the kind's word, else the first
+    /// of `<kind>-b`, `<kind>-c`, ... that no node holds.
+    AddNode {
+        kind: PlanNodeKind,
+        at: (i32, i32),
+    },
     RemoveNode(NodeId),
-    /// Replace a node's title and body; its id and place stay.
+    /// Replace a node's title and body; its id, kind and place stay.
     SetNode {
         id: NodeId,
         title: String,
@@ -497,4 +545,30 @@ pub enum PlanEdit {
         id: NodeId,
         at: (i32, i32),
     },
+}
+
+impl PlanEdit {
+    /// The one way in for an edit off the wire, through the same readers a file's nodes and edges
+    /// go through. Refused: an `on` that is no verdict, a cap or `perItem` of 0. Ids are carried
+    /// unchecked, so a bad one is a problem on its node, judged with every other rule.
+    pub fn read(file: &PlanEditFile) -> Result<PlanEdit, Vec<PlanProblem>> {
+        parse::edit_of(file)
+    }
+
+    /// Every edit read, or every refusal together.
+    pub fn read_all(files: &[PlanEditFile]) -> Result<Vec<PlanEdit>, Vec<PlanProblem>> {
+        let mut edits = Vec::new();
+        let mut problems = Vec::new();
+        for file in files {
+            match PlanEdit::read(file) {
+                Ok(edit) => edits.push(edit),
+                Err(more) => problems.extend(more),
+            }
+        }
+        if problems.is_empty() {
+            Ok(edits)
+        } else {
+            Err(problems)
+        }
+    }
 }

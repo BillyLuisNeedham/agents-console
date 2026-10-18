@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use ac_protocol::wire::{
     AllItems, PlanAssign, PlanAtEdge, PlanAtNode, PlanAtPlan, PlanCap, PlanCheckpoint,
-    PlanConflict, PlanConversationNode, PlanCopies, PlanEdgeFile, PlanFinishAct, PlanFinishNode,
-    PlanGateNode, PlanHold, PlanJoin, PlanLoopCap, PlanMergerNode, PlanNamedAct, PlanNodeFile,
-    PlanOneCopy, PlanOpener, PlanOtherAct, PlanPerItem, PlanProblemAt, PlanResolver, PlanSpawns,
-    PlanSpentTo, PlanTicketNode, PlanWait, PlanWhenSpent,
+    PlanConflict, PlanConversationNode, PlanCopies, PlanEdgeFile, PlanEditFile, PlanFinishAct,
+    PlanFinishNode, PlanGateNode, PlanHold, PlanJoin, PlanLoopCap, PlanMergerNode, PlanNamedAct,
+    PlanNodeFile, PlanOneCopy, PlanOpener, PlanOtherAct, PlanPerItem, PlanProblemAt, PlanResolver,
+    PlanSpawns, PlanSpentTo, PlanTicketNode, PlanWait, PlanWhenSpent,
 };
 use serde::Deserialize;
 
@@ -98,6 +98,29 @@ pub(super) struct DraftEdge {
     pub cap: Option<LoopCap>,
 }
 
+impl DraftEdge {
+    /// The edge with its `on` read as a verdict, or the problem that it is none.
+    fn typed(self) -> Result<Edge, PlanProblem> {
+        let Some(on) = Verdict::parse(&self.on) else {
+            let (from, to) = (self.from.as_str(), self.to.as_str());
+            return Err(at_edge(
+                from,
+                &self.on,
+                to,
+                format!("`{}` is not a verdict", self.on),
+            ));
+        };
+        Ok(Edge {
+            key: EdgeKey {
+                from: self.from,
+                on,
+                to: self.to,
+            },
+            cap: self.cap,
+        })
+    }
+}
+
 impl From<Edge> for DraftEdge {
     fn from(edge: Edge) -> Self {
         DraftEdge {
@@ -110,7 +133,11 @@ impl From<Edge> for DraftEdge {
 }
 
 pub(super) fn from_value(value: &Value) -> Result<Plan, Vec<PlanProblem>> {
-    let (draft, mut problems) = read(value);
+    let Read {
+        draft,
+        mut problems,
+        ..
+    } = read(value);
     match validate(draft) {
         Ok(plan) if problems.is_empty() => Ok(plan),
         Ok(_) => Err(problems),
@@ -121,9 +148,51 @@ pub(super) fn from_value(value: &Value) -> Result<Plan, Vec<PlanProblem>> {
     }
 }
 
+/// What `read` took in.
+struct Read {
+    draft: Draft,
+    problems: Vec<PlanProblem>,
+    /// Every field was taken in as written: nothing dropped or rewritten. A missing `name` keeps it,
+    /// since writing the draft back loses nothing and reports it again.
+    lossless: bool,
+}
+
+/// A draft safe to edit: taken in whole as written, every edge's `on` a verdict.
+pub(super) struct LosslessDraft {
+    pub meta: PlanMeta,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+/// The draft, or why editing it would drop or rewrite what it holds.
+pub(super) fn read_lossless(value: &Value) -> Result<LosslessDraft, Vec<PlanProblem>> {
+    let Read {
+        draft,
+        problems,
+        lossless,
+    } = read(value);
+    let mut refused = if lossless { Vec::new() } else { problems };
+    let mut edges = Vec::new();
+    for edge in draft.edges {
+        match edge.typed() {
+            Ok(edge) => edges.push(edge),
+            Err(problem) => refused.push(problem),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(refused);
+    }
+    Ok(LosslessDraft {
+        meta: draft.meta,
+        nodes: draft.nodes,
+        edges,
+    })
+}
+
 /// The file read field by field, so one bad node or edge is one problem and the rest still count.
-fn read(value: &Value) -> (Draft, Vec<PlanProblem>) {
+fn read(value: &Value) -> Read {
     let mut problems = Vec::new();
+    let mut unnamed = false;
     let mut draft = Draft {
         meta: PlanMeta::default(),
         nodes: Vec::new(),
@@ -134,7 +203,11 @@ fn read(value: &Value) -> (Draft, Vec<PlanProblem>) {
     let Some(file) = value.as_object() else {
         draft.whole = false;
         problems.push(at_plan("a Plan file is a JSON object".to_owned()));
-        return (draft, problems);
+        return Read {
+            draft,
+            problems,
+            lossless: false,
+        };
     };
     for key in file
         .keys()
@@ -145,9 +218,17 @@ fn read(value: &Value) -> (Draft, Vec<PlanProblem>) {
     if file.get("horde").and_then(Value::as_u64) != Some(u64::from(HORDE_VERSION)) {
         problems.push(at_plan(format!("`horde` must be {HORDE_VERSION}")));
     }
-    match file.get("name") {
-        Some(Value::String(name)) if !name.trim().is_empty() => draft.meta.name = name.clone(),
-        _ => problems.push(at_plan("a Plan needs a `name`".to_owned())),
+    let named = match file.get("name") {
+        Some(Value::String(name)) => {
+            draft.meta.name = name.clone();
+            !name.trim().is_empty()
+        }
+        _ => false,
+    };
+    if !named {
+        problems.push(at_plan("a Plan needs a `name`".to_owned()));
+        // Written back, an absent or blank name stays as it was; one of another type does not.
+        unnamed = matches!(file.get("name"), None | Some(Value::String(_)));
     }
     let mut text = |key: &str| match file.get(key) {
         None | Some(Value::Null) => None,
@@ -209,7 +290,12 @@ fn read(value: &Value) -> (Draft, Vec<PlanProblem>) {
             }
         }
     }
-    (draft, problems)
+    let lossless = problems.len() == usize::from(unnamed);
+    Read {
+        draft,
+        problems,
+        lossless,
+    }
 }
 
 /// serde's text, except where an untagged union would only say "did not match any variant".
@@ -409,16 +495,86 @@ fn assign_file(assign: &Assign) -> Option<PlanAssign> {
     })
 }
 
+/// An edit off the wire, its node and edge read as a file's are.
+pub(super) fn edit_of(file: &PlanEditFile) -> Result<PlanEdit, Vec<PlanProblem>> {
+    let edge = |from: &str, on: &str, to: &str, cap: Option<PlanLoopCap>| {
+        edge_read(PlanEdgeFile {
+            from: from.to_owned(),
+            on: on.to_owned(),
+            to: to.to_owned(),
+            cap,
+        })
+    };
+    Ok(match file {
+        PlanEditFile::AddNode(add) => PlanEdit::AddNode {
+            kind: add.kind,
+            at: (add.x, add.y),
+        },
+        PlanEditFile::RemoveNode(remove) => PlanEdit::RemoveNode(NodeId(remove.id.clone())),
+        PlanEditFile::SetNode(set) => {
+            let mut problems = Vec::new();
+            let node = node_of(set.node.clone(), &mut problems);
+            if !problems.is_empty() {
+                return Err(problems);
+            }
+            PlanEdit::SetNode {
+                id: node.id,
+                title: node.title,
+                body: node.body,
+            }
+        }
+        PlanEditFile::Link(link) => PlanEdit::Link(edge_read(link.edge.clone())?),
+        PlanEditFile::Unlink(key) => PlanEdit::Unlink(edge(&key.from, &key.on, &key.to, None)?.key),
+        PlanEditFile::SetCap(set) => {
+            let Edge { key, cap } = edge(&set.from, &set.on, &set.to, set.cap.clone())?;
+            PlanEdit::SetCap { edge: key, cap }
+        }
+        PlanEditFile::SetMeta(meta) => PlanEdit::SetMeta(PlanMeta {
+            name: meta.name.clone(),
+            author: meta.author.clone(),
+            source: meta.source.clone(),
+            note: meta.note.clone(),
+            steward_edits: meta.steward_edits.unwrap_or(false),
+        }),
+        PlanEditFile::Move(to) => PlanEdit::Move {
+            id: NodeId(to.id.clone()),
+            at: (to.x, to.y),
+        },
+    })
+}
+
+/// One edge as a file's is read, its `on` a verdict.
+fn edge_read(file: PlanEdgeFile) -> Result<Edge, Vec<PlanProblem>> {
+    let mut problems = Vec::new();
+    match edge_of(file, &mut problems).typed() {
+        Ok(edge) if problems.is_empty() => Ok(edge),
+        Ok(_) => Err(problems),
+        Err(problem) => {
+            problems.push(problem);
+            Err(problems)
+        }
+    }
+}
+
 pub(super) fn to_file(plan: &Plan) -> PlanFile {
+    file_of(&plan.meta, plan.nodes(), &plan.edges)
+}
+
+/// The file shape of a Plan's parts, valid or not, every policy field written out.
+pub(super) fn file_of<'a>(
+    meta: &PlanMeta,
+    nodes: impl Iterator<Item = &'a Node>,
+    edges: &[Edge],
+) -> PlanFile {
     PlanFile {
         horde: HORDE_VERSION,
-        name: plan.meta.name.clone(),
-        author: plan.meta.author.clone(),
-        source: plan.meta.source.clone(),
-        note: plan.meta.note.clone(),
-        steward_edits: Some(plan.meta.steward_edits),
-        nodes: plan.nodes().map(node_file).collect(),
-        edges: plan.edges.iter().map(edge_file).collect(),
+        name: meta.name.clone(),
+        author: meta.author.clone(),
+        source: meta.source.clone(),
+        note: meta.note.clone(),
+        steward_edits: Some(meta.steward_edits),
+        nodes: nodes.map(node_file).collect(),
+        edges: edges.iter().map(edge_file).collect(),
     }
 }
 

@@ -1,26 +1,19 @@
-//! `Plan::edit`: typed edits that keep Mergers in step, validated whole after.
+//! `Plan::edit` and `Plan::edit_draft`: typed edits that keep Mergers in step, on a valid Plan
+//! (validated whole after) or on a draft (judged with `Plan::check` after).
 
-use super::parse::{Draft, DraftEdge, at_edge, at_node, validate};
+use super::parse::{
+    Draft, DraftEdge, LosslessDraft, at_edge, at_node, file_of, read_lossless, validate,
+};
 use super::*;
 
 pub(super) fn apply(plan: &Plan, edits: &[PlanEdit]) -> Result<Edited, Vec<PlanProblem>> {
-    let mut draft = Editing {
-        meta: plan.meta.clone(),
-        nodes: plan.nodes().cloned().collect(),
-        edges: plan.edges.clone(),
-        notes: Vec::new(),
-        problems: Vec::new(),
-    };
-    for edit in edits {
-        draft.apply(edit);
-    }
     let Editing {
         meta,
         nodes,
         edges,
         notes,
         mut problems,
-    } = draft;
+    } = Editing::from_plan(plan).run(edits);
     let checked = validate(Draft {
         meta,
         nodes,
@@ -38,11 +31,36 @@ pub(super) fn apply(plan: &Plan, edits: &[PlanEdit]) -> Result<Edited, Vec<PlanP
     }
 }
 
+pub(super) fn draft(value: &Value, edits: &[PlanEdit]) -> Result<DraftEdited, Vec<PlanProblem>> {
+    let Editing {
+        meta,
+        nodes,
+        edges,
+        notes,
+        problems,
+    } = Editing::from_draft(read_lossless(value)?).run(edits);
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let file = file_of(&meta, nodes.iter(), &edges);
+    let find = |id: &NodeId| nodes.iter().find(|node| &node.id == id);
+    Ok(DraftEdited {
+        problems: Plan::check(&serde_json::to_value(&file).expect("a Plan file serializes")),
+        file,
+        notes,
+        verdicts: nodes
+            .iter()
+            .map(|node| (node.id.as_str().to_owned(), node.body.vocabulary(find)))
+            .collect(),
+    })
+}
+
 struct Editing {
     meta: PlanMeta,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     notes: Vec<String>,
+    /// The edits that missed. Any refuses the batch.
     problems: Vec<PlanProblem>,
 }
 
@@ -55,19 +73,40 @@ fn edges_word(n: usize) -> String {
 }
 
 impl Editing {
+    fn from_plan(plan: &Plan) -> Editing {
+        Editing::from_draft(LosslessDraft {
+            meta: plan.meta.clone(),
+            nodes: plan.nodes().cloned().collect(),
+            edges: plan.edges.clone(),
+        })
+    }
+
+    fn from_draft(draft: LosslessDraft) -> Editing {
+        Editing {
+            meta: draft.meta,
+            nodes: draft.nodes,
+            edges: draft.edges,
+            notes: Vec::new(),
+            problems: Vec::new(),
+        }
+    }
+
+    fn run(mut self, edits: &[PlanEdit]) -> Editing {
+        for edit in edits {
+            self.apply(edit);
+        }
+        self
+    }
+
     fn apply(&mut self, edit: &PlanEdit) {
         match edit {
-            PlanEdit::AddNode(node) => {
-                if self.position(&node.id).is_some() {
-                    self.node_problem(&node.id, format!("there is already a node `{}`", node.id));
-                    return;
-                }
-                self.nodes.push(node.clone());
-                match &node.body {
-                    NodeBody::Merger(merger) => self.opt_in(&node.id, &merger.of),
-                    body if body.is_per_item() => self.place_merger(&node.id),
-                    _ => {}
-                }
+            PlanEdit::AddNode { kind, at } => {
+                let id = std::iter::once(kind.as_str().to_owned())
+                    .chain((2..).map(|n| format!("{}-{}", kind.as_str(), letters(n))))
+                    .map(NodeId)
+                    .find(|id| self.position(id).is_none())
+                    .expect("the names never run out");
+                self.nodes.push(new_node(*kind, id, *at));
             }
             PlanEdit::RemoveNode(id) => {
                 let Some(at) = self.position(id) else {
@@ -93,6 +132,15 @@ impl Editing {
                 let Some(at) = self.position(id) else {
                     return self.no_node(id);
                 };
+                let (was, now) = (self.nodes[at].body.kind(), body.kind());
+                if was != now {
+                    return self.node_problem(
+                        id,
+                        format!(
+                            "`{id}` is a {was} node, and an edit never changes a node's kind: remove it and add a {now} node"
+                        ),
+                    );
+                }
                 self.nodes[at].title = title.clone();
                 self.nodes[at].body = body.clone();
                 match (body.is_per_item(), self.merger_of(id)) {
@@ -204,21 +252,6 @@ impl Editing {
         ));
     }
 
-    /// A Merger added by hand for a per-item node takes its out-edges, unless the node has another.
-    fn opt_in(&mut self, merger: &NodeId, of: &NodeId) {
-        let per_item = self
-            .position(of)
-            .is_some_and(|at| self.nodes[at].body.is_per_item());
-        if !per_item || self.merger_of(of).as_ref() != Some(merger) {
-            return;
-        }
-        let moved = self.move_onto_merger(of, merger);
-        self.notes.push(format!(
-            "`{merger}` folds `{of}` again: moved {} onto it",
-            edges_word(moved)
-        ));
-    }
-
     /// Every `id.v -> t` becomes `merger.v -> t`, and `id.v -> merger` is linked for each verdict
     /// moved, or for the node's first verdict when nothing moved.
     fn move_onto_merger(&mut self, id: &NodeId, merger: &NodeId) -> usize {
@@ -273,4 +306,64 @@ impl Editing {
         }
         moved
     }
+}
+
+/// A node of `kind` as the editor puts one down: the kind's label as its title, every policy its
+/// default.
+fn new_node(kind: PlanNodeKind, id: NodeId, at: (i32, i32)) -> Node {
+    let ticket = |kind: TicketKind| {
+        NodeBody::Ticket(TicketNode {
+            kind,
+            skill: None,
+            assign: Assign::default(),
+            copies: Copies::One,
+            makes_items: false,
+            checkpoint: CheckpointPolicy::Operator,
+            spawns: SpawnPolicy::Hold,
+            note: None,
+        })
+    };
+    let (title, body) = match kind {
+        PlanNodeKind::Conversation => (
+            "Conversation",
+            NodeBody::Conversation(ConversationNode::default()),
+        ),
+        PlanNodeKind::Agent => ("Agent", ticket(TicketKind::Agent)),
+        PlanNodeKind::Prove => ("Prove", ticket(TicketKind::Prove)),
+        PlanNodeKind::Review => ("Review", ticket(TicketKind::Review)),
+        PlanNodeKind::Decide => ("Decide", ticket(TicketKind::Decide)),
+        PlanNodeKind::Gate => (
+            "Gate",
+            NodeBody::Gate(GateNode {
+                open: Opener::Operator,
+                join: Join::Any,
+            }),
+        ),
+        PlanNodeKind::Finish => (
+            "Finish",
+            NodeBody::Finish(FinishNode {
+                act: FinishAct::None,
+                assign: Assign::default(),
+            }),
+        ),
+    };
+    Node {
+        id,
+        title: title.to_owned(),
+        at,
+        body,
+    }
+}
+
+/// `n` in letters, counting from `a` for 1: `b`, ..., `z`, `aa`, `ab`, ... A letter tail never
+/// reads as the `-<digits>` a Ticket id appends.
+fn letters(mut n: usize) -> String {
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(b'a' + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("ASCII letters")
 }

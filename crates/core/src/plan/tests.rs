@@ -1,4 +1,4 @@
-use ac_protocol::wire::{PlanAtEdge, PlanAtNode, PlanAtPlan, PlanProblemAt};
+use ac_protocol::wire::{PlanAtEdge, PlanAtNode, PlanAtPlan, PlanNodeFile, PlanProblemAt};
 use serde_json::json;
 
 use super::*;
@@ -702,33 +702,6 @@ fn removing_a_merger_hands_each_copy_on_alone() {
             "removed `build-merge`, so each copy of `build` hands on alone: moved 2 edges back onto it"
         ]
     );
-
-    let back = edited
-        .plan
-        .edit(&[PlanEdit::AddNode(Node {
-            id: id("fold"),
-            title: "Fold".to_owned(),
-            at: (0, 0),
-            body: NodeBody::Merger(MergerNode {
-                of: id("build"),
-                conflict: Conflict::Wait,
-            }),
-        })])
-        .unwrap();
-    assert_eq!(back.plan.merger_of(&id("build")), Some(&id("fold")));
-    let keys = edge_keys(&back.plan);
-    for expected in [
-        "fold.done -> review",
-        "fold.closed -> review",
-        "build.done -> fold",
-        "build.closed -> fold",
-    ] {
-        assert!(keys.contains(&expected.to_owned()), "{keys:?}");
-    }
-    assert_eq!(
-        back.notes,
-        ["`fold` folds `build` again: moved 2 edges onto it"]
-    );
 }
 
 #[test]
@@ -742,30 +715,96 @@ fn removing_a_per_item_node_removes_its_merger() {
 }
 
 #[test]
-fn adding_a_per_item_node_places_its_merger() {
-    let built = body(&editable(), "build");
+fn an_added_node_is_named_by_its_kind_and_takes_its_kinds_defaults() {
+    let add = |kind| PlanEdit::AddNode { kind, at: (5, 6) };
     let edited = editable()
         .edit(&[
-            PlanEdit::AddNode(Node {
-                id: id("fan"),
-                title: "Fan".to_owned(),
-                at: (5, 5),
-                body: with_copies(built, PER_ITEM),
+            add(PlanNodeKind::Agent),
+            add(PlanNodeKind::Agent),
+            add(PlanNodeKind::Gate),
+            PlanEdit::Link(Edge {
+                key: key("tasks", Verdict::Closed, "agent"),
+                cap: None,
             }),
             PlanEdit::Link(Edge {
-                key: key("tasks", Verdict::Closed, "fan"),
+                key: key("tasks", Verdict::Closed, "agent-b"),
+                cap: None,
+            }),
+            PlanEdit::Link(Edge {
+                key: key("agent", Verdict::Done, "gate"),
+                cap: None,
+            }),
+            PlanEdit::Link(Edge {
+                key: key("gate", Verdict::Open, "finish"),
                 cap: None,
             }),
         ])
         .unwrap();
     assert_eq!(
         node_ids(&edited.plan),
-        ["tasks", "build", "review", "finish", "fan", "fan-merge"]
+        [
+            "tasks", "build", "review", "finish", "agent", "agent-b", "gate"
+        ]
     );
-    assert!(edge_keys(&edited.plan).contains(&"fan.done -> fan-merge".to_owned()));
+    let added = edited.plan.node(&id("agent-b")).unwrap();
+    assert_eq!((added.title.as_str(), added.at), ("Agent", (5, 6)));
     assert_eq!(
-        edited.notes,
-        ["`fan` is per-item now: placed `fan-merge` and moved 0 edges onto it"]
+        added.body,
+        NodeBody::Ticket(TicketNode {
+            kind: TicketKind::Agent,
+            skill: None,
+            assign: Assign::default(),
+            copies: Copies::One,
+            makes_items: false,
+            checkpoint: CheckpointPolicy::Operator,
+            spawns: SpawnPolicy::Hold,
+            note: None,
+        })
+    );
+    assert_eq!(
+        edited.plan.node(&id("gate")).unwrap().body,
+        NodeBody::Gate(GateNode {
+            open: Opener::Operator,
+            join: Join::Any,
+        })
+    );
+    assert_eq!(edited.notes, Vec::<String>::new());
+}
+
+#[test]
+fn names_past_z_go_on_in_letters() {
+    let edits = vec![
+        PlanEdit::AddNode {
+            kind: PlanNodeKind::Prove,
+            at: (0, 0),
+        };
+        28
+    ];
+    let edited = Plan::edit_draft(&file(vec![], vec![]), &edits).unwrap();
+    let ids: Vec<_> = edited.verdicts.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(&ids[..3], ["prove", "prove-b", "prove-c"]);
+    assert_eq!(&ids[24..], ["prove-y", "prove-z", "prove-aa", "prove-ab"]);
+    assert!(ids.iter().all(|raw| NodeId::parse(raw).is_ok()));
+}
+
+#[test]
+fn an_edit_never_changes_a_nodes_kind() {
+    let plan = editable();
+    let refused = plan
+        .edit(&[PlanEdit::SetNode {
+            id: id("review"),
+            title: "Review".to_owned(),
+            body: body(&plan, "build"),
+        }])
+        .unwrap_err();
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert_eq!(refused[0].at, at_node("review"));
+    assert!(
+        refused[0]
+            .message
+            .contains("is a review node, and an edit never changes a node's kind"),
+        "{}",
+        refused[0].message
     );
 }
 
@@ -833,7 +872,6 @@ fn refuses_edits_on_what_is_not_there_and_edits_that_break_a_rule() {
         .edit(&[
             PlanEdit::RemoveNode(id("ghost")),
             PlanEdit::Unlink(key("tasks", Verdict::Done, "review")),
-            PlanEdit::AddNode(plan.node(&id("tasks")).unwrap().clone()),
         ])
         .unwrap_err();
     assert!(
@@ -846,11 +884,6 @@ fn refuses_edits_on_what_is_not_there_and_edits_that_break_a_rule() {
             .iter()
             .any(|p| p.at == at_edge("tasks", "done", "review"))
     );
-    assert!(
-        refused
-            .iter()
-            .any(|p| p.at == at_node("tasks") && p.message.contains("already"))
-    );
 
     let uncapped = plan
         .edit(&[PlanEdit::SetCap {
@@ -862,6 +895,237 @@ fn refuses_edits_on_what_is_not_there_and_edits_that_break_a_rule() {
         uncapped.iter().any(|p| p.message.contains("cycle")),
         "{uncapped:#?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Edits on a draft
+// ---------------------------------------------------------------------------------------------------
+
+fn add(kind: PlanNodeKind) -> PlanEdit {
+    PlanEdit::AddNode { kind, at: (0, 0) }
+}
+
+fn file_value(file: &PlanFile) -> Value {
+    serde_json::to_value(file).unwrap()
+}
+
+#[test]
+fn a_draft_with_no_edits_answers_its_canonical_file_and_every_nodes_verdicts() {
+    for preset in PRESETS {
+        let value: Value = serde_json::from_str(preset.json).unwrap();
+        let edited = Plan::edit_draft(&value, &[]).unwrap();
+        let plan = Plan::from_value(&value).unwrap();
+        assert_eq!(edited.file, plan.to_file(), "{}", preset.slug);
+        assert_eq!(edited.problems, Vec::new(), "{}", preset.slug);
+        let verdicts: Vec<_> = plan
+            .nodes()
+            .map(|node| (node.id.as_str().to_owned(), plan.vocabulary(&node.id)))
+            .collect();
+        assert_eq!(edited.verdicts, verdicts, "{}", preset.slug);
+    }
+}
+
+#[test]
+fn a_drafts_problems_are_always_what_check_says_of_its_file() {
+    for preset in PRESETS {
+        let value: Value = serde_json::from_str(preset.json).unwrap();
+        for kind in PlanNodeKind::ALL {
+            let edited = Plan::edit_draft(&value, &[add(*kind)]).unwrap();
+            assert_eq!(
+                edited.problems,
+                Plan::check(&file_value(&edited.file)),
+                "{} + {kind}",
+                preset.slug
+            );
+        }
+    }
+    let second = Plan::edit_draft(&simple(vec![], vec![]), &[add(PlanNodeKind::Finish)]).unwrap();
+    assert!(
+        second
+            .problems
+            .iter()
+            .any(|p| p.at == at_node("finish-b") && p.message.contains("one Finish")),
+        "{:#?}",
+        second.problems
+    );
+}
+
+#[test]
+fn a_draft_keeps_its_mergers_in_step_with_the_notes_edit_gives() {
+    let plan = editable();
+    let draft = file_value(&plan.to_file());
+    let set = |plan: &Plan, copies| PlanEdit::SetNode {
+        id: id("build"),
+        title: "Build".to_owned(),
+        body: with_copies(body(plan, "build"), copies),
+    };
+    let to_per_item = set(&plan, PER_ITEM);
+    let link = PlanEdit::Link(Edge {
+        key: key("build", Verdict::Done, "finish"),
+        cap: None,
+    });
+    let to_one = set(&plan, Copies::One);
+    for edits in [
+        vec![to_per_item.clone()],
+        vec![to_per_item.clone(), link],
+        vec![to_per_item.clone(), to_one],
+        vec![to_per_item, PlanEdit::RemoveNode(id("build-merge"))],
+    ] {
+        let edited = plan.edit(&edits).unwrap();
+        let drafted = Plan::edit_draft(&draft, &edits).unwrap();
+        assert_eq!(drafted.file, edited.plan.to_file());
+        assert_eq!(drafted.notes, edited.notes);
+        assert_eq!(drafted.problems, Vec::new());
+    }
+}
+
+#[test]
+fn edits_a_draft_that_is_not_valid_and_reports_what_is_wrong() {
+    let draft = file(vec![node("agent", "a")], vec![]);
+    let edited = Plan::edit_draft(
+        &draft,
+        &[PlanEdit::Move {
+            id: id("a"),
+            at: (40, 50),
+        }],
+    )
+    .unwrap();
+    assert_eq!((edited.file.nodes.len(), edited.file.edges.len()), (1, 0));
+    assert!(matches!(&edited.file.nodes[0], PlanNodeFile::Agent(a) if (a.x, a.y) == (40, 50)));
+    assert!(
+        edited
+            .problems
+            .iter()
+            .any(|p| p.message.contains("one Finish"))
+    );
+}
+
+#[test]
+fn a_miss_refuses_the_whole_batch() {
+    let refused = Plan::edit_draft(
+        &simple(vec![], vec![]),
+        &[
+            PlanEdit::Move {
+                id: id("a"),
+                at: (9, 9),
+            },
+            PlanEdit::RemoveNode(id("nope")),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].at, at_node("nope"));
+}
+
+#[test]
+fn refuses_to_edit_a_draft_it_would_drop_or_rewrite() {
+    let lossy = [
+        (
+            with(simple(vec![], vec![]), json!({"colour": "red"})),
+            "colour",
+        ),
+        (
+            simple(
+                vec![with(node("agent", "b"), json!({"colour": "red"}))],
+                vec![],
+            ),
+            "colour",
+        ),
+        (with(simple(vec![], vec![]), json!({"author": 3})), "author"),
+        (with(simple(vec![], vec![]), json!({"name": 3})), "name"),
+        (with(simple(vec![], vec![]), json!({"horde": 2})), "horde"),
+        (simple(vec![], vec![edge("a", "maybe", "finish")]), "maybe"),
+        (
+            simple(
+                vec![with(node("agent", "b"), json!({"copies": {"perItem": 0}}))],
+                vec![],
+            ),
+            "perItem",
+        ),
+        (simple(vec![], vec![capped("a", "closed", "a", 0)]), "max"),
+        (json!({"horde": 1, "name": "x", "nodes": {}}), "nodes"),
+    ];
+    for (draft, word) in lossy {
+        let refused = Plan::edit_draft(&draft, &[]).unwrap_err();
+        assert!(
+            refused.iter().any(|p| p.message.contains(word)),
+            "{word}: {refused:#?}"
+        );
+        assert!(!Plan::check(&draft).is_empty());
+    }
+}
+
+#[test]
+fn edits_a_draft_with_no_name_and_still_reports_it() {
+    for unnamed in [
+        json!({"horde": 1, "nodes": [], "edges": []}),
+        file(vec![], vec![]),
+    ] {
+        let mut unnamed = unnamed;
+        if unnamed.get("name").is_some() {
+            unnamed["name"] = json!("  ");
+        }
+        let edited = Plan::edit_draft(&unnamed, &[add(PlanNodeKind::Finish)]).unwrap();
+        assert!(
+            edited
+                .problems
+                .iter()
+                .any(|p| p.at == at_plan() && p.message.contains("needs a `name`")),
+            "{:#?}",
+            edited.problems
+        );
+    }
+}
+
+#[test]
+fn reads_edits_off_the_wire_refusing_what_read_would_rewrite() {
+    let read =
+        |value: Value| PlanEdit::read(&serde_json::from_value::<PlanEditFile>(value).unwrap());
+    assert_eq!(
+        read(json!({"edit": "link", "edge": {"from": "a", "on": "done", "to": "B!"}})),
+        Ok(PlanEdit::Link(Edge {
+            key: EdgeKey {
+                from: id("a"),
+                on: Verdict::Done,
+                to: NodeId("B!".to_owned()),
+            },
+            cap: None,
+        }))
+    );
+    assert_eq!(
+        read(json!({"edit": "addNode", "kind": "decide", "x": 1, "y": 2})),
+        Ok(PlanEdit::AddNode {
+            kind: PlanNodeKind::Decide,
+            at: (1, 2)
+        })
+    );
+    for (refused, word) in [
+        (
+            json!({"edit": "unlink", "from": "a", "on": "maybe", "to": "b"}),
+            "maybe",
+        ),
+        (
+            json!({"edit": "setCap", "from": "a", "on": "done", "to": "b", "cap": {"max": 0}}),
+            "max",
+        ),
+        (
+            json!({"edit": "setNode", "node": {"kind": "agent", "id": "a", "title": "a", "x": 0, "y": 0, "copies": {"perItem": 0}}}),
+            "perItem",
+        ),
+    ] {
+        let problems = read(refused).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.message.contains(word)),
+            "{word}: {problems:#?}"
+        );
+    }
+    let files: Vec<PlanEditFile> = serde_json::from_value(json!([
+        {"edit": "unlink", "from": "a", "on": "maybe", "to": "b"},
+        {"edit": "move", "id": "a", "x": 0, "y": 0},
+        {"edit": "unlink", "from": "a", "on": "never", "to": "b"},
+    ]))
+    .unwrap();
+    assert_eq!(PlanEdit::read_all(&files).unwrap_err().len(), 2);
 }
 
 mod library_files {
@@ -889,10 +1153,24 @@ mod library_files {
     #[test]
     fn refuses_a_bad_slug_an_invalid_plan_and_a_preset_slug() {
         let (_dir, home) = home();
-        for slug in ["Mine", "-mine", "validate", "", &"a".repeat(65)] {
+        for slug in [
+            "Mine",
+            "-mine",
+            "validate",
+            "edit",
+            "boot",
+            "",
+            &"a".repeat(65),
+        ] {
             let refused = library::save(&home, slug, &factory_today()).unwrap_err();
             assert_eq!(refused, LibraryError::BadSlug(slug.to_owned()));
             assert!(refused.to_string().contains("is not a Plan slug"));
+            assert!(
+                refused
+                    .to_string()
+                    .ends_with("none of `validate`, `edit`, `boot`"),
+                "{refused}"
+            );
         }
         let invalid = library::save(&home, "mine", &file(vec![], vec![])).unwrap_err();
         assert!(matches!(invalid, LibraryError::Invalid(_)));
