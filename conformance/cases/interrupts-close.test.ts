@@ -404,7 +404,7 @@ conformance(
       tickets: [
         ticket("01", { status: "checkpoint", body: "# 01\n\n## Brief\n\nshould this still happen?" }),
         { file: "01-grader-1.md", marker: marker("01-grader-1", "01") },
-        { file: "01-head-to-head.md", marker: marker("01-head-to-head", "01") },
+        { file: "01-head-to-head.md", marker: marker("01-head-to-head", "01", "done") },
         ticket("02", { blockedBy: "01" }),
       ],
       config: CONFIG,
@@ -415,11 +415,12 @@ conformance(
 
     await close(server, "01");
     const after = await untilInterrupt(server, "02", "deadlock");
-    expect(statuses(after)).toEqual({ "01": "closed", "01-grader-1": "closed", "01-head-to-head": "closed", "02": "ready" });
+    expect(statuses(after)).toEqual({ "01": "closed", "01-grader-1": "closed", "01-head-to-head": "done", "02": "ready" });
     expect(after.state.log).toContain("ticket 01-grader-1: closed with its build ticket 01");
-    expect(after.state.log).toContain("ticket 01-head-to-head: closed with its build ticket 01");
+    // A head-to-head card is finished once its round is, so the Close leaves it done.
+    expect(after.state.log).not.toContain("ticket 01-head-to-head: closed with its build ticket 01");
     expect(readStateLine(world.pool, "01-grader-1.md").line).toBe(marker("01-grader-1", "01", "closed"));
-    expect(readStateLine(world.pool, "01-head-to-head.md").line).toBe(marker("01-head-to-head", "01", "closed"));
+    expect(readStateLine(world.pool, "01-head-to-head.md").line).toBe(marker("01-head-to-head", "01", "done"));
     // The hand-written dependent is the operator's to decide.
     expect(after.state.interrupts).toEqual([{ ticketId: "02", kind: "deadlock", body: "blocker 01 was closed" }]);
     expect(launches(world)).toEqual([]);

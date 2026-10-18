@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Map;
 
+use ac_core::assignment::parse_head_to_head_id;
 use ac_core::events::{append_event, attempt_outcome_name, event_now, last_attempt};
 use ac_core::pool::{TicketMarker, is_finished, write_marker_status};
 use ac_protocol::{Interrupt, InterruptKind, TicketEventKind, TicketStatus};
@@ -499,11 +500,12 @@ pub fn names_ticket(note: &str, id: &str) -> bool {
     Regex::new(&pattern).is_ok_and(|re| re.is_match(note))
 }
 
-/// The tickets a review reject can send back: every one but a closed ticket.
+/// The tickets a review reject can send back: every one but a closed ticket and a head-to-head card,
+/// which belongs to the selection round that wrote it and has no run of its own to repeat.
 pub fn reopenable(markers: &[TicketMarker]) -> impl Iterator<Item = &TicketMarker> {
-    markers
-        .iter()
-        .filter(|marker| marker.status != TicketStatus::Closed)
+    markers.iter().filter(|marker| {
+        marker.status != TicketStatus::Closed && parse_head_to_head_id(&marker.id).is_none()
+    })
 }
 
 /// The ticket ids a review reject's note names.
