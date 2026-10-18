@@ -59,7 +59,12 @@ function setup(editable = true) {
     target.dispatchEvent(
       new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, clientX: world.x + VIEW_ORIGIN.x, clientY: world.y + VIEW_ORIGIN.y }),
     );
-  return { canvas, root, draw, viewport, pointer, seen };
+  const world = () => root.querySelector<HTMLElement>(".plan-world")!.style.transform;
+  const resize = (w: number, h: number) => {
+    Object.defineProperty(viewport(), "clientWidth", { configurable: true, value: w });
+    Object.defineProperty(viewport(), "clientHeight", { configurable: true, value: h });
+  };
+  return { canvas, model, root, draw, viewport, pointer, seen, world, resize };
 }
 
 describe("PlanCanvas", () => {
@@ -116,5 +121,52 @@ describe("PlanCanvas", () => {
     t.pointer("pointerup", t.viewport(), { x: 120, y: 90 });
     expect(t.seen.move).toEqual([]);
     expect(t.root.querySelector(".plan-shelf-add")).toBeNull();
+  });
+
+  describe("framing", () => {
+    const wheel = (t: ReturnType<typeof setup>) =>
+      t.viewport().dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -200 }));
+
+    it("frames the Plan when first sized, and again when the viewport changes size", () => {
+      const t = setup();
+      t.resize(2000, 1000);
+      t.draw();
+      const first = t.world();
+      expect(first).not.toContain(`translate(${VIEW_ORIGIN.x}px, ${VIEW_ORIGIN.y}px)`);
+      t.draw();
+      expect(t.world()).toBe(first);
+      t.resize(1200, 1000);
+      t.draw();
+      expect(t.world()).not.toBe(first);
+    });
+
+    it("leaves a view the operator zoomed alone when the viewport changes size, and the fit button frames it again", () => {
+      const t = setup();
+      t.resize(2000, 1000);
+      t.draw();
+      const first = t.world();
+      wheel(t);
+      const zoomed = t.world();
+      expect(zoomed).not.toBe(first);
+      t.resize(1200, 1000);
+      t.draw();
+      expect(t.world()).toBe(zoomed);
+      t.root.querySelector<HTMLButtonElement>(".plan-fit")!.click();
+      expect(t.world()).not.toBe(zoomed);
+      t.resize(2000, 1000);
+      t.draw();
+      expect(t.world()).toBe(first);
+    });
+
+    it("frames a newly opened Plan even after the operator moved the view", () => {
+      const t = setup();
+      t.resize(2000, 1000);
+      t.draw();
+      wheel(t);
+      const zoomed = t.world();
+      t.model.fitKey = "2";
+      t.draw();
+      expect(t.world()).not.toBe(zoomed);
+    });
   });
 });

@@ -66,7 +66,9 @@ export class PlanCanvas {
   private model: PlanCanvasModel | null = null;
   private drawing: PlanDrawing | null = null;
   private viewport: HTMLElement | null = null;
-  private fitted: string | null = null;
+  private fitted: { key: string; size: { w: number; h: number } } | null = null;
+  private adjusted = false;
+  private resizes: ResizeObserver | null = null;
   private framePending = false;
 
   constructor(private readonly events: PlanCanvasEvents) {
@@ -137,14 +139,18 @@ export class PlanCanvas {
   }
 
   bind(viewport: HTMLElement): void {
-    this.viewport = viewport;
-    if (this.model && this.fitted !== this.model.fitKey && viewport.clientWidth > 0) {
-      this.fitted = this.model.fitKey;
-      this.fit();
+    if (this.viewport !== viewport && typeof ResizeObserver !== "undefined") {
+      this.resizes?.disconnect();
+      this.resizes = new ResizeObserver(() => this.autoFit());
+      this.resizes.observe(viewport);
     }
+    this.viewport = viewport;
+    this.autoFit();
   }
 
   unbind(): void {
+    this.resizes?.disconnect();
+    this.resizes = null;
     this.viewport = null;
     this.gesture = { kind: "none" };
   }
@@ -318,6 +324,7 @@ export class PlanCanvas {
     if (!g.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     g.moved = true;
     if (g.kind === "pan") {
+      this.adjusted = true;
       this.view.x = g.startView.x + dx;
       this.view.y = g.startView.y + dy;
       this.viewport?.classList.add("plan-panning");
@@ -427,6 +434,7 @@ export class PlanCanvas {
 
   private wheel(event: WheelEvent): void {
     event.preventDefault();
+    this.adjusted = true;
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     this.view = zoomAtCursor(
       this.view,
@@ -439,13 +447,26 @@ export class PlanCanvas {
   private zoomBy(factor: number): void {
     const rect = this.viewport?.getBoundingClientRect();
     if (!rect) return;
+    this.adjusted = true;
     this.view = zoomAtCursor(this.view, { x: rect.width / 2, y: rect.height / 2 }, factor);
     this.applyTransform();
   }
 
+  private autoFit(): void {
+    const viewport = this.viewport;
+    if (!viewport || !this.model || viewport.clientWidth <= 0) return;
+    const { fitted } = this;
+    if (!fitted || fitted.key !== this.model.fitKey) return this.fit();
+    const resized = fitted.size.w !== viewport.clientWidth || fitted.size.h !== viewport.clientHeight;
+    if (resized && !this.adjusted) this.fit();
+  }
+
   private fit(): void {
-    if (!this.viewport || !this.drawing) return;
-    this.view = fitView(this.drawing.nodes, { w: this.viewport.clientWidth, h: this.viewport.clientHeight });
+    if (!this.viewport || !this.drawing || !this.model) return;
+    const size = { w: this.viewport.clientWidth, h: this.viewport.clientHeight };
+    this.view = fitView(this.drawing.nodes, size);
+    this.fitted = { key: this.model.fitKey, size };
+    this.adjusted = false;
     this.applyTransform();
   }
 
