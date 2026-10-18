@@ -1452,13 +1452,15 @@ impl LineRun {
         let is_finish = matches!(pass.work, PassWork::Finish { .. });
         let mut after = vec![ticket.clone()];
         after.extend(pass.input.after.iter().cloned());
+        // Notes are a person's answer to whatever halted the work upstream, so revised work starts
+        // without the halt: a Decide downstream may choose another round again.
         let onward = |verdict: Verdict, notes: Option<String>| Handoff {
             from: Some(node.clone()),
             verdict,
             items: pass.input.items.clone(),
             after: after.clone(),
+            halted: notes.is_none().then(|| pass.input.halted.clone()).flatten(),
             notes,
-            halted: pass.input.halted.clone(),
         };
         match (is_finish, answer) {
             (true, HoldAnswer::Open) => {

@@ -612,6 +612,40 @@ fn notes_on_the_finish_go_back_to_implement_and_reset_the_round_count() {
 }
 
 #[test]
+fn notes_on_the_finish_after_a_spent_round_send_the_work_back_without_the_halt() {
+    let (mut run, mut pool) = started("none");
+    to_first_decide(&mut run, &mut pool);
+    let round =
+        json!({"decide": "another-round", "fixes": [{"title": "Login leaks", "reason": "must"}]});
+    pool.decide("decide-1", round.clone());
+    tick(&mut run, &mut pool);
+    pool.agent("implement-3");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-3", true);
+    tick(&mut run, &mut pool);
+    pool.review("review-2", json!([]));
+    tick(&mut run, &mut pool);
+    pool.decide("decide-2", round);
+    tick(&mut run, &mut pool);
+
+    pool.answer("finish-1", Some("rename the flag"), false);
+    let back = tick(&mut run, &mut pool);
+    let body = &ticket(&back, "implement-4").body;
+    assert!(!body.contains("Halted upstream"), "{body}");
+    pool.agent("implement-4");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-4", true);
+    tick(&mut run, &mut pool);
+    pool.review("review-3", json!([]));
+    let decide = tick(&mut run, &mut pool);
+    let body = &ticket(&decide, "decide-3").body;
+    assert!(
+        body.contains("Choose another round") && body.contains("1 more round is left."),
+        "{body}"
+    );
+}
+
+#[test]
 fn closing_implement_runs_decide_with_halted_then_the_finish() {
     let (mut run, mut pool) = started("none");
     pool.close("implement-1");
