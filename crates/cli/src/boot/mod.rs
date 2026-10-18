@@ -17,6 +17,7 @@ pub mod config;
 pub mod detect;
 pub mod factory;
 pub mod launch;
+pub mod plan_choice;
 pub mod pool;
 
 use std::collections::VecDeque;
@@ -58,7 +59,8 @@ cut from.
   --plan <slug>          Line mode on this Plan: a Preset (factory-today, ...) or a Plan in
                          ~/.agent-graphs/plans/; asks for the work unless --work or --brief
                          gives it
-  --work <text>          the piece of work: an issue number (186, #186) or free text; on a
+  --work <text>          the piece of work: an issue number (186, #186) or free text; enters
+                         Line mode, and Boot asks which Plan unless --plan names one; on a
                          Plan that starts with a Conversation, Boot opens the Grill with it
                          as the Grill's first Turn
   --brief <path>         a ready Line brief (its spec found from here first, then beside
@@ -78,7 +80,7 @@ cut from.
   --no-steward           start no Steward (a Line pool starts one by default; it never
                          answers the Finish)";
 
-/// The Plan a Line runs when Boot is given none (until Boot asks which, slice 9).
+/// The Plan an unattended Line runs when none is named, and the picker's Enter.
 pub const DEFAULT_PLAN: &str = "factory-today";
 
 /// Boot's flags, kept deliberately few.
@@ -111,9 +113,11 @@ pub struct BootArgs {
 }
 
 impl BootArgs {
-    /// Line mode: a Plan named, or a ready brief, which runs on the default Plan.
+    /// Line mode: a Plan named, the work given, or a ready brief. `--work` names what a Line
+    /// builds and means nothing to a plain pool, so it enters Line mode on its own and Boot asks
+    /// which Plan.
     pub fn line_mode(&self) -> bool {
-        self.plan.is_some() || self.brief.is_some()
+        self.plan.is_some() || self.work.is_some() || self.brief.is_some()
     }
 }
 
@@ -206,7 +210,6 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
         args.yes = true;
     }
     let line_only = [
-        ("--work", args.work.is_some()),
         ("--from", args.from.is_some()),
         ("--line", args.line.is_some()),
         ("--name", args.name.is_some()),
@@ -1174,14 +1177,10 @@ fn run_line_boot(
     let top = git_line(cwd, &["rev-parse", "--show-toplevel"]).ok_or_else(|| {
         format!("{cwd} is not inside a git checkout; Line mode cuts the Line's branch from one")
     })?;
-    let plan_slug = args.plan.as_deref().unwrap_or(DEFAULT_PLAN);
-    if args.plan.is_none() {
-        io.log(&format!(
-            "no --plan: the Line runs the {DEFAULT_PLAN} Preset"
-        ));
-    }
-    let plan = ac_core::plan::library::load(home, plan_slug)
+    let plan_slug = plan_choice::choose_plan(args.plan.as_deref(), unattended, io, home);
+    let plan = ac_core::plan::library::load(home, &plan_slug)
         .map_err(|err| format!("--plan {plan_slug}: {err}"))?;
+    io.log(&format!("plan: {plan_slug} ({:?})", plan.meta().name));
 
     let work = match (&args.brief, &args.work) {
         (Some(path), _) => LineWork::Ready(Box::new(factory::read_ready_brief(path, cwd)?)),

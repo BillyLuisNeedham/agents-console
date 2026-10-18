@@ -120,9 +120,15 @@ fn takes_the_line_flags_and_a_brief_implies_line_mode_asking_nothing() {
 }
 
 #[test]
+fn work_alone_enters_line_mode() {
+    let args = parse_boot_args(&strings(&["--work", "186"])).unwrap();
+    assert!(args.line_mode() && args.plan.is_none() && !args.yes);
+}
+
+#[test]
 fn refuses_line_flags_that_do_not_fit_together() {
     let message = |argv: &[&str]| parse_boot_args(&strings(argv)).unwrap_err().message;
-    assert!(message(&["--work", "x"]).starts_with("--work is for Line mode: add --plan <slug>\n"));
+    assert!(message(&["--line", "x"]).starts_with("--line is for Line mode: add --plan <slug>\n"));
     assert!(message(&["--no-steward"]).starts_with("--no-steward is for Line mode"));
     assert!(message(&["--from", "develop"]).starts_with("--from is for Line mode"));
     assert!(message(&["--plan", "p", "--from"]).starts_with("--from needs a value\n"));
@@ -810,4 +816,72 @@ fn prints_the_usage_on_help_and_starts_nothing() {
         run_boot(&strings(&["--nope"]), &mut pen, "/nowhere"),
         Err(format!("unknown flag --nope\n{USAGE}"))
     );
+}
+
+/// A HOME whose plan library holds `zz-mine` (valid, from factory-today) and `aa-broken` (not).
+fn home_with_library() -> tempfile::TempDir {
+    let home = temp();
+    let dir = ac_core::plan::library::plans_dir(&text(&home));
+    fs::create_dir_all(&dir).unwrap();
+    let mut mine = ac_core::plan::library::get(&text(&home), "factory-today")
+        .unwrap()
+        .file;
+    mine["name"] = json!("Mine");
+    fs::write(format!("{dir}/zz-mine.json"), mine.to_string()).unwrap();
+    fs::write(format!("{dir}/aa-broken.json"), "{}").unwrap();
+    home
+}
+
+#[test]
+fn a_named_plan_is_asked_nothing() {
+    let home = home_with_library();
+    let mut pen = Pen::default();
+    let slug = plan_choice::choose_plan(Some("anything"), false, &mut pen, &text(&home));
+    assert_eq!(slug, "anything");
+    assert!(pen.asked.is_empty() && pen.logs.is_empty() && pen.warned.is_empty());
+}
+
+#[test]
+fn an_unattended_line_runs_the_default_plan_and_says_so() {
+    let home = home_with_library();
+    let mut pen = Pen::default();
+    let slug = plan_choice::choose_plan(None, true, &mut pen, &text(&home));
+    assert_eq!(slug, DEFAULT_PLAN);
+    assert!(pen.asked.is_empty());
+    assert_eq!(
+        pen.logs,
+        ["no --plan: the Line runs the factory-today Preset"]
+    );
+}
+
+#[test]
+fn the_picker_lists_presets_then_library_slugs_and_leaves_out_a_broken_one() {
+    let home = home_with_library();
+    let mut pen = Pen::new(&[("start from which plan", "zz-mine")]);
+    let slug = plan_choice::choose_plan(None, false, &mut pen, &text(&home));
+    assert_eq!(slug, "zz-mine");
+    let listed = pen.logs.last().unwrap();
+    assert!(
+        listed.starts_with("Plans: factory-today, matt-pocock-main, "),
+        "{listed}"
+    );
+    assert!(listed.ends_with(", addy-bug-fix, zz-mine"), "{listed}");
+    assert!(!listed.contains("aa-broken"));
+    assert_eq!(pen.warned.len(), 1);
+    assert!(pen.warned[0].starts_with("not offering aa-broken: "));
+    assert_eq!(pen.asked, ["start from which plan"]);
+}
+
+#[test]
+fn an_answer_not_offered_is_asked_again_and_enter_takes_the_default() {
+    let home = home_with_library();
+    let mut pen = Pen::new(&[
+        ("start from which plan", "nope"),
+        ("start from which plan", "aa-broken"),
+    ]);
+    let slug = plan_choice::choose_plan(None, false, &mut pen, &text(&home));
+    assert_eq!(slug, DEFAULT_PLAN);
+    assert_eq!(pen.asked.len(), 3);
+    assert!(pen.warned.contains(&"no Plan named nope".to_owned()));
+    assert!(pen.warned.contains(&"no Plan named aa-broken".to_owned()));
 }
