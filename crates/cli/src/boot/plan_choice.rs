@@ -21,10 +21,11 @@ pub fn choose_plan(
     }
     let offered = offered_plans(&library::list(home), io);
     io.log(&format!("Plans: {}", offered.join(", ")));
+    // End of input answers DEFAULT_PLAN, a Preset that is always offered, so the loop ends.
     loop {
         let answer = io.ask("start from which plan", DEFAULT_PLAN);
         let answer = js::trim(&answer);
-        if offered.iter().any(|slug| slug == answer) {
+        if answer == DEFAULT_PLAN || offered.iter().any(|slug| slug == answer) {
             return answer.to_owned();
         }
         io.warn(&format!("no Plan named {answer}"));
