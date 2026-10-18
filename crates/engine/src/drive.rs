@@ -950,46 +950,30 @@ fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
 // ---------------------------------------------------------------------------------------------------
 
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
-    // A closed ticket (issue #154) is finished too.
-    let (pending, closed_ids, raised, merging_at_gate) = engine
+    let (mut phase, quiet) = engine
         .call(|s| {
+            // A closed ticket (issue #154) is finished too.
             let pending: Vec<String> = s
                 .markers
                 .iter()
                 .filter(|m| !is_finished(s.status_of(&m.id)))
                 .map(|m| m.id.clone())
                 .collect();
-            let closed: Vec<String> = s
+            let closed_ids: Vec<String> = s
                 .markers
                 .iter()
                 .filter(|m| s.status_of(&m.id) == Some(TicketStatus::Closed))
                 .map(|m| m.id.clone())
                 .collect();
             let merging = s.merge_line.unsettled();
-            let raise = pending.is_empty()
+            let raised = pending.is_empty()
                 && !crate::line::is_factory_pool(s)
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
                 && merging.is_empty();
-            if raise {
+            if raised {
                 let review = crate::interrupts::review_interrupt(s);
                 raise_interrupt(s, review);
-            }
-            (pending, closed, raise, merging)
-        })
-        .await?;
-    if raised {
-        persist_with_retry(engine).await?;
-    }
-    let pending_c = pending.clone();
-    let (mut phase, quiet) = engine
-        .call(move |s| {
-            let pending = pending_c;
-            let mut merging = s.merge_line.unsettled();
-            for id in merging_at_gate {
-                if !merging.contains(&id) {
-                    merging.push(id);
-                }
             }
             let mut outside: Vec<&String> = pending
                 .iter()
