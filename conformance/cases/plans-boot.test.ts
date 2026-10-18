@@ -1,17 +1,3 @@
-/**
- * What `plans.boot` starts, seen from outside the server (ADR-0036): Boot,
- * detached, with `--plan <slug> --work <work> --yes`, run from the main
- * worktree of the repository the pool sits in, its output appended to the
- * pool's runs/boot.log, and answered with that argv, directory and log.
- * Every refusal comes before Boot is started. Boot is a `bootRecorder`
- * stand-in, so nothing here starts a real Line.
- *
- * Origin: docs/specs/build-your-own-factory.md, "Wire: verbs and snapshot"
- * (`plans.boot` runs Boot detached with `--plan`, `--work`, `--yes` from the
- * main worktree of the pool's repository) and Slices item 9 ("`plans-boot`
- * (the Boot argv)").
- */
-
 import { expect } from "bun:test";
 import { cpSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -1,12 +1,3 @@
-/**
- * The Plans view's projection: a Plan document, what core says is wrong with
- * it and each node's verdicts, turned into what the Plan canvas draws. Pure:
- * no DOM, no store. Cards are a fixed box, so every port, edge route and hit
- * test is a function of the document and the places held over it (a card
- * dropped and not yet answered, a card under the pointer), never of a layout
- * read. Slice 8's Line view can feed it a Line's frozen Plan.
- */
-
 import type {
   PlanAssign,
   PlanCopies,
@@ -21,14 +12,12 @@ export const CARD_W = 210;
 export const CARD_H = 120;
 export const HEAD_H = 28;
 
-/** `(from, on, to)`: an edge's identity, unique in a valid Plan. */
 export interface EdgeKey {
   from: string;
   on: string;
   to: string;
 }
 
-/** `from.on>to`: how a drawn edge is keyed and how a problem finds it. */
 export function edgeKeyText(key: EdgeKey): string {
   return `${key.from}.${key.on}>${key.to}`;
 }
@@ -46,11 +35,8 @@ export const KIND_LABEL: Record<PlanNodeFile["kind"], string> = {
 
 export interface DrawnPort {
   on: string;
-  /** Some edge leaves the node on this verdict; an open port is drawn dashed. */
   linked: boolean;
-  /** Its share of the port row, so a long word gets the room it needs. */
   weight: number;
-  /** World point at the card's bottom edge, under the pill's middle. */
   at: Point;
 }
 
@@ -59,7 +45,6 @@ export interface DrawnNode {
   at: Point;
   ports: DrawnPort[];
   problems: string[];
-  /** The card body's dim lines: skill, Assignment, what a Merger folds. */
   lines: string[];
   chips: string[];
 }
@@ -67,12 +52,10 @@ export interface DrawnNode {
 export interface EdgeRoute {
   d: string;
   label: Point;
-  /** Back to a card at or left of the source: dashed, under the cards. */
   back: boolean;
 }
 
 export interface DrawnEdge {
-  /** `from.on>to`, with `#n` on a duplicate a draft may hold. */
   key: string;
   edge: PlanEdgeFile;
   label: string;
@@ -83,9 +66,7 @@ export interface DrawnEdge {
 export interface PlanDrawing {
   nodes: DrawnNode[];
   edges: DrawnEdge[];
-  /** Problems on the Plan as a whole, and any whose node or edge is not drawn. */
   planProblems: string[];
-  /** The world's extent, room for the loops that run under the cards included. */
   size: { w: number; h: number };
 }
 
@@ -93,7 +74,6 @@ export interface PlanProjectionInput {
   plan: PlanFile;
   problems: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
-  /** Places that win over the document's. */
   places: ReadonlyMap<string, Point>;
 }
 
@@ -167,7 +147,6 @@ function push(map: Map<string, string[]>, key: string, message: string): void {
   else map.set(key, [message]);
 }
 
-/** `on`, or `on · max` on a capped loop, ` · S` when the Steward may buy one more pass. */
 export function edgeLabel(edge: PlanEdgeFile): string {
   if (!edge.cap) return edge.on;
   return `${edge.on} · ${edge.cap.max}${edge.cap.stewardExtra ? " · S" : ""}`;
@@ -214,12 +193,6 @@ function copiesText(copies: PlanCopies | undefined): string {
   return copies.perItem === "all" ? "per item, all at once" : `per item, ${copies.perItem} at once`;
 }
 
-/**
- * An edge from a verdict port to a card. Into a card right under the source
- * (a Merger below its node): straight down into its top. Into a card wholly
- * to the right: a forward curve into its head. Anything else is a loop back:
- * dashed, out of the port and under the cards, into the target's bottom.
- */
 export function edgeRoute(from: Point, port: Point, to: Point): EdgeRoute {
   const { x: px, y: py } = port;
   if (to.y >= from.y + CARD_H && Math.abs(to.x - from.x) < CARD_W) {
@@ -254,7 +227,6 @@ function inside(at: Point, point: Point): boolean {
   return point.x >= at.x && point.x <= at.x + CARD_W && point.y >= at.y && point.y <= at.y + CARD_H;
 }
 
-/** The node whose card holds a world point, the last drawn on top; null over blank. */
 export function hitNode(nodes: readonly Pick<DrawnNode, "node" | "at">[], point: Point): string | null {
   for (let i = nodes.length - 1; i >= 0; i--) {
     if (inside(nodes[i]!.at, point)) return nodes[i]!.node.id;
@@ -264,7 +236,6 @@ export function hitNode(nodes: readonly Pick<DrawnNode, "node" | "at">[], point:
 
 const GAP = 40;
 
-/** Where a new card goes: centred on `centre` if that is clear, else the nearest clear slot around it. */
 export function freeSpot(nodes: readonly Pick<DrawnNode, "at">[], centre: Point): Point {
   const origin = { x: Math.round(centre.x - CARD_W / 2), y: Math.round(centre.y - CARD_H / 2) };
   const clear = (p: Point) =>
@@ -287,14 +258,8 @@ export function freeSpot(nodes: readonly Pick<DrawnNode, "at">[], centre: Point)
   return origin;
 }
 
-/** Below this a card's words cannot be read, so a wide Plan is framed from its left end instead. */
 const READABLE_ZOOM = 0.5;
 
-/**
- * The view that frames every card with a margin, never zoomed in past 1
- * nor out past where a card can still be read; a Plan wider than that
- * starts at its left end.
- */
 export function fitView(nodes: readonly Pick<DrawnNode, "at">[], viewport: { w: number; h: number }): ViewTransform {
   if (nodes.length === 0 || viewport.w <= 0 || viewport.h <= 0) return { x: GAP, y: GAP, zoom: 1 };
   const minX = Math.min(...nodes.map((n) => n.at.x)) - GAP;

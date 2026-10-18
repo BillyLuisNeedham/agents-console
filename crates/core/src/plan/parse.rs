@@ -99,7 +99,6 @@ pub(super) struct DraftEdge {
 }
 
 impl DraftEdge {
-    /// The edge with its `on` read as a verdict, or the problem that it is none.
     fn typed(self) -> Result<Edge, PlanProblem> {
         let Some(on) = Verdict::parse(&self.on) else {
             let (from, to) = (self.from.as_str(), self.to.as_str());
@@ -148,23 +147,18 @@ pub(super) fn from_value(value: &Value) -> Result<Plan, Vec<PlanProblem>> {
     }
 }
 
-/// What `read` took in.
 struct Read {
     draft: Draft,
     problems: Vec<PlanProblem>,
-    /// Every field was taken in as written: nothing dropped or rewritten. A missing `name` keeps it,
-    /// since writing the draft back loses nothing and reports it again.
     lossless: bool,
 }
 
-/// A draft safe to edit: taken in whole as written, every edge's `on` a verdict.
 pub(super) struct LosslessDraft {
     pub meta: PlanMeta,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
 
-/// The draft, or why editing it would drop or rewrite what it holds.
 pub(super) fn read_lossless(value: &Value) -> Result<LosslessDraft, Vec<PlanProblem>> {
     let Read {
         draft,
@@ -227,7 +221,6 @@ fn read(value: &Value) -> Read {
     };
     if !named {
         problems.push(at_plan("a Plan needs a `name`".to_owned()));
-        // Written back, an absent or blank name stays as it was; one of another type does not.
         unnamed = matches!(file.get("name"), None | Some(Value::String(_)));
     }
     let mut text = |key: &str| match file.get(key) {
@@ -495,7 +488,6 @@ fn assign_file(assign: &Assign) -> Option<PlanAssign> {
     })
 }
 
-/// An edit off the wire, its node and edge read as a file's are.
 pub(super) fn edit_of(file: &PlanEditFile) -> Result<PlanEdit, Vec<PlanProblem>> {
     let edge = |from: &str, on: &str, to: &str, cap: Option<PlanLoopCap>| {
         edge_read(PlanEdgeFile {
@@ -543,7 +535,6 @@ pub(super) fn edit_of(file: &PlanEditFile) -> Result<PlanEdit, Vec<PlanProblem>>
     })
 }
 
-/// One edge as a file's is read, its `on` a verdict.
 fn edge_read(file: PlanEdgeFile) -> Result<Edge, Vec<PlanProblem>> {
     let mut problems = Vec::new();
     match edge_of(file, &mut problems).typed() {
@@ -560,7 +551,6 @@ pub(super) fn to_file(plan: &Plan) -> PlanFile {
     file_of(&plan.meta, plan.nodes(), &plan.edges)
 }
 
-/// The file shape of a Plan's parts, valid or not, every policy field written out.
 pub(super) fn file_of<'a>(
     meta: &PlanMeta,
     nodes: impl Iterator<Item = &'a Node>,

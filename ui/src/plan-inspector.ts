@@ -1,13 +1,3 @@
-/**
- * The Plans view's inspector: the fields of the selected node or edge, or
- * of the Plan itself when nothing is selected. A pure render; every control
- * yields one change for the store's edit pipeline. A change is a function
- * of the node, meta or cap as the pipeline will send it, not of what this
- * render saw, so two changes to one node in one batch both land. Text
- * fields show the store's buffer while they are typed in and commit on
- * `change` (blur or Enter) as one edit.
- */
-
 import type {
   PlanAssign,
   PlanEditFile,
@@ -22,7 +12,6 @@ import { KIND_LABEL, edgeKeyText, type EdgeKey, type PlanDrawing } from "./plan-
 
 export type PlanMeta = Omit<Extract<PlanEditFile, { edit: "setMeta" }>, "edit">;
 
-/** One change the operator made, turned into a wire edit when its batch is sent. */
 export type PlanChange =
   | { kind: "edit"; edit: PlanEditFile }
   | { kind: "node"; id: string; change: (node: PlanNodeFile) => PlanNodeFile }
@@ -33,7 +22,6 @@ export interface InspectorModel {
   plan: PlanFile;
   drawing: PlanDrawing;
   selection: PlanSelection;
-  /** The text a field shows: what is being typed into it, else the document's. */
   text(key: string, fromDoc: string): string;
 }
 
@@ -41,15 +29,12 @@ export interface InspectorIntents {
   change(change: PlanChange): void;
   select(selection: PlanSelection): void;
   type(key: string, text: string): void;
-  /** A text field's change; a null change is text that makes no edit (a cap of "x"). */
   commit(key: string, text: string, fromDoc: string, change: PlanChange | null): void;
   blur(key: string): void;
 }
 
-/** The harnesses the Assignment's quick picks offer; blank is the pool default. */
 const HARNESSES = ["claude", "codex", "cursor", "opencode"] as const;
 
-/** A copy of `of` with `field` set, or removed when `value` is undefined or blank. */
 export function withField<T extends object>(of: T, field: string, value: unknown): T {
   const next: Record<string, unknown> = { ...(of as Record<string, unknown>) };
   if (value === undefined || value === "") delete next[field];
@@ -83,10 +68,6 @@ export function renderInspector(model: InspectorModel, on: InspectorIntents): HT
   return h("div", { class: "plan-inspector", key: "plan-inspector" }, ...body);
 }
 
-// ---------------------------------------------------------------------------
-// The Plan
-// ---------------------------------------------------------------------------
-
 function renderMeta(model: InspectorModel, on: InspectorIntents): HTMLElement[] {
   const plan = model.plan;
   const meta = (field: keyof PlanMeta, label: string, area = false) =>
@@ -106,10 +87,6 @@ function renderMeta(model: InspectorModel, on: InspectorIntents): HTMLElement[] 
     h("div", { class: "plan-help" }, "Select a node or a link's label to set it up. Drag a verdict port onto a node to link them."),
   ];
 }
-
-// ---------------------------------------------------------------------------
-// A node
-// ---------------------------------------------------------------------------
 
 function renderNode(model: InspectorModel, on: InspectorIntents, node: PlanNodeFile): (HTMLElement | null)[] {
   const id = node.id;
@@ -349,10 +326,6 @@ function linksSection(model: InspectorModel, on: InspectorIntents, node: PlanNod
   ];
 }
 
-// ---------------------------------------------------------------------------
-// An edge
-// ---------------------------------------------------------------------------
-
 function renderEdge(
   model: InspectorModel,
   on: InspectorIntents,
@@ -426,10 +399,6 @@ function renderEdge(
   ];
 }
 
-// ---------------------------------------------------------------------------
-// Controls
-// ---------------------------------------------------------------------------
-
 function heading(text: string, sub: string | null): HTMLElement {
   return h("div", { class: "plan-inspector-head" }, text, sub ? h("span", { class: "dim" }, ` ${sub}`) : null);
 }
@@ -439,7 +408,6 @@ function problemList(problems: string[]): HTMLElement | null {
   return h("div", { class: "plan-problems" }, ...problems.map((p) => h("div", { class: "plan-problem" }, p)));
 }
 
-/** A text field on the store's buffer: input types, change commits, blur forgets an untouched buffer. */
 function textInput(
   model: InspectorModel,
   on: InspectorIntents,

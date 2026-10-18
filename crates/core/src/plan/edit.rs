@@ -1,6 +1,3 @@
-//! `Plan::edit` and `Plan::edit_draft`: typed edits that keep Mergers in step, on a valid Plan
-//! (validated whole after) or on a draft (judged with `Plan::check` after).
-
 use super::parse::{
     Draft, DraftEdge, LosslessDraft, at_edge, at_node, file_of, read_lossless, validate,
 };
@@ -60,7 +57,6 @@ struct Editing {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     notes: Vec<String>,
-    /// The edits that missed. Any refuses the batch.
     problems: Vec<PlanProblem>,
 }
 
@@ -308,8 +304,6 @@ impl Editing {
     }
 }
 
-/// A node of `kind` as the editor puts one down: the kind's label as its title, every policy its
-/// default.
 fn new_node(kind: PlanNodeKind, id: NodeId, at: (i32, i32)) -> Node {
     let ticket = |kind: TicketKind| {
         NodeBody::Ticket(TicketNode {
@@ -355,8 +349,6 @@ fn new_node(kind: PlanNodeKind, id: NodeId, at: (i32, i32)) -> Node {
     }
 }
 
-/// `n` in letters, counting from `a` for 1: `b`, ..., `z`, `aa`, `ab`, ... A letter tail never
-/// reads as the `-<digits>` a Ticket id appends.
 fn letters(mut n: usize) -> String {
     let mut out = Vec::new();
     while n > 0 {

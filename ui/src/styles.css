@@ -3486,11 +3486,6 @@ textarea.steward-orders {
   margin: 0;
 }
 
-/* ------------------------------------------------------------ plans view */
-
-/* The Plans view (slice 9): it covers the whole canvas column, over the
-   trays and the other panes, since a Plan needs the room: the list on the
-   left, the Plan canvas in the middle and the inspector on the right. */
 .plans-pane {
   position: absolute;
   inset: 0;
@@ -3714,8 +3709,6 @@ textarea.steward-orders {
   overflow: auto;
 }
 
-/* The Plan canvas: the pool canvas's look, with its own classes so the
-   pool's `.canvas-*` queries never find it. */
 .plan-canvas {
   flex: 1;
   min-height: 0;
@@ -3951,8 +3944,6 @@ textarea.steward-orders {
   white-space: nowrap;
 }
 
-/* The verdict ports: a row at the card's foot whose columns share its
-   width by word length, so the projection knows each pill's middle. */
 .plan-ports {
   display: grid;
   height: 24px;
@@ -3988,7 +3979,6 @@ textarea.steward-orders {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 
-/* The inspector: the Settings pane's field look, denser. */
 .plan-inspector {
   display: flex;
   flex-direction: column;

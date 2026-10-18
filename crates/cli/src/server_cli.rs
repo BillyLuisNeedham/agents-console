@@ -1,8 +1,7 @@
 //! `agent-console server --pool <dir> [--port <n>] [--registry <file>]` (server.ts `runServerCli`): the
 //! one place the server's environment is read, the boot line, and the one way out. A signal, a Stop
 //! from the Console (issue #97) and a Restart (issue #121) all take the same orderly stop, bounded by a
-//! hard limit, and a Restart then hands the pool to Boot. A `plans.boot` from the Console hands Boot a
-//! new Line, detached, with the server left running.
+//! hard limit, and a Restart then hands the pool to Boot.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -99,7 +98,6 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
     spawn_boot(&boot_command(&exe, args, here), log)
 }
 
-/// `<pool>/runs/boot.log`, opened to append, its directory made.
 fn open_boot_log(pool_dir: &Path) -> Result<(PathBuf, File), String> {
     let runs = pool_dir.join("runs");
     js::mkdir_all(&runs).map_err(|err| err.to_string())?;
@@ -112,7 +110,6 @@ fn open_boot_log(pool_dir: &Path) -> Result<(PathBuf, File), String> {
     Ok((path, log))
 }
 
-/// Boot, detached, stdin null, both its streams appended to `log`.
 fn spawn_boot(boot: &BootCommand, log: File) -> Result<(), String> {
     let err_log = log.try_clone().map_err(|err| err.to_string())?;
     let mut command = Command::new(&boot.program);
@@ -125,25 +122,18 @@ fn spawn_boot(boot: &BootCommand, log: File) -> Result<(), String> {
     spawn_detached(&mut command).map_err(|err| format!("{err}"))
 }
 
-/// The flags a Console-started Line boots with: `--yes`, since nobody is at a terminal to answer.
 fn line_boot_args(boot: &LineBoot) -> Vec<String> {
     ["--plan", &boot.plan, "--work", &boot.work, "--yes"]
         .map(str::to_owned)
         .to_vec()
 }
 
-/// The project a Console-started Line is cut from: the main worktree of the repository the pool sits
-/// in, since Line mode cuts from its working directory's checkout. Not the pool's own toplevel: a Line's
-/// pool lives in that Line's worktree, and a Line started from there would be cut from its branch.
 fn main_worktree(pool_dir: &Path) -> Option<PathBuf> {
     let listed = git_line(pool_dir, ["worktree", "list", "--porcelain"])?;
     let main = PathBuf::from(listed.lines().next()?.strip_prefix("worktree ")?);
     Some(std::fs::canonicalize(&main).unwrap_or(main))
 }
 
-/// `plans.boot`'s second half: Boot for a new Line, detached, its output appended to the pool's boot
-/// log, run from the project. The program is the one a Restart runs; only the directory differs, since
-/// the shim hands Boot the directory it was started in.
 fn hand_off_line_boot(
     pool_dir: &str,
     boot: &LineBoot,

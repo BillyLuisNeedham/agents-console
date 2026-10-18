@@ -346,12 +346,6 @@ const TICKET_BODY =
 // Mount: the app's bootstrap, minus the network and the timers.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// The Plans view's server side, faked: one Preset, and a plans.edit that
-// applies the moves, links and node edits it is sent to the document it is
-// sent with, as core would, and can be held to look at the page mid-reply.
-// ---------------------------------------------------------------------------
-
 const PLAN_VERDICTS: Record<string, string[]> = {
   conversation: ["done", "closed"],
   agent: ["done", "closed"],
@@ -395,9 +389,7 @@ const FACTORY_TODAY: PlanFile = {
   ],
 };
 
-/** Every plans.edit batch the page sent, in order. */
 const planEdits: PlanEditFile[][] = [];
-/** Set, plans.edit replies wait here until released. */
 let heldEdits: (() => void)[] | null = null;
 
 function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
@@ -1327,7 +1319,6 @@ function fadedCardsClear(): void {
 }
 
 
-/** The middle of an element, in client coordinates. */
 function middle(el: Element): { x: number; y: number } {
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -1336,7 +1327,6 @@ function middle(el: Element): { x: number; y: number } {
 const planCard = (id: string) => q<HTMLElement>(`.plans-pane .plan-node[data-node="${id}"]`);
 const planEdge = (key: string) => q<SVGGElement>(`.plans-pane .plan-edges [data-key="edge:${key}"]`);
 
-/** Open the Plans view from the header and factory-today from its list. */
 async function openFactoryToday(): Promise<void> {
   if (!q(".plans-pane")) q<HTMLButtonElement>(".canvas-plans")?.click();
   await settleAll();
@@ -1344,13 +1334,6 @@ async function openFactoryToday(): Promise<void> {
   await settleAll();
 }
 
-/**
- * The Plans view (slice 9), the gestures only a laid-out page can drive: a
- * card dragged across a snapshot render lands once, where the pointer let
- * go, and holds there while core's reply is out; a verdict port dragged
- * onto a card sends one link and draws it; a drop on blank sends nothing;
- * an inspector field keeps its node, focus and caret across renders.
- */
 async function plansChecks(): Promise<void> {
   const name = "plans view";
   stage = name;
@@ -1370,7 +1353,6 @@ async function plansChecks(): Promise<void> {
   if (!viewport || !world) return;
   const zoom = parsePan(world.style.transform).zoom;
 
-  // A node drag with a snapshot render mid-drag, core's reply held.
   stage = `${name}: node drag`;
   const prove = planCard("prove");
   const head = prove?.querySelector(".plan-node-head");
@@ -1418,7 +1400,6 @@ async function plansChecks(): Promise<void> {
     );
   }
 
-  // Drag a verdict port onto a card.
   stage = `${name}: drag to link`;
   const port = q<HTMLElement>('.plans-pane .plan-node[data-node="grill"] .plan-port[data-on="closed"]');
   const finish = planCard("finish");
@@ -1470,7 +1451,6 @@ async function plansChecks(): Promise<void> {
     );
   }
 
-  // Type into the inspector across snapshot renders.
   stage = `${name}: inspector typing`;
   const decideHead = planCard("decide")?.querySelector(".plan-node-head");
   if (decideHead) {
@@ -1520,7 +1500,6 @@ async function plansChecks(): Promise<void> {
   );
 }
 
-/** The Plans view's toolbar and inspector hold their width in the narrow window. */
 async function plansLayoutChecks(name: string): Promise<void> {
   const push = (assertion: string, failure: string | null, ok: string) =>
     report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });

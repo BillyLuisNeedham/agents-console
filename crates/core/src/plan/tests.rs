@@ -897,10 +897,6 @@ fn refuses_edits_on_what_is_not_there_and_edits_that_break_a_rule() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Edits on a draft
-// ---------------------------------------------------------------------------------------------------
-
 fn add(kind: PlanNodeKind) -> PlanEdit {
     PlanEdit::AddNode { kind, at: (0, 0) }
 }

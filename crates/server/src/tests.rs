@@ -1555,8 +1555,6 @@ async fn answers_every_concurrent_plan_save_and_keeps_one_whole() {
     assert_eq!(temp_files_beside(&dir, "mine.json"), Vec::<String>::new());
 }
 
-// Each verb word after /api/plans/ reaches its verb, which refuses an empty body as 400, rather than the
-// slug routes, where a POST is the unknown route.
 #[tokio::test]
 async fn routes_every_plan_route_word_to_its_verb() {
     let rig = rig(RigOptions::default()).await;

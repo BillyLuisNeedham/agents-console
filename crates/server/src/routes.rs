@@ -406,7 +406,6 @@ pub fn plan_edit_request(body: Body) -> Answer {
     }
 }
 
-/// A Plan verb's body read as its request type.
 fn plans_request<T: serde::de::DeserializeOwned>(body: Body) -> Result<T, String> {
     body.and_then(|body| serde_json::from_value(body).map_err(|err| format!("plans: {err}")))
 }

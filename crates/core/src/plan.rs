@@ -3,10 +3,8 @@
 //!
 //! Nothing outside this module builds a `Plan`. `Plan::parse` (a file, a request body, a Line's frozen
 //! copy) and `Plan::edit` (typed edits on a valid Plan) are the only constructors, and both end in the
-//! same `validate`, so there is one set of rules. `Plan::edit_draft` runs the same edits on a draft
-//! that need not be valid, for the editor, and judges what it makes with `Plan::check`. Every problem
-//! is reported at once, each on the node or edge the editor marks. The file's serde shape is
-//! `ac_protocol::wire::PlanFile`.
+//! same `validate`, so there is one set of rules. Every problem is reported at once, each on the node
+//! or edge the editor marks. The file's serde shape is `ac_protocol::wire::PlanFile`.
 //!
 //! A node's kind fixes its verdicts, so an edge's `on` is checked here and the run core never meets an
 //! unknown verdict. Every node whose verdicts include `closed` sends a `closed` with no edge of its own
@@ -344,8 +342,6 @@ impl NodeBody {
         })
     }
 
-    /// The verdicts an edge out of this node may route on, a Merger's found through `node`, which
-    /// looks up its `of` node. A Merger folding nothing has none.
     fn vocabulary<'a>(&self, node: impl Fn(&NodeId) -> Option<&'a Node>) -> &'static [Verdict] {
         let body = match self {
             NodeBody::Merger(merger) => node(&merger.of).map(|of| &of.body),
@@ -354,7 +350,6 @@ impl NodeBody {
         body.and_then(NodeBody::own_vocabulary).unwrap_or(&[])
     }
 
-    /// The `kind` a file spells this node with.
     fn kind(&self) -> &'static str {
         match self {
             NodeBody::Conversation(_) => "conversation",

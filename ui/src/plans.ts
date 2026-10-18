@@ -1,19 +1,3 @@
-/**
- * The Plans view: the overlay of the canvas column where the operator
- * lists the Presets and the Plan library, opens one as a node graph, edits
- * it, saves it, and boots a Line on it. One store owns the view's session
- * state as a tagged union of phases, and renders the pane.
- *
- * The Console holds no Plan rule. Every change goes to core as a
- * `plans.edit` batch on the document core last answered, and the reply
- * replaces the document whole, with its problems, the notes on what the
- * edit moved on its own, and each node's verdicts. One batch is in flight
- * at a time; changes made meanwhile queue and go as the next batch on that
- * reply's document. Nothing is applied here. Two display-only overlays
- * bridge the round trip: a dropped card's place, and a text field's typed
- * text, each shown until the reply to its batch lands.
- */
-
 import type {
   PlanBootResponse,
   PlanDraftResponse,
@@ -49,11 +33,9 @@ export interface PlansHandlers {
 }
 
 export interface PlansOptions extends PlansHandlers {
-  /** Store state changed outside a render: the composition renders again. */
   onChange: () => void;
 }
 
-/** The toolbar's inline rows, one at a time. */
 type Control =
   | { kind: "none" }
   | { kind: "saving" }
@@ -61,35 +43,26 @@ type Control =
   | { kind: "delete"; busy: boolean }
   | { kind: "boot"; work: string; busy: boolean }
   | { kind: "booted"; launched: PlanBootResponse }
-  /** Closing the pane, or opening another Plan, over unsaved changes. */
   | { kind: "discard"; then: "close" | { open: string } };
 
 interface Editing {
   phase: "editing";
-  /** The Plan the document came from, which decides what Save means. */
   slug: string;
   preset: boolean;
-  /** Fits the canvas once per open. */
   opened: number;
   doc: PlanFile;
   problems: PlanProblem[];
   verdicts: Map<string, string[]>;
   notes: string[];
-  /** Core cannot edit the file as it stands: drawn with plans.get's problems, Delete only. */
   readOnly: boolean;
-  /** The document as opened or last saved, to tell unsaved changes. */
   baseline: string;
   inFlight: PlanChange[] | null;
   queued: PlanChange[];
-  /** A dropped card's place, until the reply to the batch carrying its move. */
   moved: Map<string, { at: Point; by: PlanChange }>;
-  /** A text field's text: typed (`by` null) or committed in a batch not yet answered. */
   fields: Map<string, { text: string; by: PlanChange | null }>;
   selection: PlanSelection;
-  /** A refused edit's reason, shown in the pane's banner. */
   refusal: string | null;
   control: Control;
-  /** The last control's refusal, shown on its row. */
   failure: string | null;
 }
 
@@ -101,11 +74,6 @@ type Phase =
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/**
- * The batch as the wire carries it, against the document it is sent with.
- * A change to a node, the Plan's fields or a cap reads what an earlier
- * change in the same batch left, so neither undoes the other.
- */
 function materialize(doc: PlanFile, batch: readonly PlanChange[]): PlanEditFile[] {
   const nodes = new Map(doc.nodes.map((node) => [node.id, node]));
   const caps = new Map(doc.edges.map((edge) => [edgeKeyText(edge), edge.cap]));
@@ -145,7 +113,6 @@ export class PlansStore {
   private state: Phase = { phase: "closed" };
   private list: PlanSummary[] | null = null;
   private listFailure: string | null = null;
-  /** Bumped by every open and close: a reply for an older draft is dropped. */
   private token = 0;
   private waiters: (() => void)[] = [];
   private readonly canvas: PlanCanvas;
@@ -173,10 +140,6 @@ export class PlansStore {
     return !!e && (JSON.stringify(e.doc) !== e.baseline || e.inFlight !== null || e.queued.length > 0);
   }
 
-  // -------------------------------------------------------------------------
-  // The pane and the list
-  // -------------------------------------------------------------------------
-
   async open(): Promise<void> {
     if (this.state.phase !== "closed") return;
     this.state = { phase: "listing", failure: null };
@@ -184,7 +147,6 @@ export class PlansStore {
     await this.readList();
   }
 
-  /** Close the pane; unsaved changes ask first. */
   close(): void {
     const e = this.editing();
     if (e && this.dirty && !e.readOnly) {
@@ -211,7 +173,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  /** Open a Preset or a library Plan; over unsaved changes, ask first. */
   openPlan(slug: string): void {
     const e = this.editing();
     if (e && e.slug === slug) return;
@@ -236,7 +197,6 @@ export class PlansStore {
     }
   }
 
-  /** Drop an armed row and its refusal. */
   cancelControl(): void {
     const e = this.editing();
     if (!e) return;
@@ -250,8 +210,6 @@ export class PlansStore {
     this.wake(true);
   }
 
-  // plans.get, then plans.edit with no edits, which answers the canonical
-  // draft and its verdicts. A file core refuses to edit opens read-only.
   private async load(slug: string): Promise<void> {
     this.abandon();
     const token = this.token;
@@ -299,10 +257,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  // -------------------------------------------------------------------------
-  // The edit pipeline
-  // -------------------------------------------------------------------------
-
   select(selection: PlanSelection): void {
     const e = this.editing();
     if (!e) return;
@@ -310,7 +264,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  /** The one way the document changes: queue it, and send when nothing is in flight. */
   change(change: PlanChange): void {
     const e = this.editing();
     if (!e || e.readOnly) return;
@@ -341,7 +294,6 @@ export class PlansStore {
     );
   }
 
-  /** A text field's keystroke: held, not sent. */
   type(key: string, text: string): void {
     const e = this.editing();
     if (!e) return;
@@ -349,7 +301,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  /** A text field's change: one edit, its text shown until the reply. */
   commit(key: string, text: string, fromDoc: string, change: PlanChange | null): void {
     const e = this.editing();
     if (!e) return;
@@ -362,7 +313,6 @@ export class PlansStore {
     this.change(change);
   }
 
-  /** A field left without a change: what was typed into it is forgotten. */
   blur(key: string): void {
     const e = this.editing();
     if (e?.fields.get(key)?.by !== null) return;
@@ -374,7 +324,6 @@ export class PlansStore {
     return this.editing()?.fields.get(key)?.text ?? fromDoc;
   }
 
-  /** Resolves once nothing is queued or in flight, or the draft is let go. */
   settled(): Promise<void> {
     const e = this.editing();
     if (!e || (e.inFlight === null && e.queued.length === 0)) return Promise.resolve();
@@ -443,11 +392,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  // -------------------------------------------------------------------------
-  // Save, Save as, Delete, Boot
-  // -------------------------------------------------------------------------
-
-  /** Save a library Plan over its own slug, once the pipeline is idle. A Preset only saves as. */
   async save(): Promise<void> {
     const e = this.editing();
     if (!e || e.preset || e.readOnly || e.control.kind === "saving") return;
@@ -491,11 +435,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  /**
-   * Save under the slug typed. A library slug already listed asks to
-   * replace it first; core's refusals (a Preset's slug, a bad slug, an
-   * invalid Plan) show on the row. Saved, the draft is that library Plan.
-   */
   async confirmSaveAs(): Promise<void> {
     const e = this.editing();
     if (e?.control.kind !== "saveAs" || e.control.busy) return;
@@ -559,7 +498,6 @@ export class PlansStore {
     }
   }
 
-  /** Boot runs the saved file, so a Line boots only from a clean, valid Plan. */
   get bootable(): boolean {
     const e = this.editing();
     return !!e && !e.readOnly && !this.dirty && e.problems.length === 0;
@@ -581,7 +519,6 @@ export class PlansStore {
     this.onChange();
   }
 
-  /** plans.boot, once; the button is off while it is out. */
   async confirmBoot(): Promise<void> {
     const e = this.editing();
     if (e?.control.kind !== "boot" || e.control.busy) return;
@@ -608,11 +545,6 @@ export class PlansStore {
     this.options.onChange();
   }
 
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
-
-  /** The pane, or null while it is closed. */
   render(): HTMLElement | null {
     const s = this.state;
     if (s.phase === "closed") return null;
@@ -643,7 +575,6 @@ export class PlansStore {
     );
   }
 
-  /** After the commit: bind the Plan canvas's viewport, if one is drawn. */
   bindCanvas(root: HTMLElement): void {
     const viewport = root.querySelector(".plans-pane .plan-viewport");
     if (viewport instanceof HTMLElement) this.canvas.bind(viewport);

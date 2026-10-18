@@ -143,10 +143,6 @@ export async function validateBoth(server: CaseServer, socket: SocketClient, dra
   return problems;
 }
 
-/**
- * `plans.edit` over HTTP and on the socket, which must agree: the draft the
- * edits make, as both answered it.
- */
 export async function editBoth(server: CaseServer, socket: SocketClient, draft: unknown, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
   const http = await server.http.post("/api/plans/edit", { plan: draft, edits });
   expect(http.status, http.text).toBe(200);
@@ -157,7 +153,6 @@ export async function editBoth(server: CaseServer, socket: SocketClient, draft: 
   return answer;
 }
 
-/** `plans.edit` refused over HTTP and on the socket alike: the reason both gave. */
 export async function editRefusedBoth(server: CaseServer, socket: SocketClient, draft: unknown, edits: PlanEditFile[]): Promise<string> {
   const http = await server.http.post("/api/plans/edit", { plan: draft, edits });
   expect(http.status, http.text).toBe(400);

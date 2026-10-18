@@ -80,7 +80,6 @@ cut from.
   --no-steward           start no Steward (a Line pool starts one by default; it never
                          answers the Finish)";
 
-/// The Plan an unattended Line runs when none is named, and the picker's Enter.
 pub const DEFAULT_PLAN: &str = "factory-today";
 
 /// Boot's flags, kept deliberately few.
@@ -113,9 +112,6 @@ pub struct BootArgs {
 }
 
 impl BootArgs {
-    /// Line mode: a Plan named, the work given, or a ready brief. `--work` names what a Line
-    /// builds and means nothing to a plain pool, so it enters Line mode on its own and Boot asks
-    /// which Plan.
     pub fn line_mode(&self) -> bool {
         self.plan.is_some() || self.work.is_some() || self.brief.is_some()
     }

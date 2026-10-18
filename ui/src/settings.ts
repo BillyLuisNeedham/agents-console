@@ -47,7 +47,6 @@ export interface SettingsOptions {
   /** Open the Reassign bulk dialog (issue #126). The pane offers the button
    *  and nothing more: the dialog is its own pane with its own store. */
   onOpenReassign: () => void;
-  /** Open the Plans view (slice 9), which closes this pane. */
   onOpenPlans: () => void;
   /** Pane state changed outside a render: the composition re-renders. */
   onChange: () => void;

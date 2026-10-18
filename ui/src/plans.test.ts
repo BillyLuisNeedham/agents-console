@@ -128,7 +128,6 @@ function setup() {
     await tick();
   };
 
-  /** Open the pane and a Plan, answered with `doc` (by core, after an empty edit). */
   async function opened(slug = "mine", doc = DOC, extra: Partial<PlanDraftResponse> = {}) {
     void store.open();
     lists[lists.length - 1]!.resolve({ plans: LIST });

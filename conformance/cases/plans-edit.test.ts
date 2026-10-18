@@ -1,25 +1,9 @@
-/**
- * What `plans.edit` makes of a draft Plan, seen from outside the server
- * (ADR-0036): the edits run in core on a draft that need not be valid, so
- * the answer is the whole draft after them, everything wrong with it (the
- * same problems `plans.validate` gives that draft), what the edits moved on
- * their own, and each node's verdicts. A batch is all or none, a draft the
- * edits would have to drop or rewrite is refused, and nothing is written.
- * Every case asks over `POST /api/plans/edit` and on the socket's
- * `plans.edit`, whose answers must be the same.
- *
- * Origin: docs/specs/build-your-own-factory.md, "Wire: verbs and snapshot"
- * (`plans.edit`), "The Plan" (`Plan::edit` keeps mergers in step, each move
- * returns a note) and "Console surfaces" (new nodes are named in core).
- */
-
 import { expect } from "bun:test";
 import { existsSync } from "node:fs";
 import type { PlanDraftResponse, PlanFile, PlanNodeFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { atNode, edge, editBoth, editRefusedBoth, node, plan, plansDir, plansPool, smallPlan, validateBoth } from "./plans-support.ts";
 
-/** `tasks` hands work to `build`, which hands on to the Finish. */
 function feeder(): PlanFile {
   return plan(
     [node.agent("tasks", { makesItems: true }), { ...node.agent("build"), x: 600, y: 60 }, node.finish()],

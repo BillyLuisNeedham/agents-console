@@ -1,15 +1,3 @@
-/**
- * The Plan canvas: one Plan drawn as cards with verdict ports and keyed SVG
- * edges, with pan, zoom, node drag and drag-to-link. It holds view state
- * only (the pan and zoom, and the gesture in flight) and owns nothing of the
- * document: every finished gesture is reported as an intent, and the store
- * turns it into an edit. The render reads the gesture, so a render landing
- * mid-drag draws the dragged card where the pointer has it and keeps the
- * viewport, and with it the pointer capture. A move between renders is
- * painted straight onto the cards and paths the render drew, from the same
- * pure projection, so the two always agree.
- */
-
 import type { PlanFile, PlanNodeKind, PlanProblem } from "../../protocol/wire.ts";
 import { h } from "./dom";
 import { nextFrame } from "./frame";
@@ -34,7 +22,6 @@ const DRAG_THRESHOLD = 4;
 
 export type PlanSelection = { kind: "node"; id: string } | { kind: "edge"; key: EdgeKey } | null;
 
-/** The kinds the shelf puts down, in shelf order. Core places a Merger itself. */
 export const SHELF: readonly PlanNodeKind[] = [
   "conversation",
   "agent",
@@ -46,26 +33,20 @@ export const SHELF: readonly PlanNodeKind[] = [
 ];
 
 export interface PlanCanvasModel {
-  /** Which document is drawn: a new one is fitted to the viewport once. */
   docKey: string;
   plan: PlanFile;
   problems: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
-  /** Cards dropped and not yet answered, drawn where they were dropped. */
   moved: ReadonlyMap<string, Point>;
   selection: PlanSelection;
-  /** False for a file core cannot edit as it stands: pan, zoom and select only. */
   editable: boolean;
 }
 
 export interface PlanCanvasEvents {
   select(selection: PlanSelection): void;
-  /** A card dropped after crossing the drag threshold, at its world place. */
   move(id: string, at: Point): void;
-  /** A verdict port dragged onto a card; a drop on blank, or Esc, sends nothing. */
   link(key: EdgeKey): void;
   add(kind: PlanNodeKind, at: Point): void;
-  /** Delete or Backspace on the canvas with a node or edge selected. */
   remove(selection: Exclude<PlanSelection, null>): void;
 }
 
@@ -151,7 +132,6 @@ export class PlanCanvas {
     );
   }
 
-  /** After the commit: the viewport the gestures paint into, fitted once per document. */
   bind(viewport: HTMLElement): void {
     this.viewport = viewport;
     if (this.model && this.fitted !== this.model.docKey && viewport.clientWidth > 0) {
@@ -165,7 +145,6 @@ export class PlanCanvas {
     this.gesture = { kind: "none" };
   }
 
-  // The places drawn: the store's dropped cards, then the card under the pointer.
   private project(): PlanDrawing {
     const model = this.model!;
     const g = this.gesture;
@@ -278,10 +257,6 @@ export class PlanCanvas {
     return node?.ports.find((p) => p.on === on)?.at ?? { x: 0, y: 0 };
   }
 
-  // -------------------------------------------------------------------------
-  // Gestures
-  // -------------------------------------------------------------------------
-
   private toWorld(client: Point): Point {
     const rect = this.viewport?.getBoundingClientRect() ?? { left: 0, top: 0 };
     return {
@@ -358,11 +333,6 @@ export class PlanCanvas {
     }
   }
 
-  /**
-   * A gesture's frame: the dragged card and every edge route moved to where
-   * the projection now puts them, or the ghost edge and the drop card. Only
-   * writes; the routes are numbers, not measurements.
-   */
   private paint(): void {
     this.framePending = false;
     const g = this.gesture;
@@ -397,12 +367,10 @@ export class PlanCanvas {
     }
   }
 
-  /** The pointer let go (an event), or the gesture is called off (null). */
   private endGesture(event: PointerEvent | null): void {
     const g = this.gesture;
     if (g.kind === "none") return;
     if (g.kind === "node" && g.moved) this.paint();
-    // The card under the pointer where it let go, not where it last moved.
     if (g.kind === "link" && g.moved && event && this.drawing) {
       g.over = hitNode(this.drawing.nodes, this.toWorld({ x: event.clientX, y: event.clientY }));
     }
@@ -471,7 +439,6 @@ export class PlanCanvas {
     this.applyTransform();
   }
 
-  /** A clear slot for a new card, near the middle of what is in view. */
   private freeSpotInView(): Point {
     const rect = this.viewport?.getBoundingClientRect();
     const centre = rect
@@ -490,7 +457,6 @@ export class PlanCanvas {
   }
 }
 
-/** The label pill's box: the mono label's width, centred on the route's midpoint. */
 function labelBox(edge: DrawnEdge): { x: number; y: number; width: number } {
   const width = edge.label.length * 6.2 + 12;
   return { x: edge.route.label.x - width / 2, y: edge.route.label.y - 9, width };
@@ -534,7 +500,6 @@ function ghostAttrs(from: Point, to: Point): Record<string, string> {
   return { "data-key": "plan-ghost", class: "plan-ghost", d: `M ${from.x} ${from.y} L ${to.x} ${to.y}` };
 }
 
-/** `h` for SVG: attributes only; a `data-key` keys it for the morph like any element. */
 function svg(
   tag: string,
   attrs: Record<string, string | number>,

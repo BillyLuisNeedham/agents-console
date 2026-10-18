@@ -192,7 +192,6 @@ conformance("cli", "Boot's Line mode refuses --factory, an unknown Plan, no work
 const PRESET_SLUGS =
   "factory-today, matt-pocock-main, matt-pocock-quick, matt-pocock-bug, matt-pocock-foggy, pstack-feature, pstack-bug-fix, pclaude-feature, pclaude-bug-fix, addy-commands, addy-bug-fix";
 
-/** A checkout and a library of one valid Plan, `zz-mine`, and one broken file, `aa-broken`. */
 function libraryWorld(t: Parameters<typeof cliWorld>[0]): { w: CliWorld; repo: string } {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
@@ -201,7 +200,6 @@ function libraryWorld(t: Parameters<typeof cliWorld>[0]): { w: CliWorld; repo: s
   return { w, repo };
 }
 
-/** Boot's end for these cases: the Plan is chosen and loaded, then the cut refuses the base. */
 const ENDS = ["--from", "no-such-branch", "--title", "T", "--no-open"];
 
 conformance("cli", "Boot --work alone asks which Plan, listing the Presets in order then the library, and runs the one picked", async (t) => {

@@ -1103,9 +1103,8 @@ conformance(
         { before: logTotal, limit: 3 },
         { method: "GET", path: `/api/pool-log?before=${logTotal}&limit=3` },
       ],
-      // The Plan kinds are asked of what writes nothing: the list, a slug nobody saved, a draft the
-      // validator answers whatever it holds, an edit that names no node, a bad slug, a Preset's
-      // slug, and a boot on a slug nobody saved, refused before Boot is started.
+      // The Plan kinds are asked only what writes nothing, so a parity run never saves a Plan or
+      // starts Boot.
       "plans.list": [{}, { method: "GET", path: "/api/plans" }],
       "plans.get": [{ slug: "no-such-plan" }, { method: "GET", path: "/api/plans/no-such-plan" }],
       "plans.validate": [{ plan: NO_PLAN }, { method: "POST", path: "/api/plans/validate", body: { plan: {} } }],

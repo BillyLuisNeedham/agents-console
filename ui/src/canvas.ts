@@ -484,7 +484,6 @@ export class Canvas {
     /** The header's "Settings" button (ADR-0026): opens the Settings pane.
      *  Always offered; a headless pool has settings too. */
     onOpenSettings: () => void;
-    /** The header's "Plans" button (slice 9): opens the Plans view. */
     onOpenPlans: () => void;
     /** The header's Spawn caps line (issue #149): opens the Held spawns list. */
     onOpenHeldSpawns: () => void;

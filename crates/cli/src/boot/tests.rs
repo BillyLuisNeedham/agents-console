@@ -818,7 +818,6 @@ fn prints_the_usage_on_help_and_starts_nothing() {
     );
 }
 
-/// A HOME whose plan library holds `zz-mine` (valid, from factory-today) and `aa-broken` (not).
 fn home_with_library() -> tempfile::TempDir {
     let home = temp();
     let dir = ac_core::plan::library::plans_dir(&text(&home));

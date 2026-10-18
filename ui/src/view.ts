@@ -214,8 +214,6 @@ export interface Handlers {
 
 export type ConsoleViewOptions = NeedsInputOptions &
   ConversationsOptions &
-  /** The Plans view's reads and writes (slice 9): every one fetched when
-   *  the operator asks, never through the snapshot. */
   PlansHandlers & {
     /** Run something in the next frame. Given, the page's first render
      *  leaves measuring the canvas's cards and drawing its edges to the frame
@@ -332,7 +330,6 @@ export class ConsoleView {
       onSavePool: options.onSavePoolSettings,
       onSaveMachine: options.onSaveMachineDefaults,
       onOpenReassign: () => this.reassign.openDialog(),
-      // The Plans view covers the whole column, Settings with it.
       onOpenPlans: () => {
         this.settings.close();
         void this.plans.open();
