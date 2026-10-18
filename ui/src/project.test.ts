@@ -1497,13 +1497,13 @@ describe("merge queue projection (#129)", () => {
     expect(card?.vitals?.elapsed).toBe("resolving 10m 5s");
   });
 
-  it("names the head and the tickets behind it in the header line while the hold stands", () => {
+  it("names the head and the tickets behind it in the header line while the Merge queue holds them", () => {
     expect(projectPool(snap, {}, {}, {}, RESOLVER_NOW).mergeQueueLine).toBe(
-      "merge hold: 02 resolving (10m) · 04, 05 queued",
+      "merge queue: 02 resolving (10m) · 04, 05 queued",
     );
   });
 
-  it("words the header by what the head waits on, and hides it when nothing is held", () => {
+  it("words the header by what the head waits on, and hides it when the Merge queue is empty", () => {
     const line = (mergeQueue: EnrichedSnapshot["state"]["mergeQueue"]) =>
       projectPool(snapshot({ state: { mergeQueue } }), {}, {}, {}, RESOLVER_NOW).mergeQueueLine;
     expect(
@@ -1512,15 +1512,15 @@ describe("merge queue projection (#129)", () => {
         { ticketId: "04", state: "needs-you" },
         { ticketId: "05", state: "queued" },
       ]),
-    ).toBe("merge hold: 02 awaiting approval · 04 needs you · 05 queued");
+    ).toBe("merge queue: 02 awaiting approval · 04 needs you · 05 queued");
     expect(
       line([
         { ticketId: "02", state: "stalled" },
         { ticketId: "03", state: "stalled" },
       ]),
-    ).toBe("merge hold: 02, 03 stalled, nothing running");
+    ).toBe("merge queue: 02, 03 stalled, nothing running");
     // A resolver not yet live (the engine is launching it) has no time yet.
-    expect(line([{ ticketId: "09", state: "resolving" }])).toBe("merge hold: 09 resolving");
+    expect(line([{ ticketId: "09", state: "resolving" }])).toBe("merge queue: 09 resolving");
     expect(line([])).toBeNull();
   });
 });

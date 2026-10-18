@@ -360,7 +360,7 @@ export interface CanvasModel {
    *  then, so a headless pool is never shown an action it cannot perform. */
   terminalBacked: boolean;
   /** The Merge queue line (issue #129): shown under the status while the
-   *  Merge hold stands, absent otherwise. */
+   *  Merge queue holds anything, absent otherwise. */
   mergeQueueLine: string | null;
   /** The Spawn caps line (issue #149), beside the Merge queue line; a
    *  button that opens the Held spawns list. Null before the first snapshot. */

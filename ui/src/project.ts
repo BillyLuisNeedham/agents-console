@@ -2038,11 +2038,11 @@ const MERGE_QUEUE_HEADER: Record<MergeQueueState, string> = {
 };
 
 /**
- * The header line while the Merge hold stands (issue #129): the queue in the
- * engine's order, head first, with runs of the same state folded together
- * ("merge hold: 02 resolving (10m) · 04, 05, 09 queued"). A live resolver
- * carries its running time; one the engine is still launching has none yet.
- * Null when nothing is held, so the line is gone with the hold.
+ * The header line while the Merge queue holds anything (issue #129): the
+ * queue in the engine's order, head first, with runs of the same state folded
+ * together ("merge queue: 02 resolving (10m) · 04, 05, 09 queued"). A live
+ * resolver carries its running time; one the engine is still launching has
+ * none yet. Null when the queue is empty, so the line goes with it.
  */
 function mergeQueueLine(snapshot: EnrichedSnapshot, now: number): string | null {
   const queue = snapshot.state.mergeQueue;
@@ -2060,7 +2060,7 @@ function mergeQueueLine(snapshot: EnrichedSnapshot, now: number): string | null 
     const started = live?.role === "resolver" ? Date.parse(live.startedAt) : Number.NaN;
     return Number.isNaN(started) ? words : `${words} (${shortDurationCopy(now - started)})`;
   });
-  return `merge hold: ${parts.join(" · ")}`;
+  return `merge queue: ${parts.join(" · ")}`;
 }
 
 // ---------------------------------------------------------------------------
