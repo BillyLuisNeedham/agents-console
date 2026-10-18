@@ -1,5 +1,5 @@
 /**
- * The Held and Pending spawn routes (issue #149, issue #150, ADR-0029) and
+ * The Held spawn routes (issue #149, ADR-0029) and
  * the Steward's routes and command (ADR-0030), seen from outside the server
  * (ADR-0036): the snapshot on /api/state, the routes' answers, the pool's
  * files, and the steward command run as its own process.
@@ -205,43 +205,18 @@ conformance("spawns", "pending spawns on the snapshot › lands every Pending sp
   expect(after.state.tickets.map((ticket) => ticket.id)).toEqual(expect.arrayContaining(["01-spawn-1", "01-spawn-2"]));
 });
 
-// engine/spawn-routes.test.ts:202
-conformance(
-  "spawns",
-  "POST /api/spawns/pending/hold and /discard › answers a 409 for a spawn already held",
-  async (t) => {
-    const server = await startRig(t);
-    for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
-      const again = await server.http.post(route, { id: "proposal-2" });
-      expect(again.status).toBe(409);
-      expect(again.json<{ reason: string }>().reason).toBe("spawn proposal-2 is already held");
-    }
-    expect((await snapshot(server)).heldSpawns.map((h) => [h.id, h.reason])).toEqual([["proposal-2", "per-attempt"]]);
-  },
-);
-
-// engine/spawn-routes.test.ts:228
-conformance(
-  "spawns",
-  "POST /api/spawns/pending/hold and /discard › answers a 409 for a spawn that has already landed",
-  async (t) => {
-    const server = await startLandedRig(t);
-    for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
-      const res = await server.http.post(route, { id: "proposal-1" });
-      expect(res.status).toBe(409);
-      expect(res.json<{ reason: string }>().reason).toBe(
-        "no pending spawn proposal-1: it has landed or been discarded",
-      );
-    }
-  },
-);
-
-// engine/spawn-routes.test.ts:240
-conformance("spawns", "POST /api/spawns/pending/hold and /discard › answers a 400 for a body with no id", async (t) => {
-  const server = await startRig(t);
-  const res = await server.http.post("/api/spawns/pending/hold", {});
-  expect(res.status).toBe(400);
-  expect(res.json<{ reason: string }>().reason).toBe("id is required");
+// Hold and Discard of a Pending spawn are retired (ADR-0041): a Tick lands a proposal as soon as its
+// Attempt exits, so no request could reach one in time. Both routes answer as any path no route matches.
+conformance("spawns", "POST /api/spawns/pending/hold and /discard › answer as an unknown path does", async (t) => {
+  const server = await startLandedRig(t);
+  const unknown = await server.http.post("/api/no-such-route", { id: "proposal-1" });
+  for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
+    const res = await server.http.post(route, { id: "proposal-1" });
+    expect([route, res.status, res.text]).toEqual([route, unknown.status, unknown.text]);
+  }
+  expect((await snapshot(server)).state.tickets.map((ticket) => ticket.id)).toEqual(
+    expect.arrayContaining(["01-spawn-1", "01-spawn-2"]),
+  );
 });
 
 // ---------------------------------------------------------------------------

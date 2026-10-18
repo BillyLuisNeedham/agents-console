@@ -55,8 +55,6 @@ const REQUEST_KINDS: Record<RequestKind, true> = {
   reassign: true,
   "spawns.held.adopt": true,
   "spawns.held.discard": true,
-  "spawns.pending.hold": true,
-  "spawns.pending.discard": true,
   "conversations.start": true,
   "conversations.end": true,
   "settings.get": true,

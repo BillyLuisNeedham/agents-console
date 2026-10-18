@@ -12,7 +12,6 @@ import {
   poolLog,
   proposal,
   runAndApprove,
-  settled,
   snapshot,
   snapshotUntil,
   ticket,
@@ -53,7 +52,7 @@ conformance("spawns", "lands a proposal at the next Tick, its take and its landi
   expect(ledgerLines(world)).toContain("| 01-spawn-1 | done | Follow-up |");
 });
 
-conformance("spawns", "refuses to hold or discard a held spawn as pending, and lands it on an Adopt", async (t) => {
+conformance("spawns", "lands a held spawn on an Adopt", async (t) => {
   const world = t.world({ tickets: [ticket("01")], config: withCaps({ perAttempt: 0 }) });
   world.stubs.script("01", { spawn: [proposal("Wait for me")] });
   const server = await t.start(world);
@@ -62,12 +61,6 @@ conformance("spawns", "refuses to hold or discard a held spawn as pending, and l
     (snap) => snap.phase === "quiescent" && snap.heldSpawns.some((h) => h.id === "proposal-1"),
     "the pool to settle with proposal-1 held",
   );
-
-  for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
-    const again = await server.http.post(route, { id: "proposal-1" });
-    expect(again.status).toBe(409);
-    expect(again.json<{ reason: string }>().reason).toBe("spawn proposal-1 is already held");
-  }
   expect(hasTicket(world, "01-spawn-1.md")).toBe(false);
 
   const adopted = await server.http.post("/api/spawns/held/adopt", { id: "proposal-1" });
@@ -87,22 +80,6 @@ conformance("spawns", "holds a proposal past the run cap once an earlier one has
     "the pool to settle with 01-spawn-1 landed",
   );
   expect(rest.heldSpawns.map((h) => [h.parentId, h.reason])).toEqual([["02", "per-run"]]);
-});
-
-conformance("spawns", "refuses an operator's action on a spawn that has already landed", async (t) => {
-  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
-  world.stubs.script("01", { spawn: [proposal("Landed")] });
-  const server = await t.start(world);
-  await settled(server);
-  expect(hasTicket(world, "01-spawn-1.md")).toBe(true);
-
-  for (const route of ["/api/spawns/pending/hold", "/api/spawns/pending/discard"]) {
-    const refused = await server.http.post(route, { id: "proposal-1" });
-    expect(refused.status).toBe(409);
-    expect(refused.json<{ reason: string }>().reason).toBe(
-      "no pending spawn proposal-1: it has landed or been discarded",
-    );
-  }
 });
 
 conformance("spawns", "holds a proposal that names what it overlaps, with the ids on the hold", async (t) => {

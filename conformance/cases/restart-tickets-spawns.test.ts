@@ -47,7 +47,7 @@ function spawnedFile(
     `# ${id}: ${title}\n\n` +
     `**Spawned by** ticket ${parentId} (ADR-0010): the engine wrote this ticket at a Tick from the ` +
     "attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, " +
-    "verifies, and may itself spawn, and the operator can edit or kill it before it schedules.\n\n" +
+    "verifies, and may itself spawn.\n\n" +
     `${options.body ?? GOOD_BODY}\n`
   );
 }

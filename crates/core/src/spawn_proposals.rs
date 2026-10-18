@@ -285,12 +285,6 @@ impl SpawnProposals {
         Ok(Some(held))
     }
 
-    /// The operator's Hold of a Pending spawn: held for "operator" under the same id, in one write.
-    /// `None` when it is not pending (landed, discarded, or never).
-    pub fn hold_pending(&mut self, id: &str, at: &str) -> Result<Option<HeldSpawn>, js::FsError> {
-        self.move_to_held(id, HeldSpawnReason::Operator, at, None)
-    }
-
     pub fn hold_refused(
         &mut self,
         id: &str,
@@ -298,16 +292,6 @@ impl SpawnProposals {
         at: &str,
     ) -> Result<Option<HeldSpawn>, js::FsError> {
         self.move_to_held(id, HeldSpawnReason::Refused, at, Some(reason.to_owned()))
-    }
-
-    /// Drop a Pending spawn (discarded by the operator).
-    pub fn remove_pending(&mut self, id: &str) -> Result<Option<PendingSpawn>, js::FsError> {
-        let Some(found) = self.get_pending(id).cloned() else {
-            return Ok(None);
-        };
-        self.file.pending.retain(|p| p.id != id);
-        self.write()?;
-        Ok(Some(found))
     }
 
     pub fn mark_landing(&mut self, landing: &HashMap<String, String>) -> Result<(), js::FsError> {
@@ -801,46 +785,15 @@ mod tests {
         );
     }
 
-    // The id an agent read from the Spawn ledger keeps naming the proposal when the operator holds it.
     #[test]
-    fn holds_a_pending_spawn_for_the_operator_under_the_same_id() {
-        let dir = runs_dir();
-        let mut store = load_spawn_proposals(dir.path()).unwrap();
-        store.take(vec![taken("A", None)]).unwrap();
-        let held = store.hold_pending("proposal-1", "t2").unwrap().unwrap();
-        assert_eq!(
-            serde_json::to_value(&held).unwrap(),
-            json!({ "id": "proposal-1", "parentId": "01", "origin": "ticket",
-                    "proposal": {"title": "A", "body": "A body long enough to stand."},
-                    "reason": "operator", "at": "t2" })
-        );
-        assert!(store.pending().is_empty());
-        assert_eq!(
-            ids(load_spawn_proposals(dir.path()).unwrap().held(), |h| &h.id),
-            ["proposal-1"]
-        );
-        assert_eq!(store.hold_pending("proposal-1", "t3").unwrap(), None);
-    }
-
-    #[test]
-    fn removes_a_pending_spawn_once_and_forgets_landed_ones_in_one_write() {
+    fn forgets_landed_pending_spawns_in_one_write() {
         let dir = runs_dir();
         let mut store = load_spawn_proposals(dir.path()).unwrap();
         store
-            .take(vec![taken("A", None), taken("B", None), taken("C", None)])
+            .take(vec![taken("A", None), taken("B", None)])
             .unwrap();
-        assert_eq!(
-            store
-                .remove_pending("proposal-2")
-                .unwrap()
-                .unwrap()
-                .proposal
-                .title,
-            "B"
-        );
-        assert_eq!(store.remove_pending("proposal-2").unwrap(), None);
         store
-            .landed(&["proposal-1".into(), "proposal-3".into()])
+            .landed(&["proposal-1".into(), "proposal-2".into()])
             .unwrap();
         assert!(
             load_spawn_proposals(dir.path())
@@ -894,7 +847,7 @@ mod tests {
         store
             .take(vec![taken("A", None), taken("B", None)])
             .unwrap();
-        store.remove_pending("proposal-1").unwrap();
+        store.landed(&["proposal-1".into()]).unwrap();
         assert!(store.is_proposal_id("proposal-1"));
         assert!(store.is_proposal_id("proposal-2"));
         assert!(!store.is_proposal_id("proposal-3"));

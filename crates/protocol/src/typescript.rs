@@ -271,13 +271,6 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
             ],
         ),
         (
-            "Pending spawns (POST /api/spawns/pending/hold, /api/spawns/pending/discard)",
-            vec![
-                exported::<PendingSpawnRequest>(),
-                exported::<PendingSpawnResponse>(),
-            ],
-        ),
-        (
             "Terminal peek (GET /api/terminal/peek)",
             vec![exported::<TerminalPeekResponse>()],
         ),

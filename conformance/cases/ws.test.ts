@@ -463,6 +463,23 @@ conformance("protocol", "requests › refuses with the HTTP twin's status, for e
   expect(replies.map((frame) => (frame as { kind: string }).kind)).toEqual(["stop", "poolLog.read"]);
 });
 
+// Hold and Discard of a Pending spawn are retired (ADR-0041): their kinds are no request the socket knows,
+// so each frame is dropped unanswered as any other unknown frame is.
+conformance("protocol", "requests › drops the retired Pending spawn kinds as unknown requests", async (t) => {
+  const world = poolWorld(t, ["01"], CLAUDE);
+  const server = await t.start(world);
+  await interruptFor(server, REVIEW);
+  const client = await t.socket(server);
+  await client.sync();
+
+  const from = client.frames.length;
+  client.send({ type: "request", id: 81, kind: "spawns.pending.hold", payload: { id: "proposal-1" } } as never);
+  client.send({ type: "request", id: 82, kind: "spawns.pending.discard", payload: { id: "proposal-1" } } as never);
+  await client.sync();
+  const replies = client.frames.slice(from).filter((frame) => frame.type === "reply");
+  expect(replies.map((frame) => (frame as { kind: string }).kind)).toEqual(["poolLog.read"]);
+});
+
 // ---------------------------------------------------------------------------
 // cards
 // ---------------------------------------------------------------------------
@@ -1067,11 +1084,6 @@ conformance(
       ],
       "spawns.held.adopt": [{ id: "nope" }, { method: "POST", path: "/api/spawns/held/adopt", body: { id: "nope" } }],
       "spawns.held.discard": [{ id: "nope" }, { method: "POST", path: "/api/spawns/held/discard", body: { id: "nope" } }],
-      "spawns.pending.hold": [{ id: "nope" }, { method: "POST", path: "/api/spawns/pending/hold", body: { id: "nope" } }],
-      "spawns.pending.discard": [
-        { id: "nope" },
-        { method: "POST", path: "/api/spawns/pending/discard", body: { id: "nope" } },
-      ],
       "conversations.start": [{ title: "talk" }, { method: "POST", path: "/api/conversations", body: { title: "talk" } }],
       "conversations.end": [{ id: "nope" }, { method: "POST", path: "/api/conversations/end", body: { id: "nope" } }],
       "settings.get": [{}, { method: "GET", path: "/api/settings" }],

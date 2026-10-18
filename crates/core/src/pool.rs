@@ -436,8 +436,7 @@ pub fn spawn_ticket_text(parent_id: &str, id: &str, proposal: &SpawnProposal) ->
         "<!-- state: id={id} blocked-by={blocked_by} status=ready spawned-by={parent_id}{assign} -->\n\n\
          # {id}: {}\n\n\
          **Spawned by** ticket {parent_id} (ADR-0010): the engine wrote this ticket at a Tick from the \
-         attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, verifies, and may itself spawn, and the operator can edit or kill it \
-         before it schedules.\n\n\
+         attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, verifies, and may itself spawn.\n\n\
          {}\n",
         js::trim(&proposal.title),
         js::trim(&proposal.body)
@@ -1075,7 +1074,7 @@ mod tests {
                  # 01-spawn-1: Tidy up\n\n\
                  **Spawned by** ticket 01 (ADR-0010): the engine wrote this ticket at a Tick \
                  from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it \
-                 schedules, verifies, and may itself spawn, and the operator can edit or kill it before it schedules.\n\n\
+                 schedules, verifies, and may itself spawn.\n\n\
                  Make it tidy, every file of it.\n"
             )
         );

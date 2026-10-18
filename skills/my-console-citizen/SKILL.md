@@ -24,7 +24,7 @@ The teaching Turn that enlisted you (or the pool's `AGENT.md`) states four thing
    - `effort` is the harness's own word (claude: low, medium, high, xhigh, max), passed through as written; leave it out for the harness's default.
    - You cannot tell, or the defaults name no model: ask the operator in this pane before you write the file. The operator is in the room; a guess costs a wasted Attempt.
 4. `blockedBy` names Tickets only, never a Conversation.
-5. Write the file. Within the pool's Spawn caps the proposal waits as a Pending spawn and lands at the next Tick, where the engine assigns the id and writes the ticket; the operator may hold or discard it before then. Beyond a cap it is held for the operator, and a cap of 0 holds every proposal. You never write under `issues/`, never set a status, never pick an id.
+5. Write the file. Within the pool's Spawn caps the proposal waits as a Pending spawn and lands at the next Tick, where the engine assigns the id and writes the ticket. Beyond a cap it is held for the operator, and a cap of 0 holds every proposal. You never write under `issues/`, never set a status, never pick an id.
 
 ## Ending
 

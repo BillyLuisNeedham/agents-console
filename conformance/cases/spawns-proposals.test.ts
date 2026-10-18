@@ -146,7 +146,7 @@ conformance("spawns", "serves each held spawn as the Console shows it", async (t
   ]);
 });
 
-conformance("spawns", "lands the pending spawns of one Outcome in one write, and refuses a discard after", async (t) => {
+conformance("spawns", "lands the pending spawns of one Outcome in one write", async (t) => {
   const world = t.world({ tickets: [ticket("01")], config: CONFIG });
   world.stubs.script("01", { spawn: [proposal("A"), proposal("B", { overlaps: ["01"] }), proposal("C")] });
   const server = await t.start(world);
@@ -162,9 +162,6 @@ conformance("spawns", "lands the pending spawns of one Outcome in one write, and
   expect(eventsOf(world, "01", "spawn-adopted").map((event) => event.payload)).toEqual([
     { adopted: ["01-spawn-1", "01-spawn-2"], fromPending: ["proposal-1", "proposal-3"] },
   ]);
-  const late = await server.http.post("/api/spawns/pending/discard", { id: "proposal-1" });
-  expect(late.status).toBe(409);
-  expect(late.json<Record<string, string>>()).toEqual({ reason: "no pending spawn proposal-1: it has landed or been discarded" });
   await settled(server);
 });
 

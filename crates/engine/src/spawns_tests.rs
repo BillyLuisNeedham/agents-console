@@ -326,17 +326,6 @@ fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
     session
 }
 
-type Taken = (
-    Vec<ac_core::spawn_proposals::PendingSpawn>,
-    Vec<ac_core::spawn_proposals::HeldSpawn>,
-);
-
-fn propose(session: &mut crate::session::Session, title: &str) -> Taken {
-    let proposals = vec![serde_json::from_value(proposal(title, json!({}))).unwrap()];
-    crate::spawns::take_spawn_proposals(session, "01", proposals, ac_protocol::SpawnKind::Ticket)
-        .unwrap()
-}
-
 fn spawn_file(dir: &std::path::Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(dir.join("runs/held-spawns.json")).unwrap())
         .unwrap()
@@ -348,89 +337,6 @@ fn parent_events(dir: &std::path::Path, kind: TicketEventKind) -> Vec<Value> {
         .filter(|event| event.kind == kind)
         .map(|event| Value::Object(event.payload.clone()))
         .collect()
-}
-
-#[test]
-fn the_operators_hold_of_a_pending_spawn_keeps_it_held_under_its_id_with_the_operator_as_the_reason()
- {
-    let dir = tempfile::tempdir().unwrap();
-    let mut session = session_in(dir.path(), json!({}));
-    let (pending, _) = propose(&mut session, "Hold me");
-    assert_eq!(pending[0].id, "proposal-1");
-
-    crate::spawns::hold_pending_spawn(&mut session, "proposal-1").unwrap();
-
-    assert_eq!(
-        parent_events(dir.path(), TicketEventKind::SpawnHeld),
-        [json!({ "held": [{ "id": "proposal-1", "title": "Hold me", "reason": "operator" }] })]
-    );
-    let file = spawn_file(dir.path());
-    assert_eq!(file["pending"], json!([]));
-    assert_eq!(file["held"][0]["id"], "proposal-1");
-    assert_eq!(file["held"][0]["reason"], "operator");
-    assert!(session.state.log.contains(
-        &"ticket 01: pending spawn proposal-1 ('Hold me') held by the operator".to_owned()
-    ));
-    let ledger = std::fs::read_to_string(dir.path().join("runs/spawn-ledger.md")).unwrap();
-    assert!(
-        ledger.contains("| proposal-1 | 01 | ticket | held by operator | Hold me |"),
-        "{ledger}"
-    );
-    assert_eq!(
-        crate::spawns::hold_pending_spawn(&mut session, "proposal-1")
-            .unwrap_err()
-            .message(),
-        "spawn proposal-1 is already held"
-    );
-}
-
-#[test]
-fn the_operators_discard_of_a_pending_spawn_drops_it_for_good_and_logs_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut session = session_in(dir.path(), json!({}));
-    propose(&mut session, "Drop me");
-
-    crate::spawns::discard_pending_spawn(&mut session, "proposal-1").unwrap();
-
-    assert_eq!(
-        parent_events(dir.path(), TicketEventKind::SpawnDiscarded),
-        [json!({ "id": "proposal-1", "title": "Drop me", "pending": true })]
-    );
-    let file = spawn_file(dir.path());
-    assert_eq!(file["pending"], json!([]));
-    assert_eq!(file["held"], json!([]));
-    assert!(session.state.log.contains(
-        &"ticket 01: pending spawn proposal-1 ('Drop me') discarded by the operator".to_owned()
-    ));
-    assert_eq!(
-        crate::spawns::discard_pending_spawn(&mut session, "proposal-1")
-            .unwrap_err()
-            .message(),
-        "no pending spawn proposal-1: it has landed or been discarded"
-    );
-}
-
-#[test]
-fn holding_or_discarding_a_pending_spawn_frees_the_run_room_it_reserved() {
-    type Act = fn(&mut crate::session::Session, &str) -> Result<(), crate::error::EngineError>;
-    let acts: [(&str, Act); 2] = [
-        ("hold", crate::spawns::hold_pending_spawn),
-        ("discard", crate::spawns::discard_pending_spawn),
-    ];
-    for (name, act) in acts {
-        let dir = tempfile::tempdir().unwrap();
-        let mut session = session_in(dir.path(), json!({ "perRun": 1 }));
-        let (reserving, _) = propose(&mut session, "Reserves");
-        let (pending, held) = propose(&mut session, "Over the cap");
-        assert!(pending.is_empty(), "{name}: the room is reserved");
-        assert_eq!(held[0].reason, HeldSpawnReason::PerRun, "{name}");
-
-        act(&mut session, &reserving[0].id).unwrap();
-
-        let (pending, held) = propose(&mut session, "Fits now");
-        assert_eq!(pending.len(), 1, "{name}: the room is free again");
-        assert!(held.is_empty(), "{name}");
-    }
 }
 
 #[test]

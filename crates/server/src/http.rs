@@ -336,18 +336,6 @@ async fn fetch(server: Server, request: Request) -> Response {
                 routes::spawn_request(&server, RequestKind::SpawnsHeldDiscard, body).await,
             );
         }
-        ("/api/spawns/pending/hold", _) if post => {
-            let body = read_body(body).await;
-            return http_of(
-                routes::spawn_request(&server, RequestKind::SpawnsPendingHold, body).await,
-            );
-        }
-        ("/api/spawns/pending/discard", _) if post => {
-            let body = read_body(body).await;
-            return http_of(
-                routes::spawn_request(&server, RequestKind::SpawnsPendingDiscard, body).await,
-            );
-        }
         _ => {}
     }
 

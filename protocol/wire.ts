@@ -58,13 +58,13 @@ export type TicketEventKind =
    * Proposals held for the operator rather than landed (ADR-0029, issue
    * #150): each one's proposal id, title and reason, a cap that had no room
    * (`per-attempt`, `per-run`), the agent's own `overlaps` mark (with the
-   * ids it named) or the operator's Hold (`operator`); `recovered` when
-   * boot held proposals a pre-ADR cap had truncated.
+   * ids it named); `recovered` when boot held proposals a pre-ADR cap had
+   * truncated. An older pool's operator Hold reads as `operator`.
    */
   | "spawn-held"
   /**
-   * A Held or Pending spawn the operator discarded (ADR-0029, issue #150),
-   * by id and title, `pending` when it had not yet been held.
+   * A Held spawn the operator discarded (ADR-0029, issue #150), by id and
+   * title. An older pool's Discard of a Pending spawn carries `pending`.
    */
   | "spawn-discarded"
   | "reassigned"
@@ -553,9 +553,9 @@ export interface HeldPaneRecord {
 /**
  * Why a proposal is held: which cap had no room (the attempt's, or a
  * spawn.json's, own; or the run's), the proposing agent's own `overlaps`
- * mark (the ids ride on the proposal), the operator's Hold of a Pending
- * spawn, or a Pending spawn a Tick refused to land because the pool
- * moved after it was taken (the reason rides as `adoptError`).
+ * mark (the ids ride on the proposal), a Pending spawn a Tick refused to
+ * land because the pool moved after it was taken (the reason rides as
+ * `adoptError`), or an older pool's operator Hold of a Pending spawn.
  */
 export type HeldSpawnReason =
   | "per-attempt"
@@ -570,9 +570,9 @@ export type HeldSpawnReason =
   | "line";
 
 /**
- * One Pending spawn as the Console shows it: a proposal within the caps that
- * lands at the next Tick unless the operator Holds or
- * Discards it first.
+ * One Pending spawn as the Console shows it: a proposal within the caps
+ * that lands at the next Tick. A Tick lands it as soon as its Attempt
+ * exits, so it is seen across a restart or while a stopping drive waits.
  */
 export interface PendingSpawnView {
   id: string;
@@ -1180,7 +1180,7 @@ export interface EnrichedSnapshot {
   /**
    * The Pending spawns (issue #150), oldest first, from the engine's
    * snapshot verbatim: proposals within the caps that land at the next
-   * Tick unless the operator Holds or Discards them first.
+   * Tick.
    */
   pendingSpawns: PendingSpawnView[];
   /**
@@ -1369,26 +1369,6 @@ export interface HeldSpawnRequest {
 
 /** The Held spawn an Adopt or Discard acted on. */
 export interface HeldSpawnResponse {
-  id: string;
-}
-
-// ---------------------------------------------------------------------------
-// Pending spawns (POST /api/spawns/pending/hold, /api/spawns/pending/discard)
-// ---------------------------------------------------------------------------
-
-/**
- * Hold or Discard one Pending spawn before a Tick lands it (issue
- * #150), by its id. Hold answers 200 once it is a Held spawn (held by the
- * operator, same id); Discard answers 200 once it is gone. One that has
- * already landed, or is not pending, is refused with the 409 `reason`
- * envelope.
- */
-export interface PendingSpawnRequest {
-  id: string;
-}
-
-/** The Pending spawn a Hold or Discard acted on. */
-export interface PendingSpawnResponse {
   id: string;
 }
 

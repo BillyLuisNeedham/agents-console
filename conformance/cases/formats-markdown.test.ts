@@ -28,7 +28,7 @@ function provenance(parent: string): string {
   return (
     `**Spawned by** ticket ${parent} (ADR-0010): the engine wrote this ticket at a Tick from the ` +
     "attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it " +
-    "schedules, verifies, and may itself spawn, and the operator can edit or kill it before it schedules."
+    "schedules, verifies, and may itself spawn."
   );
 }
 

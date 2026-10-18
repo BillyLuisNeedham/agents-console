@@ -220,18 +220,6 @@ impl Engine {
             .await?
     }
 
-    /// `holdPendingSpawn` (issue #150).
-    pub async fn hold_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        self.call(move |s| crate::spawns::hold_pending_spawn(s, &id))
-            .await?
-    }
-
-    /// `discardPendingSpawn` (issue #150).
-    pub async fn discard_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        self.call(move |s| crate::spawns::discard_pending_spawn(s, &id))
-            .await?
-    }
-
     /// `steward.check`: refuses unless `conversation` is the live Steward.
     pub async fn steward_check(&self, conversation: String) -> Result<(), EngineError> {
         self.call(move |s| crate::steward_actions::check_steward(s, &conversation))

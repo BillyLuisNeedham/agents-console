@@ -562,10 +562,6 @@ requests! {
         HeldSpawnRequest => HeldSpawnResponse;
     SpawnsHeldDiscard = "spawns.held.discard", "POST /api/spawns/held/discard", true,
         HeldSpawnRequest => HeldSpawnResponse;
-    SpawnsPendingHold = "spawns.pending.hold", "POST /api/spawns/pending/hold", true,
-        PendingSpawnRequest => PendingSpawnResponse;
-    SpawnsPendingDiscard = "spawns.pending.discard", "POST /api/spawns/pending/discard", true,
-        PendingSpawnRequest => PendingSpawnResponse;
     ConversationsStart = "conversations.start", "POST /api/conversations", true,
         StartConversationRequest => ConversationStarted;
     ConversationsEnd = "conversations.end", "POST /api/conversations/end", true,

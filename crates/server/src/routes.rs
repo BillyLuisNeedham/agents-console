@@ -654,7 +654,7 @@ pub async fn close_finished_request(server: &Server) -> Answer {
     }
 }
 
-/// Adopt or Discard a Held spawn (issue #149, ADR-0029), or Hold or Discard a Pending one (issue #150).
+/// Adopt or Discard a Held spawn (issue #149, ADR-0029).
 pub async fn spawn_request(server: &Server, kind: RequestKind, body: Body) -> Answer {
     let Ok(body) = body else {
         return Answer::refused(400, Field::Reason, "invalid JSON body");
@@ -668,9 +668,7 @@ pub async fn spawn_request(server: &Server, kind: RequestKind, body: Body) -> An
     };
     let (done, status) = match kind {
         RequestKind::SpawnsHeldAdopt => (engine.adopt_held_spawn(id.clone()).await, 202),
-        RequestKind::SpawnsHeldDiscard => (engine.discard_held_spawn(id.clone()).await, 200),
-        RequestKind::SpawnsPendingHold => (engine.hold_pending_spawn(id.clone()).await, 200),
-        _ => (engine.discard_pending_spawn(id.clone()).await, 200),
+        _ => (engine.discard_held_spawn(id.clone()).await, 200),
     };
     match done {
         Ok(()) => Answer::ok(status, &json!({ "id": id })),
@@ -952,10 +950,9 @@ pub async fn socket_request(
         RequestKind::TerminalsCloseFinished => close_finished_request(server).await,
         RequestKind::Enlist => enlist_request(server, body()).await,
         RequestKind::Reassign => reassign_request(server, body()).await.without_snapshot(),
-        RequestKind::SpawnsHeldAdopt
-        | RequestKind::SpawnsHeldDiscard
-        | RequestKind::SpawnsPendingHold
-        | RequestKind::SpawnsPendingDiscard => spawn_request(server, kind, body()).await,
+        RequestKind::SpawnsHeldAdopt | RequestKind::SpawnsHeldDiscard => {
+            spawn_request(server, kind, body()).await
+        }
         RequestKind::ConversationsStart => start_conversation_request(server, body()).await,
         RequestKind::ConversationsEnd => end_conversation_request(server, body())
             .await

@@ -34,8 +34,6 @@ import type {
   MergeQueueEntry,
   Outcome,
   PanesResponse,
-  PendingSpawnRequest,
-  PendingSpawnResponse,
   PendingSpawnView,
   PoolSettingsRequest,
   QueuedAnswer,
@@ -303,8 +301,6 @@ export interface Requests {
   };
   "spawns.held.adopt": { payload: HeldSpawnRequest; result: HeldSpawnResponse };
   "spawns.held.discard": { payload: HeldSpawnRequest; result: HeldSpawnResponse };
-  "spawns.pending.hold": { payload: PendingSpawnRequest; result: PendingSpawnResponse };
-  "spawns.pending.discard": { payload: PendingSpawnRequest; result: PendingSpawnResponse };
   "conversations.start": { payload: StartConversationRequest; result: { conversation: ConversationView } };
   "conversations.end": { payload: EndConversationRequest; result: Empty };
   "settings.get": { payload: Empty; result: SettingsResponse };
@@ -329,8 +325,6 @@ export type RequestKind =
   | "reassign"
   | "spawns.held.adopt"
   | "spawns.held.discard"
-  | "spawns.pending.hold"
-  | "spawns.pending.discard"
   | "conversations.start"
   | "conversations.end"
   | "settings.get"
@@ -362,8 +356,6 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   reassign: "PUT /api/reassign",
   "spawns.held.adopt": "POST /api/spawns/held/adopt",
   "spawns.held.discard": "POST /api/spawns/held/discard",
-  "spawns.pending.hold": "POST /api/spawns/pending/hold",
-  "spawns.pending.discard": "POST /api/spawns/pending/discard",
   "conversations.start": "POST /api/conversations",
   "conversations.end": "POST /api/conversations/end",
   "settings.get": "GET /api/settings",
@@ -392,8 +384,6 @@ export const ACTION_KINDS: ReadonlySet<RequestKind> = new Set<RequestKind>([
   "reassign",
   "spawns.held.adopt",
   "spawns.held.discard",
-  "spawns.pending.hold",
-  "spawns.pending.discard",
   "conversations.start",
   "conversations.end",
   "settings.pool.put",

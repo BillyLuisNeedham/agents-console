@@ -65,8 +65,6 @@ conformance("http", "request bodies › answers a body that is not JSON in each 
     ["POST", "/api/keep-talking", 400, invalid],
     ["POST", "/api/spawns/held/adopt", 400, invalid],
     ["POST", "/api/spawns/held/discard", 400, invalid],
-    ["POST", "/api/spawns/pending/hold", 400, invalid],
-    ["POST", "/api/spawns/pending/discard", 400, invalid],
   ];
   for (const [method, path, status, body] of routes) {
     expect([method, path, await send(server, method, path, "not json")]).toEqual([method, path, { status, body }]);
