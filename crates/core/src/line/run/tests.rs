@@ -1474,6 +1474,34 @@ fn without_a_merger_each_settled_copy_hands_on_alone() {
 }
 
 #[test]
+fn every_copy_that_hands_on_alone_reaches_one_finish_hold() {
+    let (mut run, mut pool) = work_run(fan_out(json!(3), false));
+    tick(&mut run, &mut pool);
+    pool.agent_with_items("tasks-1", &["a", "b", "c"]);
+    tick(&mut run, &mut pool);
+    for copy in ["build-1.1", "build-1.2", "build-1.3"] {
+        pool.agent(copy);
+    }
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-1"]);
+    pool.agent("after-1");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-2"]);
+    pool.agent("after-2");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-3"]);
+    pool.agent("after-3");
+    let ended = tick(&mut run, &mut pool);
+    assert_eq!(
+        written(&ended),
+        ["finish-1"],
+        "the handoffs that came after the first are not left in the Finish's inbox"
+    );
+    let brief = &hold(&ended, "finish-1").brief;
+    assert!(
+        brief.contains("`after-1`") && brief.contains("`after-2`") && brief.contains("`after-3`"),
+        "{brief}"
+    );
+}
+
+#[test]
 fn items_from_a_node_that_does_not_make_them_are_ignored() {
     let quiet = plan(
         json!([

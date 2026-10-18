@@ -1301,9 +1301,25 @@ impl LineRun {
                     self.start_or_queue(node, handoff);
                 }
             }
-            NodeBody::Ticket(_) | NodeBody::Conversation(_) | NodeBody::Finish(_) => {
+            NodeBody::Finish(_) => self.reach_finish(node, handoff),
+            NodeBody::Ticket(_) | NodeBody::Conversation(_) => {
                 self.start_or_queue(node, handoff);
             }
+        }
+    }
+
+    /// Every handoff that arrives before the Finish hold is written is the same Finish pass's input:
+    /// the hold waits for all of them, so one left in the inbox would hold it back for good.
+    fn reach_finish(&mut self, node: &NodeId, handoff: Handoff) {
+        if let Some(Pass {
+            input,
+            work: PassWork::Finish { hold: None },
+            ..
+        }) = self.node_mut(node).current.as_mut()
+        {
+            *input = input.clone().join(handoff);
+        } else {
+            self.start_or_queue(node, handoff);
         }
     }
 

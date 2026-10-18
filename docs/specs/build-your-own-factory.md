@@ -104,7 +104,7 @@ The engine never records the brief at End. It reads it from the Conversation's b
 
 ### The Finish
 
-When a handoff reaches the Finish, the Line is `Finishing` and the graph names what it waits for: live copies, queued items, inbox handoffs, gate and loop holds, open Conversation passes, any non-Line Ticket not Done or Closed, any done Ticket not merged, any Held or Pending spawn, any pending Interrupt. The Finish hold `finish-<n>` is written the first time that list is empty. It is the operator's: the Steward is never told of it and is refused on it.
+When a handoff reaches the Finish, the Line is `Finishing` and the graph names what it waits for: live copies, queued items, inbox handoffs, gate and loop holds, open Conversation passes, any non-Line Ticket not Done or Closed, any done Ticket not merged, any Held or Pending spawn, any pending Interrupt. The Finish hold `finish-<n>` is written the first time that list is empty, and every handoff that reaches the Finish before then joins that one Finish pass, so copies with no Merger still end in one hold. It is the operator's: the Steward is never told of it and is refused on it.
 
 An answer on it is checked when accepted and again when it drains. Approval while anything blocks is refused with the list. Resume with notes is refused if the Finish has no `revise` edge, and otherwise hands the notes on along it. Close ends the Line Closed.
 
