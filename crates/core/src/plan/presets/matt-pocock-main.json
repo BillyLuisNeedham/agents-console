@@ -3,7 +3,7 @@
   "name": "Matt Pocock · Main",
   "author": "Matt Pocock",
   "source": "skills/engineering/ask-matt/SKILL.md",
-  "note": "You approve the seams and the ticket breakdown, implement-spec builds the ready tickets in parallel into one integration branch, then one code-review and a single fixer with no re-review loop. Not expressible here: grill, spec and tickets share one context window while prototype is a detour you /handoff out to in a fresh session and back from, the draft PR opens inside implement-spec, and retro prefers the session it looks back on.",
+  "note": "You approve the seams and the ticket breakdown, implement-spec builds the ready tickets in parallel into one integration branch, then one code-review and a single fixer with no re-review loop. Not expressible here: grill, spec and tickets share one context window while prototype is a detour you /handoff out to in a fresh session and back from, the draft PR opens inside implement-spec, and retro prefers the session it looks back on. Its implementers step starts one harness per item with no cap, so set the pool's maxLive for a long list.",
   "nodes": [
     {"kind":"conversation","id":"grill-with-docs","title":"Grill with docs","x":40,"y":60,"skill":"grill-with-docs","assign":{"harness":"claude","model":"opus","effort":"high"}},
     {"kind":"agent","id":"prototype","title":"Prototype","x":340,"y":60,"skill":"prototype","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},

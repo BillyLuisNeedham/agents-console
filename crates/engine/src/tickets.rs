@@ -357,19 +357,26 @@ fn exited_status(valid: &ValidOutcome) -> TicketStatus {
     }
 }
 
-// Malformed spawn entries were dropped per proposal at validation (ADR-0010); each reason lands on the
-// ticket's log at the exit that produced it, ahead of the exited event.
-fn spawn_rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Map<String, Value>)> {
-    valid
+// Malformed spawn and item entries were dropped per entry at validation (ADR-0010); each reason lands
+// on the ticket's log at the exit that produced it, ahead of the exited event.
+pub(crate) fn rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Map<String, Value>)> {
+    let spawns = valid
         .spawn_rejections
         .iter()
-        .map(|rejection| {
+        .map(|rejection| (TicketEventKind::SpawnRejected, rejection));
+    let items = valid
+        .item_rejections
+        .iter()
+        .map(|rejection| (TicketEventKind::ItemRejected, rejection));
+    spawns
+        .chain(items)
+        .map(|(kind, rejection)| {
             let mut payload = Map::new();
             payload.insert("reason".into(), Value::String(rejection.reason.clone()));
             if let Some(index) = rejection.index {
                 payload.insert("index".into(), Value::from(index));
             }
-            (TicketEventKind::SpawnRejected, payload)
+            (kind, payload)
         })
         .collect()
 }
@@ -459,7 +466,7 @@ pub async fn run_ticket(
             crash_subject: CrashSubject::Harness,
             events: AttemptEvents::Full {
                 exited_status,
-                result_events: Some(spawn_rejection_events),
+                result_events: Some(rejection_events),
             },
         },
         move |parsed: &Value| {
@@ -573,6 +580,36 @@ mod tests {
                 outcome_exists: true,
             }),
             "crash: no outcome written\n/l\n\noutcome file: /o (exists)\n"
+        );
+    }
+
+    #[test]
+    fn a_dropped_spawn_and_a_dropped_item_each_log_their_own_event_before_the_exit() {
+        let valid = ac_core::outcome::validate_outcome(&serde_json::json!({
+            "status": "done", "summary": "s",
+            "spawn": ["x"], "items": ["y", {"title": "ok", "body": ""}, 3]
+        }))
+        .unwrap();
+        let logged: Vec<_> = rejection_events(&valid)
+            .into_iter()
+            .map(|(kind, payload)| (kind, Value::Object(payload)))
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                (
+                    TicketEventKind::SpawnRejected,
+                    serde_json::json!({"reason": "spawn entry is not an object", "index": 0})
+                ),
+                (
+                    TicketEventKind::ItemRejected,
+                    serde_json::json!({"reason": "item is not an object", "index": 0})
+                ),
+                (
+                    TicketEventKind::ItemRejected,
+                    serde_json::json!({"reason": "item is not an object", "index": 2})
+                ),
+            ]
         );
     }
 }

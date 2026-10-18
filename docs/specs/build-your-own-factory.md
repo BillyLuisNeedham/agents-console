@@ -104,7 +104,7 @@ The engine never records the brief at End. It reads it from the Conversation's b
 
 ### The Finish
 
-When a handoff reaches the Finish, the Line is `Finishing` and the graph names what it waits for: live copies, queued items, inbox handoffs, gate and loop holds, open Conversation passes, any non-Line Ticket not Done or Closed, any done Ticket not merged, any Held or Pending spawn, any pending Interrupt. The Finish hold `finish-<n>` is written the first time that list is empty. It is the operator's: the Steward is never told of it and is refused on it.
+When a handoff reaches the Finish, the Line is `Finishing` and the graph names what it waits for: live copies, queued items, inbox handoffs, gate and loop holds, open Conversation passes, any non-Line Ticket not Done or Closed, any done Ticket not merged, any Held or Pending spawn, any pending Interrupt. The Finish hold `finish-<n>` is written the first time that list is empty, and every handoff that reaches the Finish before then joins that one Finish pass, so copies with no Merger still end in one hold. It is the operator's: the Steward is never told of it and is refused on it.
 
 An answer on it is checked when accepted and again when it drains. Approval while anything blocks is refused with the list. Resume with notes is refused if the Finish has no `revise` edge, and otherwise hands the notes on along it. Close ends the Line Closed.
 
@@ -242,7 +242,7 @@ Each slice lands green on the full suite with its conformance cases and unit tes
 
 - **Rolling everywhere.** A plain pool whose Tickets leaned on a fully merged main without declaring `blocked-by` now starts them before unrelated work merges. The fix is declaring blockers. Slice 1 should check the operator's live pools first.
 - **Cost under `all`.** With `maxLive` unlimited by default, a per-item `all` node on 30 items starts 30 harnesses. Presets using `all` should say so in their note.
-- **Dots in Ticket ids.** `build-2.3` needs the id parser, branch names and `worktree_path_for` to accept a dot. Slice 6 checks first; the fallback is `build-2-3`.
+- **Dots in Ticket ids.** Checked in slice 6: a dot passes the marker parser, `blocked-by`, branch names (`git check-ref-format` accepts `pool/<key>/build-1.3`), `worktree_path_for` and the run-file names, so Copy ids keep it and the `build-2-3` fallback is not needed. One consequence: markers launch in file-name order, so under a cap of 10 or more `build-1.10` launches before `build-1.2`.
 - **Engine-chosen Conversation ids.** A Conversation node pass needs the id `grill-1`, and today the engine mints Conversation ids from its own counter. Slice 5 must let the Line name them without collisions.
 - **Factory-today divergences.** The three behaviour changes in Done means item 1 are deliberate. If Finish notes must leave Decide's extra-Round count alone, `finish.revise` needs a way to exempt it from the reset, and nothing here offers one.
 - **The act's idempotence is taught.** The engine cannot stop an agent opening a second PR; the url check at exit catches a missing result, not a duplicate.

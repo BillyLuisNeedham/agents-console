@@ -14,8 +14,8 @@ use ac_protocol::Outcome;
 use indexmap::IndexMap;
 
 use crate::plan::{
-    Assign, Cap, CheckpointPolicy, Conflict, Copies, EdgeKey, FinishAct, FinishNode, Join,
-    NodeBody, NodeId, Opener, Plan, PlanEdit, TicketKind, Verdict, WhenSpent,
+    Assign, Cap, CheckpointPolicy, Copies, EdgeKey, FinishAct, FinishNode, Join, NodeBody, NodeId,
+    Opener, Plan, PlanEdit, TicketKind, Verdict, WhenSpent,
 };
 use ac_protocol::wire::PlanProblem;
 
@@ -423,7 +423,6 @@ pub struct NewTicket {
     pub skill: Option<String>,
     pub check: OutcomeCheck,
     pub checkpoint: CheckpointPolicy,
-    pub conflict: Option<Conflict>,
 }
 
 /// The check the attempt's exit applies to a Line Ticket's done Outcome.
@@ -520,24 +519,6 @@ impl LineRun {
         Ok(run)
     }
 
-    /// What a Plan holds that this build cannot run yet: per-item copies and Mergers. Line start
-    /// refuses a Plan with any.
-    pub fn unsupported(plan: &Plan) -> Vec<String> {
-        plan.nodes()
-            .filter_map(|node| match &node.body {
-                NodeBody::Ticket(t) if matches!(t.copies, Copies::PerItem { .. }) => Some(format!(
-                    "node {} makes one copy per item, which this build cannot run yet",
-                    node.id
-                )),
-                NodeBody::Merger(_) => Some(format!(
-                    "node {} is a Merger, which this build cannot run yet",
-                    node.id
-                )),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// Facts not yet absorbed, in Plan-node order then copy order. Never mutates.
     pub fn observe(&self, facts: &dyn LineFacts) -> Vec<LineEvent> {
         let mut events = Vec::new();
@@ -554,6 +535,8 @@ impl LineRun {
             };
             match &pass.work {
                 PassWork::Tickets { copies, .. } => {
+                    // A node that was not taught the field never fans anything out.
+                    let makes_items = matches!(&node.body, NodeBody::Ticket(t) if t.makes_items);
                     for copy in copies {
                         let fact = facts.ticket(&copy.ticket);
                         let ended = matches!(fact, TicketFact::Done { .. } | TicketFact::Closed);
@@ -571,7 +554,9 @@ impl LineRun {
                                 verdict,
                                 items,
                                 merged: true,
-                            } => Some((verdict, true, items)),
+                            } => {
+                                Some((verdict, true, if makes_items { items } else { Vec::new() }))
+                            }
                             TicketFact::Closed => Some((Verdict::Closed, false, Vec::new())),
                             _ => None,
                         };
@@ -1164,6 +1149,11 @@ impl LineRun {
                     .find(|v| *v != ok)
                     .unwrap_or(ok)
             };
+            let closed: Vec<String> = settled
+                .iter()
+                .filter(|(_, s)| s.verdict == Verdict::Closed)
+                .map(|(t, _)| format!("{t} was closed"))
+                .collect();
             let handoff = Handoff {
                 from: Some(node.clone()),
                 verdict,
@@ -1174,7 +1164,11 @@ impl LineRun {
                     .map(|(t, _)| (*t).clone())
                     .collect(),
                 notes: None,
-                halted: pass.input.halted.clone(),
+                halted: if closed.is_empty() {
+                    pass.input.halted.clone()
+                } else {
+                    Some(closed.join("; "))
+                },
             };
             self.emit(node, handoff);
         }
@@ -1307,9 +1301,25 @@ impl LineRun {
                     self.start_or_queue(node, handoff);
                 }
             }
-            NodeBody::Ticket(_) | NodeBody::Conversation(_) | NodeBody::Finish(_) => {
+            NodeBody::Finish(_) => self.reach_finish(node, handoff),
+            NodeBody::Ticket(_) | NodeBody::Conversation(_) => {
                 self.start_or_queue(node, handoff);
             }
+        }
+    }
+
+    /// Every handoff that arrives before the Finish hold is written is the same Finish pass's input:
+    /// the hold waits for all of them, so one left in the inbox would hold it back for good.
+    fn reach_finish(&mut self, node: &NodeId, handoff: Handoff) {
+        if let Some(Pass {
+            input,
+            work: PassWork::Finish { hold: None },
+            ..
+        }) = self.node_mut(node).current.as_mut()
+        {
+            *input = input.clone().join(handoff);
+        } else {
+            self.start_or_queue(node, handoff);
         }
     }
 

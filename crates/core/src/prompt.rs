@@ -650,6 +650,7 @@ mod tests {
             commit_sha: None,
             brief: None,
             spawn: None,
+            items: None,
             verdict: None,
         };
         let upstream = [Upstream {

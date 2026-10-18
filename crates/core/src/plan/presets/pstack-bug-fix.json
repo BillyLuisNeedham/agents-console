@@ -3,7 +3,7 @@
   "name": "Pstack · Bug fix",
   "author": "Pstack (Lauren Tan)",
   "source": "skills/pstack/pstack-poteto-mode/playbooks/bug-fix.md",
-  "note": "Reproduce on the matching surface first, binary-search the cause with one investigator per evidence source (the hunt runs under Cursor /loop with no stated limit, so verify loops back at most 2), architect only if the fix crosses a function boundary, and land the failing repro before the fix unless the test would be expensive. deslop and control-ui come from cursor-team-kit.",
+  "note": "Reproduce on the matching surface first, binary-search the cause with one investigator per evidence source (the hunt runs under Cursor /loop with no stated limit, so verify loops back at most 2), architect only if the fix crosses a function boundary, and land the failing repro before the fix unless the test would be expensive. deslop and control-ui come from cursor-team-kit. Its why step starts one harness per item with no cap, so set the pool's maxLive for a long list.",
   "nodes": [
     {"kind":"agent","id":"reproduce","title":"Reproduce on the surface","x":40,"y":60,"skill":"control-ui","assign":{"harness":"cursor","model":"grok-4.7-xhigh-fast","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
     {"kind":"agent","id":"how","title":"How does it work?","x":340,"y":60,"skill":"pstack-how","assign":{"harness":"cursor","model":"claude-opus-5-5-xhigh","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},

@@ -61,6 +61,7 @@ impl Pool {
                 commit_sha: None,
                 brief: brief.map(str::to_owned),
                 spawn: None,
+                items: None,
                 verdict,
             },
         );
@@ -69,6 +70,34 @@ impl Pool {
 
     fn agent(&mut self, id: &str) {
         self.done(id, TicketKind::Agent, None, None);
+    }
+
+    /// A done agent Ticket whose Outcome carried these Items, titled as given with a body.
+    fn agent_with_items(&mut self, id: &str, titles: &[&str]) {
+        self.agent(id);
+        let Some(TicketFact::Done { items, .. }) = self.tickets.get_mut(id) else {
+            unreachable!("agent just made it done");
+        };
+        *items = titles
+            .iter()
+            .map(|title| Item {
+                title: (*title).to_owned(),
+                body: format!("build {title}"),
+            })
+            .collect();
+    }
+
+    /// Done on its branch, not yet merged into the Line's.
+    fn unmerged(&mut self, id: &str) {
+        self.agent(id);
+        let Some(TicketFact::Done { merged, .. }) = self.tickets.get_mut(id) else {
+            unreachable!("agent just made it done");
+        };
+        *merged = false;
+    }
+
+    fn checkpoint(&mut self, id: &str) {
+        self.tickets.insert(id.to_owned(), TicketFact::Live);
     }
 
     fn prove(&mut self, id: &str, pass: bool) {
@@ -1133,7 +1162,6 @@ fn a_handoff_to_a_live_conversation_pass_queues_the_next_pass() {
             {"from": "talk", "on": "done", "to": "finish"}
         ]),
     );
-    assert!(LineRun::unsupported(&talks).is_empty());
     let (mut run, mut pool) = work_run(talks);
     assert_eq!(written(&tick(&mut run, &mut pool)), ["left-1", "right-1"]);
     pool.agent("left-1");
@@ -1255,21 +1283,6 @@ fn verdicts_are_read_by_kind() {
 }
 
 #[test]
-fn line_start_names_what_this_build_cannot_run() {
-    assert!(LineRun::unsupported(&factory_today()).is_empty());
-    let addy = PRESETS.iter().find(|p| p.slug == "addy-commands").unwrap();
-    let problems = LineRun::unsupported(&Plan::parse(addy.json).unwrap());
-    assert!(
-        problems.iter().any(|p| p.contains("one copy per item")),
-        "{problems:?}"
-    );
-    assert!(
-        problems.iter().any(|p| p.contains("is a Merger")),
-        "{problems:?}"
-    );
-}
-
-#[test]
 fn a_copy_on_the_stewards_checkpoint_is_the_stewards() {
     let (run, _) = started("none");
     assert!(run.steward_may_answer(&id("implement-1")));
@@ -1302,4 +1315,241 @@ fn plan_edits_on_a_running_line_are_refused_for_now() {
         run.apply(edit(Editor::Operator, 0)),
         Err(Refusal::Live(_))
     ));
+}
+
+// -------------------------------------------------------------------------------------------------
+// Per-item copies and the Merger
+// -------------------------------------------------------------------------------------------------
+
+/// Tasks makes Items, Build runs one copy of each under `cap` and hands on to After, through a Merger
+/// when it has one.
+fn fan_out(cap: Value, merger: bool) -> Plan {
+    let mut nodes = vec![
+        json!({"kind": "agent", "id": "tasks", "makesItems": true}),
+        json!({"kind": "agent", "id": "build", "copies": {"perItem": cap}}),
+        json!({"kind": "agent", "id": "after"}),
+        json!({"kind": "finish", "id": "finish"}),
+    ];
+    let mut edges = vec![
+        json!({"from": "tasks", "on": "done", "to": "build"}),
+        json!({"from": "after", "on": "done", "to": "finish"}),
+    ];
+    if merger {
+        nodes.push(
+            json!({"kind": "merger", "id": "build-merge", "of": "build", "conflict": "wait"}),
+        );
+        edges.push(json!({"from": "build", "on": "done", "to": "build-merge"}));
+        edges.push(json!({"from": "build-merge", "on": "done", "to": "after"}));
+    } else {
+        edges.push(json!({"from": "build", "on": "done", "to": "after"}));
+    }
+    plan(json!(nodes), json!(edges))
+}
+
+/// Tasks has handed five Items to Build, whose first two copies are written.
+fn five_items(merger: bool) -> (LineRun, Pool) {
+    let (mut run, mut pool) = work_run(fan_out(json!(2), merger));
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["tasks-1"]);
+    pool.agent_with_items("tasks-1", &["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["build-1.1", "build-1.2"]
+    );
+    (run, pool)
+}
+
+#[test]
+fn a_per_item_node_runs_its_cap_of_copies_and_starts_the_next_as_one_ends() {
+    let (mut run, mut pool) = five_items(true);
+    let first = &pool.written["build-1.1"];
+    assert!(
+        first.contains("build a"),
+        "the copy carries its Item: {first}"
+    );
+    assert!(pool.written["build-1.2"].contains("build b"));
+
+    pool.agent("build-1.1");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["build-1.3"]);
+    assert_eq!(written(&tick(&mut run, &mut pool)), Vec::<String>::new());
+    pool.agent("build-1.2");
+    pool.agent("build-1.3");
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["build-1.4", "build-1.5"]
+    );
+
+    pool.agent("build-1.4");
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        Vec::<String>::new(),
+        "After waits for the fifth copy"
+    );
+}
+
+#[test]
+fn a_checkpointed_copy_keeps_its_slot() {
+    let (mut run, mut pool) = five_items(true);
+    pool.checkpoint("build-1.2");
+    assert_eq!(written(&tick(&mut run, &mut pool)), Vec::<String>::new());
+    pool.agent("build-1.1");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["build-1.3"]);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        Vec::<String>::new(),
+        "build-1.2 still holds its slot, so no copy past the cap"
+    );
+}
+
+#[test]
+fn with_a_merger_the_next_ticket_waits_for_every_copy_to_be_done_and_merged() {
+    let (mut run, mut pool) = five_items(true);
+    for copy in ["build-1.1", "build-1.2", "build-1.3", "build-1.4"] {
+        pool.agent(copy);
+        tick(&mut run, &mut pool);
+    }
+    pool.unmerged("build-1.5");
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        Vec::<String>::new(),
+        "done is not merged"
+    );
+    pool.agent("build-1.5");
+    let after = tick(&mut run, &mut pool);
+    assert_eq!(written(&after), ["after-1"]);
+    let blocked: Vec<_> = [
+        "build-1.1",
+        "build-1.2",
+        "build-1.3",
+        "build-1.4",
+        "build-1.5",
+    ]
+    .map(id)
+    .into();
+    assert_eq!(ticket(&after, "after-1").blocked_by, blocked);
+}
+
+#[test]
+fn a_closed_copy_ends_the_merged_pass_closed_and_names_the_copy() {
+    let (mut run, mut pool) = work_run(fan_out(json!(2), true));
+    tick(&mut run, &mut pool);
+    pool.agent_with_items("tasks-1", &["a", "b", "c"]);
+    tick(&mut run, &mut pool);
+    pool.close("build-1.1");
+    tick(&mut run, &mut pool);
+    pool.agent("build-1.2");
+    pool.agent("build-1.3");
+    let ended = tick(&mut run, &mut pool);
+    assert_eq!(written(&ended), ["finish-1"], "closed reaches the Finish");
+    let brief = &hold(&ended, "finish-1").brief;
+    assert!(brief.contains("build-1.1 was closed"), "{brief}");
+    assert!(
+        brief.contains("`build-1.2`, `build-1.3`") && !brief.contains("`build-1.1`"),
+        "the closed copy is absent from what the Finish waits after: {brief}"
+    );
+}
+
+#[test]
+fn without_a_merger_each_settled_copy_hands_on_alone() {
+    let (mut run, mut pool) = work_run(fan_out(json!(3), false));
+    tick(&mut run, &mut pool);
+    pool.agent_with_items("tasks-1", &["a", "b", "c"]);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["build-1.1", "build-1.2", "build-1.3"]
+    );
+    pool.agent("build-1.2");
+    let first = tick(&mut run, &mut pool);
+    assert_eq!(written(&first), ["after-1"]);
+    assert_eq!(ticket(&first, "after-1").blocked_by, [id("build-1.2")]);
+    pool.agent("build-1.3");
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        Vec::<String>::new(),
+        "After runs one pass at a time"
+    );
+    pool.agent("after-1");
+    let second = tick(&mut run, &mut pool);
+    assert_eq!(written(&second), ["after-2"]);
+    assert_eq!(ticket(&second, "after-2").blocked_by, [id("build-1.3")]);
+}
+
+#[test]
+fn every_copy_that_hands_on_alone_reaches_one_finish_hold() {
+    let (mut run, mut pool) = work_run(fan_out(json!(3), false));
+    tick(&mut run, &mut pool);
+    pool.agent_with_items("tasks-1", &["a", "b", "c"]);
+    tick(&mut run, &mut pool);
+    for copy in ["build-1.1", "build-1.2", "build-1.3"] {
+        pool.agent(copy);
+    }
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-1"]);
+    pool.agent("after-1");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-2"]);
+    pool.agent("after-2");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["after-3"]);
+    pool.agent("after-3");
+    let ended = tick(&mut run, &mut pool);
+    assert_eq!(
+        written(&ended),
+        ["finish-1"],
+        "the handoffs that came after the first are not left in the Finish's inbox"
+    );
+    let brief = &hold(&ended, "finish-1").brief;
+    assert!(
+        brief.contains("`after-1`") && brief.contains("`after-2`") && brief.contains("`after-3`"),
+        "{brief}"
+    );
+}
+
+#[test]
+fn items_from_a_node_that_does_not_make_them_are_ignored() {
+    let quiet = plan(
+        json!([
+            {"kind": "agent", "id": "tasks"},
+            {"kind": "agent", "id": "build", "copies": {"perItem": 2}},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "tasks", "on": "done", "to": "build"},
+            {"from": "build", "on": "done", "to": "finish"}
+        ]),
+    );
+    let (mut run, mut pool) = work_run(quiet);
+    tick(&mut run, &mut pool);
+    pool.agent_with_items("tasks-1", &["a", "b"]);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["build-1"],
+        "one plain copy, never one per item"
+    );
+}
+
+#[test]
+fn a_restart_mid_pass_writes_no_copy_twice_and_no_queued_item_early() {
+    let (run, mut pool) = five_items(true);
+    let mut run = LineRun::from_json(&run.to_json()).unwrap();
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        Vec::<String>::new(),
+        "the two live copies are not written again, the three queued not yet"
+    );
+    pool.agent("build-1.1");
+    let mut run = LineRun::from_json(&run.to_json()).unwrap();
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["build-1.3"]);
+}
+
+#[test]
+fn only_a_node_that_makes_items_is_taught_the_field() {
+    let (mut run, mut pool) = work_run(fan_out(json!(2), true));
+    let tasks = tick(&mut run, &mut pool);
+    let teaching = &ticket(&tasks, "tasks-1").body;
+    assert!(
+        teaching.contains("## Your items")
+            && teaching.contains(r#""items": [{"title": "...", "body": "..."}]"#)
+            && teaching.contains("Send at most 64 entries"),
+        "{teaching}"
+    );
+    pool.agent_with_items("tasks-1", &["a"]);
+    let build = tick(&mut run, &mut pool);
+    assert!(!ticket(&build, "build-1.1").body.contains("## Your items"));
 }

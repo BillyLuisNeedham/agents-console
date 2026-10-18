@@ -46,7 +46,7 @@ use crate::session::{PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::spawns::take_spawn_proposals;
 use crate::steward_actions::note_answered;
-use crate::tickets::CandidateEnding;
+use crate::tickets::{CandidateEnding, rejection_events};
 use crate::verify::{checkpoint_ticket_by_engine, grade_round, resolve_lone_attempt};
 
 /// One Continued attempt in flight.
@@ -713,17 +713,8 @@ fn end_continued_attempt(
     if let Ok(valid) = &read
         && decision.crash_reason.is_none()
     {
-        for rejection in &valid.spawn_rejections {
-            let mut payload = Map::new();
-            payload.insert("reason".into(), Value::String(rejection.reason.clone()));
-            if let Some(index) = rejection.index {
-                payload.insert("index".into(), Value::from(index));
-            }
-            append_event(
-                runs(session),
-                ticket_id,
-                &event_now(attempt, TicketEventKind::SpawnRejected, payload),
-            )?;
+        for (kind, payload) in rejection_events(valid) {
+            append_event(runs(session), ticket_id, &event_now(attempt, kind, payload))?;
         }
     }
 

@@ -13,13 +13,13 @@ use ac_core::conversation_record::ConversationRecord;
 use ac_core::events::{last_attempt, read_events};
 use ac_core::js;
 use ac_core::line::run::{
-    Blocker, ConversationFact, HoldAnswer, LineBrief, LineFacts, LinePlaces, LineRun, LineStart,
-    LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text, ticket_text,
-    verdict_of,
+    Blocker, ConversationFact, HoldAnswer, Item, LineBrief, LineFacts, LinePlaces, LineRun,
+    LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text,
+    ticket_text, verdict_of,
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
-use ac_core::plan::{NodeBody, Plan, SpawnPolicy};
+use ac_core::plan::{Conflict, MergerNode, NodeBody, Plan, SpawnPolicy};
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_io::git;
 use ac_protocol::{
@@ -93,6 +93,18 @@ impl<'a> SessionFacts<'a> {
             || !self.unlanded.contains(&marker.id)
     }
 
+    fn items(&self, marker: &TicketMarker) -> Vec<Item> {
+        let outcome = self.session.state.outcomes.get(&marker.id);
+        let items = outcome.and_then(|o| o.items.as_deref()).unwrap_or_default();
+        items
+            .iter()
+            .map(|item| Item {
+                title: item.title.clone(),
+                body: item.body.clone(),
+            })
+            .collect()
+    }
+
     fn verdict(&self, marker: &TicketMarker) -> Option<ac_core::plan::Verdict> {
         let kind = match marker.node.as_deref().and_then(|n| node_body(self.plan, n)) {
             Some(NodeBody::Ticket(t)) => Some(t.kind),
@@ -122,7 +134,7 @@ impl LineFacts for SessionFacts<'_> {
             TicketStatus::Done => match self.verdict(marker) {
                 Some(verdict) => TicketFact::Done {
                     verdict,
-                    items: Vec::new(),
+                    items: self.items(marker),
                     merged: self.merged(marker),
                 },
                 None => TicketFact::Live,
@@ -486,8 +498,8 @@ pub enum Begin {
 }
 
 /// `POST /api/line {plan, work | brief}`, sent once by Boot: the engine parses the Plan again (its
-/// boundary is the one that counts), refuses what this build cannot run and harness names the
-/// machine lacks, freezes it in `line.json` and wakes. No Ticket is written here: the first tick
+/// boundary is the one that counts), refuses harness names the machine lacks (a node's or a
+/// Merger's resolver), freezes it in `line.json` and wakes. No Ticket is written here: the first tick
 /// projects them.
 pub fn begin_line(
     session: &mut Session,
@@ -506,13 +518,6 @@ pub fn begin_line(
             problems.join("; ")
         ))
     })?;
-    let unsupported = LineRun::unsupported(&plan);
-    if !unsupported.is_empty() {
-        return Err(EngineError::refused(format!(
-            "the Line cannot begin: {}",
-            unsupported.join("; ")
-        )));
-    }
     if let Some(problem) = unknown_harness(session, &plan) {
         return Err(EngineError::refused(format!(
             "the Line cannot begin: {problem}"
@@ -563,6 +568,10 @@ fn unknown_harness(session: &Session, plan: &Plan) -> Option<String> {
             NodeBody::Conversation(c) => &c.assign,
             NodeBody::Ticket(t) => &t.assign,
             NodeBody::Finish(f) => &f.assign,
+            NodeBody::Merger(MergerNode {
+                conflict: Conflict::Resolver(assign),
+                ..
+            }) => assign,
             NodeBody::Merger(_) | NodeBody::Gate(_) => return None,
         };
         let harness = assign.harness.as_deref()?;
@@ -684,6 +693,31 @@ mod tests {
         session.markers =
             load_pool_tickets(std::path::Path::new(&session.pool_dir), false).unwrap();
         session.state.tickets.insert(id.to_owned(), status);
+    }
+
+    #[test]
+    fn a_mergers_resolver_harness_is_checked_at_line_start_like_a_nodes() {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let session = crate::testkit::bare_session(publisher);
+        let plan = |harness: &str| {
+            Plan::from_value(&json!({"horde": 1, "name": "p", "nodes": [
+                {"kind": "agent", "id": "build", "title": "B", "x": 0, "y": 0,
+                 "copies": {"perItem": 2}},
+                {"kind": "merger", "id": "m", "title": "M", "x": 0, "y": 0, "of": "build",
+                 "conflict": {"resolver": {"harness": harness}}},
+                {"kind": "finish", "id": "finish", "title": "F", "x": 0, "y": 0}
+            ], "edges": [
+                {"from": "build", "on": "done", "to": "m"},
+                {"from": "m", "on": "done", "to": "finish"}
+            ]}))
+            .unwrap()
+        };
+        assert_eq!(super::unknown_harness(&session, &plan("claude")), None);
+        let problem = super::unknown_harness(&session, &plan("nonesuch")).unwrap();
+        assert!(
+            problem.starts_with("node m names unknown harness 'nonesuch'"),
+            "{problem}"
+        );
     }
 
     #[test]

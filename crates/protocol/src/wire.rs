@@ -55,6 +55,10 @@ wire_enum! {
         ReviewReject = "review-reject",
         SpawnAdopted = "spawn-adopted",
         SpawnRejected = "spawn-rejected",
+        /// An Outcome `items` entry dropped for being outside the bounds, by reason
+        /// and index (no index when the key itself was malformed). The attempt
+        /// still ends as its Outcome says.
+        ItemRejected = "item-rejected",
         /// Proposals within the caps, taken from the attempt and waiting for the
         /// next Tick to land (issue #150): each one's proposal id and title.
         SpawnPending = "spawn-pending",
@@ -347,6 +351,11 @@ wire_struct! {
         /// well-formed proposals riding to a Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn: Option<Vec<SpawnProposal>>,
+        /// The pieces of work a Line node taught to make Items hands on, one Copy
+        /// each downstream. Absent, present and empty, and populated mean what
+        /// they do for `spawn`; entries outside the bounds were dropped.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub items: Option<Vec<LineItem>>,
         /// A Line Ticket's typed verdict (ADR-0037, ADR-0039), kept as the agent
         /// wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
         /// choice, or the Finish Ticket's PR url. Absent when the Outcome carried none.

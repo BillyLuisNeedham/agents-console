@@ -3,7 +3,8 @@
  * but line.json, and the first tick re-reads every fact from the pool and writes only what is
  * missing, under the same ids and the same bytes. A done Ticket whose merge has not landed hands
  * nothing on until it does; a deleted hold the Line still names is written again as it was; and
- * the Finish Ticket owed by an approval is written once.
+ * the Finish Ticket owed by an approval is written once. A stop with copies of a per-item node live
+ * and Items still queued writes no copy twice and no queued Item early.
  */
 
 import { expect } from "bun:test";
@@ -12,7 +13,8 @@ import { join } from "node:path";
 import type { EnrichedSnapshot, LineFile } from "../../protocol/wire.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
 import { answer, settle, snapshot, statuses } from "../harness/pool-run.ts";
-import { PASS, approveFinish, atCheckpoint, begun, launches, lineWorld, passPath, verdict } from "./line-support.ts";
+import { copiesPlan, copyIds, makingItems, pieces, untilLaunched } from "./line-copies-support.ts";
+import { PASS, approveFinish, atCheckpoint, begun, launches, lineOf, lineWorld, passPath, verdict } from "./line-support.ts";
 import { poolLog, restartCase, startLeg, untilState } from "./restart-support.ts";
 
 const issuePath = (pool: string, id: string): string => join(pool, "issues", `${id}.md`);
@@ -101,4 +103,43 @@ restartCase("a stop after the Finish is approved and before finish-1-act ends wr
   expect(statuses(done)["finish-1-act"]).toBe("done");
   expect(readFileSync(issuePath(world.pool, "finish-1-act"), "utf8").split("\n").slice(1).join("\n")).toStartWith(bytes);
   expect(wrote(await poolLog(second), "finish-1-act")).toBe(1);
+});
+
+/** Every id the pool log says the Line wrote, in order: a line names several as `line: wrote a, b`. */
+const wroteIds = (log: string[]): string[] =>
+  log.filter((l) => l.startsWith("line: wrote ")).flatMap((l) => l.slice("line: wrote ".length).split(", "));
+
+restartCase("a stop with two copies live and three queued writes no copy twice and no queued item early, and the pass completes", async (t) => {
+  const world = lineWorld(t, null);
+  world.stubs.script("tasks-1", makingItems(pieces(5)));
+  const holds = [world.stubs.hold("build-1.1"), world.stubs.hold("build-1.2")];
+  const first = await startLeg(t, world, 0);
+  await begun(first, { plan: copiesPlan({ cap: 2, merger: true }), work: "#1" });
+  await untilLaunched(world, ["build-1.1", "build-1.2"]);
+  expect(wroteIds(await poolLog(first))).toEqual(["tasks-1", "build-1.1", "build-1.2"]);
+  await first.stop();
+
+  // The stop took the two live copies down: the next server runs them again, and writes nothing more.
+  const second = await startLeg(t, world, 1);
+  await until(
+    () => world.stubs.calls().filter((call) => call.key === "build-1.1" || call.key === "build-1.2"),
+    (calls) => calls.length === 4,
+    { what: "both copies to launch again", ms: 30_000 },
+  );
+  const midPass = await snapshot(second);
+  expect(statuses(midPass)).toEqual({ "tasks-1": "done", "build-1.1": "in-progress", "build-1.2": "in-progress" });
+  expect(wroteIds(await poolLog(second))).toEqual(["tasks-1", "build-1.1", "build-1.2"]);
+  expect((await lineOf(second))?.nodes.find((n) => n.id === "build")).toMatchObject({ tickets: ["build-1.1", "build-1.2"], queued: 3 });
+  for (const id of copyIds(5).slice(2)) expect(existsSync(issuePath(world.pool, id)), `${id} is not written early`).toBe(false);
+
+  for (const hold of holds) await hold.release();
+  await atCheckpoint(second, "finish-1");
+  expect(wroteIds(await poolLog(second))).toEqual(["tasks-1", ...copyIds(5), "check-1", "finish-1"]);
+  expect(launches(world).filter((key) => key.startsWith("build-1.") && !["build-1.1", "build-1.2"].includes(key))).toEqual([
+    "build-1.3",
+    "build-1.4",
+    "build-1.5",
+  ]);
+  expect(launches(world).filter((key) => key === "check-1")).toEqual(["check-1"]);
+  expect(readStateLine(world.pool, "check-1.md").blockedBy).toEqual(copyIds(5));
 });
