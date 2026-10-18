@@ -627,6 +627,11 @@ export interface HeldSpawnView {
    */
   unknownOverlaps: string[];
   /**
+   * The Tickets a "started" hold found already started; empty for every
+   * other reason.
+   */
+  startedIds: string[];
+  /**
    * An Adopt is on its way to a Tick: the spawn is still held until
    * the engine writes it, so a restart before then loses nothing.
    */

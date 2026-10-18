@@ -1900,7 +1900,7 @@ function projectSpawnCard(
     kind: "spawn",
     id,
     proposalId: spawn.id,
-    label: `held · ${heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps)}`,
+    label: `held · ${heldSpawnReasonCopy(spawn)}`,
     title: spawn.title,
     parentCardId: spawnParentCardId(spawn, ticketIds, conversationIds) ?? START_CARD_ID,
     parentId: spawn.parentId,
@@ -1982,6 +1982,11 @@ export function heldReasonCopy(
   }
 }
 
+/** Why a Held spawn on the wire is held, as its list row and faded card say it. */
+function heldSpawnReasonCopy(spawn: HeldSpawnView): string {
+  return heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps, undefined, spawn.startedIds);
+}
+
 /** The list's reason copy for a spawn the Tick could not land: the row
  *  shows why beside its buttons. */
 export const REFUSED_AT_LANDING = heldReasonCopy("refused");
@@ -2020,7 +2025,8 @@ export interface HeldSpawnRow {
    *  null when it named nothing. */
   overlaps: string | null;
   body: string;
-  /** "per-attempt cap", "per-run cap", "overlaps 02" or "held by operator". */
+  /** "per-attempt cap", "per-run cap", "overlaps 02", "held by operator" or
+   *  "blocks 02, which has started". */
   reason: string;
   /** An Adopt is on its way to the next Tick: nothing more to decide. */
   adopting: boolean;
@@ -2051,7 +2057,7 @@ export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawn
             : null,
       overlaps: spawn.overlaps.length > 0 ? `overlaps ${spawn.overlaps.join(", ")}` : null,
       body: spawn.body,
-      reason: heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps),
+      reason: heldSpawnReasonCopy(spawn),
       adopting: spawn.adopting,
       adoptError: spawn.adoptError ?? null,
     };

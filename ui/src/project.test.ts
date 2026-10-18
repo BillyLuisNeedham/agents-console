@@ -3672,6 +3672,7 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     blocks: null,
     overlaps: [],
     unknownOverlaps: [],
+    startedIds: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,
@@ -3743,6 +3744,16 @@ describe("the hold reasons (issue #150)", () => {
     expect(refused?.adoptError).toBe(
       "blocks names done tickets, which have no next attempt to hold: 02",
     );
+  });
+
+  it("names the Tickets a started hold found started, on the row and the faded card", () => {
+    const started = heldSpawn({ reason: "started", blocks: ["02"], startedIds: ["02"] });
+    const [row] = projectHeldSpawns([started], NOW);
+    expect(row?.reason).toBe("blocks 02, which has started");
+    const card = projectPool(
+      snapshot({ state: { tickets: [ticket("02")] }, heldSpawns: [started] }),
+    ).cards.find((c) => c.kind === "spawn");
+    expect(card?.kind === "spawn" && card.label).toBe("held · blocks 02, which has started");
   });
 });
 

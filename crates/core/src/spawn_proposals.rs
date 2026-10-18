@@ -482,6 +482,7 @@ impl SpawnProposals {
                     at: h.at.clone(),
                     reason: h.reason,
                     unknown_overlaps: h.unknown_overlaps.clone().unwrap_or_default(),
+                    started_ids: h.started_ids.clone().unwrap_or_default(),
                     adopting: self.is_adopting(&h.id),
                     adopt_error: h.adopt_error.clone(),
                 }
@@ -767,10 +768,10 @@ mod tests {
             json!([
                 { "id": "proposal-1", "parentId": "01", "origin": "ticket", "kind": "ticket", "title": "A",
                   "body": "A body long enough to stand.", "blockedBy": ["02"], "blocks": "all", "overlaps": [],
-                  "at": "t1", "reason": "per-run", "unknownOverlaps": [], "adopting": false },
+                  "at": "t1", "reason": "per-run", "unknownOverlaps": [], "startedIds": [], "adopting": false },
                 { "id": "proposal-2", "parentId": "c-1", "origin": "conversation", "kind": "conversation",
                   "title": "B", "body": "A body long enough to stand.", "blockedBy": [], "blocks": null,
-                  "overlaps": [], "at": "t2", "reason": "per-attempt", "unknownOverlaps": [], "adopting": true },
+                  "overlaps": [], "at": "t2", "reason": "per-attempt", "unknownOverlaps": [], "startedIds": [], "adopting": true },
             ])
         );
     }
@@ -969,6 +970,7 @@ mod tests {
         let reloaded = load_spawn_proposals(dir.path()).unwrap();
         assert_eq!(reloaded.held()[0].started_ids, Some(vec!["02".to_owned()]));
         assert_eq!(reloaded.held_views()[0].reason, HeldSpawnReason::Started);
+        assert_eq!(reloaded.held_views()[0].started_ids, ["02"]);
     }
 
     // A pool that held spawns before issue #150 has no pending list.

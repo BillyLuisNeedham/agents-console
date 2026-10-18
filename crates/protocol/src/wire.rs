@@ -759,6 +759,9 @@ wire_struct! {
         /// The ids an "overlaps" hold named that the pool never knew; empty when
         /// every one was known.
         pub unknown_overlaps: Vec<String>,
+        /// The Tickets a "started" hold found already started; empty for every
+        /// other reason.
+        pub started_ids: Vec<String>,
         /// An Adopt is on its way to a Tick: the spawn is still held until
         /// the engine writes it, so a restart before then loses nothing.
         pub adopting: bool,
