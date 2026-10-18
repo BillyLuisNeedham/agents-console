@@ -55,6 +55,23 @@ export interface EdgeRoute {
   back: boolean;
 }
 
+export interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const LABEL_CHAR_WIDTH = 6.2;
+const LABEL_PADDING = 12;
+const LABEL_HEIGHT = 18;
+const LABEL_CLEARANCE = 2;
+
+export function labelBox(text: string, at: Point): Box {
+  const width = text.length * LABEL_CHAR_WIDTH + LABEL_PADDING;
+  return { x: at.x - width / 2, y: at.y - LABEL_HEIGHT / 2, width, height: LABEL_HEIGHT };
+}
+
 export interface DrawnEdge {
   key: string;
   copy: number;
@@ -119,6 +136,8 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
   const byId = new Map(nodes.map((n) => [n.node.id, n]));
   const seen = new Map<string, number>();
   const edges: DrawnEdge[] = [];
+  const cards = nodes.map((n): Box => ({ x: n.at.x, y: n.at.y, width: CARD_W, height: CARD_H }));
+  const placed: Box[] = [];
   for (const edge of plan.edges) {
     const from = byId.get(edge.from);
     const to = byId.get(edge.to);
@@ -130,13 +149,17 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
       x: from.at.x + CARD_W / 2,
       y: from.at.y + CARD_H,
     };
+    const label = edgeLabels?.get(base) ?? edgeLabel(edge);
+    const curve = edgeCurve(from.at, port, to.at);
+    const spot = clearLabelSpot(curve, label, cards, placed) ?? curveAt(curve, 0.5);
+    placed.push(labelBox(label, spot));
     edges.push({
       key: base,
       copy,
       edge,
-      label: edgeLabels?.get(base) ?? edgeLabel(edge),
+      label,
       problems: edgeProblems.get(base) ?? [],
-      route: edgeRoute(from.at, port, to.at),
+      route: routeOf(curve, spot),
     });
   }
 
@@ -201,7 +224,19 @@ function copiesText(copies: PlanCopies | undefined): string {
   return copies.perItem === "all" ? "per item, all at once" : `per item, ${copies.perItem} at once`;
 }
 
+type Pair = [number, number];
+
+interface Curve {
+  points: [Pair, Pair, Pair, Pair];
+  back: boolean;
+}
+
 export function edgeRoute(from: Point, port: Point, to: Point): EdgeRoute {
+  const curve = edgeCurve(from, port, to);
+  return routeOf(curve, curveAt(curve, 0.5));
+}
+
+function edgeCurve(from: Point, port: Point, to: Point): Curve {
   const { x: px, y: py } = port;
   const straightDown = to.y >= from.y + CARD_H && Math.abs(to.x - from.x) < CARD_W;
   const forward = to.x >= from.x + CARD_W;
@@ -209,28 +244,62 @@ export function edgeRoute(from: Point, port: Point, to: Point): EdgeRoute {
     const tx = to.x + CARD_W / 2;
     const ty = to.y;
     const dy = Math.max(20, (ty - py) / 2);
-    return cubic([px, py], [px, py + dy], [tx, ty - dy], [tx, ty], false);
+    return { points: [[px, py], [px, py + dy], [tx, ty - dy], [tx, ty]], back: false };
   }
   if (forward) {
     const tx = to.x;
     const ty = to.y + HEAD_H / 2;
-    return cubic([px, py], [px, py + 40], [tx - 60, ty], [tx, ty], false);
+    return { points: [[px, py], [px, py + 40], [tx - 60, ty], [tx, ty]], back: false };
   }
   const tx = to.x + CARD_W / 2 + 30;
   const ty = to.y + CARD_H;
   const drop = 60 + (Math.abs(px - tx) / 1600) * 110;
-  return cubic([px, py], [px, py + drop], [tx, ty + drop], [tx, ty], true);
+  return { points: [[px, py], [px, py + drop], [tx, ty + drop], [tx, ty]], back: true };
 }
 
-type Pair = [number, number];
+function curveAt({ points: [a, b, c, d] }: Curve, t: number): Point {
+  const u = 1 - t;
+  const at = (i: 0 | 1) => u * u * u * a[i] + 3 * u * u * t * b[i] + 3 * u * t * t * c[i] + t * t * t * d[i];
+  return { x: at(0), y: at(1) };
+}
 
-function cubic(a: Pair, b: Pair, c: Pair, d: Pair, back: boolean): EdgeRoute {
-  const at = (i: 0 | 1) => (a[i] + 3 * b[i] + 3 * c[i] + d[i]) / 8;
+function routeOf(curve: Curve, label: Point): EdgeRoute {
+  const [a, b, c, d] = curve.points;
   return {
     d: `M ${a[0]} ${a[1]} C ${b[0]} ${b[1]}, ${c[0]} ${c[1]}, ${d[0]} ${d[1]}`,
-    label: { x: at(0), y: at(1) },
-    back,
+    label,
+    back: curve.back,
   };
+}
+
+const LABEL_T_STEP = 0.02;
+const LABEL_T_STEPS = 24;
+const LABEL_NUDGE_STEP = 20;
+const LABEL_NUDGE_STEPS = 3;
+const outFromMiddle = (steps: number, step: number): number[] =>
+  Array.from({ length: steps }, (_, i) => [-(i + 1) * step, (i + 1) * step]).flat();
+const LABEL_SAMPLES = [0.5, ...outFromMiddle(LABEL_T_STEPS, LABEL_T_STEP).map((dt) => 0.5 + dt)];
+const LABEL_NUDGES = [0, ...outFromMiddle(LABEL_NUDGE_STEPS, LABEL_NUDGE_STEP)];
+
+function meets(a: Box, b: Box): boolean {
+  return (
+    a.x < b.x + b.width + LABEL_CLEARANCE &&
+    b.x < a.x + a.width + LABEL_CLEARANCE &&
+    a.y < b.y + b.height + LABEL_CLEARANCE &&
+    b.y < a.y + a.height + LABEL_CLEARANCE
+  );
+}
+
+function clearLabelSpot(curve: Curve, text: string, cards: readonly Box[], placed: readonly Box[]): Point | null {
+  for (const nudge of LABEL_NUDGES) {
+    for (const t of LABEL_SAMPLES) {
+      const on = curveAt(curve, t);
+      const spot = { x: on.x, y: on.y + nudge };
+      const box = labelBox(text, spot);
+      if (!cards.some((card) => meets(box, card)) && !placed.some((other) => meets(box, other))) return spot;
+    }
+  }
+  return null;
 }
 
 function inside(at: Point, point: Point): boolean {

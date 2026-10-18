@@ -10,7 +10,9 @@ import {
   fitView,
   freeSpot,
   hitNode,
+  labelBox,
   projectPlan,
+  type Box,
 } from "./plan-projection";
 
 const plan: PlanFile = {
@@ -91,6 +93,81 @@ describe("projectPlan", () => {
     const route = edgeRoute({ x: 0, y: 0 }, { x: 50, y: CARD_H }, { x: 0, y: 250 });
     expect(route.back).toBe(false);
     expect(route.d.endsWith(`${CARD_W / 2} 250`)).toBe(true);
+  });
+});
+
+describe("edge labels", () => {
+  const forked: PlanFile = {
+    horde: 1,
+    name: "Forked",
+    nodes: [
+      { kind: "agent", id: "tasks", title: "tasks", x: 0, y: 60, makesItems: true },
+      { kind: "agent", id: "build", title: "build", x: 300, y: 60, copies: { perItem: 2 } },
+      { kind: "merger", id: "build-merge", title: "build-merge", x: 600, y: 60, of: "build" },
+      { kind: "finish", id: "finish", title: "finish", x: 900, y: 60 },
+    ],
+    edges: [
+      { from: "tasks", on: "done", to: "build" },
+      { from: "tasks", on: "done", to: "finish" },
+      { from: "build", on: "done", to: "build-merge" },
+      { from: "build-merge", on: "done", to: "finish" },
+    ],
+  };
+  const forkedVerdicts = new Map([
+    ["tasks", ["done"]],
+    ["build", ["done"]],
+    ["build-merge", ["done"]],
+    ["finish", []],
+  ]);
+
+  const overlap = (a: Box, b: Box) =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+  const clear = (plan: PlanFile, verdicts: Map<string, string[]>, count: number) => {
+    const drawing = projectPlan({ plan, problems: [], verdicts, places: new Map() });
+    const cards = drawing.nodes.map((n): Box => ({ ...n.at, width: CARD_W, height: CARD_H }));
+    const labels = drawing.edges.map((e) => labelBox(e.label, e.route.label));
+    expect(labels).toHaveLength(count);
+    for (const label of labels) expect(cards.filter((card) => overlap(label, card))).toEqual([]);
+    labels.forEach((label, i) => {
+      for (const other of labels.slice(i + 1)) expect(overlap(label, other)).toBe(false);
+    });
+  };
+
+  it("keeps every label of a row of cards off the cards and off each other", () => {
+    clear(forked, forkedVerdicts, 4);
+  });
+
+  it("finds room for three labels into one card from a card 90px away", () => {
+    const pair: PlanFile = {
+      horde: 1,
+      name: "Pair",
+      nodes: [
+        { kind: "review", id: "review", title: "review", x: 940, y: 60 },
+        { kind: "decide", id: "decide", title: "decide", x: 1240, y: 60 },
+      ],
+      edges: ["clean", "findings", "closed"].map((on) => ({ from: "review", on, to: "decide" })),
+    };
+    clear(pair, new Map([["review", ["clean", "findings", "closed"]], ["decide", []]]), 3);
+  });
+
+  it("keeps the middle of an edge that nothing covers", () => {
+    const drawing = projectPlan({
+      plan: {
+        horde: 1,
+        name: "Down",
+        nodes: [
+          { kind: "agent", id: "a", title: "a", x: 0, y: 0 },
+          { kind: "finish", id: "b", title: "b", x: 0, y: 250 },
+        ],
+        edges: [{ from: "a", on: "done", to: "b" }],
+      },
+      problems: [],
+      verdicts: new Map([["a", ["done"]]]),
+      places: new Map(),
+    });
+    const port = drawing.nodes[0]!.ports[0]!.at;
+    expect(drawing.edges[0]!.route.label).toEqual(edgeRoute({ x: 0, y: 0 }, port, { x: 0, y: 250 }).label);
   });
 });
 
