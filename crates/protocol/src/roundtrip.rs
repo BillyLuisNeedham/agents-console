@@ -205,7 +205,7 @@ fn a_reply_names_its_kind() {
             .iter()
             .filter(|kind| kind.is_action())
             .count(),
-        17
+        19
     );
 }
 
@@ -339,7 +339,7 @@ fn every_string_union_reads_its_own_strings() {
             Value::String(kind.as_str().to_string())
         );
     }
-    assert_eq!(TicketEventKind::ALL.len(), 36);
+    assert_eq!(TicketEventKind::ALL.len(), 35);
     assert_eq!(
         TicketStatus::parse("in-progress"),
         Some(TicketStatus::InProgress)

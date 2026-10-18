@@ -12,7 +12,7 @@ use ac_io::git;
 use ac_protocol::{InterruptKind, RunPhase, SpawnKind, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
-use crate::checkout_gate::{hold_pool_checkout, pool_checkout_free, release_pool_checkout};
+use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::error::EngineError;
 use crate::interrupts::{interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt};
 use crate::merges::{chain_ticket_merge, in_merge_chain, merge_hold, merge_target_sha};
@@ -734,17 +734,14 @@ async fn writing_in_pool_checkout<T, F>(
     engine: &Engine,
     what: String,
     work: impl FnOnce() -> F,
-) -> anyhow::Result<Option<T>>
+) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    if !pool_checkout_free(engine).await? {
-        return Ok(None);
-    }
     let hold = engine.call(move |s| hold_pool_checkout(s, what)).await?;
     let done = work().await;
     engine.call(move |s| release_pool_checkout(s, hold)).await?;
-    done.map(Some)
+    done
 }
 
 async fn verify_grade_flow(
@@ -760,8 +757,7 @@ async fn verify_grade_flow(
     let outcome = writing_in_pool_checkout(&engine, what, || {
         decide_round(&engine, &marker, &ended, verify)
     })
-    .await
-    .map(drop);
+    .await;
     let id = marker.id;
     let _ = engine
         .call(move |s| {
@@ -842,17 +838,10 @@ async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::Continu
             "the lone grade of {}'s continued attempt is deciding its merge",
             marker.id
         );
-        let (attempt, work) = (owed.attempt, owed.work.clone());
-        let graded = writing_in_pool_checkout(&engine, what, || {
-            crate::keep_talking::grade_continued_attempt(&engine, &marker, attempt, work)
+        writing_in_pool_checkout(&engine, what, || {
+            crate::keep_talking::grade_continued_attempt(&engine, &marker, owed.attempt, owed.work)
         })
-        .await?;
-        if graded.is_none() {
-            engine
-                .call(move |s| s.continued_grades.insert(0, owed))
-                .await?;
-        }
-        Ok(())
+        .await
     }
     .await;
     let _ = engine.call(move |s| grading_ended(s, outcome)).await;

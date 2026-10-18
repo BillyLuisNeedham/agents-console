@@ -32,9 +32,7 @@ use crate::actor::Engine;
 use crate::attempt_ending::{
     EXIT_CODE_PANE_GONE, EXIT_CODE_UNREADABLE, exited_phrase, read_attempt_result,
 };
-use crate::checkout_gate::{
-    DeferredMerge, hold_pool_checkout, release_pool_checkout, through_pool_checkout_gate,
-};
+use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::conversations::EnlistConversationRegistration;
 use crate::enlist::{FoundPane, find_enlistable_pane};
 use crate::enlisted::{EnlistedEnding, RegisterEnlisted, register_enlisted};
@@ -1104,17 +1102,6 @@ pub fn chain_enlisted_merge(
 ) {
     let (marker, branch) = (marker.clone(), branch.to_owned());
     session.merge_line.taken(&marker.id);
-    // The found branch is merged in place; a merge a shutdown drops at the pool checkout's gate names
-    // the found directory, for the next boot.
-    let deferred = DeferredMerge {
-        ticket_id: marker.id.clone(),
-        path: session
-            .enlisted_work
-            .get(&marker.id)
-            .map_or_else(|| session.cwd.clone(), |work| work.directory.clone()),
-        branch: branch.clone(),
-        attempt,
-    };
     let engine = session.engine();
     let previous = session.merge_chain.clone();
     let link = {
@@ -1123,7 +1110,8 @@ pub fn chain_enlisted_merge(
             previous.await;
             let merge_marker = marker.clone();
             let merge_branch = branch.clone();
-            let merged = through_pool_checkout_gate(&engine, Some(deferred), move |s| {
+            let merged = engine
+                .call(move |s| {
                 let merge = merge_with_issue_aside(s, &merge_marker, &merge_branch)?.result;
                 if merge.ok {
                     s.merge_line.settled(&merge_marker.id);
@@ -1138,8 +1126,7 @@ pub fn chain_enlisted_merge(
                     ));
                     return Ok(None);
                 }
-                // A conflict is handled inside the gate in the TypeScript (the resolver included), so
-                // the merge stays counted as a writer in the pool checkout until it is settled.
+                // The merge stays counted as a writer in the pool checkout until its resolver settles.
                 let hold = hold_pool_checkout(
                     s,
                     format!(
@@ -1147,10 +1134,10 @@ pub fn chain_enlisted_merge(
                         merge_marker.id
                     ),
                 );
-                Ok(Some((merge, hold)))
+                anyhow::Ok(Some((merge, hold)))
             })
             .await;
-            if let Ok(Some(Some((conflict, hold)))) = merged {
+            if let Ok(Ok(Some((conflict, hold)))) = merged {
                 let _ = handle_merge_conflict(&engine, marker, conflict, attempt).await;
                 let _ = engine.call(move |s| release_pool_checkout(s, hold)).await;
             }

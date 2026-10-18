@@ -24,9 +24,7 @@ use crate::attempt_run::{
     AttemptEvents, AttemptNaming, AttemptSpec, CrashSubject, Fallback, PromptDelivery, Rotate,
     run_attempt,
 };
-use crate::checkout_gate::{
-    DeferredMerge, hold_pool_checkout, release_pool_checkout, through_pool_checkout_gate,
-};
+use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::interrupts::{interrupt, raise_interrupt, without};
 use crate::session::{EnlistedWork, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
@@ -446,47 +444,42 @@ async fn merge_link(
     attempt: u64,
     what: Option<String>,
 ) -> anyhow::Result<()> {
-    let deferred = DeferredMerge {
-        ticket_id: marker.id.clone(),
-        path: worktree.path.clone(),
-        branch: worktree.branch.clone(),
-        attempt,
-    };
     let (merge_marker, merge_worktree) = (marker.clone(), worktree);
-    let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
-        let (marker, worktree) = (merge_marker, merge_worktree);
-        let merge = merge_ticket(s, &marker, &worktree)?;
-        if !merge.result.ok {
-            return Ok(Some(merge.result));
-        }
-        let id = &marker.id;
-        s.merge_line.settled(id);
-        append_event(
-            Path::new(&s.runs_dir),
-            id,
-            &event_now(
-                attempt,
-                TicketEventKind::Merged,
-                merged_payload(&merge.result),
-            ),
-        )?;
-        close_attempt_tab(s, id, attempt);
-        let range = merge.range(s);
-        crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
-        let branch = &worktree.branch;
-        s.log(match &what {
-            Some(what) => {
-                format!("ticket {id}: {what} {attempt} merged {branch} onto the working branch")
+    let conflict = engine
+        .call(move |s| {
+            let (marker, worktree) = (merge_marker, merge_worktree);
+            let merge = merge_ticket(s, &marker, &worktree)?;
+            if !merge.result.ok {
+                return Ok(Some(merge.result));
             }
-            None => format!(
-                "ticket {id}: merged {branch} onto the working branch{}",
-                landed_detail(&merge.result)
-            ),
-        });
-        Ok(None)
-    })
-    .await?;
-    if let Some(Some(conflict)) = passed {
+            let id = &marker.id;
+            s.merge_line.settled(id);
+            append_event(
+                Path::new(&s.runs_dir),
+                id,
+                &event_now(
+                    attempt,
+                    TicketEventKind::Merged,
+                    merged_payload(&merge.result),
+                ),
+            )?;
+            close_attempt_tab(s, id, attempt);
+            let range = merge.range(s);
+            crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
+            let branch = &worktree.branch;
+            s.log(match &what {
+                Some(what) => {
+                    format!("ticket {id}: {what} {attempt} merged {branch} onto the working branch")
+                }
+                None => format!(
+                    "ticket {id}: merged {branch} onto the working branch{}",
+                    landed_detail(&merge.result)
+                ),
+            });
+            anyhow::Ok(None)
+        })
+        .await??;
+    if let Some(conflict) = conflict {
         handle_merge_conflict(engine, marker, conflict, attempt).await?;
     }
     Ok(())
