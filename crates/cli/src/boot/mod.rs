@@ -46,20 +46,25 @@ use pool::{
 };
 
 pub const USAGE: &str = "usage: agent-console [pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]
-       agent-console --factory [--work <issue number or text> | --brief <path>] [--from <branch>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
+       agent-console --plan <slug> [--work <issue number or text> | --brief <path>] [--from <branch>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
 
-/// What `--help` prints: the usage, then what Factory mode's flags do.
-pub const FACTORY_HELP: &str = "
-Factory mode (ADR-0037) cuts line/<slug> from the branch this checkout has out (or from
---from's) into a worktree of its own at .scratch/lines/<slug>, leaving this checkout's
-branch alone, and boots a Factory pool inside it at <worktree>/.scratch/<name>, its
-target branch the Line's. The Line's branch never tracks the branch it was cut from.
-  --factory              Factory mode; asks for the work unless --work or --brief gives it
-  --work <text>          the piece of work: an issue number (186, #186) or free text; Boot
-                         opens the Grill with it as the Grill's first Turn
+/// What `--help` prints: the usage, then what Line mode's flags do.
+pub const LINE_HELP: &str = "
+Line mode (ADR-0037, ADR-0039) cuts line/<slug> from the branch this checkout has out (or
+from --from's) into a worktree of its own at .scratch/lines/<slug>, leaving this checkout's
+branch alone, and boots a pool inside it at <worktree>/.scratch/<name>, its target branch
+the Line's, that runs one Line on a Plan. The Line's branch never tracks the branch it was
+cut from.
+  --plan <slug>          Line mode on this Plan: a Preset (factory-today, ...) or a Plan in
+                         ~/.agent-graphs/plans/; asks for the work unless --work or --brief
+                         gives it
+  --work <text>          the piece of work: an issue number (186, #186) or free text; on a
+                         Plan that starts with a Conversation, Boot opens the Grill with it
+                         as the Grill's first Turn
   --brief <path>         a ready Line brief (its spec found from here first, then beside
                          the brief): no Grill, the spec and brief committed onto the Line
-                         branch, Round 1 started at once; implies --factory and --yes
+                         branch, the Line begun at once; implies Line mode and --yes, on
+                         factory-today unless --plan names another Plan
   --from <branch>        the Line base: the branch to cut the Line from instead of the
                          current one; a local branch, else origin's as written (origin/x),
                          else origin's by name; never another remote's, HEAD, a tag or a
@@ -70,8 +75,11 @@ target branch the Line's. The Line's branch never tracks the branch it was cut f
   --title <title>        the pool's title (default: the issue, the spec's first heading)
   --config <json file>   keys laid over the new pool's console.json before its server
                          starts, each replacing the key there: a steward block, say
-  --no-steward           start no Steward (a Factory pool starts one by default; it never
-                         answers the Finish checkpoint)";
+  --no-steward           start no Steward (a Line pool starts one by default; it never
+                         answers the Finish)";
+
+/// The Plan a Line runs when Boot is given none (until Boot asks which, slice 9).
+pub const DEFAULT_PLAN: &str = "factory-today";
 
 /// Boot's flags, kept deliberately few.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -82,24 +90,31 @@ pub struct BootArgs {
     pub port: Option<u16>,
     pub setup: Option<String>,
     pub open: bool,
-    /// Factory mode (ADR-0037): cut a Line branch and boot a Factory pool on it.
-    pub factory: bool,
-    /// The piece of work for the Grill: an issue number or free text.
+    /// Line mode (ADR-0039): cut a Line branch and boot a pool on it that runs this Plan.
+    pub plan: Option<String>,
+    /// The piece of work: an issue number or free text.
     pub work: Option<String>,
-    /// A ready Line brief: no Grill, Round 1 at once. Implies Factory mode and asks nothing.
+    /// A ready Line brief: no Grill, the Line begun at once. Implies Line mode and asks nothing.
     pub brief: Option<String>,
     /// The Line base's branch, when not the current one (issue #193).
     pub from: Option<String>,
     /// The Line's slug, `line/<slug>`.
     pub line: Option<String>,
-    /// The Factory pool's directory name.
+    /// The Line pool's directory name.
     pub name: Option<String>,
     /// The new pool's title.
     pub title: Option<String>,
     /// A JSON file whose keys are laid over the new pool's console.json before it starts.
     pub config: Option<String>,
-    /// Start no Steward in the Factory pool (one starts by default, ADR-0037).
+    /// Start no Steward in the Line pool (one starts by default, ADR-0037).
     pub no_steward: bool,
+}
+
+impl BootArgs {
+    /// Line mode: a Plan named, or a ready brief, which runs on the default Plan.
+    pub fn line_mode(&self) -> bool {
+        self.plan.is_some() || self.brief.is_some()
+    }
 }
 
 /// A command line Boot will not run: the usage asked for, or a refusal to print.
@@ -130,14 +145,15 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
             "--yes" | "-y" => args.yes = true,
             "--relaunch" => args.relaunch = true,
             "--no-open" => args.open = false,
-            "--factory" => args.factory = true,
             "--no-steward" => args.no_steward = true,
-            "--work" | "--brief" | "--from" | "--line" | "--name" | "--title" | "--config" => {
+            "--plan" | "--work" | "--brief" | "--from" | "--line" | "--name" | "--title"
+            | "--config" => {
                 let Some(value) = argv.get(i + 1).filter(|value| !value.starts_with("--")) else {
                     return Err(refusal(format!("{arg} needs a value\n{USAGE}")));
                 };
                 i += 1;
                 let slot = match arg {
+                    "--plan" => &mut args.plan,
                     "--work" => &mut args.work,
                     "--brief" => &mut args.brief,
                     "--from" => &mut args.from,
@@ -150,7 +166,7 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
             }
             "--help" | "-h" => {
                 return Err(ArgRefusal {
-                    message: format!("{USAGE}\n{FACTORY_HELP}"),
+                    message: format!("{USAGE}\n{LINE_HELP}"),
                     help: true,
                 });
             }
@@ -187,24 +203,23 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
     }
     if args.brief.is_some() {
         // A ready brief is for a run nobody watches: it asks nothing.
-        args.factory = true;
         args.yes = true;
     }
-    let factory_only = [
+    let line_only = [
         ("--work", args.work.is_some()),
         ("--from", args.from.is_some()),
         ("--line", args.line.is_some()),
         ("--name", args.name.is_some()),
         ("--no-steward", args.no_steward),
     ];
-    if !args.factory
-        && let Some((flag, _)) = factory_only.iter().find(|(_, given)| *given)
+    if !args.line_mode()
+        && let Some((flag, _)) = line_only.iter().find(|(_, given)| *given)
     {
         return Err(refusal(format!(
-            "{flag} is for Factory mode: add --factory\n{USAGE}"
+            "{flag} is for Line mode: add --plan <slug>\n{USAGE}"
         )));
     }
-    if args.factory {
+    if args.line_mode() {
         if args.work.is_some() && args.brief.is_some() {
             return Err(refusal(format!(
                 "--work and --brief both start the Line; give one\n{USAGE}"
@@ -212,13 +227,13 @@ pub fn parse_boot_args(argv: &[String]) -> Result<BootArgs, ArgRefusal> {
         }
         if args.pool_dir.is_some() {
             return Err(refusal(format!(
-                "Factory mode makes its pool inside the Line's worktree; name it with --name, not a \
+                "Line mode makes its pool inside the Line's worktree; name it with --name, not a \
                  pool directory\n{USAGE}"
             )));
         }
         if args.relaunch {
             return Err(refusal(format!(
-                "--relaunch restarts a pool that is there; Factory mode makes a new one\n{USAGE}"
+                "--relaunch restarts a pool that is there; Line mode makes a new one\n{USAGE}"
             )));
         }
     }
@@ -959,8 +974,8 @@ pub fn run_boot(argv: &[String], io: &mut dyn BootIo, home: &str) -> Result<i32,
     let cwd = std::env::current_dir()
         .map(|dir| js::path_text(&dir))
         .map_err(|err| err.to_string())?;
-    if args.factory {
-        return run_factory_boot(&args, io, home, &engine_dir, &cwd);
+    if args.line_mode() {
+        return run_line_boot(&args, io, home, &engine_dir, &cwd);
     }
 
     let (pool_dir, new_title) = choose_pool(&args, io, &cwd)?;
@@ -1144,9 +1159,10 @@ fn report_console(url: &str, pool_dir: &str, args: &BootArgs, io: &mut dyn BootI
 /// typed.
 const GRILL_START_TIMEOUT_MS: u64 = 180_000;
 
-/// Boot's Factory mode (ADR-0037, ADR-0038; see [`factory`]): the work, the Line branch and its
-/// worktree, the pool inside it, the server, then the Grill or, from a ready brief, Round 1.
-fn run_factory_boot(
+/// Boot's Line mode (ADR-0037, ADR-0038, ADR-0039; see [`factory`]): the Plan, the work, the Line
+/// branch and its worktree, the pool inside it, the server, the Line begun on the Plan, then the
+/// Grill when the Plan starts with a Conversation and the work came as words.
+fn run_line_boot(
     args: &BootArgs,
     io: &mut dyn BootIo,
     home: &str,
@@ -1156,8 +1172,16 @@ fn run_factory_boot(
     use factory::LineWork;
     let unattended = args.yes;
     let top = git_line(cwd, &["rev-parse", "--show-toplevel"]).ok_or_else(|| {
-        format!("{cwd} is not inside a git checkout; Factory mode cuts the Line's branch from one")
+        format!("{cwd} is not inside a git checkout; Line mode cuts the Line's branch from one")
     })?;
+    let plan_slug = args.plan.as_deref().unwrap_or(DEFAULT_PLAN);
+    if args.plan.is_none() {
+        io.log(&format!(
+            "no --plan: the Line runs the {DEFAULT_PLAN} Preset"
+        ));
+    }
+    let plan = ac_core::plan::library::load(home, plan_slug)
+        .map_err(|err| format!("--plan {plan_slug}: {err}"))?;
 
     let work = match (&args.brief, &args.work) {
         (Some(path), _) => LineWork::Ready(Box::new(factory::read_ready_brief(path, cwd)?)),
@@ -1166,14 +1190,14 @@ fn run_factory_boot(
         },
         _ if unattended => {
             return Err(
-                "Factory mode needs the work: --work <issue number or text>, or --brief <path>"
+                "Line mode needs the work: --work <issue number or text>, or --brief <path>"
                     .to_owned(),
             );
         }
         _ => {
             let answer = io.ask("the piece of work (an issue number or free text)", "");
             if js::trim(&answer).is_empty() {
-                return Err("Factory mode needs the piece of work; none given".to_owned());
+                return Err("Line mode needs the piece of work; none given".to_owned());
             }
             LineWork::Grill {
                 work: js::trim(&answer).to_owned(),
@@ -1239,18 +1263,17 @@ fn run_factory_boot(
         sources.push(prefill_from_setup(&setup));
     }
     sources.push(prefill_from_machine_defaults(&machine));
-    // A Factory pool's Stations carry their own Assignments; the pool's defaults fall back to the
-    // built-in Implement Station's, so a machine with no defaults file still boots one unattended.
-    let factory_defaults = ac_core::line::default_factory().implement;
+    // A Line's nodes carry their own Assignments; the pool's defaults fall back to claude on opus,
+    // so a machine with no defaults file still boots one unattended.
     sources.push(Prefill {
-        harness: Some(factory_defaults.harness),
-        model: Some(factory_defaults.model),
+        harness: Some("claude".to_owned()),
+        model: Some("opus".to_owned()),
         ..Prefill::default()
     });
     let settled = merge_prefill(&sources);
     let prefill = merge_prefill(&[settled.clone(), prefill_from_detection(&detection)]);
     let mut result = interview(io, &prefill, &settled, &detection, unattended);
-    // The Grill is a Conversation and the Stations are interactive panes: a Factory pool is
+    // The Grill is a Conversation and the Line's Tickets are interactive panes: a Line pool is
     // terminal-backed.
     result.answers.terminal = Some(TerminalAnswer::Herdr);
     result.answers.title = title;
@@ -1262,9 +1285,7 @@ fn run_factory_boot(
         factory::overlay_config(&mut merged, config, cwd)?;
         io.log(&format!("laid {config} over the pool's console.json"));
     }
-    // The engine raises no run-wide Review in a Factory pool, from its first boot (ADR-0037).
-    merged.insert("factoryPool".to_owned(), Value::Bool(true));
-    // The Line base, chosen once: Start the Line copies it into the Line's state (issue #193).
+    // The Line base, chosen once: the Line copies it into its places when it begins (issue #193).
     merged.insert(
         "lineBase".to_owned(),
         serde_json::to_value(&line.base).map_err(|err| err.to_string())?,
@@ -1281,74 +1302,43 @@ fn run_factory_boot(
     let Some(url) = start_pool_server(&pool_dir, engine_dir, args, io)? else {
         return Ok(1);
     };
-    let started = match (&work, brief_path) {
-        (LineWork::Ready(_), Some(brief)) => {
-            match launch::post_json(
-                &format!("{url}/api/line/start"),
-                &serde_json::json!({ "brief": brief }),
-                launch::STATE_TIMEOUT_MS,
-            ) {
-                Ok((202, body)) => {
-                    io.log(&format!(
-                        "line: started; Round 1's {} is written",
-                        body.get("ticketId").map(js::string_of).unwrap_or_default()
-                    ));
-                    true
-                }
-                answer => {
-                    io.warn(&format!(
-                        "Start the Line was refused: {}; the pool is up, so start it from the \
-                         Console once the brief is right",
-                        refusal_text(answer)
-                    ));
-                    false
-                }
+    let mut begin = serde_json::json!({ "plan": plan.to_file() });
+    match (&work, &brief_path) {
+        (LineWork::Ready(_), Some(brief)) => begin["brief"] = Value::String(brief.clone()),
+        (LineWork::Grill { work }, _) => begin["work"] = Value::String(work.clone()),
+        (LineWork::Ready(_), None) => unreachable!("a ready brief is committed before the server"),
+    }
+    let mut started =
+        match launch::post_json(&format!("{url}/api/line"), &begin, launch::STATE_TIMEOUT_MS) {
+            Ok((202, _)) => {
+                io.log(&format!(
+                    "line: begun on the Plan {plan_slug} (\"{}\")",
+                    plan.meta().name
+                ));
+                true
             }
-        }
-        (LineWork::Grill { work }, _) => {
-            let grill_title = format!(
-                "Grill: {}",
-                merged
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&line.slug)
-            );
-            let request = serde_json::json!({
-                "title": normalise_title(&grill_title).unwrap_or_else(|| "Grill".to_owned()),
-                "opening": factory::grill_opening(work, &line.base),
-                "role": "grill",
-            });
-            match launch::post_json(
-                &format!("{url}/api/conversations"),
-                &request,
-                GRILL_START_TIMEOUT_MS,
-            ) {
-                Ok((201, body)) => {
-                    io.log(&format!(
-                        "grill: {} opened with the work as its first Turn; press Start the Line on \
-                         it once its brief is written",
-                        body.pointer("/conversation/id")
-                            .map(js::string_of)
-                            .unwrap_or_default()
-                    ));
-                    true
-                }
-                answer => {
-                    io.warn(&format!(
-                        "the Grill did not open: {}; the pool is up, so open it again with \
-                         curl -X POST {url}/api/conversations -H 'content-type: application/json' \
-                         -d '{}'",
-                        refusal_text(answer),
-                        request
-                    ));
-                    false
-                }
+            answer => {
+                io.warn(&format!(
+                    "the Line did not begin: {}; the pool is up, but runs no Line",
+                    refusal_text(answer)
+                ));
+                false
             }
-        }
-        (LineWork::Ready(_), None) => false,
-    };
+        };
+    let opens_with_grill = plan.entries().iter().any(|entry| {
+        matches!(
+            plan.node(entry).map(|node| &node.body),
+            Some(ac_core::plan::NodeBody::Conversation(_))
+        )
+    });
+    if started
+        && opens_with_grill
+        && let LineWork::Grill { work } = &work
+    {
+        started = open_grill(&url, work, &merged, &line, io);
+    }
     if !args.no_steward {
-        start_factory_steward(&url, io);
+        start_line_steward(&url, io);
     }
     report_console(&url, &pool_dir, args, io);
     io.log(&format!(
@@ -1358,9 +1348,57 @@ fn run_factory_boot(
     Ok(if started { 0 } else { 1 })
 }
 
-// The Steward is on by default in a Factory pool (ADR-0037): started once the Line or its Grill is,
+// The Grill stands in for the Plan's entry Conversation pass (ADR-0039): opened with the work as
+// its first Turn, it is taught the pass's brief by the engine.
+fn open_grill(
+    url: &str,
+    work: &str,
+    config: &Map<String, Value>,
+    line: &factory::CutLine,
+    io: &mut dyn BootIo,
+) -> bool {
+    let grill_title = format!(
+        "Grill: {}",
+        config
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(&line.slug)
+    );
+    let request = serde_json::json!({
+        "title": normalise_title(&grill_title).unwrap_or_else(|| "Grill".to_owned()),
+        "opening": factory::grill_opening(work, &line.base),
+        "role": "grill",
+    });
+    match launch::post_json(
+        &format!("{url}/api/conversations"),
+        &request,
+        GRILL_START_TIMEOUT_MS,
+    ) {
+        Ok((201, body)) => {
+            io.log(&format!(
+                "grill: {} opened with the work as its first Turn; press Start the Line on it once \
+                 its brief is written",
+                body.pointer("/conversation/id")
+                    .map(js::string_of)
+                    .unwrap_or_default()
+            ));
+            true
+        }
+        answer => {
+            io.warn(&format!(
+                "the Grill did not open: {}; the pool is up, so open it again with curl -X POST \
+                 {url}/api/conversations -H 'content-type: application/json' -d '{}'",
+                refusal_text(answer),
+                request
+            ));
+            false
+        }
+    }
+}
+
+// The Steward is on by default in a Line pool (ADR-0037): started once the Line or its Grill is,
 // with standing orders to keep the Line moving. A Steward that does not start leaves the pool up.
-fn start_factory_steward(url: &str, io: &mut dyn BootIo) {
+fn start_line_steward(url: &str, io: &mut dyn BootIo) {
     let request = serde_json::json!({
         "title": "Steward",
         "opening": factory::STEWARD_ORDERS,
@@ -1372,7 +1410,7 @@ fn start_factory_steward(url: &str, io: &mut dyn BootIo) {
         GRILL_START_TIMEOUT_MS,
     ) {
         Ok((201, body)) => io.log(&format!(
-            "steward: {} on duty; it never answers the Finish checkpoint",
+            "steward: {} on duty; it never answers the Finish",
             body.pointer("/conversation/id")
                 .map(js::string_of)
                 .unwrap_or_default()

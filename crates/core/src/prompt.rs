@@ -6,6 +6,7 @@
 use ac_protocol::Outcome;
 
 use crate::outcome::SPAWN_BODY_MIN_CHARS;
+use crate::plan::{CheckpointPolicy, NodeBody, Opener};
 use crate::spawn_caps::SpawnCaps;
 
 // The Spawn ledger (issue #150): the path, never the contents, so the prompt stays short (issue #84)
@@ -361,8 +362,9 @@ pub struct StewardTeaching<'a> {
     pub command: &'a str,
     pub budget: u64,
     pub may_close: bool,
-    /// A Factory pool (ADR-0037): the Steward is taught which of the Line's checkpoints are its.
-    pub factory: bool,
+    /// The pool's Line (ADR-0039): the Steward is taught its Plan and which of its checkpoints and
+    /// holds are its.
+    pub line: Option<&'a crate::line::run::LineRun>,
     /// `steward.mayAdoptLineSpawns`: whether it may decide Held spawns proposed from inside the Line.
     pub may_adopt_line_spawns: bool,
 }
@@ -457,7 +459,7 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
             "{}Decide and talk, never do the work: make no edits in any Ticket's worktree or in the \
              pool checkout. Your only ways to change the code are an answer, a coaching message and \
              a Spawn.",
-            factory_steward_text(parts)
+            line_steward_text(parts)
         ),
         String::new(),
         "You may push, open pull requests or merge pull requests only if the operator's own words in \
@@ -486,11 +488,56 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
     lines.join("\n")
 }
 
-// What a Factory pool's Steward is taught about its Line; nothing in any other pool.
-fn factory_steward_text(parts: &StewardTeaching<'_>) -> String {
-    if !parts.factory {
+// What a Line's Steward is taught about it, read off the frozen Plan; nothing in a pool with no Line.
+fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
+    let Some(line) = parts.line else {
         return String::new();
+    };
+    let (plan, _) = line.plan();
+    let mut yours = Vec::new();
+    let checkpoints: Vec<String> = plan
+        .nodes()
+        .filter(
+            |n| matches!(&n.body, NodeBody::Ticket(t) if t.checkpoint == CheckpointPolicy::Steward),
+        )
+        .map(|n| n.id.to_string())
+        .collect();
+    if !checkpoints.is_empty() {
+        yours.push(format!(
+            "a checkpoint on a Ticket of {} (a \"no verdict\" one: resume, asking it to record its \
+             Outcome again with a valid verdict)",
+            checkpoints.join(", ")
+        ));
     }
+    let gates: Vec<String> = plan
+        .nodes()
+        .filter(|n| matches!(&n.body, NodeBody::Gate(g) if g.open == Opener::Steward))
+        .map(|n| n.id.to_string())
+        .collect();
+    if !gates.is_empty() {
+        yours.push(format!(
+            "the hold of the gate {} (resume opens it, resume with a note revises)",
+            gates.join(", ")
+        ));
+    }
+    let loops: Vec<String> = plan
+        .edges()
+        .iter()
+        .filter(|e| e.cap.as_ref().is_some_and(|cap| cap.steward_extra))
+        .map(|e| format!("{} --{}--> {}", e.key.from, e.key.on.as_str(), e.key.to))
+        .collect();
+    if !loops.is_empty() {
+        yours.push(format!(
+            "the hold of a spent loop on {}, once until that loop resets (resume buys one more \
+             traversal, and your note goes into it)",
+            loops.join(", ")
+        ));
+    }
+    let yours = if yours.is_empty() {
+        "None of its checkpoints or holds are yours.".to_owned()
+    } else {
+        format!("You may answer {}.", yours.join("; "))
+    };
     let spawns = if parts.may_adopt_line_spawns {
         "The operator lets you decide Held spawns proposed from inside the Line \
          (steward.mayAdoptLineSpawns): adopt one only when the Line needs it and its spec covers it, \
@@ -500,12 +547,11 @@ fn factory_steward_text(parts: &StewardTeaching<'_>) -> String {
          engine refuses you. Leave them held."
     };
     format!(
-        "This is a Factory pool: it runs one Line, and the engine routes its Stations (ADR-0037). \
-         You may answer two of the Line's checkpoints: \"no verdict\" (resume, asking the Station to \
-         record its Outcome again with a valid verdict) and the Prove limit (resume buys one more \
-         fix, and your note goes into it). The Finish checkpoint is never yours: approving the Line \
-         is the operator's, so you are not told about it and the engine refuses your answer. Never \
-         propose a Station yourself. {spawns}\n\n"
+        "This pool runs one Line on the Plan \"{}\" (ADR-0039): the engine writes its Tickets and \
+         holds from the Plan and routes each verdict. {yours} Nothing else of the Line is yours: the \
+         Finish hold and the Finish Ticket are the operator's, so you are not told of them and the \
+         engine refuses your answer. Never propose a node's work yourself. {spawns}\n\n",
+        plan.meta().name
     )
 }
 
@@ -759,7 +805,7 @@ mod tests {
                 command: "/bin/ac steward --pool /p --as conv-1",
                 budget,
                 may_close,
-                factory: false,
+                line: None,
                 may_adopt_line_spawns: false,
             })
         };

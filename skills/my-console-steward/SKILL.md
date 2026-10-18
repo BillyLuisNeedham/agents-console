@@ -36,13 +36,14 @@ An item is done when the command answered without a refusal.
 - **an adoption checkpoint** (the body says the engine re-adopted a live pane after a restart): answering it abandons that pane's Attempt. `leave` it unless the orders say otherwise.
 - **a stalled Merge queue head**: there is no Interrupt to answer, and only the Tickets that name it as a blocker wait until it lands. Read its log and branch, and tell the operator in your pane what you found. Merge it by hand only when the operator's own words allowed you to merge.
 
-## A Factory pool's Line
+## A Line pool's Line
 
-In a Factory pool (your teaching says so) the engine runs one Line and routes its Stations: Implement, Prove, Review, Decide, then the Finish checkpoint. Never propose a Station yourself.
+In a pool that runs a Line (your teaching names its Plan) the engine writes the Line's Tickets and holds from the Plan and routes each verdict. Your teaching lists exactly which of the Line's Interrupts are yours; the engine hides and refuses the rest. Never propose a node's work yourself.
 
-- **"no verdict"** (the Brief's first line): a Station recorded done without a valid verdict. `answer <ticket> resume <note>` (or `keep-talking` while its pane lives) telling the Station to record its Outcome again with the verdict its Ticket teaches. Name what was wrong, from the Brief.
-- **The Prove limit** (Prove failed too often in one Round, so the next fix waits): `answer <ticket> resume <note>` buys one more fix, and your note goes into it. Resume when the failures point at a fix within reach; when the same thing keeps failing, `leave` it recommending Close (which halts the Line at its Finish).
-- **The Finish checkpoint** is the operator's approval of the Line. You are never told about it and the engine refuses your answer. When the Line waits there, say so in your pane.
+- **"no verdict"** (the Brief's first line) on a Ticket of a node your teaching names: it recorded done without a valid verdict. `answer <ticket> resume <note>` (or `keep-talking` while its pane lives) telling it to record its Outcome again with the verdict its Ticket teaches. Name what was wrong, from the Brief.
+- **A gate's hold** your teaching names: `answer <ticket> resume` opens it; a note answers `revise` instead and is handed on with it.
+- **A spent loop's hold** on an edge your teaching names (the loop ran its cap, so the next traversal waits): `answer <ticket> resume <note>` buys one more traversal, once until that loop resets, and your note goes into it. Resume when the failures point at a fix within reach; when the same thing keeps failing, `leave` it recommending Close.
+- **The Finish** (its hold and its Ticket) is the operator's approval of the Line and its act. You are never told about it and the engine refuses your answer. When the Line waits there, say in your pane what the Finish waits for.
 - **Held spawns proposed from inside the Line** (`reason` `line` in `state`) merge into the Line's branch if they land. They are the operator's to adopt or discard unless the pool setting `steward.mayAdoptLineSpawns` is on (`state` says whether). When it is on, adopt one only when the Line needs it and its spec covers it; discard a duplicate.
 
 ## Held spawns, Spawns and Reassign
@@ -54,7 +55,7 @@ In a Factory pool (your teaching says so) the engine runs one Line and routes it
 ## Your limits
 
 - **The budget**: every `answer`, `close` and `keep-talking` on a Ticket counts, until the operator next answers it. When it is spent the engine refuses: `leave` the Ticket with a note. A checkpoint you resumed that checkpoints again for the same reason is a loop; leave it before the budget does it for you.
-- **The operator's**: review and persistence Interrupts, a Line's Finish checkpoint, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
+- **The operator's**: review and persistence Interrupts, a Line's Finish, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
 - **Your hands**: the worktrees and the pool checkout belong to the Tickets' agents. You read them; you change code through answers, coaching and Spawns.
 - **Pushing and pull requests**: push, open a pull request or merge one only when the operator's own words in this pane allow it, and only as far as they allow.
 

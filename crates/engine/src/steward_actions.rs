@@ -198,12 +198,12 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
     let merge_queue = last
         .map(|snapshot| snapshot.merge_queue.clone())
         .unwrap_or_default();
-    // The Line's Finish checkpoint is the operator's approval (ADR-0037): the Steward never hears of it.
+    // The Steward hears only of the Line's Interrupts its Plan gives it (ADR-0039): never the Finish.
     let interrupts: Vec<Interrupt> = session
         .state
         .interrupts
         .iter()
-        .filter(|i| !is_finish_checkpoint(session, &i.ticket_id))
+        .filter(|i| crate::line::steward_may_answer(session, &i.ticket_id))
         .cloned()
         .collect();
     let title_of = |id: &str| titles.get(id).map(|title| (*title).to_owned());
@@ -224,12 +224,6 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
         merged: &merged,
         review,
     })
-}
-
-/// Whether a Ticket is a Line's Finish checkpoint: approving the Line, the operator's alone.
-pub fn is_finish_checkpoint(session: &Session, ticket_id: &str) -> bool {
-    session.marker(ticket_id).and_then(|marker| marker.station)
-        == Some(ac_protocol::Station::Finish)
 }
 
 fn steward_refusal(why: impl AsRef<str>) -> EngineError {
@@ -282,10 +276,15 @@ fn steward_interrupt(
         }
         _ => {}
     }
-    if is_finish_checkpoint(session, ticket_id) {
+    if crate::line::is_finish(session, ticket_id) {
         return Err(steward_refusal(format!(
-            "{ticket_id} is the Line's Finish checkpoint: approving the Line is the operator's, \
+            "{ticket_id} is the Line's Finish: approving the Line and its act are the operator's, \
              never the Steward's"
+        )));
+    }
+    if !crate::line::steward_may_answer(session, ticket_id) {
+        return Err(steward_refusal(format!(
+            "{ticket_id} is the Line's, and its Plan leaves it to the operator"
         )));
     }
     if !steward_may_answer(
@@ -601,7 +600,7 @@ pub fn steward_state(
                         &interrupt.ticket_id,
                         interrupt.kind.as_str(),
                         &conversations,
-                    ) && !is_finish_checkpoint(session, &interrupt.ticket_id),
+                    ) && crate::line::steward_may_answer(session, &interrupt.ticket_id),
                     keep_talking: interrupt.kind == InterruptKind::Checkpoint
                         && session.held.contains_key(&interrupt.ticket_id),
                     queued: queued.contains(&interrupt.ticket_id),

@@ -1,7 +1,7 @@
-//! Boot's Factory mode (issue #187, ADR-0037, ADR-0038): a Factory pool runs one Line on a branch of its
-//! own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s) before there
-//! is any pool, and the pool lives inside that branch's checkout. The base goes into the pool's
-//! console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
+//! Boot's Line mode (issue #187, ADR-0037, ADR-0038, ADR-0039): a Line pool runs one Line on a branch
+//! of its own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s)
+//! before there is any pool, and the pool lives inside that branch's checkout. The base goes into the
+//! pool's console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
 //!
 //! The engine finds a pool's checkout from the pool directory (the git toplevel above it) and merges
 //! into whatever that checkout has out. So Boot gives the Line branch a worktree of its own, at
@@ -9,16 +9,18 @@
 //! pool's target branch is the Line's with no setting to keep in step, and the directory Boot was run
 //! from keeps the branch it had, whatever else is running there.
 //!
-//! Then one of two starts. Asked for the work (an issue number or free text), Boot opens the Grill, a
-//! Conversation on the Grill Station's skills with the work as its first Turn, and the operator's Start
-//! the Line hands off from it. Given a ready brief (`--brief`), Boot commits the brief and its spec onto
-//! the Line branch and starts Round 1 at once, with no Grill and no question asked.
+//! Then the Line begins on its Plan (`POST /api/line`), in one of two ways. Asked for the work (an
+//! issue number or free text), Boot hands it over, and on a Plan that starts with a Conversation it
+//! opens the Grill with the work as its first Turn, which the operator's Start the Line ends on its
+//! brief. Given a ready brief (`--brief`), Boot commits the brief and its spec onto the Line branch
+//! and hands over the brief's path, with no Grill and no question asked.
 
 use ac_protocol::LineBase;
 use serde_json::{Map, Value};
 
 use ac_core::js;
-use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX, parse_brief};
+use ac_core::line::run::LineBrief;
+use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX};
 use ac_core::pool_title::normalise_title;
 
 use super::BootIo;
@@ -27,11 +29,12 @@ use super::pool::{Excluded, ensure_scratch_excluded, git_line, slugify};
 /// Where Line worktrees go under the checkout Boot runs from.
 pub const LINES_DIR: &str = "lines";
 
-/// A ready brief Boot was handed: the brief as written, the spec's text, and the name its file gives.
+/// A ready brief Boot was handed: the brief as written, its spec's text when it names one, and the
+/// name its file gives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadyBrief {
     pub brief: Map<String, Value>,
-    pub spec_text: String,
+    pub spec_text: Option<String>,
     /// The spec's first `# ` heading, which titles the pool when nothing else does.
     pub heading: Option<String>,
     /// The brief's file name without `.brief.json`.
@@ -58,11 +61,24 @@ pub fn read_ready_brief(path: &str, cwd: &str) -> Result<ReadyBrief, String> {
         return Err(format!("--brief {path}: no such file"));
     }
     let text = js::read_text(&file).map_err(|err| format!("--brief {path}: {err}"))?;
-    let checked = parse_brief(&text).map_err(|reason| format!("--brief {path}: {reason}"))?;
+    let checked = LineBrief::parse(&text).map_err(|reason| format!("--brief {path}: {reason}"))?;
     let Ok(Value::Object(brief)) = js::parse(&text) else {
         return Err(format!("--brief {path}: not a JSON object"));
     };
-    let spec = js::trim(&checked.spec).to_owned();
+    let name = js::basename(&file);
+    let stem = name
+        .strip_suffix(BRIEF_SUFFIX)
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name)
+        .to_owned();
+    let Some(spec) = checked.spec else {
+        return Ok(ReadyBrief {
+            brief,
+            spec_text: None,
+            heading: None,
+            stem,
+        });
+    };
     let beside = super::pool::dirname(&file);
     let candidates = if std::path::Path::new(&spec).is_absolute() {
         vec![spec.clone()]
@@ -81,16 +97,10 @@ pub fn read_ready_brief(path: &str, cwd: &str) -> Result<ReadyBrief, String> {
         ));
     };
     let spec_text = js::read_text(found).map_err(|err| format!("--brief {path}: {err}"))?;
-    let name = js::basename(&file);
-    let stem = name
-        .strip_suffix(BRIEF_SUFFIX)
-        .or_else(|| name.strip_suffix(".json"))
-        .unwrap_or(name)
-        .to_owned();
     Ok(ReadyBrief {
         brief,
         heading: first_heading(&spec_text),
-        spec_text,
+        spec_text: Some(spec_text),
         stem,
     })
 }
@@ -147,11 +157,11 @@ pub fn derived_title(work: &LineWork, slug: &str) -> Option<String> {
     }
 }
 
-/// The standing orders of the Steward a Factory pool starts with (ADR-0037).
-pub const STEWARD_ORDERS: &str = "Steward this Factory pool's Line while the operator is away: keep \
-its Stations moving through the checkpoints that are yours to answer. The Finish checkpoint is the \
-operator's: when the Line waits there, say in your pane where the Line stands and wait. End yourself \
-once the Line is done.";
+/// The standing orders of the Steward a Line pool starts with (ADR-0037, ADR-0039).
+pub const STEWARD_ORDERS: &str = "Steward this pool's Line while the operator is away: keep its \
+Plan moving through the checkpoints and holds your teaching says are yours to answer. The Finish \
+and its act are the operator's: when the Line waits there, say in your pane where the Line stands \
+and what the Finish waits for, and wait. End yourself once the Line is done.";
 
 /// The Grill's first Turn: the work as the operator gave it, an issue number spelled out, and the Line
 /// base it was cut from.
@@ -348,18 +358,19 @@ pub fn cut_line(
 
 /// Commit a ready brief and its spec onto the Line branch as `docs/specs/<slug>.md` and
 /// `docs/specs/<slug>.brief.json`, the brief's spec renamed to match. Answers the brief's path in the
-/// Line's checkout, which Start the Line is then given.
+/// Line's checkout, which `POST /api/line` is then given.
 pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, String> {
     let spec_path = format!("{BRIEF_DIR}/{}.md", line.slug);
     let brief_path = format!("{BRIEF_DIR}/{}{BRIEF_SUFFIX}", line.slug);
     let mut brief = ready.brief.clone();
-    brief.insert("spec".to_owned(), Value::String(spec_path.clone()));
     js::mkdir_all(js::path_join(&[&line.worktree, BRIEF_DIR])).map_err(|err| err.to_string())?;
-    js::write_file(
-        js::path_join(&[&line.worktree, &spec_path]),
-        &ready.spec_text,
-    )
-    .map_err(|err| err.to_string())?;
+    let mut paths = vec![brief_path.as_str()];
+    if let Some(spec_text) = &ready.spec_text {
+        brief.insert("spec".to_owned(), Value::String(spec_path.clone()));
+        js::write_file(js::path_join(&[&line.worktree, &spec_path]), spec_text)
+            .map_err(|err| err.to_string())?;
+        paths.push(&spec_path);
+    }
     let text =
         serde_json::to_string_pretty(&Value::Object(brief)).map_err(|err| err.to_string())?;
     js::write_file(
@@ -367,7 +378,9 @@ pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, 
         &format!("{text}\n"),
     )
     .map_err(|err| err.to_string())?;
-    git_ok(&line.worktree, &["add", "--", &spec_path, &brief_path])?;
+    let mut add = vec!["add", "--"];
+    add.extend(paths);
+    git_ok(&line.worktree, &add)?;
     let message = format!("Write down the spec and the Line brief for {}", line.branch);
     let mut commit: Vec<&str> = Vec::new();
     // A machine with no git identity still gets its Line: the commit says who made it.
@@ -425,14 +438,14 @@ mod tests {
         assert_eq!(derived_slug(&grill("#186")), "186");
         assert_eq!(
             derived_slug(&grill(
-                "Make the header strip show the Round and the Station too"
+                "Make the header strip show the Round and the node too"
             )),
             "make-the-header-strip-show-the"
         );
         assert_eq!(derived_slug(&grill("!!!")), "line");
         let ready = LineWork::Ready(Box::new(ReadyBrief {
             brief: Map::new(),
-            spec_text: String::new(),
+            spec_text: None,
             heading: None,
             stem: "186".to_owned(),
         }));
@@ -560,7 +573,7 @@ mod tests {
         js::write_file(js::path_join(&[&pilots, "186.md"]), "# Fix it\n\nbody\n").unwrap();
         js::write_file(
             js::path_join(&[&pilots, "186.brief.json"]),
-            r#"{"spec": "pilots/186.md", "finish": "draft-pr", "factory": {}}"#,
+            r#"{"spec": "pilots/186.md", "finish": "draft-pr"}"#,
         )
         .unwrap();
         js::write_file(
@@ -578,8 +591,9 @@ mod tests {
         assert_eq!(
             read_ready_brief("pilots/beside.brief.json", &dir)
                 .unwrap()
-                .spec_text,
-            "# Fix it\n\nbody\n"
+                .spec_text
+                .as_deref(),
+            Some("# Fix it\n\nbody\n")
         );
         js::write_file(
             js::path_join(&[&pilots, "lost.brief.json"]),

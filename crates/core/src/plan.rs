@@ -35,8 +35,8 @@ pub const HORDE_VERSION: u32 = 1;
 // -------------------------------------------------------------------------------------------------
 
 /// `[a-z][a-z0-9-]{0,39}`, not ending in `-<digits>` (Ticket ids append `-<pass>`), and none of the
-/// reserved words `plan`, `line`, `spawn`, `grader`. Parsed once, so a `NodeId` is always a valid
-/// Ticket-id prefix and branch-name fragment.
+/// reserved words `plan`, `line`, `spawn`, `grader`, `enlist`. Parsed once, so a `NodeId` is always
+/// a valid Ticket-id prefix and branch-name fragment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(String);
 
@@ -285,7 +285,7 @@ pub struct FinishNode {
     pub assign: Assign,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishAct {
     /// Approval ends the Line; no Finish Ticket is written.
     None,

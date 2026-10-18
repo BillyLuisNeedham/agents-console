@@ -1,14 +1,12 @@
 use ac_protocol::json::{True, Unchecked};
 use ac_protocol::{
-    EffectiveSettings, FactorySettings, MachineDefaultsView, PoolSettingsView, RestartResponse,
-    SettingsResponse,
+    EffectiveSettings, MachineDefaultsView, PoolSettingsView, RestartResponse, SettingsResponse,
 };
 use serde_json::{Map, Value};
 
 use crate::config::{ConfigError, PoolConfig, config_path, read_config};
 use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
-use crate::line::normalise_factory;
 use crate::machine_defaults::{
     MachineDefaultsPaths, read_machine_defaults, read_machine_defaults_file,
 };
@@ -18,7 +16,7 @@ use crate::steward::is_steward_budget;
 
 /// The keys the Settings pane owns. A patch may carry any subset; anything else in a patch body is
 /// ignored rather than written, so a stale tab cannot smuggle `assign` through the pane.
-pub const POOL_SETTINGS_KEYS: [&str; 11] = [
+pub const POOL_SETTINGS_KEYS: [&str; 10] = [
     "defaults",
     "resolver",
     "terminal",
@@ -29,7 +27,6 @@ pub const POOL_SETTINGS_KEYS: [&str; 11] = [
     "title",
     "spawnCaps",
     "steward",
-    "factory",
 ];
 
 /// The settings a saved edit does not reach until the next Restart: selection, terminal and port stay
@@ -69,7 +66,7 @@ pub fn read_pool_settings(pool_dir: &str) -> Result<PoolSettings, ConfigError> {
 ///
 /// A key absent from the patch is left exactly as it was. A key present with null or "" is removed,
 /// which is how the pane clears a pinned port or drops `terminal` back to headless. `defaults`,
-/// `spawnCaps`, `steward` and `factory` are replaced whole when present (their empty fields dropped, an all-empty
+/// `spawnCaps` and `steward` are replaced whole when present (their empty fields dropped, an all-empty
 /// one removing the key): the pane shows every field at once, so a field the operator emptied is an
 /// instruction, not an omission.
 ///
@@ -134,7 +131,6 @@ fn normalise_key(
         "reviewer" | "checkpoint" => normalise_prose(key, value),
         "title" => normalise_pool_title(value),
         "spawnCaps" => normalise_spawn_caps(value),
-        "factory" => normalise_factory_settings(value, harnesses),
         _ => normalise_steward(value, harnesses),
     }
 }
@@ -192,21 +188,6 @@ fn text_number(value: &Value) -> Option<Value> {
 // `/^\d+$/`: ASCII digits only, at least one.
 fn is_digits(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
-}
-
-// The Factory settings (issue #187): the pool's layer, replaced whole, its blank fields dropped and
-// every Station's harness one the pool knows.
-fn normalise_factory_settings(
-    value: &Value,
-    harnesses: &[String],
-) -> Result<Option<Value>, ConfigError> {
-    let Some(layer) = normalise_factory(value, "pool settings: factory").map_err(refused)? else {
-        return Ok(None);
-    };
-    require_known_station_harnesses(&layer, "pool settings", harnesses)?;
-    Ok(Some(
-        serde_json::to_value(layer).map_err(|e| refused(e.to_string()))?,
-    ))
 }
 
 // The Steward entry (ADR-0030) is replaced whole: a field the operator emptied goes back to its default
@@ -408,39 +389,6 @@ fn normalise_choice(
 /// `defaults.harness`, resolver and Steward harness and by Reassign's per-ticket harness (issue #126).
 /// `subject` is the whole prefix the message opens with ("pool settings: defaults.harness", "reassign:
 /// harness"). An empty table skips the check.
-/// Every harness a layer of the Factory settings names for a Station must be one the pool knows: the
-/// Pool settings' layer and the Machine defaults' alike, so a Station Ticket is never written naming one
-/// the pool cannot launch.
-pub fn require_known_station_harnesses(
-    layer: &FactorySettings,
-    subject: &str,
-    harnesses: &[String],
-) -> Result<(), ConfigError> {
-    let Some(stations) = &layer.stations else {
-        return Ok(());
-    };
-    for (key, station) in [
-        ("implement", &stations.implement),
-        ("prove", &stations.prove),
-        ("review", &stations.review),
-        ("decide", &stations.decide),
-        ("grill", &stations.grill),
-    ] {
-        if let Some(harness) = station
-            .as_ref()
-            .and_then(|s| s.assign.as_ref())
-            .and_then(|a| a.harness.as_deref())
-        {
-            require_known_harness(
-                &format!("{subject}: factory.stations.{key}.assign.harness"),
-                harness,
-                harnesses,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 pub fn require_known_harness(
     subject: &str,
     harness: &str,
@@ -901,72 +849,6 @@ mod tests {
     }
 
     // steward.test.ts: is a Pool setting, replaced whole, its budget typed as text, its harness checked
-    #[test]
-    fn replaces_the_factory_settings_whole_tidied_with_each_stations_harness_checked() {
-        let pool = Pool::new(Some(json!({ "steward": { "budget": 2 } })));
-        let two = vec!["claude".to_owned(), "opencode".to_owned()];
-        assert_eq!(
-            pool.write(
-                json!({ "factory": {
-                    "stations": {
-                        "implement": { "drivers": " tdd ", "assign": { "harness": "opencode", "model": "" }, "note": "" },
-                        "prove": { "enabled": false },
-                        "review": { "assign": {} }
-                    },
-                    "limits": { "proveFailsPerRound": "3", "extraRounds": "" },
-                    "finish": " draft-pr "
-                } }),
-                &two
-            )
-            .unwrap(),
-            json!({
-                "steward": { "budget": 2 },
-                "factory": {
-                    "stations": {
-                        "implement": { "drivers": "tdd", "assign": { "harness": "opencode" } },
-                        "prove": { "enabled": false }
-                    },
-                    "limits": { "proveFailsPerRound": 3 },
-                    "finish": "draft-pr"
-                }
-            })
-        );
-        assert_eq!(
-            pool.write(
-                json!({ "factory": { "stations": { "decide": { "assign": { "harness": "nope" } } } } }),
-                &["claude".to_owned()]
-            )
-            .unwrap_err(),
-            "pool settings: factory.stations.decide.assign.harness names unknown harness 'nope'. Known: claude"
-        );
-        assert_eq!(
-            pool.write(
-                json!({ "factory": { "stations": { "implement": { "enabled": false } } } }),
-                &[]
-            )
-            .unwrap_err(),
-            "pool settings: factory: factory.stations.implement.enabled is false: only Prove and Review can be switched off"
-        );
-        assert!(
-            pool.write(
-                json!({ "factory": { "limits": { "extraRounds": "two" } } }),
-                &[]
-            )
-            .unwrap_err()
-            .starts_with("pool settings: factory: invalid type")
-        );
-        // A form the operator emptied leaves the key out: every field falls to the machine's layer.
-        assert_eq!(
-            pool.write(
-                json!({ "factory": { "stations": { "prove": {} }, "finish": "" } }),
-                &[]
-            )
-            .unwrap()
-            .get("factory"),
-            None
-        );
-    }
-
     #[test]
     fn replaces_the_steward_entry_whole_its_budget_typed_as_text_its_harness_checked() {
         let pool = Pool::new(Some(

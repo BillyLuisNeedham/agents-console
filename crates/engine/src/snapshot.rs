@@ -85,8 +85,8 @@ pub struct PoolSnapshot {
     pub held_spawns: Vec<HeldSpawnView>,
     /// The Steward budget (ADR-0030).
     pub steward_budget: StewardBudgetView,
-    /// The Factory's Line for the header strip (ADR-0037); `None` until it starts.
-    pub line: Option<ac_protocol::LineView>,
+    /// The pool's Line, its frozen Plan with live state (ADR-0039); `None` in a pool that runs none.
+    pub line: Option<ac_protocol::LineGraphView>,
 }
 
 /// `emitSnapshot`: the one emit point for every snapshot the run produces. The hold is derived fresh

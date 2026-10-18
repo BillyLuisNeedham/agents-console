@@ -23,7 +23,7 @@ wire_consts! {
     /// Bumped on every change to a message's shape. The server says its version
     /// in `hello`; a page that was built for another one reloads itself, which is
     /// how a Restart that rebuilt the UI reaches a tab left open across it.
-    pub const PROTOCOL_VERSION: u64 = 2;
+    pub const PROTOCOL_VERSION: u64 = 3;
 
     /// Where the socket is served.
     pub const WS_PATH: &str = "/api/ws";
@@ -250,7 +250,7 @@ wire_struct! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub line: Option<LineView>,
+        pub line: Option<LineGraphView>,
     }
 }
 

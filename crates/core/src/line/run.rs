@@ -427,7 +427,7 @@ pub struct NewTicket {
 }
 
 /// The check the attempt's exit applies to a Line Ticket's done Outcome.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutcomeCheck {
     Agent,
     Prove,
@@ -962,6 +962,18 @@ impl LineRun {
             PassWork::Conversation { id } => Some(id),
             _ => None,
         }
+    }
+
+    /// The live pass of an entry Conversation node, with its opening Turn: what the Grill opens on
+    /// until Conversation passes open as Conversations of their own.
+    pub fn grill_pass(&self) -> Option<NewConversation> {
+        self.plan.entries().iter().find_map(|entry| {
+            let pass = self.current(entry)?;
+            let PassWork::Conversation { id } = &pass.work else {
+                return None;
+            };
+            Some(text::conversation(self, self.plan.node(entry)?, pass, id))
+        })
     }
 
     /// The check a Line Ticket's done Outcome must pass at its exit, `None` for an id that runs no

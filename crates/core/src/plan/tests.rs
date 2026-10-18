@@ -146,6 +146,12 @@ fn refuses_a_node_id_that_is_badly_shaped_numbered_or_reserved() {
 }
 
 #[test]
+fn refuses_enlist_as_a_node_id_since_an_enlist_pass_would_fail_the_pool_load() {
+    assert!(NodeId::parse("enlist").is_err());
+    assert!(NodeId::parse("enlisted").is_ok());
+}
+
+#[test]
 fn refuses_a_node_id_used_twice() {
     assert_refused(
         &simple(vec![node("prove", "a")], vec![]),

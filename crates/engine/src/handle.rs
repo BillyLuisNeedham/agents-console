@@ -160,18 +160,41 @@ impl Engine {
             .await;
     }
 
-    /// Start the Line (ADR-0037): the first Station Ticket's id, or the refusal's reason.
-    pub async fn start_line(&self, brief: Option<String>) -> Result<String, EngineError> {
-        self.call(move |s| crate::line::start_line(s, brief))
+    /// `POST /api/line` (ADR-0039): the Line begins on its Plan, or the refusal's reason.
+    pub async fn begin_line(
+        &self,
+        plan: serde_json::Value,
+        begin: crate::line::Begin,
+    ) -> Result<ac_protocol::LineGraphView, EngineError> {
+        self.call(move |s| crate::line::begin_line(s, &plan, begin))
             .await?
     }
 
-    /// Start the Line on the Grill (ADR-0037), the operator's act: the brief checked on the Grill's
-    /// branch, the branch merged and Round 1's Implement written, then the Grill ended. The first
-    /// Station Ticket's id, or the refusal's reason.
-    pub async fn start_line_from_grill(&self, grill: String) -> Result<String, EngineError> {
+    /// The Line's graph with live state, `None` in a pool that runs none.
+    pub async fn line_view(&self) -> Result<Option<ac_protocol::LineGraphView>, EngineError> {
+        Ok(self.call(|s| crate::line::line_view(s)).await?)
+    }
+
+    /// Where a Decide pass's report is, `None` when the pool's Line has no such node.
+    pub async fn line_report_path(
+        &self,
+        node: String,
+        pass: u32,
+    ) -> Result<Option<String>, EngineError> {
+        Ok(self
+            .call(move |s| crate::line::report_path(s, &node, pass))
+            .await?)
+    }
+
+    /// Start the Line on the Grill (the bridge until Conversation nodes, ADR-0039), the operator's
+    /// act: the brief checked on the Grill's branch, the branch merged and the entry pass ended on
+    /// it, then the Grill ended. The Line, or the refusal's reason.
+    pub async fn start_line_from_grill(
+        &self,
+        grill: String,
+    ) -> Result<ac_protocol::LineGraphView, EngineError> {
         let id = grill.clone();
-        let ticket = self
+        let view = self
             .call(move |s| crate::line::start_line_from_grill(s, &id))
             .await??;
         // The Line has started by now, so an End that fails is logged, not a refusal: the Grill
@@ -190,7 +213,7 @@ impl Engine {
             );
             let _ = self.call(move |s| s.log(line)).await;
         }
-        Ok(ticket)
+        Ok(view)
     }
 
     /// `adoptHeldSpawn` (ADR-0029).

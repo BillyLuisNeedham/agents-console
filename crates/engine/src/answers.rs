@@ -141,6 +141,12 @@ pub fn accept_answer(
     {
         return Err(refused(review_reject_unnamed_error(&session.markers)));
     }
+    if pending.kind == InterruptKind::Checkpoint
+        && let Some(refusal) =
+            crate::line::answer_refusal(session, ticket_id, close, note.as_deref())
+    {
+        return Err(EngineError::LineRefusal(format!("answer: {refusal}")));
+    }
     if pending.kind == InterruptKind::Selection {
         let named = parse_selection_answer(note.as_deref());
         let candidate = named.is_some_and(|n| {
@@ -272,6 +278,13 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
             .answer_waiters
             .remove(&record.seq)
             .unwrap_or_default();
+        if let Some(refusal) = line_refusal_at_drain(session, &record) {
+            drop_refused_answer(session, &record, &refusal)?;
+            for waiter in waiters {
+                let _ = waiter.send(Err(EngineError::LineRefusal(refusal.clone())));
+            }
+            continue;
+        }
         if let Err(error) = process_answer(session, &record) {
             session.answers.mark_processed(record.seq)?;
             session.publish_now();
@@ -293,6 +306,43 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
             let _ = waiter.send(Ok(()));
         }
     }
+    Ok(())
+}
+
+// An answer on a Line hold is checked again as it drains: the Finish may have gained a blocker since
+// it was accepted (ADR-0039).
+fn line_refusal_at_drain(session: &mut Session, record: &QueuedAnswer) -> Option<String> {
+    if record.kind != InterruptKind::Checkpoint {
+        return None;
+    }
+    let close = record.action == Some(QueuedAnswerAction::Close);
+    crate::line::answer_refusal(session, &record.ticket_id, close, record.note.as_deref())
+}
+
+// A refused answer is consumed with its record and an event; its Interrupt stays for the next one.
+fn drop_refused_answer(
+    session: &mut Session,
+    record: &QueuedAnswer,
+    refusal: &str,
+) -> anyhow::Result<()> {
+    let runs = Path::new(&session.runs_dir).to_path_buf();
+    let mut payload = Map::new();
+    payload.insert("reason".into(), Value::String(refusal.to_owned()));
+    append_event(
+        &runs,
+        &record.ticket_id,
+        &event_now(
+            last_attempt(&runs, &record.ticket_id),
+            TicketEventKind::AnswerRefused,
+            payload,
+        ),
+    )?;
+    session.answers.mark_processed(record.seq)?;
+    session.log(format!(
+        "line: the answer on {} was dropped: {refusal}",
+        record.ticket_id
+    ));
+    session.publish_now();
     Ok(())
 }
 
@@ -382,20 +432,34 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
     }
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
     session.held.shift_remove(&record.ticket_id);
-    if marker.status != TicketStatus::Done {
-        write_marker_status(&marker.file, TicketStatus::Ready)?;
-        if let Some(m) = session.marker_mut(&marker.id) {
-            m.status = TicketStatus::Ready;
-        }
-    }
-    if let Some(note) = note.map(js::trim).filter(|n| !n.is_empty()) {
-        // The Steward's note is marked as its own (ADR-0030).
-        let heading = if record.by == Some(AnswerBy::Steward) {
+    // The note lands before the status moves: a Line hold's Done state line is the fact the run reads
+    // its answer from, the note and its heading included (ADR-0039).
+    let note = note.map(js::trim).filter(|n| !n.is_empty());
+    let by_steward = record.by == Some(AnswerBy::Steward);
+    // The Steward's note is marked as its own (ADR-0030). On a hold its heading is written even with
+    // no note, because the run spends the Steward's one extra loop pass by that heading.
+    if note.is_some() || (marker.hold && by_steward) {
+        let heading = if by_steward {
             "## Resume note, from the Steward"
         } else {
             "## Resume note"
         };
-        js::append_file(&marker.file, &format!("\n{heading}\n\n{note}\n"))?;
+        js::append_file(
+            &marker.file,
+            &format!("\n{heading}\n\n{}\n", note.unwrap_or_default()),
+        )?;
+    }
+    if marker.status != TicketStatus::Done {
+        // A hold is answered, never run.
+        let resumed = if marker.hold {
+            TicketStatus::Done
+        } else {
+            TicketStatus::Ready
+        };
+        write_marker_status(&marker.file, resumed)?;
+        if let Some(m) = session.marker_mut(&marker.id) {
+            m.status = resumed;
+        }
     }
     let tickets = session.marker_statuses();
     let interrupts: Vec<Interrupt> = session
@@ -687,7 +751,8 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
-            station: None,
+            node: None,
+            hold: false,
         });
         session
             .state

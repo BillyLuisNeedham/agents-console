@@ -317,7 +317,8 @@ fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
-        station: None,
+        node: None,
+        hold: false,
     });
     session
         .state

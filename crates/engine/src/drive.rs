@@ -216,9 +216,7 @@ impl PoolFacts for SessionFacts<'_> {
     }
 
     fn is_hold(&self, id: &str) -> bool {
-        self.session
-            .marker(id)
-            .is_some_and(|m| m.station == Some(ac_protocol::Station::Finish))
+        self.session.marker(id).is_some_and(|m| m.hold)
     }
 
     fn is_live(&self, id: &str) -> bool {
@@ -444,7 +442,7 @@ const TICK_STEPS: [fn(&mut Session) -> anyhow::Result<()>; 6] = [
     crate::config_reload::reload_config,
     crate::answers::drain_answers,
     crate::interrupts::reconcile_deadlocks,
-    crate::line::route_line,
+    crate::line::advance_line,
     crate::spawns::adopt_spawn_proposals,
     start_owed_grading,
 ];
@@ -454,6 +452,7 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         anyhow::bail!(failure);
     }
     let before = serde_json::to_value(&session.state)?;
+    let line_before = session.line.clone();
     for step in TICK_STEPS {
         step(session)?;
     }
@@ -471,7 +470,9 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         && session.continued_grades.is_empty()
         && !spawns_await_tick(session)
         && merge_hold(session).is_empty();
-    let stirred = state != before || !launches.is_empty() || !close;
+    // line.json is saved by its step; a change to the run alone still persists and emits.
+    let line_moved = session.line != line_before;
+    let stirred = state != before || line_moved || !launches.is_empty() || !close;
     if stirred {
         emit_snapshot(session, RunPhase::Running);
     }
@@ -480,7 +481,7 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     Ok(Tick {
         launches,
         next: if close { Next::Close } else { Next::Wait },
-        changed: !held && session.persisted.as_ref() != Some(&state),
+        changed: !held && (line_moved || session.persisted.as_ref() != Some(&state)),
     })
 }
 
@@ -954,7 +955,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .collect();
             let merging = s.merge_line.unsettled();
             let raised = pending.is_empty()
-                && !crate::line::is_factory_pool(s)
+                && s.line.is_none()
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
                 && merging.is_empty();
@@ -972,9 +973,8 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 }
             }
             let interrupts = !s.state.interrupts.is_empty();
-            // A Factory pool is done only when its Line is: before Start the Line, and while it
-            // routes, an empty or finished pool waits on it.
-            let line_waits = crate::line::is_factory_pool(s) && !crate::line::line_ended(s);
+            // A Line pool is done only when its Line is: while it runs, a finished pool waits on it.
+            let line_waits = s.line.is_some() && !crate::line::line_ended(s);
             let phase = if interrupts
                 || !outside.is_empty()
                 || !s.continued_grades.is_empty()
@@ -1005,11 +1005,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 RunPhase::Quiescent => format!(
                     "pool quiescent: waiting on {}",
                     if line_waits && pending.is_empty() && outside.is_empty() {
-                        if s.line.is_some() {
-                            "the Line".to_owned()
-                        } else {
-                            "Start the Line".to_owned()
-                        }
+                        "the Line".to_owned()
                     } else if !outside.is_empty() {
                         outside
                             .iter()
@@ -1112,7 +1108,8 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
-            station: None,
+            node: None,
+            hold: false,
         }
     }
 

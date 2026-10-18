@@ -85,7 +85,7 @@ fn accepts_the_positional_pool_and_every_flag() {
 }
 
 #[test]
-fn takes_the_factory_flags_and_a_brief_implies_factory_mode_asking_nothing() {
+fn takes_the_line_flags_and_a_brief_implies_line_mode_asking_nothing() {
     let args = parse_boot_args(&strings(&[
         "--brief",
         ".scratch/pilots/186.brief.json",
@@ -102,7 +102,7 @@ fn takes_the_factory_flags_and_a_brief_implies_factory_mode_asking_nothing() {
     ]))
     .unwrap();
     assert_eq!(args.from.as_deref(), Some("origin/experiment/x"));
-    assert!(args.factory && args.yes);
+    assert!(args.line_mode() && args.yes && args.plan.is_none());
     assert_eq!(
         args.brief.as_deref(),
         Some(".scratch/pilots/186.brief.json")
@@ -111,26 +111,29 @@ fn takes_the_factory_flags_and_a_brief_implies_factory_mode_asking_nothing() {
     assert_eq!(args.name.as_deref(), Some("pilot"));
     assert_eq!(args.line.as_deref(), Some("186"));
     assert_eq!(args.config.as_deref(), Some("steward.json"));
-    let grill = parse_boot_args(&strings(&["--factory", "--work", "#186"])).unwrap();
-    assert!(grill.factory && !grill.yes && !grill.no_steward);
+    let grill = parse_boot_args(&strings(&["--plan", "factory-today", "--work", "#186"])).unwrap();
+    assert!(grill.line_mode() && !grill.yes && !grill.no_steward);
+    assert_eq!(grill.plan.as_deref(), Some("factory-today"));
     assert_eq!(grill.work.as_deref(), Some("#186"));
-    let quiet = parse_boot_args(&strings(&["--factory", "--no-steward"])).unwrap();
+    let quiet = parse_boot_args(&strings(&["--plan", "p", "--no-steward"])).unwrap();
     assert!(quiet.no_steward);
 }
 
 #[test]
-fn refuses_factory_flags_that_do_not_fit_together() {
+fn refuses_line_flags_that_do_not_fit_together() {
     let message = |argv: &[&str]| parse_boot_args(&strings(argv)).unwrap_err().message;
-    assert!(message(&["--work", "x"]).starts_with("--work is for Factory mode: add --factory\n"));
-    assert!(message(&["--no-steward"]).starts_with("--no-steward is for Factory mode"));
-    assert!(message(&["--from", "develop"]).starts_with("--from is for Factory mode"));
-    assert!(message(&["--factory", "--from"]).starts_with("--from needs a value\n"));
+    assert!(message(&["--work", "x"]).starts_with("--work is for Line mode: add --plan <slug>\n"));
+    assert!(message(&["--no-steward"]).starts_with("--no-steward is for Line mode"));
+    assert!(message(&["--from", "develop"]).starts_with("--from is for Line mode"));
+    assert!(message(&["--plan", "p", "--from"]).starts_with("--from needs a value\n"));
+    assert!(message(&["--plan"]).starts_with("--plan needs a value\n"));
     assert!(
-        message(&["--factory", "--work", "x", "--brief", "b.json"])
+        message(&["--plan", "p", "--work", "x", "--brief", "b.json"])
             .starts_with("--work and --brief both start the Line; give one\n")
     );
-    assert!(message(&["--factory", "some/pool"]).starts_with("Factory mode makes its pool inside"));
-    assert!(message(&["--factory", "--relaunch"]).starts_with("--relaunch restarts a pool"));
+    assert!(message(&["--plan", "p", "some/pool"]).starts_with("Line mode makes its pool inside"));
+    assert!(message(&["--plan", "p", "--relaunch"]).starts_with("--relaunch restarts a pool"));
+    assert!(message(&["--factory"]).starts_with("unknown flag --factory\n"));
     assert!(message(&["--brief"]).starts_with("--brief needs a value\n"));
 }
 
@@ -184,7 +187,7 @@ fn rejects_a_flag_with_no_value_and_an_unknown_flag() {
     );
     let help = parse_boot_args(&strings(&["--yes", "--help"])).unwrap_err();
     assert!(help.help);
-    assert_eq!(help.message, format!("{USAGE}\n{FACTORY_HELP}"));
+    assert_eq!(help.message, format!("{USAGE}\n{LINE_HELP}"));
 }
 
 #[test]
@@ -801,7 +804,7 @@ fn refuses_a_setup_it_cannot_find() {
 fn prints_the_usage_on_help_and_starts_nothing() {
     let mut pen = Pen::default();
     assert_eq!(run_boot(&strings(&["--help"]), &mut pen, "/nowhere"), Ok(0));
-    assert_eq!(pen.logs, [format!("{USAGE}\n{FACTORY_HELP}")]);
+    assert_eq!(pen.logs, [format!("{USAGE}\n{LINE_HELP}")]);
     let mut pen = Pen::default();
     assert_eq!(
         run_boot(&strings(&["--nope"]), &mut pen, "/nowhere"),
