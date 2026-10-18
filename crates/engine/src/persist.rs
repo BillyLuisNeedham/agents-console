@@ -34,20 +34,26 @@ pub fn persist(session: &mut Session) -> anyhow::Result<()> {
 }
 
 pub async fn persist_with_retry(engine: &Engine) -> anyhow::Result<bool> {
-    let mut backoff = PERSIST_RETRY_BACKOFF_MS.iter();
-    loop {
-        let error = match engine.call(persist).await? {
-            Ok(()) => return Ok(true),
-            Err(error) => error.to_string(),
-        };
-        let Some(ms) = backoff.next() else {
-            engine
-                .call(move |s| crate::interrupts::raise_interrupt(s, persistence_interrupt(&error)))
-                .await?;
-            return Ok(false);
-        };
-        tokio::time::sleep(Duration::from_millis(*ms)).await;
+    match engine.call(persist).await? {
+        Ok(()) => Ok(true),
+        Err(refused) => retry_persist(engine, refused).await,
     }
+}
+
+/// The backoff after a refused write, ending in the persistence Interrupt once every retry is refused.
+pub async fn retry_persist(engine: &Engine, refused: anyhow::Error) -> anyhow::Result<bool> {
+    let mut error = refused.to_string();
+    for ms in PERSIST_RETRY_BACKOFF_MS {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        match engine.call(persist).await? {
+            Ok(()) => return Ok(true),
+            Err(refused) => error = refused.to_string(),
+        }
+    }
+    engine
+        .call(move |s| crate::interrupts::raise_interrupt(s, persistence_interrupt(&error)))
+        .await?;
+    Ok(false)
 }
 
 pub async fn persist_after_flow(engine: &Engine) {

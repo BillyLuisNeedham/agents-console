@@ -16,7 +16,7 @@ use crate::checkout_gate::{hold_pool_checkout, pool_checkout_free, release_pool_
 use crate::error::EngineError;
 use crate::interrupts::{interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt};
 use crate::merges::{chain_ticket_merge, in_merge_chain, merge_hold, merge_target_sha};
-use crate::persist::{close_store, persist_with_retry, write_markers};
+use crate::persist::{close_store, persist, persist_with_retry, retry_persist, write_markers};
 use crate::session::{PoolState, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::spawns::spawns_await_tick;
@@ -413,11 +413,17 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
             next,
             changed,
         } = engine.call(tick).await??;
+        let refused = if changed {
+            engine.call(persist).await?.err()
+        } else {
+            None
+        };
+        // A refused write retries while the launches run, so a failing store holds no Attempt back.
         for launch in launches {
             tokio::spawn(run_launch(engine.clone(), launch));
         }
-        if changed {
-            persist_with_retry(engine).await?;
+        if let Some(refused) = refused {
+            retry_persist(engine, refused).await?;
         }
         if next == Next::Close {
             break;
