@@ -300,6 +300,8 @@ fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
     std::fs::create_dir_all(&runs).unwrap();
     let (publisher, _) = tokio::sync::watch::channel(None);
     let mut session = crate::testkit::bare_session(publisher);
+    // As mid-run: a wake rings the running drive rather than starting one.
+    session.driving = true;
     session.pool_dir = dir.to_string_lossy().into_owned();
     session.issues_dir = dir.join("issues").to_string_lossy().into_owned();
     session.runs_dir = runs.to_string_lossy().into_owned();
@@ -409,6 +411,24 @@ fn the_operators_discard_of_a_pending_spawn_drops_it_for_good_and_logs_it() {
             .message(),
         "no pending spawn proposal-1: it has landed or been discarded"
     );
+}
+
+#[test]
+fn holding_or_discarding_a_spawn_wakes_the_drive_since_the_lines_finish_waits_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({}));
+    propose(&mut session, "Hold me");
+    propose(&mut session, "Drop me");
+
+    session.wakes.see_all();
+    crate::spawns::hold_pending_spawn(&mut session, "proposal-1").unwrap();
+    assert!(session.wakes.any_unseen(), "a hold wakes the drive");
+    session.wakes.see_all();
+    crate::spawns::discard_held_spawn(&mut session, "proposal-1", None).unwrap();
+    assert!(session.wakes.any_unseen(), "a held discard wakes the drive");
+    session.wakes.see_all();
+    crate::spawns::discard_pending_spawn(&mut session, "proposal-2").unwrap();
+    assert!(session.wakes.any_unseen(), "a pending discard wakes the drive");
 }
 
 #[test]

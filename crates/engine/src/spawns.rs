@@ -969,9 +969,12 @@ pub fn ledger_path(session: &Session) -> String {
     js::path_text(&spawn_ledger_path(runs(session)))
 }
 
-fn emit_current(session: &mut Session) {
+// An operator's or Steward's answer on a spawn: shown at once, and the drive woken, since the
+// Line's Finish waits on every Held and Pending spawn.
+fn emit_and_wake(session: &mut Session) {
     let phase = session.current_phase();
     emit_snapshot(session, phase);
+    session.wake();
 }
 
 pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
@@ -996,9 +999,7 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
         .spawn_proposals
         .begin_adopt(id)
         .map_err(|e| refused(e.to_string()))?;
-    let phase = session.current_phase();
-    emit_snapshot(session, phase);
-    session.wake();
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1044,7 +1045,7 @@ pub fn discard_held_spawn(
             }
         ),
     );
-    emit_current(session);
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1081,7 +1082,7 @@ pub fn hold_pending_spawn(session: &mut Session, id: &str) -> Result<(), EngineE
             held.parent_id, held.proposal.title
         ),
     );
-    emit_current(session);
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1109,7 +1110,7 @@ pub fn discard_pending_spawn(session: &mut Session, id: &str) -> Result<(), Engi
             pending.parent_id, pending.proposal.title
         ),
     );
-    emit_current(session);
+    emit_and_wake(session);
     Ok(())
 }
 
