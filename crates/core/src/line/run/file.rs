@@ -322,6 +322,12 @@ impl LineRun {
                 };
                 LineNodeView {
                     id: node.id.to_string(),
+                    verdicts: self
+                        .plan
+                        .vocabulary(&node.id)
+                        .iter()
+                        .map(|v| v.as_str().to_owned())
+                        .collect(),
                     passes: run.map_or(0, |r| r.passes),
                     pass: pass.map(|p| p.n),
                     tickets,

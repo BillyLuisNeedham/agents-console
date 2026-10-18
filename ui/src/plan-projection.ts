@@ -76,10 +76,12 @@ export interface PlanProjectionInput {
   problems: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
   places: ReadonlyMap<string, Point>;
+  /** A label for an edge, by its key text, where the static one would mislead (the live Line's counts). */
+  edgeLabels?: ReadonlyMap<string, string>;
 }
 
 export function projectPlan(input: PlanProjectionInput): PlanDrawing {
-  const { plan, problems, verdicts, places } = input;
+  const { plan, problems, verdicts, places, edgeLabels } = input;
   const nodeProblems = new Map<string, string[]>();
   const edgeProblems = new Map<string, string[]>();
   const planProblems: string[] = [];
@@ -132,7 +134,7 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
       key: base,
       copy,
       edge,
-      label: edgeLabel(edge),
+      label: edgeLabels?.get(base) ?? edgeLabel(edge),
       problems: edgeProblems.get(base) ?? [],
       route: edgeRoute(from.at, port, to.at),
     });

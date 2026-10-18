@@ -1290,8 +1290,6 @@ export interface PoolView {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149). */
   spawnLine: SpawnLineView;
-  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
-  lineStrip: string | null;
   /** The Held spawns list the line opens (issue #149), oldest first. */
   heldSpawns: HeldSpawnRow[];
   /** The Steward on duty (ADR-0030), which the header names; null when none is. */
@@ -1869,7 +1867,6 @@ export function projectPool(
     log: snapshot.state.log,
     mergeQueueLine: mergeQueueLine(snapshot, now),
     spawnLine: spawnLine(snapshot),
-    lineStrip: lineStrip(snapshot.line),
     heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
     steward: stewardOnDuty(conversations),
   };
@@ -1907,26 +1904,6 @@ function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
   const parts = [`Spawns ${spawnedThisRun}/${perRun} this run`, `${perAttempt} per attempt`];
   if (held > 0) parts.push(`${held} held`);
   return { text: parts.join(" · "), warn: spawnedThisRun >= perRun || held > 0 };
-}
-
-// ---------------------------------------------------------------------------
-// The Line (ADR-0037)
-// ---------------------------------------------------------------------------
-
-/**
- * The canvas header's Line strip: the Plan's name and where the Line stands,
- * "Matt Pocock main · running", "Factory today · finishing · Finish waiting
- * for implement-1, review-1" while the Finish refuses, "Factory today · Line
- * done" once it ends. Null in a pool that runs no Line.
- */
-export function lineStrip(line: LineGraphView | undefined): string | null {
-  if (!line) return null;
-  const { name } = line.plan;
-  if (line.status === "done" || line.status === "closed") return `${name} · Line ${line.status}`;
-  if (line.status === "finishing" && line.waitingFor.length > 0) {
-    return `${name} · finishing · Finish waiting for ${line.waitingFor.join(", ")}`;
-  }
-  return `${name} · ${line.status}`;
 }
 
 // ---------------------------------------------------------------------------

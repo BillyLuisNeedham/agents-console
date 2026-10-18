@@ -1600,6 +1600,8 @@ export interface LineGraphView {
 /** One node of the live graph, every Plan node listed. */
 export interface LineNodeView {
   id: string;
+  /** The verdicts an edge out of it may route on, for its ports. */
+  verdicts: string[];
   passes: number;
   /** The live pass, if any. */
   pass?: number;

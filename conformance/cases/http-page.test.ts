@@ -3,7 +3,8 @@
  * (ADR-0036): the boot snapshot embedded in the page, a hostile Ticket title
  * included, the build's own scripts and stylesheets with the types a browser
  * loads them by, and what a path outside the build or no route at all is
- * answered with. The first case is engine/protocol.test.ts:306 (since moved
+ * answered with. A pool running a Line embeds the Line's graph in that
+ * snapshot too. The first case is engine/protocol.test.ts:306 (since moved
  * to ui/src/protocol.test.ts:308), which embedded a made-up snapshot in a
  * made-up page; the rest are the inventory's gaps beside engine/server.ts.
  */
@@ -13,7 +14,8 @@ import { connect } from "node:net";
 import type { CaseServer } from "../harness/case.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
-import { doneTicket, snapshotOf } from "./config-support.ts";
+import { doneTicket, snapshotOf, untilSnapshot } from "./config-support.ts";
+import { copyIds, finishWaitsOnBuild, liveCopies } from "./line-copies-support.ts";
 import { CLAUDE, REVIEW, interruptFor, servedPage } from "./protocol-support.ts";
 
 const HOSTILE = "</script><script>alert(1)</script>";
@@ -66,6 +68,22 @@ conformance(
   },
   { timeoutMs: 120_000 },
 );
+
+conformance("http", "the embedded boot snapshot › carries a running Line's graph, so the Console draws it before the socket opens", async (t) => {
+  const { server, first, second } = await liveCopies(t);
+  const held = await untilSnapshot(server, finishWaitsOnBuild, "the Finish to wait on build");
+
+  const { boot } = await servedPage(server);
+  const line = boot.snapshot?.line;
+  expect(line).toMatchObject({ status: "finishing", waitingFor: ["build-1.1", "build-1.2", "3 queued items on build"] });
+  expect(line?.plan.name).toBe("Forked");
+  expect(line?.nodes.find((n) => n.id === "build")).toMatchObject({ pass: 1, tickets: copyIds(2), queued: 3 });
+  expect(line?.nodes.find((n) => n.id === "finish")?.verdicts).toEqual(["revise"]);
+  expectParsedEqual(line, held.line, "the embedded graph");
+
+  await first.release();
+  await second.release();
+});
 
 // The gap at engine/server.ts:396
 conformance(

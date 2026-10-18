@@ -46,6 +46,8 @@ import {
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
 import { PlansStore, type PlansHandlers } from "./plans";
+import { LinePane } from "./line-pane";
+import type { LineLive } from "./line-projection";
 import {
   HeldSpawnsStore,
   type HeldSpawnHandler,
@@ -141,8 +143,9 @@ export interface AppModel {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
   spawnLine: SpawnLineView | null;
-  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
-  lineStrip: string | null;
+  /** The running Line's live graph (ADR-0039), which the header's Line button
+   *  and the Line view read; null in a pool that runs no Line. */
+  line: LineLive | null;
   /** The Held spawns list the Spawn caps line opens (issue #149). */
   heldSpawns: HeldSpawnRow[];
   detail: DetailView | null;
@@ -274,6 +277,7 @@ export class ConsoleView {
   private readonly reassign: ReassignStore;
   private readonly heldSpawns: HeldSpawnsStore;
   private readonly plans: PlansStore;
+  private readonly linePane: LinePane;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   private readonly onChange: () => void;
   // The selection outlives any one render (snapshots never close the panel
@@ -325,6 +329,10 @@ export class ConsoleView {
       onBootPlan: options.onBootPlan,
       onChange: options.onChange,
     });
+    this.linePane = new LinePane({
+      onChange: options.onChange,
+      onOpenCard: (cardId) => this.focusCard(cardId),
+    });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,
       onSavePool: options.onSavePoolSettings,
@@ -349,6 +357,7 @@ export class ConsoleView {
       onOpenPlans: () => {
         void this.plans.open();
       },
+      onOpenLine: () => this.linePane.open(),
       onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
       onEndConversation: (conversationId, close) => {
@@ -442,6 +451,7 @@ export class ConsoleView {
       model.spawnLine
         ? this.heldSpawns.render(model.heldSpawns, model.spawnLine)
         : null,
+      this.linePane.render(model.line),
       this.plans.render(),
     );
     const content = h(
@@ -472,6 +482,7 @@ export class ConsoleView {
       this.canvas.unbind();
     }
     this.plans.bindCanvas(root);
+    this.linePane.bindCanvas(root);
   }
 
   private selectNode(nodeId: string): void {

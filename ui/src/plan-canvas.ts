@@ -2,6 +2,8 @@ import type { PlanFile, PlanNodeKind, PlanProblem } from "../../protocol/wire.ts
 import { h } from "./dom";
 import { nextFrame } from "./frame";
 import { zoomAtCursor, type Point, type ViewTransform } from "./geometry";
+import type { LineLive, LiveEdge } from "./line-projection";
+import { liveBody, liveState } from "./plan-live";
 import {
   CARD_H,
   CARD_W,
@@ -44,6 +46,8 @@ export interface PlanCanvasModel {
   pendingDrops: ReadonlyMap<string, Point>;
   selection: PlanSelection;
   editable: boolean;
+  /** The running Line's state drawn over `plan`: cards show copies and holds, edges their counts. Read-only. */
+  live?: LineLive;
 }
 
 export interface PlanCanvasEvents {
@@ -52,6 +56,14 @@ export interface PlanCanvasEvents {
   link(key: EdgeKey): void;
   add(kind: PlanNodeKind, at: Point): void;
   remove(selection: Exclude<PlanSelection, null>): void;
+  /** A copy dot or hold chip of the live Line was tapped: the card it names. */
+  open?(card: string): void;
+}
+
+/** The events of a canvas that only shows the Line: a tap on a copy opens it, everything else does nothing. */
+export function liveEvents(open: (card: string) => void): PlanCanvasEvents {
+  const none = () => {};
+  return { select: none, move: none, link: none, add: none, remove: none, open };
 }
 
 type Gesture =
@@ -96,6 +108,7 @@ export class PlanCanvas {
         onpointermove: (event: PointerEvent) => this.pointerMove(event),
         onpointerup: (event: PointerEvent) => this.endGesture(event),
         onpointercancel: () => this.cancelGesture(),
+        onclick: (event: MouseEvent) => this.click(event),
         onwheel: (event: WheelEvent) => this.wheel(event),
         onkeydown: (event: KeyboardEvent) => this.keyDown(event),
       },
@@ -108,7 +121,7 @@ export class PlanCanvas {
     );
     return h(
       "div",
-      { class: "plan-canvas", key: "plan-canvas" },
+      { class: "plan-canvas" + (model.live ? " plan-canvas-live" : ""), key: "plan-canvas" },
       h(
         "div",
         { class: "plan-shelf" },
@@ -159,7 +172,8 @@ export class PlanCanvas {
     const model = this.model!;
     const g = this.gesture;
     const places = g.kind === "node" && g.moved ? new Map(model.pendingDrops).set(g.id, g.at) : model.pendingDrops;
-    this.drawing = projectPlan({ plan: model.plan, problems: model.problems, verdicts: model.verdicts, places });
+    const edgeLabels = model.live && new Map([...model.live.edges].map(([key, edge]) => [key, edge.label]));
+    this.drawing = projectPlan({ plan: model.plan, problems: model.problems, verdicts: model.verdicts, places, edgeLabels });
     return this.drawing;
   }
 
@@ -168,9 +182,11 @@ export class PlanCanvas {
     const model = this.model!;
     const g = this.gesture;
     const selected = model.selection?.kind === "node" && model.selection.id === node.id;
+    const live = model.live?.nodes.get(node.id);
     const cls =
       "plan-node plan-node-" +
       node.kind +
+      (live ? ` plan-node-live plan-live-${live.state.tone}` : "") +
       (selected ? " plan-node-selected" : "") +
       (drawn.problems.length ? " plan-node-problem" : "") +
       (g.kind === "node" && g.moved && g.id === node.id ? " plan-node-dragging" : "") +
@@ -188,24 +204,28 @@ export class PlanCanvas {
         "div",
         { class: "plan-node-head" },
         h("span", { class: "plan-node-title" }, node.title),
-        drawn.problems.length
-          ? h("span", { class: "plan-node-flag" }, `${drawn.problems.length} problem${drawn.problems.length > 1 ? "s" : ""}`)
-          : null,
+        live
+          ? liveState(live)
+          : drawn.problems.length
+            ? h("span", { class: "plan-node-flag" }, `${drawn.problems.length} problem${drawn.problems.length > 1 ? "s" : ""}`)
+            : null,
       ),
-      h(
-        "div",
-        { class: "plan-node-body" },
-        h(
-          "div",
-          { class: "plan-node-row" },
-          h("span", { class: "plan-kind" }, KIND_LABEL[node.kind]),
-          h("span", { class: "plan-node-id" }, node.id),
-        ),
-        ...drawn.lines.map((line) => h("div", { class: "plan-node-line" }, line)),
-        drawn.chips.length
-          ? h("div", { class: "plan-chips" }, ...drawn.chips.map((chip) => h("span", { class: "plan-chip" }, chip)))
-          : null,
-      ),
+      live
+        ? liveBody(drawn, live)
+        : h(
+            "div",
+            { class: "plan-node-body" },
+            h(
+              "div",
+              { class: "plan-node-row" },
+              h("span", { class: "plan-kind" }, KIND_LABEL[node.kind]),
+              h("span", { class: "plan-node-id" }, node.id),
+            ),
+            ...drawn.lines.map((line) => h("div", { class: "plan-node-line" }, line)),
+            drawn.chips.length
+              ? h("div", { class: "plan-chips" }, ...drawn.chips.map((chip) => h("span", { class: "plan-chip" }, chip)))
+              : null,
+          ),
       drawn.ports.length
         ? h(
             "div",
@@ -217,14 +237,21 @@ export class PlanCanvas {
               h(
                 "button",
                 {
-                  class: "plan-port" + (port.linked ? "" : " plan-port-open"),
+                  class:
+                    "plan-port" +
+                    (port.linked ? "" : " plan-port-open") +
+                    (live?.parked.includes(port.on) ? " plan-port-parked" : ""),
                   type: "button",
                   key: port.on,
                   "data-node": node.id,
                   "data-on": port.on,
-                  title: `drag onto the node that follows when ${node.id} says ${port.on}`,
+                  title: live
+                    ? live.parked.includes(port.on)
+                      ? `${node.id} said ${port.on}, and no edge takes it: waiting`
+                      : `${node.id} says ${port.on}`
+                    : `drag onto the node that follows when ${node.id} says ${port.on}`,
                 },
-                port.on,
+                live?.parked.includes(port.on) ? `● ${port.on}` : port.on,
               ),
             ),
           )
@@ -257,7 +284,9 @@ export class PlanCanvas {
           svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "plan-arrow" }),
         ),
       ),
-      ...drawing.edges.map((edge) => renderEdge(edge, edgeDomKey(edge) === selectedKey)),
+      ...drawing.edges.map((edge) =>
+        renderEdge(edge, edgeDomKey(edge) === selectedKey, model.live?.edges.get(edge.key)),
+      ),
       g.kind === "link" && g.moved ? svg("path", ghostAttrs(this.portAt(g.from, g.on), g.end)) : null,
     );
   }
@@ -278,6 +307,7 @@ export class PlanCanvas {
   private pointerDown(event: PointerEvent): void {
     if (this.gesture.kind !== "none" || !this.model || event.button !== 0) return;
     const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-card]")) return;
     const start = { x: event.clientX, y: event.clientY };
     const port = target?.closest(".plan-port");
     const card = target?.closest(".plan-node");
@@ -314,6 +344,12 @@ export class PlanCanvas {
     } catch {
       // the pointer is already gone
     }
+  }
+
+  private click(event: MouseEvent): void {
+    const copy = event.target instanceof Element ? event.target.closest("[data-card]") : null;
+    const card = copy?.getAttribute("data-card");
+    if (card) this.events.open?.(card);
   }
 
   private pointerMove(event: PointerEvent): void {
@@ -493,7 +529,7 @@ function labelBox(edge: DrawnEdge): { x: number; y: number; width: number } {
   return { x: edge.route.label.x - width / 2, y: edge.route.label.y - 9, width };
 }
 
-function renderEdge(edge: DrawnEdge, selected: boolean): SVGElement {
+function renderEdge(edge: DrawnEdge, selected: boolean, live: LiveEdge | undefined): SVGElement {
   const box = labelBox(edge);
   return svg(
     "g",
@@ -503,13 +539,22 @@ function renderEdge(edge: DrawnEdge, selected: boolean): SVGElement {
         "plan-edge" +
         (edge.route.back ? " plan-edge-back" : "") +
         (edge.problems.length ? " plan-edge-problem" : "") +
+        (live?.spent ? " plan-edge-spent" : "") +
         (selected ? " plan-edge-selected" : ""),
     },
     svg("path", { class: "plan-edge-path", d: edge.route.d, "marker-end": "url(#plan-arrow)" }),
     svg(
       "g",
       { class: "plan-edge-label", "data-edge": edgeDomKey(edge) },
-      svg("title", {}, edge.problems.length ? edge.problems.join("\n") : edgeKeyText(edge.edge)),
+      svg(
+        "title",
+        {},
+        edge.problems.length
+          ? edge.problems.join("\n")
+          : live?.hold
+            ? `${edgeKeyText(edge.edge)}: spent, held by ${live.hold.id}`
+            : edgeKeyText(edge.edge),
+      ),
       svg("rect", { ...box, height: 18, rx: 9 }),
       svg("text", { x: edge.route.label.x, y: edge.route.label.y + 3.5, "text-anchor": "middle" }, edge.label),
     ),

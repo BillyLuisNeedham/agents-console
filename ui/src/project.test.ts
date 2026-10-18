@@ -19,7 +19,6 @@ import {
   initialLogWindow,
   isTerminalBacked,
   joinStreamFiles,
-  lineStrip,
   logAtBottom,
   logTailOffset,
   nextNodeSelection,
@@ -4295,31 +4294,6 @@ describe("the Line (#187, ADR-0039)", () => {
       ...overrides,
     };
   }
-
-  it("reads the running Line in the header strip: the Plan and its status", () => {
-    expect(lineStrip(line())).toBe("Factory today · running");
-    expect(lineStrip(line({ status: "acting", act: "finish-1-act" }))).toBe(
-      "Factory today · acting",
-    );
-  });
-
-  it("lists what the Finish waits for while it refuses", () => {
-    expect(lineStrip(line({ status: "finishing", waitingFor: ["review-1", "side-quest"] }))).toBe(
-      "Factory today · finishing · Finish waiting for review-1, side-quest",
-    );
-    expect(lineStrip(line({ status: "finishing" }))).toBe("Factory today · finishing");
-  });
-
-  it("says the Line ended once it is done or closed", () => {
-    expect(lineStrip(line({ status: "done" }))).toBe("Factory today · Line done");
-    expect(lineStrip(line({ status: "closed" }))).toBe("Factory today · Line closed");
-  });
-
-  it("has no strip before a Line starts, and the pool view carries the snapshot's", () => {
-    expect(lineStrip(undefined)).toBeNull();
-    expect(projectPool(snapshot()).lineStrip).toBeNull();
-    expect(projectPool(snapshot({ line: line() })).lineStrip).toBe("Factory today · running");
-  });
 
   it("carries a Line Ticket's node onto its card, and none onto any other", () => {
     const cards = projectPool(

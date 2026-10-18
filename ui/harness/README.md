@@ -36,8 +36,25 @@ card and the Steward note on a tray row keep theirs. One more opens a
 Decide Ticket's Detail on a Line (ADR-0039), whose report frame
 must keep its node, since moving an iframe reloads it; a pass after it
 checks the frame reads at its height inside the Detail with Open in browser
-beside its heading, and the layout checks find the header's Line strip and
+beside its heading, and the layout checks find the header's Line button and
 each Line Ticket's labelled card head inside its card.
+The Line view (ADR-0039) has its own scenario. The fixture's Line has a
+per-item Implement node with a done copy, two running and three queued, a
+capped loop edge at 1 of 2, a parked verdict on Review and a Finish that
+refuses while two copies run, and its copy Tickets are in the pool. The
+scenario opens the view from the header's Line button and checks the graph:
+five cards and five edges, the dots by status, the loop's "fail · 1/2 · S"
+label, and each card's state word. It renders five times with the same model
+and asserts the cards, a running dot, a queued dot, the loop edge and its
+label are the same nodes and the pan has not moved. It then pushes a
+snapshot in which one copy finished, the queue shrank and a new copy started,
+and asserts the dots repaint on the same nodes, the new dot appears and the
+pan holds. A pointer tap on a copy dot (the pointer pair, then the click the
+browser makes of it) must open that Ticket's Detail beside the still-open
+view, select its card and leave the graph where it was, and a second tap must
+keep the Detail open. At the narrow window the layout run opens the view
+and checks its head holds one line and each live card's text, state word and
+pass summary stay inside the card, uncut.
 One more presses End on a Line's Conversation pass whose End the fixture
 refuses with a long reason: the reason and End as closed must stay inside the
 card, and inside the Detail's End box once it opens, and an ordinary

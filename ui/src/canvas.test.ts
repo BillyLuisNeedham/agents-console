@@ -50,7 +50,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     terminalBacked: false,
     mergeQueueLine: null,
     spawnLine: null,
-    lineStrip: null,
+    line: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
     ...overrides,
   };
@@ -163,6 +163,7 @@ function mountCanvas(
     onEnlist: () => {},
     onOpenSettings: () => {},
     onOpenPlans: () => {},
+    onOpenLine: () => {},
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
@@ -594,26 +595,38 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
     { kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 },
   ];
 
-  it("shows the Line strip in the header, after the Spawn caps line, whole on hover", () => {
-    const strip = "Factory today · finishing · Finish waiting for review-1";
+  it("shows the Line button in the header, after the Spawn caps line, whole on hover", () => {
+    const headline = "Factory today · finishing";
     const { root, commit } = mountCanvas(
       model({
         cards,
         spawnLine: { text: "Spawns 3/20 this run · 5 per attempt", warn: false },
-        lineStrip: strip,
+        line: { headline },
       }),
     );
     commit();
-    const el = root.querySelector<HTMLElement>(".canvas-lines .canvas-line-strip")!;
-    expect(el.textContent).toBe(strip);
-    expect(el.title).toBe(strip);
+    const el = root.querySelector<HTMLButtonElement>(".canvas-lines .canvas-line-open")!;
+    expect(el.tagName).toBe("BUTTON");
+    expect(el.textContent).toBe(headline);
+    expect(el.title).toBe(`${headline} (open the Line)`);
     expect(el.previousElementSibling?.classList.contains("canvas-spawn-line")).toBe(true);
   });
 
-  it("shows no strip before Start the Line", () => {
+  it("opens the Line view from the header button", () => {
+    let opens = 0;
+    const { root, commit } = mountCanvas(
+      model({ cards, line: { headline: "Factory today · running" } }),
+      { onOpenLine: () => (opens += 1) },
+    );
+    commit();
+    root.querySelector<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(opens).toBe(1);
+  });
+
+  it("shows no Line button in a pool that runs no Line", () => {
     const { root, commit } = mountCanvas(model({ cards }));
     commit();
-    expect(root.querySelector(".canvas-line-strip")).toBeNull();
+    expect(root.querySelector(".canvas-line-open")).toBeNull();
   });
 
   function linePool(): CanvasModel {

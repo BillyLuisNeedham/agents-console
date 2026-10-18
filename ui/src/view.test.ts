@@ -433,3 +433,103 @@ describe("ConsoleView: Notices not landing", () => {
     expect(c.q(".detail-open .conversation-delivery-error")?.textContent).toBe("a dialog is open");
   });
 });
+
+describe("ConsoleView: the Line view (ADR-0039)", () => {
+  const LINE_SNAPSHOT: EnrichedSnapshot = {
+    ...SNAPSHOT,
+    line: {
+      plan: {
+        horde: 1,
+        name: "Factory today",
+        nodes: [
+          { kind: "agent", id: "build", title: "Build", x: 0, y: 0, copies: { perItem: 2 } },
+          { kind: "finish", id: "finish", title: "Finish", x: 300, y: 0 },
+        ],
+        edges: [{ from: "build", on: "done", to: "finish" }],
+      },
+      rev: 1,
+      status: "finishing",
+      waitingFor: ["A", "B"],
+      nodes: [
+        {
+          id: "build",
+          verdicts: ["done"],
+          passes: 1,
+          pass: 1,
+          tickets: ["A", "B"],
+          queued: 3,
+          inbox: 0,
+          parked: [],
+          arrived: [],
+        },
+        { id: "finish", verdicts: [], passes: 0, tickets: [], queued: 0, inbox: 0, parked: [], arrived: [] },
+      ],
+      edges: [],
+    },
+  };
+  const dot = (c: ReturnType<typeof mountConsole>, id: string) =>
+    c.q<HTMLButtonElement>(`.line-pane .plan-dot[data-card="ticket:${id}"]`)!;
+
+  it("offers the Line from the header and keeps the view shut until it is asked for", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    expect(c.q(".canvas-line-open")?.textContent).toBe("Factory today · finishing");
+    expect(c.q(".line-pane")).toBeNull();
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(c.q(".line-pane .line-headline")?.textContent).toBe("Factory today · finishing");
+    expect(c.q(".line-pane .line-waiting")?.textContent).toBe("Finish waiting for A, B");
+    expect(c.root.querySelectorAll(".line-pane .plan-node").length).toBe(2);
+  });
+
+  it("draws each node's state, its copy dots by status and the queue as hollow dots", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    const build = c.q<HTMLElement>('.line-pane .plan-node[data-node="build"]')!;
+    expect(build.querySelector(".plan-node-state")?.textContent).toBe("needs you");
+    expect(build.querySelectorAll(".plan-dot-checkpoint").length).toBe(2);
+    expect(build.querySelectorAll(".plan-dot-queued").length).toBe(3);
+    expect(build.querySelector(".plan-node-line")?.textContent).toBe("pass 1 · 0 running · 3 queued");
+    const finish = c.q<HTMLElement>('.line-pane .plan-node[data-node="finish"]')!;
+    expect(finish.querySelector(".plan-node-state")?.textContent).toBe("waiting for 2");
+  });
+
+  it("opens a copy's Detail beside the open view, selects its card, and a second tap keeps it open", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    dot(c, "B").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("B");
+    expect(c.q(".line-pane")).not.toBeNull();
+    expect(c.q('.node-card[data-node-id="ticket:B"]')?.classList.contains("node-card-selected")).toBe(true);
+    expect(dot(c, "B").classList.contains("plan-dot-selected")).toBe(true);
+    dot(c, "B").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("B");
+    dot(c, "A").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("A");
+  });
+
+  it("does not pan the graph when a copy dot is pressed", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    const world = c.q<HTMLElement>(".line-pane .plan-world")!;
+    const before = world.style.transform;
+    const target = dot(c, "A");
+    for (const [type, x] of [["pointerdown", 10], ["pointermove", 60], ["pointerup", 60]] as const) {
+      target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, clientX: x, clientY: 10 }));
+    }
+    expect(world.style.transform).toBe(before);
+    expect(c.q(".line-pane .plan-panning")).toBeNull();
+  });
+
+  it("closes back to the Ticket canvas, and closes by itself when the Line goes away", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    c.q<HTMLButtonElement>(".line-close")!.click();
+    expect(c.q(".line-pane")).toBeNull();
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(c.q(".line-pane")).not.toBeNull();
+    c.session.setSnapshot(SNAPSHOT);
+    expect(c.q(".line-pane")).toBeNull();
+    expect(c.q(".canvas-line-open")).toBeNull();
+    c.session.setSnapshot(LINE_SNAPSHOT);
+    expect(c.q(".line-pane")).toBeNull();
+  });
+});

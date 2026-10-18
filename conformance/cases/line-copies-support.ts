@@ -7,13 +7,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, PlanFile, PlanNodeFile } from "../../protocol/wire.ts";
-import type { CaseServer } from "../harness/case.ts";
+import type { Case, CaseServer } from "../harness/case.ts";
 import { until } from "../harness/pool-files.ts";
 import { snapshot } from "../harness/pool-run.ts";
-import type { ConformanceStubBehaviour } from "../harness/stubs.ts";
+import type { ConformanceStubBehaviour, StubHold } from "../harness/stubs.ts";
 import type { World } from "../harness/world.ts";
 import { edge, node, plan } from "./plans-support.ts";
-import { launches, lineOf } from "./line-support.ts";
+import { begun, launches, lineOf, lineWorld } from "./line-support.ts";
 
 /** `n` Items, titled `Piece 1` and so on, each with a body of its own. */
 export function pieces(n: number): { title: string; body: string }[] {
@@ -64,6 +64,49 @@ export function copiesPlan(spec: CopiesPlan): PlanFile {
   ];
   return plan(nodes, edges, "Copies");
 }
+
+/**
+ * tasks -> build (one copy per Item, under cap 2) -> build-merge -> finish, with `tasks` also
+ * routed straight to finish. A verdict fans out to every edge that routes it, so the Finish
+ * has its handoff while build's copies run and waits on them.
+ */
+export function forkedPlan(): PlanFile {
+  return plan(
+    [
+      node.agent("tasks", { makesItems: true }),
+      node.agent("build", { copies: { perItem: 2 } }),
+      node.merger("build-merge", "build"),
+      node.finish(),
+    ],
+    [
+      edge("tasks", "done", "build"),
+      edge("tasks", "done", "finish"),
+      edge("build", "done", "build-merge"),
+      edge("build-merge", "done", "finish"),
+    ],
+    "Forked",
+  );
+}
+
+/**
+ * A Line on `forkedPlan()` whose `tasks` makes five Items, with `build-1.1` and `build-1.2`
+ * held live and the other three queued, once both copies have launched. A held copy ends on
+ * its `release()`.
+ */
+export async function liveCopies(t: Case): Promise<{ world: World; server: CaseServer; first: StubHold; second: StubHold }> {
+  const world = lineWorld(t, null);
+  world.stubs.script("tasks-1", makingItems(pieces(5)));
+  const first = world.stubs.hold("build-1.1");
+  const second = world.stubs.hold("build-1.2");
+  const server = await t.start(world);
+  await begun(server, { plan: forkedPlan(), work: "#1" });
+  await untilLaunched(world, ["build-1.1", "build-1.2"]);
+  return { world, server, first, second };
+}
+
+/** Whether the Finish of `liveCopies`' Line waits on its two copies and three queued Items. */
+export const finishWaitsOnBuild = (snap: EnrichedSnapshot): boolean =>
+  snap.line?.status === "finishing" && snap.line.waitingFor.length === 3;
 
 /** `build-1.1` to `build-1.n`: the ids of one pass's copies. */
 export function copyIds(n: number): string[] {
