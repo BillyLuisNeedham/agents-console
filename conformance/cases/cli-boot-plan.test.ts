@@ -200,11 +200,11 @@ function libraryWorld(t: Parameters<typeof cliWorld>[0]): { w: CliWorld; repo: s
   return { w, repo };
 }
 
-const ENDS = ["--from", "no-such-branch", "--title", "T", "--no-open"];
+const STOP_AFTER_PLAN_LOAD = ["--from", "no-such-branch", "--title", "T", "--no-open"];
 
 conformance("cli", "Boot --work alone asks which Plan, listing the Presets in order then the library, and runs the one picked", async (t) => {
   const { w, repo } = libraryWorld(t);
-  const run = await w.run("boot", ["--work", "186", ...ENDS], { cwd: repo, answers: [["start from which plan", "zz-mine"]] });
+  const run = await w.run("boot", ["--work", "186", ...STOP_AFTER_PLAN_LOAD], { cwd: repo, answers: [["start from which plan", "zz-mine"]] });
   expect(run.code).toBe(1);
   expect(run.prompts).toEqual(["start from which plan [factory-today]"]);
   expect(run.stdout).toContain(`Plans: ${PRESET_SLUGS}, zz-mine\n`);
@@ -218,7 +218,7 @@ conformance("cli", "Boot --work alone asks which Plan, listing the Presets in or
 
 conformance("cli", "Boot asks again for a Plan it does not offer, and Enter takes factory-today", async (t) => {
   const { w, repo } = libraryWorld(t);
-  const run = await w.run("boot", ["--work", "186", ...ENDS], {
+  const run = await w.run("boot", ["--work", "186", ...STOP_AFTER_PLAN_LOAD], {
     cwd: repo,
     answers: [
       ["start from which plan", "nope"],
@@ -235,7 +235,7 @@ conformance("cli", "Boot asks again for a Plan it does not offer, and Enter take
 
 conformance("cli", "Boot takes factory-today when the answer is end of input", async (t) => {
   const { w, repo } = libraryWorld(t);
-  const run = await w.run("boot", ["--work", "186", ...ENDS], { cwd: repo, stdin: "" });
+  const run = await w.run("boot", ["--work", "186", ...STOP_AFTER_PLAN_LOAD], { cwd: repo, stdin: "" });
   expect(run.code).toBe(1);
   expect(run.stdout).toContain("start from which plan [factory-today]: ");
   expect(run.stdout).toContain('plan: factory-today ("Factory today")\n');
@@ -243,13 +243,13 @@ conformance("cli", "Boot takes factory-today when the answer is end of input", a
 
 conformance("cli", "Boot --plan asks nothing about the Plan, and --yes takes factory-today without asking", async (t) => {
   const { w, repo } = libraryWorld(t);
-  const named = await w.run("boot", ["--plan", "zz-mine", "--work", "186", ...ENDS], { cwd: repo });
+  const named = await w.run("boot", ["--plan", "zz-mine", "--work", "186", ...STOP_AFTER_PLAN_LOAD], { cwd: repo });
   expect(named.code).toBe(1);
   expect(named.prompts.some((prompt) => prompt.startsWith("start from which plan"))).toBe(false);
   expect(named.stdout).not.toContain("Plans:");
   expect(named.stdout).toContain('plan: zz-mine ("Mine")\n');
 
-  const yes = await w.run("boot", ["--work", "186", "--yes", ...ENDS], { cwd: repo });
+  const yes = await w.run("boot", ["--work", "186", "--yes", ...STOP_AFTER_PLAN_LOAD], { cwd: repo });
   expect(yes.code).toBe(1);
   expect(yes.prompts).toEqual([]);
   expect(yes.stdout).not.toContain("Plans:");
