@@ -2436,6 +2436,9 @@ export interface PoolConfigPatch {
   /** The Spawn caps (issue #149), replaced whole: a null field goes back to
    *  the engine's default, and both null removes the key. */
   spawnCaps?: { perAttempt: number | null; perRun: number | null };
+  /** maxLive (ADR-0040): null removes the key, and the Machine default
+   *  applies. */
+  maxLive?: number | null;
   /** The Steward entry (ADR-0030), replaced whole like `defaults`: a null
    *  budget goes back to 5, an empty Assignment field to the pool defaults,
    *  an absent `mayClose` to off (issue #154), an absent
