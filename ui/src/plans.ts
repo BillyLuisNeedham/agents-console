@@ -13,7 +13,7 @@ import type {
 import { h } from "./dom";
 import type { Point } from "./geometry";
 import { PlanCanvas, type PlanSelection } from "./plan-canvas";
-import { renderInspector, type PlanChange, type PlanMeta } from "./plan-inspector";
+import { renderInspector, type FieldChange, type PlanChange, type PlanMeta } from "./plan-inspector";
 import { edgeKeyText, projectPlan } from "./plan-projection";
 
 export type ListPlansHandler = () => Promise<PlansListResponse>;
@@ -301,10 +301,10 @@ export class PlansStore {
     this.onChange();
   }
 
-  commit(key: string, text: string, fromDoc: string, change: PlanChange | null): void {
+  commit(key: string, text: string, fromDoc: string, change: FieldChange): void {
     const e = this.editing();
     if (!e) return;
-    if (change === null || text === fromDoc) {
+    if (change.kind === "none" || text === fromDoc) {
       e.fields.delete(key);
       this.onChange();
       return;

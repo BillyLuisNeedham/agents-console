@@ -15,7 +15,7 @@ import type {
 import { h } from "./dom";
 import { commit } from "./morph";
 import { PlansStore } from "./plans";
-import { withField } from "./plan-inspector";
+import { setOrClearField } from "./plan-inspector";
 import { useDom } from "./test-dom";
 
 useDom();
@@ -236,7 +236,7 @@ describe("PlansStore: the edit pipeline", () => {
       t.store.commit(`node:build:${name}`, value, "", {
         kind: "node",
         id: "build",
-        change: (node) => withField(node, name, value),
+        change: (node) => setOrClearField(node, name, value),
       });
     field("title", "Build it");
     field("skill", "addy-build");

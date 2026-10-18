@@ -18,6 +18,10 @@ export type PlanChange =
   | { kind: "meta"; change: (meta: PlanMeta) => PlanMeta }
   | { kind: "cap"; key: EdgeKey; change: (cap: PlanLoopCap | undefined) => PlanLoopCap | undefined };
 
+export const NO_EDIT = { kind: "none" } as const;
+
+export type FieldChange = PlanChange | typeof NO_EDIT;
+
 export interface InspectorModel {
   plan: PlanFile;
   drawing: PlanDrawing;
@@ -29,13 +33,13 @@ export interface InspectorIntents {
   change(change: PlanChange): void;
   select(selection: PlanSelection): void;
   type(key: string, text: string): void;
-  commit(key: string, text: string, fromDoc: string, change: PlanChange | null): void;
+  commit(key: string, text: string, fromDoc: string, change: FieldChange): void;
   blur(key: string): void;
 }
 
 const HARNESSES = ["claude", "codex", "cursor", "opencode"] as const;
 
-export function withField<T extends object>(of: T, field: string, value: unknown): T {
+export function setOrClearField<T extends object>(of: T, field: string, value: unknown): T {
   const next: Record<string, unknown> = { ...(of as Record<string, unknown>) };
   if (value === undefined || value === "") delete next[field];
   else next[field] = value;
@@ -43,7 +47,7 @@ export function withField<T extends object>(of: T, field: string, value: unknown
 }
 
 function withAssign(assign: PlanAssign | undefined, field: keyof PlanAssign, value: string): PlanAssign | undefined {
-  const next = withField(assign ?? {}, field, value.trim());
+  const next = setOrClearField(assign ?? {}, field, value.trim());
   return Object.keys(next).length ? next : undefined;
 }
 
@@ -73,7 +77,7 @@ function renderMeta(model: InspectorModel, on: InspectorIntents): HTMLElement[] 
   const meta = (field: keyof PlanMeta, label: string, area = false) =>
     textField(model, on, `plan:${field}`, label, String(plan[field] ?? ""), area, (text) => ({
       kind: "meta",
-      change: (m) => withField(m, field, field === "name" ? text : text.trim()),
+      change: (m) => setOrClearField(m, field, field === "name" ? text : text.trim()),
     }));
   return [
     heading("Plan", null),
@@ -82,7 +86,7 @@ function renderMeta(model: InspectorModel, on: InspectorIntents): HTMLElement[] 
     meta("source", "source"),
     meta("note", "note", true),
     checkField("plan:stewardEdits", "the Steward may edit a Line running this Plan", plan.stewardEdits === true, (value) =>
-      on.change({ kind: "meta", change: (m) => withField(m, "stewardEdits", value || undefined) }),
+      on.change({ kind: "meta", change: (m) => setOrClearField(m, "stewardEdits", value || undefined) }),
     ),
     h("div", { class: "plan-help" }, "Select a node or a link's label to set it up. Drag a verdict port onto a node to link them."),
   ];
@@ -92,14 +96,14 @@ function renderNode(model: InspectorModel, on: InspectorIntents, node: PlanNodeF
   const id = node.id;
   const drawn = model.drawing.nodes.find((n) => n.node.id === id);
   const set = (field: string, value: unknown) =>
-    on.change(nodeChange(id, (n) => withField(n, field, value)));
+    on.change(nodeChange(id, (n) => setOrClearField(n, field, value)));
   const text = (field: string, label: string, fromDoc: string, area = false) =>
     textField(model, on, `node:${id}:${field}`, label, fromDoc, area, (value) =>
-      nodeChange(id, (n) => withField(n, field, field === "title" ? value : value.trim())),
+      nodeChange(id, (n) => setOrClearField(n, field, field === "title" ? value : value.trim())),
     );
   const assignOf = (assign: PlanAssign | undefined) =>
     assignFields(model, on, `node:${id}:assign`, assign, (f) =>
-      nodeChange(id, (n) => withField(n, "assign", f((n as { assign?: PlanAssign }).assign))),
+      nodeChange(id, (n) => setOrClearField(n, "assign", f((n as { assign?: PlanAssign }).assign))),
     );
   const out: (HTMLElement | null)[] = [
     heading(`${KIND_LABEL[node.kind]} · ${id}`, null),
@@ -144,7 +148,7 @@ function renderNode(model: InspectorModel, on: InspectorIntents, node: PlanNodeF
             nodeChange(id, (n) => {
               const conflict = (n as { conflict?: unknown }).conflict;
               const current = conflict && typeof conflict === "object" ? (conflict as { resolver: PlanAssign }).resolver : undefined;
-              return withField(n, "conflict", { resolver: f(current) ?? {} });
+              return setOrClearField(n, "conflict", { resolver: f(current) ?? {} });
             }),
           ),
         );
@@ -176,7 +180,7 @@ function renderNode(model: InspectorModel, on: InspectorIntents, node: PlanNodeF
       if (other) {
         out.push(
           textField(model, on, `node:${id}:act-other`, "the act, in words", act.other, true, (value) =>
-            nodeChange(id, (n) => withField(n, "act", { other: value.trim() })),
+            nodeChange(id, (n) => setOrClearField(n, "act", { other: value.trim() })),
           ),
         );
       }
@@ -210,7 +214,7 @@ function copiesField(
   copies: "one" | { perItem: number | "all" } | undefined,
 ): HTMLElement {
   const perItem = copies && copies !== "one" ? copies.perItem : null;
-  const set = (value: unknown) => on.change(nodeChange(id, (n) => withField(n, "copies", value)));
+  const set = (value: unknown) => on.change(nodeChange(id, (n) => setOrClearField(n, "copies", value)));
   return h(
     "div",
     { class: "plan-field", key: `node:${id}:copies` },
@@ -223,7 +227,7 @@ function copiesField(
       ),
       perItem !== null
         ? numberInput(model, on, `node:${id}:perItem`, perItem === "all" ? "" : String(perItem), "cap", (text) =>
-            /^\d+$/.test(text) ? nodeChange(id, (n) => withField(n, "copies", { perItem: Number(text) })) : null,
+            /^\d+$/.test(text) ? nodeChange(id, (n) => setOrClearField(n, "copies", { perItem: Number(text) })) : NO_EDIT,
           )
         : null,
       perItem !== null
@@ -355,12 +359,12 @@ function renderEdge(
           ? capChange(() => undefined)
           : /^\d+$/.test(text)
             ? capChange((c) => ({ ...c, max: Number(text) }))
-            : null,
+            : NO_EDIT,
       ),
       h("span", { class: "plan-help" }, "A link that loops back keeps a cap; once it is spent the Line asks before going round again."),
     ),
     checkField(`${k}:stewardExtra`, "the Steward may buy one more pass", cap?.stewardExtra === true, (value) =>
-      on.change(capChange((c) => (c ? withField(c, "stewardExtra", value || undefined) : c))),
+      on.change(capChange((c) => (c ? setOrClearField(c, "stewardExtra", value || undefined) : c))),
       !cap,
     ),
     h(
@@ -376,7 +380,7 @@ function renderEdge(
           disabled: cap ? null : true,
           onchange: (event: Event) => {
             const value = (event.currentTarget as HTMLSelectElement).value;
-            on.change(capChange((c) => (c ? withField(c, "whenSpent", value === "hold" ? "hold" : { to: value }) : c)));
+            on.change(capChange((c) => (c ? setOrClearField(c, "whenSpent", value === "hold" ? "hold" : { to: value }) : c)));
           },
         },
         h("option", { value: "hold" }, "hold for the operator"),
@@ -414,7 +418,7 @@ function textInput(
   key: string,
   fromDoc: string,
   area: boolean,
-  toChange: (text: string) => PlanChange | null,
+  toChange: (text: string) => FieldChange,
   attrs: Record<string, unknown> = {},
 ): HTMLElement {
   return h(area ? "textarea" : "input", {
@@ -439,7 +443,7 @@ function textField(
   label: string,
   fromDoc: string,
   area: boolean,
-  toChange: (text: string) => PlanChange | null,
+  toChange: (text: string) => FieldChange,
 ): HTMLElement {
   return h(
     "label",
@@ -455,7 +459,7 @@ function numberInput(
   key: string,
   fromDoc: string,
   placeholder: string,
-  toChange: (text: string) => PlanChange | null,
+  toChange: (text: string) => FieldChange,
 ): HTMLElement {
   return textInput(model, on, key, fromDoc, false, (text) => toChange(text.trim()), {
     class: "plan-input plan-number",
