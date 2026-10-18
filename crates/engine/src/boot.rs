@@ -195,49 +195,26 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
 
 // The Pool workspace comes first (issue #94), then boot reconciliation, awaited by the drive before
 // its first scheduling: terminal-backed orphans re-adopted or crashed (ADR-0014), headless orphans
-// stopped (ADR-0017), enlisted and started Conversations re-adopted; then the merges a shutdown
-// dropped at the pool checkout's gate are chained again.
+// stopped (ADR-0017), enlisted and started Conversations re-adopted.
 fn start_boot_reconcile(session: &mut Session, done: watch::Sender<bool>) {
     // A headless pool with no orphan has nothing to reconcile against: the TypeScript's chain settles
     // in microtasks, before the drive's first await, so it is done here and now.
     let terminal_backed = session.state.config.terminal() == Some(ac_protocol::TerminalKind::Herdr);
     if !terminal_backed && session.orphans.is_empty() {
-        crate::restart::redo_deferred_merges(session);
         let _ = done.send(true);
         return;
     }
     let engine = session.engine();
-    // With no orphan to stop and no Conversation to re-adopt, the reconciliation is the only work, and
-    // the merges to redo follow it with nothing in between, as the TypeScript's microtasks run them.
-    let alone = session.orphans.is_empty() && !live_conversation_recorded(session);
     tokio::spawn(async move {
         crate::pool_workspace::resolve_pool_workspace_for_session(&engine).await;
-        if alone {
-            let _ = crate::restart::reconcile_terminal_attempts_then_redo_merges(&engine).await;
-            let _ = done.send(true);
-            return;
-        }
         futures::join!(
             crate::restart::reconcile_terminal_attempts(&engine),
             crate::restart::reap_headless_orphans(&engine),
             crate::conversations::adopt_enlisted_at_boot(&engine),
             crate::conversations::adopt_started_at_boot(&engine),
         );
-        let _ = engine.call(crate::restart::redo_deferred_merges).await;
         let _ = done.send(true);
     });
-}
-
-// Whether any Conversation record reads live: the boot adoptions of Conversations have work to do.
-fn live_conversation_recorded(session: &Session) -> bool {
-    load_conversations(&Path::new(&session.pool_dir).join("conversations")).map_or(
-        true,
-        |records| {
-            records
-                .iter()
-                .any(|rec| rec.status == ac_protocol::ConversationStatus::Live)
-        },
-    )
 }
 
 // The enlist `spawned` event of an enlisted Ticket or Conversation: the one carrying the found

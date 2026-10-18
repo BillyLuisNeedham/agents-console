@@ -107,7 +107,7 @@ that is not a plain passing case.
   CONTEXT.md says of a ticket left waiting on the operator. The case
   (`merges-queue.test.ts`) pins that, and that a landed ticket leaves the queue. Joining the back happens
   only on the paths that take a merge again (the drive's merge chain, an adopted or Continued attempt ending,
-  the boot re-chain of a merge dropped at shutdown, an enlisted ticket's merge), none of which re-takes a
+  an enlisted ticket's merge), none of which re-takes a
   merge already in the line from outside today.
   Rust unit test: *merge line: a ticket taken again after it left the line joins the back, behind tickets
   taken since; one resumed in place keeps its place.* It is
@@ -696,12 +696,6 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
 - **`engine.test.ts:12561`** (an answered Interrupt across a SIGKILL). The resumed attempt the kill left running is
   let go and waited out before the restart, so the boot finds no agent alive and takes the plain reset; left
   running, it would take the orphan path of `engine.test.ts:13174` instead.
-- **`merge-hold.test.ts:526`** (a restart's merge queue). The one merge the restart takes on must stay queued long
-  enough to read, and a merge is one synchronous git run inside the server. The only thing that holds one from
-  outside is the pool checkout's gate: the case continues Ticket 01 in the pool checkout by Keep talking, stops,
-  writes 03, 07 and 09 done on branches main lacks with 07's events ending in `merge-deferred`, and restarts. The
-  re-adopted Continued attempt holds 07's re-chained merge at the gate, so the queue reads 07 queued, then 03 and
-  09 stalled, beside the Continued attempt's adoption checkpoint, the one Interrupt up.
 - **`children.test.ts:62`** (a harness that ignores TERM). The stub is made to ignore TERM by its own wrapper
   (`trap '' TERM` before its exec), since the stop signals the whole process group and the stub script itself
   must outlive the TERM for the KILL to be what ends it (exit 137).
@@ -994,15 +988,9 @@ left out, and no harness or fixture changed.
   `releaseOrphanAgent` in `reconcileTerminalAttempts` (`engine/engine.ts`) says the pane may still be alive. Intended
   behaviour (inference): an orphan's pane is looked for daemon-wide by its recorded ids before it is called gone, as a
   Conversation's is and as an enlisted Ticket's already is.
-- **A merge redone at boot is recorded deferred a second time** (`keep-talking.test.ts:832`, `:889`): meeting the
-  pool checkout's gate again, the redo appends another `merge-deferred`, so the Ticket's events read `merge-deferred`
-  twice before `merged`. The cases pin the whole list.
 
 ### Observed while writing these, not pinned
 
-- While a merge redone at boot waits at the pool checkout's gate, the drive's phase stays `running` until the Continued
-  attempt ends (inference: the merge hold stands at the first boundary). The cases wait for the redo's pool log line
-  (`ticket <id>: merge dropped at the last shutdown chained again`) and the Ticket's `mergeState: queued` instead.
 - A started Conversation's TUI counts as exited at boot only when its exit-code file is no older than its launch's
   `spawned` event, so a stale file never crashes a live talk. No case makes a stale file appear after a launch. Rust
   unit test: *Conversation boot adoption: an exit-code file older than the recorded launch is not read as the TUI
@@ -1112,9 +1100,9 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
   can time it; the Peek would otherwise answer a pane nothing watches.
 - **A conflicted enlisted merge keeps its writer mark.** `chainEnlistedMerge` handles the conflict (the
   resolver run included) inside the pool checkout's gate, so the merge counts as a writer there until it is
-  settled and Keep talking refuses beside it. The Rust gate runs one synchronous merge, so the port re-takes
-  the same mark inside the merge's own job and releases it when the conflict handling ends. Same words, same
-  span.
+  settled and Keep talking refuses beside it. The Rust port has no gate (ADR-0027's wait is gone) and runs one
+  synchronous merge, so it takes the same mark inside the merge's own job and releases it when the conflict
+  handling ends. Same words, same span.
 - **The enlist teaching's paste check** reads `recent` 200 lines of the operator's pane (`type_verified`), which
   moves their viewport; copied as the TypeScript has it (see `herdr` panes above).
 - **A refused `tab.close` outside the bulk close** writes its pool-log line and a `tab-close-failed` event with no
@@ -1142,19 +1130,14 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
 
 ## `restart`: what the Rust port does differently (r-restart)
 
-- **The tab of a boot-adopted or boot-redone merge's attempt is recorded closed sooner in Rust.** Two cases read
-  a Ticket's events right after its `merged` event, and expect them to end there: the one for
-  `attempt-ending.test.ts:405` (a re-adopted attempt that wrote a done Outcome while no server ran; read at the
-  Review) and the one for `keep-talking.test.ts:832` (a merge held at the gate and redone after a restart; read
-  as soon as `merged` shows). On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after
-  `merged` in a world with a fake herdr: the close is a round trip over a fresh socket that waits behind the
-  synchronous merges of the same burst. In Rust the close runs on its own task, and its event follows `merged` by
-  a few milliseconds. Nothing about the Ticket differs, only when the event is written. The three cases that read
-  there now wait for the `tab-closed` event and expect it last, so they pin the same events on both servers
-  without racing the close.
-- **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
-  resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
-  merge's resolver names a different writer.
+- **The tab of a boot-adopted merge's attempt is recorded closed sooner in Rust.** Cases read a Ticket's events right
+  after its `merged` event, and expect them to end there: the one for `attempt-ending.test.ts:405` (a re-adopted
+  attempt that wrote a done Outcome while no server ran; read at the Review) and the others that adopt a pair of
+  Tickets at boot. On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after `merged` in a world
+  with a fake herdr: the close is a round trip over a fresh socket that waits behind the synchronous merges of the
+  same burst. In Rust the close runs on its own task, and its event follows `merged` by a few milliseconds. Nothing
+  about the Ticket differs, only when the event is written. The cases that read there now wait for the `tab-closed`
+  event and expect it last, so they pin the same events on both servers without racing the close.
 - **A recorded pid of 1 or less, or one that is not a whole number, names no process.** The boot's orphan scan reads
   each unfinished headless attempt's `spawned` pid. The TypeScript passed 0, 1 and negatives through
   (`engine/engine.ts:2762`, `engine/children.ts:77`): `kill(0, 0)` succeeds, and with no `/proc/<pid>/cwd` to compare

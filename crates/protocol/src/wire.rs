@@ -105,10 +105,6 @@ wire_enum! {
         /// the End moves anything, so an engine that stops mid-End leaves the next
         /// boot the fact that this was an ending, not a crash.
         EndRequested = "end-requested",
-        /// A merge a shutdown dropped while it waited at the pool checkout's gate
-        /// (issue #139, ADR-0027): the worktree and branch it would have merged,
-        /// so the next boot chains it again through the ordinary merge path.
-        MergeDeferred = "merge-deferred",
         /// The Steward (ADR-0030) left a pending Interrupt to the operator: the
         /// Interrupt's kind and the Steward note, its recommendation, with `by`
         /// and the Steward's `conversation`. Never counts against its budget.

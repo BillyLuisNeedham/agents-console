@@ -130,12 +130,6 @@ export type TicketEventKind =
    */
   | "end-requested"
   /**
-   * A merge a shutdown dropped while it waited at the pool checkout's gate
-   * (issue #139, ADR-0027): the worktree and branch it would have merged,
-   * so the next boot chains it again through the ordinary merge path.
-   */
-  | "merge-deferred"
-  /**
    * The Steward (ADR-0030) left a pending Interrupt to the operator: the
    * Interrupt's kind and the Steward note, its recommendation, with `by`
    * and the Steward's `conversation`. Never counts against its budget.

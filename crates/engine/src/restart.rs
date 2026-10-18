@@ -1,11 +1,10 @@
 //! Restart (engine.ts 2407-2440, 2518-2891, 3232-3935): the boot notes, headless and terminal
-//! orphans, terminal adoption and its finalize, and deferred merges. `rehydrate` itself is ported in
+//! orphans, and terminal adoption and its finalize. `rehydrate` itself is ported in
 //! [`crate::boot`].
 //!
 //! What a previous engine process left behind is settled here before the drive schedules anything:
 //! a headless attempt still running is stopped (ADR-0017), a terminal-backed attempt whose pane is
-//! still alive is re-adopted and its ending recorded when it comes (ADR-0014), and a merge a shutdown
-//! dropped at the pool checkout's gate is chained again (ADR-0027).
+//! still alive is re-adopted and its ending recorded when it comes (ADR-0014).
 //!
 //! Some of what adoption calls belongs to other ports (the Continued attempts, the enlisted runtime).
 //! Those calls go through the small functions in [`peers`], each named for the TypeScript it stands
@@ -272,22 +271,10 @@ enum MarkerStep {
 /// interrupt up. Never fails: reconciliation is advisory boot work, and a daemon that cannot be asked
 /// changes nothing about the pool's ordinary recovery.
 pub async fn reconcile_terminal_attempts(engine: &Engine) {
-    let _ = reconcile(engine, false).await;
+    let _ = reconcile(engine).await;
 }
 
-/// [`reconcile_terminal_attempts`] followed by [`redo_deferred_merges`], for a boot with nothing else
-/// to reconcile: the TypeScript runs the second in the microtasks after the first, so nothing sees the
-/// adoption without the merges taken on beside it, and here the last stretch of the reconciliation
-/// takes them on in the same job. Fails only when the engine is gone.
-pub async fn reconcile_terminal_attempts_then_redo_merges(engine: &Engine) -> anyhow::Result<()> {
-    if !reconcile(engine, true).await.unwrap_or(false) {
-        engine.call(redo_deferred_merges).await?;
-    }
-    Ok(())
-}
-
-// Whether the deferred merges were redone, in the last job of the reconciliation.
-async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
+async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
     let (terminal_backed, socket, workspace) = engine
         .call(|s| {
             (
@@ -298,7 +285,7 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
         })
         .await?;
     if !terminal_backed {
-        return Ok(false);
+        return Ok(());
     }
     let herdr = Herdr::new(&socket);
     // Scoped to the Pool workspace when there is one (issue #94): this pool's orphans can only be in
@@ -311,7 +298,7 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
                 ]))
             })
             .await?;
-        return Ok(false);
+        return Ok(());
     };
     let live: HashSet<String> = live.into_iter().collect();
     // An enlisted pane is the one orphan the scoped listing cannot answer for (issue #101): the
@@ -324,10 +311,10 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
     loop {
         let (taken, live) = (pass, live.clone());
         let next = engine
-            .call(move |s| reconcile_markers(s, &live, taken, then_redo))
+            .call(move |s| reconcile_markers(s, &live, taken))
             .await??;
         let (pane_id, resumed) = match next {
-            Reconciled::Finished => return Ok(then_redo),
+            Reconciled::Finished => return Ok(()),
             Reconciled::NeedsEnlistedLiveness { pane_id, pass } => (pane_id, pass),
         };
         let is_live = if let Some(panes) = &enlisted_panes {
@@ -374,7 +361,6 @@ fn reconcile_markers(
     session: &mut Session,
     live: &HashSet<String>,
     mut pass: Pass,
-    then_redo: bool,
 ) -> anyhow::Result<Reconciled> {
     while pass.next < session.markers.len() {
         let id = session.markers[pass.next].id.clone();
@@ -394,9 +380,6 @@ fn reconcile_markers(
     }
     if !pass.log.is_empty() {
         session.apply(PoolUpdate::log(pass.log));
-    }
-    if then_redo {
-        redo_deferred_merges(session);
     }
     Ok(Reconciled::Finished)
 }
@@ -1157,94 +1140,6 @@ pub fn finish_adopted_finalize(session: &mut Session) {
     let _ = session.wake();
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Deferred merges (ADR-0027)
-// ---------------------------------------------------------------------------------------------------
-
-/// `redoDeferredMerges`: chain again every merge a shutdown dropped at the pool checkout's gate: a done
-/// ticket whose last `merge-deferred` has no merge record after it (merged, merge-conflict,
-/// merge-blocked, resolver) and no merge interrupt waiting. Through the ordinary path, so the merge
-/// passes the gate again (a re-adopted Continued attempt may still hold the checkout), lands or goes to
-/// the resolver machinery as any merge does, and takes its place in the Merge queue rather than
-/// standing there stalled.
-pub fn redo_deferred_merges(session: &mut Session) {
-    let mut taken = false;
-    for index in 0..session.markers.len() {
-        let marker = session.markers[index].clone();
-        if session.status_of(&marker.id) != Some(TicketStatus::Done) {
-            continue;
-        }
-        if session.state.interrupts.iter().any(|i| {
-            i.ticket_id == marker.id
-                && matches!(
-                    i.kind,
-                    InterruptKind::MergeConflict | InterruptKind::MergeApproval
-                )
-        }) {
-            continue;
-        }
-        let events = read_events(Path::new(&session.runs_dir), &marker.id);
-        let Some(deferred_at) = events
-            .iter()
-            .rposition(|event| event.kind == TicketEventKind::MergeDeferred)
-        else {
-            continue;
-        };
-        let settled = events.iter().skip(deferred_at + 1).any(|event| {
-            matches!(
-                event.kind,
-                TicketEventKind::Merged
-                    | TicketEventKind::MergeConflict
-                    | TicketEventKind::MergeBlocked
-                    | TicketEventKind::Resolver
-            )
-        });
-        if settled {
-            continue;
-        }
-        let deferred = &events[deferred_at];
-        // The ticket ran again since (a later attempt spawned): that attempt's own ending decides its
-        // merge, not this old record.
-        if events
-            .iter()
-            .skip(deferred_at + 1)
-            .any(|event| event.kind == TicketEventKind::Spawned && event.attempt > deferred.attempt)
-        {
-            continue;
-        }
-        let (Some(path), Some(branch)) = (
-            deferred.payload.get("path").and_then(Value::as_str),
-            deferred.payload.get("branch").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        let (path, branch) = (path.to_owned(), branch.to_owned());
-        session.apply(PoolUpdate::log([format!(
-            "ticket {}: merge dropped at the last shutdown chained again",
-            marker.id
-        )]));
-        if marker.enlisted_from.is_some() && session.enlisted_work.contains_key(&marker.id) {
-            peers::chain_enlisted_merge(session, &marker, deferred.attempt, &branch);
-            continue;
-        }
-        taken = true;
-        chain_ticket_merge(
-            session,
-            marker,
-            WorktreeInfo { path, branch },
-            deferred.attempt,
-            Some("attempt"),
-        );
-    }
-    // The Merge queue now has a place taken in it, which the TypeScript's drive shows in its next emit,
-    // a microtask away. Here the drive's next emit is a few jobs off, so a reader would see the
-    // adoption without the merges taken on beside it.
-    if taken {
-        let phase = session.current_phase();
-        emit_snapshot(session, phase);
-    }
-}
-
 /// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime,
 /// each named for the TypeScript it stands for.
 mod peers {
@@ -1305,16 +1200,6 @@ mod peers {
         attempt: u64,
     ) -> anyhow::Result<()> {
         crate::enlist_flow::end_enlisted_attempt(session, ticket_id, ending, Some(attempt))
-    }
-
-    /// `chainEnlistedMerge`.
-    pub fn chain_enlisted_merge(
-        session: &mut Session,
-        marker: &TicketMarker,
-        attempt: u64,
-        branch: &str,
-    ) {
-        crate::enlist_flow::chain_enlisted_merge(session, marker, attempt, branch);
     }
 
     /// What `session.enlisted.register` takes for a re-adopted pane: the pane was taught before the
@@ -1388,7 +1273,7 @@ mod tests {
     use ac_protocol::TicketEventKind as Kind;
 
     use super::*;
-    use crate::testkit::{Pool, Script, pool_git, settled, wait_for};
+    use crate::testkit::{Pool, settled, wait_for};
 
     fn orphan(attempt: u64, pid: u32) -> HeadlessOrphan {
         HeadlessOrphan {
@@ -1600,86 +1485,5 @@ mod tests {
             "attempt 1 (pid {pid}) was found still running in the working tree"
         )));
         crate::children::signal_group(elsewhere, nix::sys::signal::Signal::SIGKILL);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn boot_chains_again_a_merge_a_shutdown_dropped_at_the_gate() {
-        let pool = Pool::git(&[("01", &[])]);
-        pool.script("01", vec![Script::done("one")]);
-        let branch = ac_io::git::branch_for(&pool.path, "01", None);
-        let worktree = ac_io::git::worktree_path_for(&pool.path, "01", None);
-        pool_git(&pool, &["worktree", "add", "-q", "-b", &branch, &worktree]);
-        std::fs::write(format!("{worktree}/one.txt"), "one\n").unwrap();
-        for args in [
-            vec!["add", "one.txt"],
-            vec![
-                "-c",
-                "user.email=t@e.com",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-qm",
-                "one",
-            ],
-        ] {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&worktree)
-                .args(&args)
-                .output()
-                .unwrap();
-            assert!(out.status.success());
-        }
-        set_status(&pool, "issues/01.md", "ready", "done");
-        std::fs::create_dir_all(pool.file("runs")).unwrap();
-        let event = |attempt: u64, kind: &str, payload: serde_json::Value| {
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "at": "2026-10-04T09:00:00.000Z",
-                    "attempt": attempt,
-                    "kind": kind,
-                    "payload": payload,
-                })
-            )
-        };
-        std::fs::write(
-            pool.file("runs/01.events.jsonl"),
-            [
-                spawned_event(1, serde_json::json!({ "cwd": worktree, "branch": branch })),
-                event(
-                    1,
-                    "exited",
-                    serde_json::json!({ "code": 0, "status": "done" }),
-                ),
-                event(
-                    1,
-                    "merge-deferred",
-                    serde_json::json!({ "path": worktree, "branch": branch }),
-                ),
-            ]
-            .concat(),
-        )
-        .unwrap();
-        let engine = pool.start().await;
-        let snapshot = wait_for(&engine, |s| {
-            s.state.log.iter().any(|l| l.contains("attempt 1 merged"))
-        })
-        .await;
-        assert!(
-            snapshot.state.log.contains(
-                &"ticket 01: merge dropped at the last shutdown chained again".to_owned()
-            )
-        );
-        assert!(snapshot.state.log.contains(&format!(
-            "ticket 01: attempt 1 merged {branch} onto the working branch"
-        )));
-        assert!(pool.file("one.txt").exists());
-        assert_eq!(
-            pool.kinds("01").last().copied(),
-            Some(Kind::Merged),
-            "{:?}",
-            pool.kinds("01")
-        );
     }
 }

@@ -19,10 +19,6 @@ use ac_protocol::{Interrupt, InterruptKind, MergeQueueEntry, MergeQueueState, Ti
 /// How often a held pool re-derives the hold looking for a merge done by hand, in milliseconds.
 pub const MERGE_HOLD_WATCH_MS: u64 = 2_000;
 
-/// The poll cadence of a waiting flow (ADR-0014), in milliseconds: the hold is re-derived on every
-/// tick, so a manual CLI merge is observed without any Console action.
-pub const MERGE_HOLD_POLL_MS: u64 = 250;
-
 /// The git facts the derivation reads.
 pub trait MergeHoldProbe {
     /// The merge target: the pool checkout's current branch, main or a feature branch alike.

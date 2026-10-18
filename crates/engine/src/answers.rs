@@ -13,7 +13,7 @@ use ac_protocol::{
     TicketEventKind, TicketStatus,
 };
 
-use crate::checkout_gate::{in_pool_checkout, pool_checkout_held};
+use crate::checkout_gate::in_pool_checkout;
 use crate::error::EngineError;
 use crate::interrupts::{
     CLOSE_KINDS, approve_review, clear_interrupt, named_review_tickets, reject_review,
@@ -229,7 +229,7 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
                         | InterruptKind::MergeApproval
                         | InterruptKind::Selection
                 ));
-        let merging = pool_checkout_held(session) || !session.merge_line.unsettled().is_empty();
+        let merging = !session.merge_line.unsettled().is_empty();
         if merging && merges_into_checkout {
             continue;
         }

@@ -282,17 +282,7 @@ pub fn start_line_from_grill(session: &mut Session, grill: &str) -> Result<Strin
     refuse_if_unlaunchable(session, &factory)?;
     let (_, first) = begin_line(brief, &path, &factory, LinePlaces::default());
     refuse_if_taken(session, &first)?;
-    if crate::checkout_gate::pool_checkout_held(session) {
-        return Err(EngineError::refused(
-            "a Continued attempt holds the pool checkout; Start the Line once it ends",
-        ));
-    }
-    let hold = crate::checkout_gate::hold_pool_checkout(
-        session,
-        "Start the Line is merging the Grill's branch",
-    );
     let merged = crate::conversations::merge_into_target(session, &branch);
-    crate::checkout_gate::release_pool_checkout(session, hold);
     if !merged.ok {
         return Err(EngineError::refused(format!(
             "the Grill's branch {branch} did not merge into the Line's branch, so the Line has not \
