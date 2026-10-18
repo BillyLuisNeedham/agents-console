@@ -103,8 +103,8 @@ conformance("attempts", "the pool log gives a real exit as the shell's status be
   await waitForExit(world, "02");
   const log = await until(
     () => poolLog(server),
-    (got) => got.some((line) => line.startsWith("ticket 02: exited")),
-    { what: "02's ending in the pool log" },
+    (got) => ["01", "02"].every((id) => got.some((line) => line.startsWith(`ticket ${id}: exited`))),
+    { what: "01's and 02's endings in the pool log" },
   );
   expect(log).toContain("ticket 01: exited 3, marker in-progress, crash: harness exited 3");
   expect(log).toContain("ticket 02: exited 0, marker done");
