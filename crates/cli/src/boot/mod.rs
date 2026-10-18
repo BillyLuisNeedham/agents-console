@@ -47,7 +47,7 @@ use pool::{
 };
 
 pub const USAGE: &str = "usage: agent-console [pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]
-       agent-console --plan <slug> [--work <issue number or text> | --brief <path>] [--from <branch>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
+       agent-console [--plan <slug>] [--work <issue number or text> | --brief <path>] [--from <branch>] [--line <slug>] [--name <dir>] [--title <title>] [--config <json file>] [--no-steward] [--yes] [--port <n>] [--setup <name>] [--no-open]";
 
 /// What `--help` prints: the usage, then what Line mode's flags do.
 pub const LINE_HELP: &str = "
