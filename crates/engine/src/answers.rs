@@ -217,8 +217,6 @@ pub fn accept_answer(
     Ok(record)
 }
 
-/// The one way an answer enters the pool. An idle pool drains it in this job, so the answerer's
-/// reply already holds the processed state; a drive in flight drains it at its next Tick.
 pub fn submit_answer(
     session: &mut Session,
     ticket_id: &str,

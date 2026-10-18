@@ -40,7 +40,6 @@ pub async fn persist_with_retry(engine: &Engine) -> anyhow::Result<bool> {
     }
 }
 
-/// The backoff after a refused write, ending in the persistence Interrupt once every retry is refused.
 pub async fn retry_persist(engine: &Engine, refused: anyhow::Error) -> anyhow::Result<bool> {
     let mut error = refused.to_string();
     for ms in PERSIST_RETRY_BACKOFF_MS {

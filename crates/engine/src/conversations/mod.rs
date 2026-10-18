@@ -533,8 +533,6 @@ pub fn reserved_ids(s: &Session) -> Vec<String> {
     s.conversations.reserved_ids()
 }
 
-/// Reserve an id minted in this job for a claim that runs in a later one (idempotent), so a start landing
-/// in between cannot mint it again.
 pub fn reserve(s: &mut Session, id: &str) {
     s.conversations.reserved.insert(id.to_owned());
 }

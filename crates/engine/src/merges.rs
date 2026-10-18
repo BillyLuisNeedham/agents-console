@@ -146,7 +146,6 @@ pub fn merge_target_branch(session: &Session) -> String {
         .unwrap_or_else(|| git::current_branch(&session.cwd))
 }
 
-/// `mergeTargetSha`: the merge target's commit; empty in a git-less pool.
 pub fn merge_target_sha(session: &Session) -> String {
     if session.git {
         git::rev_parse(&session.cwd, &merge_target_ref(session))
@@ -155,14 +154,12 @@ pub fn merge_target_sha(session: &Session) -> String {
     }
 }
 
-/// A merge and the target's tip from before it, which a done-Notice's diff summary starts from.
 pub struct TipMerge {
     pub result: MergeResult,
     pub before_sha: String,
 }
 
 impl TipMerge {
-    /// `before..after` once the merge has moved the target; none in a git-less pool.
     pub fn range(&self, session: &Session) -> Option<String> {
         (!self.before_sha.is_empty())
             .then(|| format!("{}..{}", self.before_sha, merge_target_ref(session)))

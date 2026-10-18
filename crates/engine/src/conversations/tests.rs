@@ -721,8 +721,6 @@ async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
     assert!(rig.kinds("conv-1").contains(&TicketEventKind::Ended));
 }
 
-// A start refused before its launch reserves nothing, so the parent's next Spawn does not skip the
-// number.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_start_reserves_no_id() {
     let pool = Pool::git(&[("01", &[])]);
@@ -748,8 +746,6 @@ async fn a_refused_start_reserves_no_id() {
     assert!(reserved.is_empty(), "still reserved: {reserved:?}");
 }
 
-// A Spawn adoption runs the prepare stretch inside the Tick's own job, and the next adoption in that
-// job must already see the id it reserved.
 #[tokio::test]
 async fn a_prepared_start_has_its_id_reserved_in_the_same_job() {
     let rig = Rig::new().await;

@@ -418,7 +418,6 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
         } else {
             None
         };
-        // A refused write retries while the launches run, so a failing store holds no Attempt back.
         for launch in launches {
             tokio::spawn(run_launch(engine.clone(), launch));
         }
@@ -952,7 +951,6 @@ fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
     let (mut phase, quiet) = engine
         .call(|s| {
-            // A closed ticket (issue #154) is finished too.
             let pending: Vec<String> = s
                 .markers
                 .iter()

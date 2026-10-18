@@ -175,10 +175,6 @@ fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), Engine
     Ok(())
 }
 
-/// The synchronous stretch of `start` up to the launch: the checks, the id, the reservation, the
-/// Assignment, the worktree and the teaching. A Spawn adoption runs it in the Tick's own job, so the id
-/// it mints is reserved before the Tick's next adoption reads the reserved ids; `launch_prepared` then
-/// releases the reservation. A refusal reserves nothing.
 pub(crate) fn prepare(
     s: &mut Session,
     req: &StartConversationRequest,
@@ -269,7 +265,6 @@ pub async fn start(
     launch_prepared(engine, prepared).await
 }
 
-/// The rest of `start` once `prepare` has run: the launch, then the release of the id `prepare` reserved.
 pub(crate) async fn launch_prepared(
     engine: &Engine,
     prepared: Prepared,
@@ -439,9 +434,6 @@ fn after_launch(
     // resolves the same way a grader or spawned ticket inherits from its own parent.
     record_assignment(s, &id, p.assignment.clone());
     super::tick::start_tick(s, &runtime);
-    // The launch is run off the drive loop (the server route, or a spawn adoption's own task), so nothing
-    // else emits a snapshot that would tell the socket this Conversation now exists; a pool with no other
-    // ticket activity in flight could otherwise go arbitrarily long before the next unrelated emit.
     publish(s);
     Ok(view_of(s, &record, &load(s)))
 }
