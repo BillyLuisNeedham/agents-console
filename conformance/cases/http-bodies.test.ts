@@ -86,7 +86,7 @@ conformance("http", "request bodies › refuses a body missing the field each ro
     ["POST", "/api/enlist", { becomes: "ticket" }, { reason: "paneId is required" }],
     ["POST", "/api/keep-talking", {}, { reason: "ticketId is required" }],
     ["POST", "/api/conversations/end", {}, { reason: "id is required" }],
-    ["POST", "/api/conversations", { title: "t", role: "admin" }, { reason: 'role must be "steward" or "grill" when given' }],
+    ["POST", "/api/conversations", { title: "t", role: "admin" }, { reason: 'role must be "steward" when given' }],
     ["PUT", "/api/settings/machine", { defaults: [] }, { error: "settings: defaults must be an object" }],
   ];
   for (const [method, path, body, refusal] of refusals) {

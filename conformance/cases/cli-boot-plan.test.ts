@@ -4,8 +4,9 @@
  * the operator's checkout has out, unless --from names another) into a worktree of its own under
  * `.scratch/lines/`, leaving that checkout's branch alone, makes the pool inside that worktree and
  * begins the Line on the Plan through POST /api/line. Given a ready brief it commits the brief and
- * its spec onto the Line branch first and asks nothing; asked for the work, it opens the Grill with
- * the work as its first Turn. `--brief` alone runs the factory-today Preset.
+ * its spec onto the Line branch first and asks nothing; asked for the work, it hands the work over
+ * and the engine opens the entry Conversation node's first pass on it. `--brief` alone runs the
+ * factory-today Preset.
  */
 
 import { expect } from "bun:test";
@@ -113,7 +114,7 @@ conformance("cli", "Boot --plan --brief cuts the Line from the current branch in
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 });
 
-conformance("cli", "Boot --plan asks for the work, cuts the Line, begins it on the work and opens the Grill with the issue as its first Turn", async (t) => {
+conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it on the work, and the engine opens grill-1 with the issue in its first Turn", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
   writeFileSync(join(w.bin, "claude"), "#!/bin/sh\nexec sleep 150\n");
@@ -133,8 +134,9 @@ conformance("cli", "Boot --plan asks for the work, cuts the Line, begins it on t
   const base = gitIn(w, repo, ["rev-parse", "feature/x"]);
   expect(run.stdout).toContain(`line: cut line/186 from feature/x (${base.slice(0, 7)}) at `);
   expect(run.stdout).toContain('line: begun on the Plan factory-today ("Factory today")\n');
-  expect(run.stdout).toContain("grill: conv-1 opened with the work as its first Turn");
-  expect(run.stdout).toContain("steward: conv-2 on duty; it never answers the Finish\n");
+  expect(run.stdout).toContain("line: grill-1 opens on the work\n");
+  expect(run.stdout).not.toContain("grill: ");
+  expect(run.stdout).toContain("steward: conv-1 on duty; it never answers the Finish\n");
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 
   const pool = join(repo, ".scratch", "lines", "186", ".scratch", "186");
@@ -145,20 +147,29 @@ conformance("cli", "Boot --plan asks for the work, cuts the Line, begins it on t
   });
   expect(readJson(join(pool, "line.json"))).toMatchObject({ places: { branch: "line/186", work: "#186" } });
   expect(existsSync(join(pool, "issues", "implement-1.md"))).toBe(false);
-  const steward = readFileSync(join(pool, "conversations", "conv-2.md"), "utf8");
+  const steward = readFileSync(join(pool, "conversations", "conv-1.md"), "utf8");
   expect(steward.split("\n", 1)[0]).toContain(" role=steward ");
   expect(steward).toContain("Steward this pool's Line while the operator is away");
-  const record = readFileSync(join(pool, "conversations", "conv-1.md"), "utf8");
-  expect(record.split("\n", 1)[0]).toContain(" role=grill ");
-  expect(record).toContain("# Grill: Issue #186\n");
+  const grillFile = join(pool, "conversations", "grill-1.md");
+  const record = await until(
+    () => (existsSync(grillFile) ? readFileSync(grillFile, "utf8") : ""),
+    (text) => text.length > 0,
+    { what: "grill-1's record" },
+  );
+  expect(record.split("\n", 1)[0]).toContain(" node=grill ");
+  expect(record).toContain("# Grill, pass 1\n");
   const typed = await until(
     () => herdr.control<string[]>("submitted"),
-    (texts) => texts.length >= 1,
-    { what: "the Grill's first Turn" },
+    (texts) => texts.some((text) => text.includes("(`grill-1`)")),
+    { what: "grill-1's first Turn" },
   );
-  expect(typed[0]!.startsWith("The piece of work for this Line is issue #186.")).toBe(true);
-  expect(typed[0]).toContain(`This Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`);
-  expect(typed[0]).toContain("write the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.grill-1.brief.json`");
+  const first = typed.find((text) => text.includes("(`grill-1`)"))!;
+  expect(first).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)");
+  expect(first).toContain(
+    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on " +
+      `it.\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,
+  );
+  expect(first).toContain("write the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.grill-1.brief.json`");
 });
 
 conformance("cli", "Boot's Line mode refuses --factory, an unknown Plan, no work unattended and a brief whose spec is nowhere, before cutting anything", async (t) => {
