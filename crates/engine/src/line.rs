@@ -608,12 +608,14 @@ pub fn start_line_from_grill(
     Ok(view)
 }
 
-/// Where a Decide pass's report is, for `GET /api/line/report?node=&pass=`.
-pub fn report_path(session: &Session, node: &str, pass: u32) -> Option<String> {
-    let run = session.line.as_ref()?;
-    let node = ac_core::plan::NodeId::parse(node).ok()?;
-    run.plan().0.node(&node)?;
-    Some(run.report_path(&node, pass, &session.runs_dir))
+/// Where a Decide pass's report is, for `GET /api/line/report?node=&pass=`; why there is none.
+pub fn report_path(session: &Session, node: &str, pass: u32) -> Result<String, String> {
+    let run = session.line.as_ref().ok_or("the pool runs no Line")?;
+    let id = ac_core::plan::NodeId::parse(node)
+        .ok()
+        .filter(|id| run.plan().0.node(id).is_some())
+        .ok_or_else(|| format!("the Line has no node {node}"))?;
+    Ok(run.report_path(&id, pass, &session.runs_dir))
 }
 
 #[cfg(test)]

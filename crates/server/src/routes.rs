@@ -709,8 +709,8 @@ pub async fn line_report(server: &Server, node: &str, pass: &str) -> Result<Vec<
         return Err(not_found("the pool runs no Line".into()));
     };
     let path = match engine.line_report_path(node.to_owned(), pass).await {
-        Ok(Some(path)) => path,
-        Ok(None) => return Err(not_found(format!("the Line has no node {node}"))),
+        Ok(Ok(path)) => path,
+        Ok(Err(why)) => return Err(not_found(why)),
         Err(err) => return Err(Answer::refused(500, Field::Reason, err.message())),
     };
     std::fs::read(&path).map_err(|_| {

@@ -175,12 +175,12 @@ impl Engine {
         Ok(self.call(|s| crate::line::line_view(s)).await?)
     }
 
-    /// Where a Decide pass's report is, `None` when the pool's Line has no such node.
+    /// Where a Decide pass's report is, or why there is none.
     pub async fn line_report_path(
         &self,
         node: String,
         pass: u32,
-    ) -> Result<Option<String>, EngineError> {
+    ) -> Result<Result<String, String>, EngineError> {
         Ok(self
             .call(move |s| crate::line::report_path(s, &node, pass))
             .await?)
