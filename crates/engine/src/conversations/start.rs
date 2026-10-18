@@ -545,6 +545,7 @@ fn after_launch(
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: p.role,
         told: Default::default(),

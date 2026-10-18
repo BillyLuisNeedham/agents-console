@@ -115,13 +115,14 @@ impl Engine {
         crate::conversations::start(self, request).await
     }
 
-    /// `endConversation` (conversations.ts).
+    /// `endConversation` (conversations.ts): ended as closed (`close`), it merges nothing.
     pub async fn end_conversation(
         &self,
         id: String,
         closing: Option<String>,
+        close: bool,
     ) -> Result<(), EngineError> {
-        crate::conversations::end(self, &id, closing, ac_protocol::AnswerBy::Operator).await
+        crate::conversations::end(self, &id, closing, close, ac_protocol::AnswerBy::Operator).await
     }
 
     /// `paneRead` (issue #122): the last recorded read of a pane a loop watches.
@@ -203,6 +204,7 @@ impl Engine {
             self,
             &grill,
             Some("Start the Line".to_owned()),
+            false,
             ac_protocol::AnswerBy::Operator,
         )
         .await

@@ -683,7 +683,7 @@ pub async fn steward_end(
 ) -> Result<(), EngineError> {
     let c = conversation.clone();
     engine.call(move |s| check_steward(s, &c)).await??;
-    crate::conversations::end(engine, &conversation, closing, AnswerBy::Steward).await
+    crate::conversations::end(engine, &conversation, closing, false, AnswerBy::Steward).await
 }
 
 #[cfg(test)]

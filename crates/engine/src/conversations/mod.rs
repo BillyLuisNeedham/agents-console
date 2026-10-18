@@ -101,6 +101,8 @@ pub struct Runtime {
     /// already knows about.
     pub ending: bool,
     pub closing: Option<String>,
+    /// Ended as closed: the End merges nothing, and its branch stays as it is.
+    pub close: bool,
     /// Who asked for the End: the operator, or a Steward ending itself (ADR-0030).
     pub ended_by: Option<AnswerBy>,
     /// The Steward role (ADR-0030), from the record.
@@ -537,6 +539,13 @@ pub fn reserve(s: &mut Session, id: &str) {
     s.conversations.reserved.insert(id.to_owned());
 }
 
+/// A Line Conversation pass has ended or crashed: the drive wakes so the Line reads its end.
+pub(crate) fn wake_line(s: &mut Session, id: &str) {
+    if record_of(s, id).is_some_and(|rec| rec.node.is_some()) {
+        s.wake();
+    }
+}
+
 /// Whether a start holding this id is still in flight.
 pub(crate) fn is_reserved(s: &Session, id: &str) -> bool {
     s.conversations.reserved.contains(id)
@@ -877,6 +886,7 @@ pub(crate) fn enlisted_runtime(s: &Session, facts: EnlistedFacts<'_>) -> Rt {
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: facts.role,
         told: HashSet::new(),
@@ -917,6 +927,7 @@ pub(crate) fn started_runtime(s: &Session, rec: &ConversationRecord, tab_id: Opt
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: rec.role,
         told: HashSet::new(),

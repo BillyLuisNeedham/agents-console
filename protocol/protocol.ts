@@ -221,10 +221,14 @@ export interface TerminalFocusResponse {
   paneId: string;
 }
 
-/** POST /api/conversations/end's body. */
+/**
+ * POST /api/conversations/end's body. `close: true` ends it as closed: nothing
+ * merges, its branch stays, and a Line Conversation pass hands on `closed`.
+ */
 export interface EndConversationRequest {
   id: string;
   closing?: string;
+  close?: boolean;
 }
 
 /**

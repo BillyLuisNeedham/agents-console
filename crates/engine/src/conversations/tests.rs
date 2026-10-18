@@ -455,6 +455,7 @@ async fn an_end_on_an_unadopted_record_whose_pane_is_another_terminal_touches_no
         &rig.engine,
         "conv-1",
         Some("bye".into()),
+        false,
         Some(listing),
         ac_protocol::AnswerBy::Operator,
     )
@@ -487,6 +488,7 @@ async fn two_ends_of_one_unadopted_record_record_the_ending_once() {
             &rig.engine,
             "conv-1",
             None,
+            false,
             Some(listing.clone()),
             ac_protocol::AnswerBy::Operator,
         )
@@ -508,6 +510,7 @@ async fn ending_an_unknown_conversation_names_the_id() {
         &rig.engine,
         "conv-99",
         None,
+        false,
         ac_protocol::AnswerBy::Operator,
     )
     .await
@@ -709,6 +712,7 @@ async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
         &rig.engine,
         "conv-1",
         Some("bye".into()),
+        false,
         ac_protocol::AnswerBy::Operator,
     )
     .await

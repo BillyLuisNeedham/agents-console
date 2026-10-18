@@ -535,7 +535,8 @@ pub async fn start_conversation_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// End a Conversation (issue #60): 404 when there is no live Conversation with that id, 409 otherwise.
+/// End a Conversation (issue #60), or end it as closed (`close: true`), merging nothing: 404 when
+/// there is no live Conversation with that id, 409 otherwise.
 pub async fn end_conversation_request(server: &Server, body: Body) -> Answer {
     let Ok(body) = body else {
         return Answer::refused(400, Field::Reason, "invalid JSON body");
@@ -546,10 +547,11 @@ pub async fn end_conversation_request(server: &Server, body: Body) -> Answer {
         return Answer::refused(400, Field::Reason, "id is required");
     }
     let closing = string_field(&fields, "closing");
+    let close = field_of(&fields, "close") == Some(&Value::Bool(true));
     let ended = match server.engine() {
         None => Err("pool not started".to_owned()),
         Some(engine) => engine
-            .end_conversation(id, closing)
+            .end_conversation(id, closing, close)
             .await
             .map_err(|err| err.message().to_owned()),
     };
