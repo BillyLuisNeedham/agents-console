@@ -109,6 +109,40 @@ restartCase(
   { timeoutMs: 180_000 },
 );
 
+restartCase(
+  "a waiting merge conflict's count of Tickets started since it was raised is derived again after a restart",
+  async (t) => {
+    const world = t.world({
+      tickets: [ticket("01", "t"), ticket("02", "t"), ticket("03", "t", { blockedBy: "04" }), ticket("04", "t")],
+      config: { ...CONFIG, resolver: "none" },
+      repoFiles: { "shared.txt": "base\n" },
+    });
+    world.stubs.script("01", { run: overwriteShared("from-01", "work-01") });
+    world.stubs.script("02", { run: `${waitOnMain("work-01")}\n${overwriteShared("from-02", "work-02")}` });
+    world.stubs.script("03", { run: "echo three > three.txt; git add -A; git commit -qm work-03" });
+    const four = world.stubs.hold("04", { run: "echo four > four.txt; git add -A; git commit -qm work-04" });
+
+    const first = await startLeg(t, world, 0);
+    await untilState(first, "02's conflict waiting, nothing started since", (s) => interruptsOf(s).join(" ") === "02:merge-conflict", 60_000);
+    await four.release();
+    const counted = await untilState(
+      first,
+      "02's conflict counting 03's start",
+      (s) => s.state.interrupts.some((i) => i.ticketId === "02" && i.startedSince === 1),
+      60_000,
+    );
+    await untilState(first, "03 merged", (s) => cardOf(s, "03").status === "done" && cardOf(s, "03").mergeState === null, 60_000);
+    const raised = counted.state.interrupts.find((i) => i.ticketId === "02")!;
+    await first.kill();
+
+    const second = await startLeg(t, world, 1);
+    const rederived = await untilState(second, "02's conflict again", (s) => interruptsOf(s).join(" ") === "02:merge-conflict", 60_000);
+    expect(rederived.state.interrupts).toEqual([raised]);
+    expect(launchKeys(world).filter((key) => key === "03")).toEqual(["03"]);
+  },
+  { timeoutMs: 180_000 },
+);
+
 /**
  * Ticket `id` done on its pool branch, as a server that died before its
  * merge left it: its worktree on `pool/<key>/<id>` holding one commit main
