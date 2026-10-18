@@ -355,11 +355,14 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// POST /api/conversations/end's body.
+    /// POST /api/conversations/end's body. `close: true` ends it as closed: nothing
+    /// merges, its branch stays, and a Line Conversation pass hands on `closed`.
     pub struct EndConversationRequest {
         pub id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub closing: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub close: Option<bool>,
     }
 }
 

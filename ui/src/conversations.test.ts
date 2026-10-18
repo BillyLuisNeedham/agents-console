@@ -1,7 +1,7 @@
 /// <reference types="bun" />
 
 import { describe, expect, it } from "bun:test";
-import { ConversationsTray, postStartLine } from "./conversations";
+import { ConversationsTray } from "./conversations";
 import type { ConversationView, StartConversationRequest } from "./project";
 import { useDom } from "./test-dom";
 
@@ -40,10 +40,8 @@ const CONVERSATION: ConversationView = {
 function trayHarness() {
   const startCalls: StartConversationRequest[] = [];
   const startDeferreds: Deferred<ConversationView>[] = [];
-  const endCalls: { id: string; closing?: string }[] = [];
+  const endCalls: { id: string; closing?: string; close?: boolean }[] = [];
   const endDeferreds = new Map<string, Deferred<void>>();
-  const lineCalls: string[] = [];
-  const lineDeferreds = new Map<string, Deferred<void>>();
   let changes = 0;
   const tray = new ConversationsTray({
     onStart: (request) => {
@@ -52,16 +50,10 @@ function trayHarness() {
       startDeferreds.push(d);
       return d.promise;
     },
-    onEnd: (id, closing) => {
-      endCalls.push({ id, closing });
+    onEnd: (id, closing, close) => {
+      endCalls.push({ id, closing, close });
       const d = deferred<void>();
       endDeferreds.set(id, d);
-      return d.promise;
-    },
-    onStartLine: (id) => {
-      lineCalls.push(id);
-      const d = deferred<void>();
-      lineDeferreds.set(id, d);
       return d.promise;
     },
     onChange: () => {
@@ -74,8 +66,6 @@ function trayHarness() {
     startDeferreds,
     endCalls,
     endDeferreds,
-    lineCalls,
-    lineDeferreds,
     changes: () => changes,
   };
 }
@@ -203,6 +193,14 @@ describe("ConversationsTray End", () => {
     endDeferreds.get("conv-1")!.resolve();
     await ended;
     expect(endCalls).toEqual([{ id: "conv-1", closing: "wrapping up" }]);
+  });
+
+  it("passes End as closed through to onEnd, with the closing line", async () => {
+    const { tray, endCalls, endDeferreds } = trayHarness();
+    const ended = tray.endConversation("grill-1", "not needed", true);
+    endDeferreds.get("grill-1")!.resolve();
+    await ended;
+    expect(endCalls).toEqual([{ id: "grill-1", closing: "not needed", close: true }]);
   });
 
   it("marks a failed End inline, keyed by conversation id", async () => {
@@ -446,7 +444,7 @@ describe("ConversationsTray Start Steward (ADR-0030)", () => {
         turn: { state: "working" as const, lastLine: "", idleSince: null },
         idleAge: null,
         steward,
-        grill: false,
+        node: null,
         delivery: null,
       });
       const el = tray.render([row("conv-1", false), row("conv-3", true)], {}, handlers);
@@ -473,7 +471,7 @@ describe("ConversationsTray: Notices not landing", () => {
           turn: { state: "waiting", lastLine: "", idleSince: null },
           idleAge: null,
           steward: false,
-          grill: false,
+          node: null,
           delivery,
         },
       ],
@@ -488,56 +486,11 @@ describe("ConversationsTray: Notices not landing", () => {
   });
 });
 
-describe("ConversationsTray Start the Line (ADR-0037)", () => {
-  it("starts the Line on the Grill's id, marked in flight until the engine answers", async () => {
-    const { tray, lineCalls, lineDeferreds } = trayHarness();
-    const started = tray.startLine("conv-2");
-    expect(lineCalls).toEqual(["conv-2"]);
-    expect(tray.lineStartView("conv-2")).toEqual({ starting: true, failure: null });
-    // A second press while the first is out sends nothing.
-    void tray.startLine("conv-2");
-    expect(lineCalls).toHaveLength(1);
-    lineDeferreds.get("conv-2")!.resolve();
-    await started;
-    expect(tray.lineStartView("conv-2")).toEqual({ starting: false, failure: null });
-  });
-
-  it("keeps the refusal's reason, and clears it on the next press", async () => {
-    const { tray, lineDeferreds } = trayHarness();
-    const refused = tray.startLine("conv-2");
-    lineDeferreds.get("conv-2")!.reject(
-      new Error("no Line brief: docs/specs/ in the Grill's committed branch pool/x/conv-2 holds no *.brief.json"),
-    );
-    await refused;
-    expect(tray.lineStartView("conv-2").failure).toBe(
-      "no Line brief: docs/specs/ in the Grill's committed branch pool/x/conv-2 holds no *.brief.json",
-    );
-    const retried = tray.startLine("conv-2");
-    expect(tray.lineStartView("conv-2")).toEqual({ starting: true, failure: null });
-    lineDeferreds.get("conv-2")!.resolve();
-    await retried;
-  });
-
-  it("reports its state as a map and drops a refusal once the Grill is not live", async () => {
-    const { tray, lineDeferreds } = trayHarness();
-    const refused = tray.startLine("conv-2");
-    expect(tray.lineStartState()).toEqual({ "conv-2": { starting: true, failure: null } });
-    lineDeferreds.get("conv-2")!.reject(new Error("the Line has already started"));
-    await refused;
-    tray.pruneLineStartFailures(new Set(["conv-2"]));
-    expect(tray.lineStartState()).toEqual({
-      "conv-2": { starting: false, failure: "the Line has already started" },
-    });
-    tray.pruneLineStartFailures(new Set());
-    expect(tray.lineStartState()).toEqual({});
-  });
-});
-
-describe("ConversationsTray: the Grill's row (ADR-0037)", () => {
+describe("ConversationsTray: a Line Conversation's row (ADR-0039)", () => {
   useDom();
-  it("marks the Grill's tray row", () => {
+  it("names the node on the Line Conversation's tray row", () => {
     const { tray } = trayHarness();
-    const row = (id: string, grill: boolean) => ({
+    const row = (id: string, node: string | null) => ({
       id,
       cardId: `conversation:${id}`,
       title: id,
@@ -545,46 +498,16 @@ describe("ConversationsTray: the Grill's row (ADR-0037)", () => {
       turn: { state: "waiting" as const, lastLine: "", idleSince: null },
       idleAge: null,
       steward: false,
-      grill,
+      node,
       delivery: null,
     });
-    const el = tray.render([row("conv-1", false), row("conv-2", true)], {}, {
+    const el = tray.render([row("conv-1", null), row("grill-1", "grill")], {}, {
       onSelect: () => {},
       onFocusSteward: () => {},
     });
     const marked = [...el.querySelectorAll(".conversations-row")].map(
-      (r) => r.querySelector(".grill-badge")?.textContent ?? null,
+      (r) => r.querySelector(".node-badge")?.textContent ?? null,
     );
-    expect(marked).toEqual([null, "Grill"]);
-  });
-});
-
-describe("postStartLine (ADR-0037)", () => {
-  function fakeFetch(status: number, body: string) {
-    const calls: { url: string; init: RequestInit | undefined }[] = [];
-    const fetchFn = ((url: string, init?: RequestInit) => {
-      calls.push({ url, init });
-      return Promise.resolve(new Response(body, { status }));
-    }) as unknown as typeof fetch;
-    return { calls, fetchFn };
-  }
-
-  it("posts the Grill's id to /api/line/start and resolves on 202", async () => {
-    const { calls, fetchFn } = fakeFetch(202, JSON.stringify({ ticketId: "r1-implement" }));
-    await postStartLine("conv-2", fetchFn);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe("/api/line/start");
-    expect(calls[0].init?.method).toBe("POST");
-    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ grill: "conv-2" });
-  });
-
-  it("rejects with the refusal's reason", async () => {
-    const { fetchFn } = fakeFetch(409, JSON.stringify({ reason: "the Line has already started" }));
-    await expect(postStartLine("conv-2", fetchFn)).rejects.toThrow("the Line has already started");
-  });
-
-  it("rejects with the status when the refusal carries no reason", async () => {
-    const { fetchFn } = fakeFetch(500, "not json");
-    await expect(postStartLine("conv-2", fetchFn)).rejects.toThrow("HTTP 500");
+    expect(marked).toEqual([null, "grill"]);
   });
 });

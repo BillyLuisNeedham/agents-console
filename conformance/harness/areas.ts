@@ -27,7 +27,7 @@ export const AREAS = {
   interrupts: "Interrupts and answers: /api/resume, Close, Keep talking, Queued answers",
   enlist: "enlisting a live herdr pane as a Ticket or a Conversation, and the enlisted Ticket's lifecycle",
   plans: "Plans: the Plan format's validation, the Plan library under HOME, the compiled-in Presets, and the plans.* verbs and routes",
-  line: "the pool's Line running its Plan: POST /api/line, the Ticket nodes' Tickets and verdicts, loops and their holds, the Finish hold and its act, line.json, the Grill bridge",
+  line: "the pool's Line running its Plan: POST /api/line, the Ticket nodes' Tickets and verdicts, loops and their holds, the Finish hold and its act, line.json, its Conversation passes and their briefs",
 } as const;
 
 export type Area = keyof typeof AREAS;

@@ -59,10 +59,10 @@ cut from.
                          ~/.agent-graphs/plans/; asks for the work unless --work or --brief
                          gives it
   --work <text>          the piece of work: an issue number (186, #186) or free text; on a
-                         Plan that starts with a Conversation, Boot opens the Grill with it
-                         as the Grill's first Turn
+                         Plan that starts with a Conversation, the engine opens that node's
+                         first pass on it
   --brief <path>         a ready Line brief (its spec found from here first, then beside
-                         the brief): no Grill, the spec and brief committed onto the Line
+                         the brief): no Conversation, the spec and brief committed onto the Line
                          branch, the Line begun at once; implies Line mode and --yes, on
                          factory-today unless --plan names another Plan
   --from <branch>        the Line base: the branch to cut the Line from instead of the
@@ -94,7 +94,8 @@ pub struct BootArgs {
     pub plan: Option<String>,
     /// The piece of work: an issue number or free text.
     pub work: Option<String>,
-    /// A ready Line brief: no Grill, the Line begun at once. Implies Line mode and asks nothing.
+    /// A ready Line brief: no Conversation, the Line begun at once. Implies Line mode and asks
+    /// nothing.
     pub brief: Option<String>,
     /// The Line base's branch, when not the current one (issue #193).
     pub from: Option<String>,
@@ -1155,13 +1156,13 @@ fn report_console(url: &str, pool_dir: &str, args: &BootArgs, io: &mut dyn BootI
     ));
 }
 
-/// How long Boot waits for the Grill's start, which answers once its pane is up and its first Turn
+/// How long Boot waits for the Steward's start, which answers once its pane is up and its first Turn
 /// typed.
-const GRILL_START_TIMEOUT_MS: u64 = 180_000;
+const STEWARD_START_TIMEOUT_MS: u64 = 180_000;
 
 /// Boot's Line mode (ADR-0037, ADR-0038, ADR-0039; see [`factory`]): the Plan, the work, the Line
 /// branch and its worktree, the pool inside it, the server, the Line begun on the Plan, then the
-/// Grill when the Plan starts with a Conversation and the work came as words.
+/// Steward.
 fn run_line_boot(
     args: &BootArgs,
     io: &mut dyn BootIo,
@@ -1185,7 +1186,7 @@ fn run_line_boot(
 
     let work = match (&args.brief, &args.work) {
         (Some(path), _) => LineWork::Ready(Box::new(factory::read_ready_brief(path, cwd)?)),
-        (None, Some(work)) if !js::trim(work).is_empty() => LineWork::Grill {
+        (None, Some(work)) if !js::trim(work).is_empty() => LineWork::Work {
             work: js::trim(work).to_owned(),
         },
         _ if unattended => {
@@ -1199,7 +1200,7 @@ fn run_line_boot(
             if js::trim(&answer).is_empty() {
                 return Err("Line mode needs the piece of work; none given".to_owned());
             }
-            LineWork::Grill {
+            LineWork::Work {
                 work: js::trim(&answer).to_owned(),
             }
         }
@@ -1222,7 +1223,7 @@ fn run_line_boot(
         "line: cut {} from {} ({}) at {}",
         line.branch,
         line.base.base_ref,
-        factory::short_commit(&line.base.commit),
+        ac_core::line::short_commit(&line.base.commit),
         line.worktree
     ));
     let brief_path = match &work {
@@ -1234,7 +1235,7 @@ fn run_line_boot(
             ));
             Some(path)
         }
-        LineWork::Grill { .. } => None,
+        LineWork::Work { .. } => None,
     };
 
     let scratch = js::path_join(&[&line.worktree, ".scratch"]);
@@ -1305,10 +1306,10 @@ fn run_line_boot(
     let mut begin = serde_json::json!({ "plan": plan.to_file() });
     match (&work, &brief_path) {
         (LineWork::Ready(_), Some(brief)) => begin["brief"] = Value::String(brief.clone()),
-        (LineWork::Grill { work }, _) => begin["work"] = Value::String(work.clone()),
+        (LineWork::Work { work }, _) => begin["work"] = Value::String(work.clone()),
         (LineWork::Ready(_), None) => unreachable!("a ready brief is committed before the server"),
     }
-    let mut started =
+    let started =
         match launch::post_json(&format!("{url}/api/line"), &begin, launch::STATE_TIMEOUT_MS) {
             Ok((202, _)) => {
                 io.log(&format!(
@@ -1325,17 +1326,16 @@ fn run_line_boot(
                 false
             }
         };
-    let opens_with_grill = plan.entries().iter().any(|entry| {
-        matches!(
-            plan.node(entry).map(|node| &node.body),
-            Some(ac_core::plan::NodeBody::Conversation(_))
-        )
-    });
-    if started
-        && opens_with_grill
-        && let LineWork::Grill { work } = &work
-    {
-        started = open_grill(&url, work, &merged, &line, io);
+    // The engine opens each entry Conversation node's first pass on the work at its first tick.
+    if started && matches!(work, LineWork::Work { .. }) {
+        for entry in plan.entries() {
+            if matches!(
+                plan.node(entry).map(|node| &node.body),
+                Some(ac_core::plan::NodeBody::Conversation(_))
+            ) {
+                io.log(&format!("line: {entry}-1 opens on the work"));
+            }
+        }
     }
     if !args.no_steward {
         start_line_steward(&url, io);
@@ -1348,55 +1348,7 @@ fn run_line_boot(
     Ok(if started { 0 } else { 1 })
 }
 
-// The Grill stands in for the Plan's entry Conversation pass (ADR-0039): opened with the work as
-// its first Turn, it is taught the pass's brief by the engine.
-fn open_grill(
-    url: &str,
-    work: &str,
-    config: &Map<String, Value>,
-    line: &factory::CutLine,
-    io: &mut dyn BootIo,
-) -> bool {
-    let grill_title = format!(
-        "Grill: {}",
-        config
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or(&line.slug)
-    );
-    let request = serde_json::json!({
-        "title": normalise_title(&grill_title).unwrap_or_else(|| "Grill".to_owned()),
-        "opening": factory::grill_opening(work, &line.base),
-        "role": "grill",
-    });
-    match launch::post_json(
-        &format!("{url}/api/conversations"),
-        &request,
-        GRILL_START_TIMEOUT_MS,
-    ) {
-        Ok((201, body)) => {
-            io.log(&format!(
-                "grill: {} opened with the work as its first Turn; press Start the Line on it once \
-                 its brief is written",
-                body.pointer("/conversation/id")
-                    .map(js::string_of)
-                    .unwrap_or_default()
-            ));
-            true
-        }
-        answer => {
-            io.warn(&format!(
-                "the Grill did not open: {}; the pool is up, so open it again with curl -X POST \
-                 {url}/api/conversations -H 'content-type: application/json' -d '{}'",
-                refusal_text(answer),
-                request
-            ));
-            false
-        }
-    }
-}
-
-// The Steward is on by default in a Line pool (ADR-0037): started once the Line or its Grill is,
+// The Steward is on by default in a Line pool (ADR-0037): started once the Line is,
 // with standing orders to keep the Line moving. A Steward that does not start leaves the pool up.
 fn start_line_steward(url: &str, io: &mut dyn BootIo) {
     let request = serde_json::json!({
@@ -1407,7 +1359,7 @@ fn start_line_steward(url: &str, io: &mut dyn BootIo) {
     match launch::post_json(
         &format!("{url}/api/conversations"),
         &request,
-        GRILL_START_TIMEOUT_MS,
+        STEWARD_START_TIMEOUT_MS,
     ) {
         Ok((201, body)) => io.log(&format!(
             "steward: {} on duty; it never answers the Finish",

@@ -520,8 +520,8 @@ impl LineRun {
         Ok(run)
     }
 
-    /// What a Plan holds that this build cannot run yet: per-item copies, Mergers, and Conversation
-    /// nodes that are not entries. Line start refuses a Plan with any.
+    /// What a Plan holds that this build cannot run yet: per-item copies and Mergers. Line start
+    /// refuses a Plan with any.
     pub fn unsupported(plan: &Plan) -> Vec<String> {
         plan.nodes()
             .filter_map(|node| match &node.body {
@@ -531,11 +531,6 @@ impl LineRun {
                 )),
                 NodeBody::Merger(_) => Some(format!(
                     "node {} is a Merger, which this build cannot run yet",
-                    node.id
-                )),
-                NodeBody::Conversation(_) if !plan.entries().contains(&node.id) => Some(format!(
-                    "node {} is a Conversation node after the start of the Plan, which this build \
-                     cannot run yet",
                     node.id
                 )),
                 _ => None,
@@ -962,18 +957,6 @@ impl LineRun {
             PassWork::Conversation { id } => Some(id),
             _ => None,
         }
-    }
-
-    /// The live pass of an entry Conversation node, with its opening Turn: what the Grill opens on
-    /// until Conversation passes open as Conversations of their own.
-    pub fn grill_pass(&self) -> Option<NewConversation> {
-        self.plan.entries().iter().find_map(|entry| {
-            let pass = self.current(entry)?;
-            let PassWork::Conversation { id } = &pass.work else {
-                return None;
-            };
-            Some(text::conversation(self, self.plan.node(entry)?, pass, id))
-        })
     }
 
     /// The check a Line Ticket's done Outcome must pass at its exit, `None` for an id that runs no

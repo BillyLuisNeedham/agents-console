@@ -3,6 +3,7 @@
 use serde_json::{Map, Value, json};
 
 use ac_core::conversation_record::write_conversation_status;
+use ac_core::line::run::{LineBrief, TicketId, brief_problem};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
 use ac_io::herdr::{Herdr, is_tab_not_found};
 use ac_protocol::{AnswerBy, ConversationStatus, Interrupt, InterruptKind, TicketEventKind};
@@ -91,6 +92,7 @@ fn mark_crashed(s: &mut Session, rt: &Rt, ending: PaneEnding) {
     // whatever never delivered.
     super::notices::note_ended(s, &id, &branch, None, true);
     s.conversations.runtimes.shift_remove(&id);
+    wake_line(s, &id);
     publish(s);
 }
 
@@ -182,30 +184,31 @@ fn dispose_worktree(s: &Session, rt: &Rt) {
 
 pub(crate) fn finish_end(s: &mut Session, rt: &Rt, merged: bool) {
     stop_tick(s, rt);
-    let (id, file, closing, by, pane, harness, branch, enlisted, close_tabs) = rt.with(|r| {
-        (
-            r.id.clone(),
-            r.file.clone(),
-            r.closing.clone(),
-            r.ended_by,
-            r.pane_id.clone(),
-            r.harness.clone(),
-            r.worktree.branch.clone(),
-            r.enlisted,
-            r.close_tabs,
-        )
-    });
+    let (id, file, closing, close, by, pane, harness, branch, enlisted, close_tabs) =
+        rt.with(|r| {
+            (
+                r.id.clone(),
+                r.file.clone(),
+                r.closing.clone(),
+                r.close,
+                r.ended_by,
+                r.pane_id.clone(),
+                r.harness.clone(),
+                r.worktree.branch.clone(),
+                r.enlisted,
+                r.close_tabs,
+            )
+        });
     let _ = write_conversation_status(&file, ConversationStatus::Ended);
-    event1(
-        s,
-        &id,
-        TicketEventKind::Ended,
-        json!({
-            "closing": closing,
-            "by": by.unwrap_or(AnswerBy::Operator).as_str(),
-            "merged": merged,
-        }),
-    );
+    let mut payload = object(json!({
+        "closing": closing,
+        "by": by.unwrap_or(AnswerBy::Operator).as_str(),
+        "merged": merged,
+    }));
+    if close {
+        payload.insert("close".into(), true.into());
+    }
+    event(s, &id, TicketEventKind::Ended, payload, 1);
     release_agent(s, pane.as_deref(), &harness);
     crate::live_attempts::clear(s, &id, 1);
     // An enlisted Conversation's tab is the operator's and never closes (issue #101); the engine opened
@@ -218,6 +221,7 @@ pub(crate) fn finish_end(s: &mut Session, rt: &Rt, merged: bool) {
     // never delivered.
     super::notices::note_ended(s, &id, &branch, closing.as_deref(), false);
     s.conversations.runtimes.shift_remove(&id);
+    wake_line(s, &id);
     // The one place every ending path converges (End's no-commit fast path and its merge-chain success,
     // plus the three merge answers below): none of those callers run inside the drive loop, so this is
     // the single spot that guarantees the snapshot stream sees the ending promptly, mirroring
@@ -383,14 +387,15 @@ pub(crate) async fn claim_detached(
 // ---------------------------------------------------------------------------
 
 /// End a Conversation the operator is done with, or a Steward ending itself (ADR-0030, which `by`
-/// records).
+/// records). Ended as closed (`close`), it merges nothing.
 pub async fn end(
     engine: &Engine,
     id: &str,
     closing: Option<String>,
+    close: bool,
     by: AnswerBy,
 ) -> Result<(), EngineError> {
-    end_with(engine, id, closing, None, by).await
+    end_with(engine, id, closing, close, None, by).await
 }
 
 /// A Steward ends itself (ADR-0030): the End as the operator's, with the closing line and who asked.
@@ -399,7 +404,7 @@ pub async fn end_conversation_by_steward(
     id: String,
     closing: Option<String>,
 ) -> Result<(), EngineError> {
-    end(engine, &id, closing, AnswerBy::Steward).await
+    end(engine, &id, closing, false, AnswerBy::Steward).await
 }
 
 /// End: only the operator does this (card End, Detail End, or closing the herdr tab: the last arrives
@@ -411,6 +416,7 @@ pub(crate) async fn end_with(
     engine: &Engine,
     id: &str,
     closing: Option<String>,
+    close: bool,
     listing: Option<PaneListing>,
     by: AnswerBy,
 ) -> Result<(), EngineError> {
@@ -418,11 +424,14 @@ pub(crate) async fn end_with(
     let (key, closing_now) = (id.to_owned(), closing.clone());
     let known = engine
         .call(move |s| {
-            s.conversations
+            if !close && let Some(why) = brief_refusal(s, &key) {
+                return Err(EngineError::refused(why));
+            }
+            Ok(s.conversations
                 .runtime(&key)
-                .map(|rt| begin_end(s, &rt, closing_now, by).then_some(rt))
+                .map(|rt| begin_end(s, &rt, closing_now, close, by).then_some(rt)))
         })
-        .await?;
+        .await??;
     let rt = match known {
         Some(Some(rt)) => rt,
         Some(None) => return Ok(()),
@@ -432,7 +441,7 @@ pub(crate) async fn end_with(
                 .map_err(EngineError::refused)?;
             let (rt_now, closing_now) = (rt.clone(), closing.clone());
             let proceed = engine
-                .call(move |s| begin_end(s, &rt_now, closing_now, by))
+                .call(move |s| begin_end(s, &rt_now, closing_now, close, by))
                 .await?;
             if !proceed {
                 return Ok(());
@@ -449,11 +458,46 @@ pub(crate) async fn end_with(
     Ok(())
 }
 
+// A Line Conversation pass ends only on the Line brief its committed branch holds at the path its
+// pass names, valid for the Plan and with its spec beside it (ADR-0039); anything less refuses the
+// End before anything moves. Ended as closed it merges nothing, so it needs none, and an End already
+// asked for (a second End, a boot finishing one) was checked when it was asked.
+fn brief_refusal(s: &Session, id: &str) -> Option<String> {
+    let rec = record_of(s, id).filter(|rec| rec.status == ConversationStatus::Live)?;
+    rec.node.as_ref()?;
+    let run = s.line.as_ref()?;
+    let (branch, ending) = branch_and_ending(s, id);
+    if ending || end_requested(s, id) {
+        return None;
+    }
+    let path = run.brief_path(&TicketId::new(id));
+    let committed = |file: &str| git::show_file(&s.cwd, &format!("{branch}:{file}"));
+    // The branch's committed tree: what is not committed never merges, so it never counts.
+    let Some(text) = committed(&path) else {
+        return Some(format!(
+            "{id}'s committed branch {branch} has no Line brief at {path}"
+        ));
+    };
+    let brief = match LineBrief::parse(&text) {
+        Ok(brief) => brief,
+        Err(why) => return Some(format!("Line brief {path}: {why}")),
+    };
+    if let Some(problem) = brief_problem(run.plan().0, &brief) {
+        return Some(format!("Line brief {path}: {problem}"));
+    }
+    match &brief.spec {
+        Some(spec) if committed(spec).is_none() => Some(format!(
+            "Line brief {path}: its spec {spec} is not on {id}'s committed branch {branch}"
+        )),
+        _ => None,
+    }
+}
+
 // The first stretch of an End: recorded before anything moves (issue #140): an engine that stops mid End
 // leaves the record live, and the next boot finishes this ending rather than calling the Conversation
-// crashed, with the closing line and who asked for it as they were recorded. False when it is already
-// ending.
-fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, by: AnswerBy) -> bool {
+// crashed, with the closing line, who asked for it and whether it ends as closed as they were recorded.
+// False when it is already ending.
+fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, close: bool, by: AnswerBy) -> bool {
     if rt.with(|r| r.ending) {
         return false;
     }
@@ -461,6 +505,7 @@ fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, by: AnswerBy) ->
     rt.with(|r| {
         r.ending = true;
         r.closing = closing.clone();
+        r.close = close;
         r.ended_by = Some(by);
     });
     if !end_requested(s, &id) {
@@ -472,18 +517,26 @@ fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, by: AnswerBy) ->
         if by == AnswerBy::Steward {
             payload.insert("by".into(), by.as_str().into());
         }
+        if close {
+            payload.insert("close".into(), true.into());
+        }
         event(s, &id, TicketEventKind::EndRequested, payload, 1);
-    } else if closing.is_none() {
+    } else {
         let events = read_events(runs_dir(s), &id);
         let asked = events
             .iter()
             .rfind(|e| e.kind == TicketEventKind::EndRequested);
         if let Some(asked) = asked {
-            if let Some(Value::String(text)) = asked.payload.get("closing") {
-                rt.with(|r| r.closing = Some(text.clone()));
+            if asked.payload.get("close") == Some(&json!(true)) {
+                rt.with(|r| r.close = true);
             }
-            if asked.payload.get("by") == Some(&json!("steward")) {
-                rt.with(|r| r.ended_by = Some(AnswerBy::Steward));
+            if closing.is_none() {
+                if let Some(Value::String(text)) = asked.payload.get("closing") {
+                    rt.with(|r| r.closing = Some(text.clone()));
+                }
+                if asked.payload.get("by") == Some(&json!("steward")) {
+                    rt.with(|r| r.ended_by = Some(AnswerBy::Steward));
+                }
             }
         }
     }
@@ -499,9 +552,9 @@ fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, by: AnswerBy) ->
 
 fn finish_or_chain(s: &mut Session, rt: &Rt) {
     let target = crate::merges::merge_target_branch(s);
-    let branch = rt.with(|r| r.worktree.branch.clone());
-    let has_commits = git::has_commits_beyond(&s.cwd, &target, &branch);
-    if !has_commits {
+    let (branch, close) = rt.with(|r| (r.worktree.branch.clone(), r.close));
+    // Ended as closed, the worktree goes and a branch with work on it stays, unmerged.
+    if close || !git::has_commits_beyond(&s.cwd, &target, &branch) {
         dispose_worktree(s, rt);
         finish_end(s, rt, false);
         return;
@@ -571,7 +624,7 @@ fn run_end_merge(
 
 /// Merge `branch` into the merge target, in whichever checkout holds it (issue #101): the engine's,
 /// never one an enlisted agent works in.
-pub(crate) fn merge_into_target(s: &Session, branch: &str) -> MergeResult {
+fn merge_into_target(s: &Session, branch: &str) -> MergeResult {
     let merged = git::with_merge_checkout(&s.cwd, s.merge_target.as_deref(), |cwd| {
         git::merge_branch(cwd, branch)
     });

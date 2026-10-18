@@ -98,3 +98,13 @@ fn a_malformed_line_base_is_refused_never_read_as_main() {
         assert!(err.contains(why), "{bad}: {err}");
     }
 }
+
+#[test]
+fn reads_an_issue_number_with_or_without_its_hash() {
+    assert_eq!(issue_number("186"), Some("186".to_owned()));
+    assert_eq!(issue_number(" #179 "), Some("179".to_owned()));
+    assert_eq!(issue_number("fix #179"), None);
+    assert_eq!(issue_number("#"), None);
+    assert_eq!(short_commit("abc1234def"), "abc1234");
+    assert_eq!(short_commit("abc"), "abc");
+}

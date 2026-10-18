@@ -115,13 +115,14 @@ impl Engine {
         crate::conversations::start(self, request).await
     }
 
-    /// `endConversation` (conversations.ts).
+    /// `endConversation` (conversations.ts): ended as closed (`close`), it merges nothing.
     pub async fn end_conversation(
         &self,
         id: String,
         closing: Option<String>,
+        close: bool,
     ) -> Result<(), EngineError> {
-        crate::conversations::end(self, &id, closing, ac_protocol::AnswerBy::Operator).await
+        crate::conversations::end(self, &id, closing, close, ac_protocol::AnswerBy::Operator).await
     }
 
     /// `paneRead` (issue #122): the last recorded read of a pane a loop watches.
@@ -184,36 +185,6 @@ impl Engine {
         Ok(self
             .call(move |s| crate::line::report_path(s, &node, pass))
             .await?)
-    }
-
-    /// Start the Line on the Grill (the bridge until Conversation nodes, ADR-0039), the operator's
-    /// act: the brief checked on the Grill's branch, the branch merged and the entry pass ended on
-    /// it, then the Grill ended. The Line, or the refusal's reason.
-    pub async fn start_line_from_grill(
-        &self,
-        grill: String,
-    ) -> Result<ac_protocol::LineGraphView, EngineError> {
-        let id = grill.clone();
-        let view = self
-            .call(move |s| crate::line::start_line_from_grill(s, &id))
-            .await??;
-        // The Line has started by now, so an End that fails is logged, not a refusal: the Grill
-        // is left for the operator to end, with nothing left on its branch to merge.
-        if let Err(err) = crate::conversations::end(
-            self,
-            &grill,
-            Some("Start the Line".to_owned()),
-            ac_protocol::AnswerBy::Operator,
-        )
-        .await
-        {
-            let line = format!(
-                "line: the Line started but the Grill {grill} did not end: {}",
-                err.message()
-            );
-            let _ = self.call(move |s| s.log(line)).await;
-        }
-        Ok(view)
     }
 
     /// `adoptHeldSpawn` (ADR-0029).

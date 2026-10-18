@@ -320,6 +320,7 @@ fn requests_from_the_console_and_the_cli() {
     round_trip::<KeepTalkingRequest>(r#"{"ticketId":"02"}"#);
     round_trip::<HeldSpawnRequest>(r#"{"id":"x"}"#);
     round_trip::<EndConversationRequest>(r#"{"id":"conv-1"}"#);
+    round_trip::<EndConversationRequest>(r#"{"id":"grill-1","close":true}"#);
     round_trip::<LogReadRequest>(r#"{"id":"01","offset":0}"#);
     round_trip::<PoolLogReadRequest>(r#"{"before":0}"#);
     round_trip::<CardSubscription>(r#"{"id":"01"}"#);

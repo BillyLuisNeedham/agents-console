@@ -1,18 +1,18 @@
 /**
  * Conversations: the Conversations tray (list, the "New Conversation" form
- * and the "Start Steward" form) and the End and Start the Line actions'
- * per-conversation in-flight/failure state, shared by the card and Detail so
- * either surface's button disables together and shows the same 409/failure
- * reason. One module owns this session state, the needs-input.ts /
- * terminal.ts way: a small store the composition wires once, its state
- * feeding the pure projection (`endView` and `lineStart` on the card and
- * Detail) and its actions reached through the same seam from both places.
+ * and the "Start Steward" form) and the End action's per-conversation
+ * in-flight/failure state, shared by the card and Detail so either surface's
+ * button disables together and shows the same 409/failure reason. One module
+ * owns this session state, the needs-input.ts / terminal.ts way: a small
+ * store the composition wires once, its state feeding the pure projection
+ * (`endView` on the card and Detail) and its actions reached through the
+ * same seam from both places.
  */
 
 import {
   conversationTurnLabel,
   stewardLiveReason,
-  type ConversationLineStartView,
+  type ConversationEndView,
   type ConversationTrayRow,
   type ConversationView,
   type DeliveryWarningView,
@@ -23,17 +23,19 @@ import { h } from "./dom";
 import { effortInput } from "./effort";
 import { renderStewardBadge } from "./steward";
 
-/** The badge on a Factory Line's Grill (ADR-0037): its card, Detail and
- *  tray row, the Steward badge's way. */
-export function renderGrillBadge(): HTMLElement {
-  return h(
-    "span",
-    {
-      class: "grill-badge",
-      title: "the Grill: the Line's entry Conversation; Start the Line hands its brief on",
-    },
-    "Grill",
-  );
+/** The badge naming the Plan node a Line's Conversation or Ticket works
+ *  (ADR-0039): on a card, in a Detail and on a tray row, the Steward badge's
+ *  way. */
+/** A Line Conversation whose End was refused can still be ended as closed. */
+export function offersEndAsClosed(view: {
+  node: string | null;
+  endView: ConversationEndView;
+}): boolean {
+  return view.node !== null && view.endView.failure !== null && !view.endView.ending;
+}
+
+export function renderNodeBadge(node: string): HTMLElement {
+  return h("span", { class: "node-badge", title: `the Line's ${node} node` }, node);
 }
 
 /**
@@ -59,44 +61,16 @@ export type StartConversationHandler = (
   request: StartConversationRequest,
 ) => Promise<ConversationView>;
 
+/** `close` ends the Conversation merging nothing (the engine's `close`). */
 export type EndConversationHandler = (
   conversationId: string,
   closing?: string,
+  close?: boolean,
 ) => Promise<void>;
-
-/** Start the Line on a Grill (ADR-0037): resolves once the engine took it,
- *  rejects with the refusal's reason. */
-export type StartLineHandler = (grillId: string) => Promise<void>;
-
-/**
- * Start the Line over HTTP, on the page's own origin: the route has no
- * socket twin. The engine merges the Grill's branch, writes the Line's
- * first Ticket and ends the Grill itself, so a 202 is all there is to wait
- * for; a 409 or 400 rejects with its `reason`, for the mark beside the
- * button.
- */
-export async function postStartLine(
-  grillId: string,
-  fetchFn: typeof fetch = fetch,
-): Promise<void> {
-  const response = await fetchFn("/api/line/start", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grill: grillId }),
-  });
-  if (response.ok) return;
-  const body = (await response.json().catch(() => null)) as {
-    reason?: unknown;
-    error?: unknown;
-  } | null;
-  const reason = body?.reason ?? body?.error;
-  throw new Error(typeof reason === "string" ? reason : `HTTP ${response.status}`);
-}
 
 export interface ConversationsOptions {
   onStart: StartConversationHandler;
   onEnd: EndConversationHandler;
-  onStartLine: StartLineHandler;
   /** Tray or End state changed outside a render: the composition re-renders. */
   onChange: () => void;
 }
@@ -203,18 +177,13 @@ export class ConversationsTray {
   // from either surface disables both.
   private readonly ending = new Set<string>();
   private readonly endFailures = new Map<string, string>();
-  // Start the Line's marks on a Grill (ADR-0037), the End marks' shape.
-  private readonly startingLine = new Set<string>();
-  private readonly lineStartFailures = new Map<string, string>();
   private readonly onStart: StartConversationHandler;
   private readonly onEnd: EndConversationHandler;
-  private readonly onStartLine: StartLineHandler;
   private readonly onChange: () => void;
 
   constructor(options: ConversationsOptions) {
     this.onStart = options.onStart;
     this.onEnd = options.onEnd;
-    this.onStartLine = options.onStartLine;
     this.onChange = options.onChange;
   }
 
@@ -392,68 +361,21 @@ export class ConversationsTray {
   /**
    * End a Conversation, from either the card or the Detail. A second click
    * while one is already in flight for the same id is a no-op: the button
-   * on both surfaces reads `endView(id).ending` and disables itself.
+   * on both surfaces reads `endView(id).ending` and disables itself. `close`
+   * is End as closed: it merges nothing, and a refused End on a Line
+   * Conversation offers it.
    */
-  async endConversation(id: string, closing?: string): Promise<void> {
+  async endConversation(id: string, closing?: string, close?: boolean): Promise<void> {
     if (this.ending.has(id)) return;
     this.ending.add(id);
     this.endFailures.delete(id);
     this.onChange();
     try {
-      await this.onEnd(id, closing);
+      await this.onEnd(id, closing, close);
     } catch (err) {
       this.endFailures.set(id, err instanceof Error ? err.message : String(err));
     } finally {
       this.ending.delete(id);
-      this.onChange();
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Start the Line
-  // -------------------------------------------------------------------------
-
-  /** The Start the Line view a Grill's card or Detail projects. */
-  lineStartView(id: string): ConversationLineStartView {
-    return {
-      starting: this.startingLine.has(id),
-      failure: this.lineStartFailures.get(id) ?? null,
-    };
-  }
-
-  /** The per-Grill Start the Line state, for the pool projection. */
-  lineStartState(): Record<string, ConversationLineStartView> {
-    const ids = new Set([...this.startingLine, ...this.lineStartFailures.keys()]);
-    const state: Record<string, ConversationLineStartView> = {};
-    for (const id of ids) state[id] = this.lineStartView(id);
-    return state;
-  }
-
-  /** Drop Start the Line refusals for Grills no longer live: the engine
-   *  ends the Grill once its Line starts, and the refusal goes with it. */
-  pruneLineStartFailures(liveIds: ReadonlySet<string>): void {
-    for (const id of [...this.lineStartFailures.keys()]) {
-      if (!liveIds.has(id)) this.lineStartFailures.delete(id);
-    }
-  }
-
-  /**
-   * Start the Line on a Grill, from either the card or the Detail. A press
-   * while one is in flight for the same Grill is a no-op, and a new press
-   * clears the last refusal. On success there is nothing to do here: the
-   * engine ends the Grill, and the snapshot that says so hides the button.
-   */
-  async startLine(id: string): Promise<void> {
-    if (this.startingLine.has(id)) return;
-    this.startingLine.add(id);
-    this.lineStartFailures.delete(id);
-    this.onChange();
-    try {
-      await this.onStartLine(id);
-    } catch (err) {
-      this.lineStartFailures.set(id, err instanceof Error ? err.message : String(err));
-    } finally {
-      this.startingLine.delete(id);
       this.onChange();
     }
   }
@@ -717,7 +639,7 @@ export class ConversationsTray {
         row.id,
       ),
       row.steward ? renderStewardBadge() : null,
-      row.grill ? renderGrillBadge() : null,
+      row.node ? renderNodeBadge(row.node) : null,
       h(
         "span",
         { class: `conversations-turn conversations-turn-${row.turn.state}` },

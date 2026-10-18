@@ -158,12 +158,8 @@ export type ConversationStatus = "live" | "ended" | "crashed";
 /** Which side of its Turn a Conversation is on. */
 export type TurnSide = "working" | "waiting";
 
-/**
- * The roles a Conversation may carry. Absent is an ordinary Conversation.
- * The Grill is a Line's entry Conversation pass (ADR-0039), the one Start
- * the Line ends on its brief.
- */
-export type ConversationRole = "steward" | "grill";
+/** The roles a Conversation may carry. Absent is an ordinary Conversation. */
+export type ConversationRole = "steward";
 
 /** A Conversation as the snapshot carries it (conversations.ts's viewOf). */
 export interface ConversationView {
@@ -190,6 +186,11 @@ export interface ConversationView {
   ending: boolean;
   /** The Steward (ADR-0030): present only on a Conversation in that role. */
   role?: ConversationRole;
+  /**
+   * The Line's Conversation node this is a pass of (ADR-0039), its id the
+   * pass's (`grill-1`): present only on a Conversation the Line opened.
+   */
+  node?: string;
   /**
    * Notices are not reaching this pane: present from the first failed
    * delivery until one lands. The Turn state may still read waiting, since
@@ -1907,14 +1908,6 @@ export interface LineBeginRequest {
   plan: LinePlanSource;
   work?: string;
   brief?: string;
-}
-
-/**
- * POST /api/line/start's body: end the Line's live Grill on the brief committed on its
- * branch, merging that branch first. Answers 202 with the Line, or the 409 `reason` envelope.
- */
-export interface LineStartRequest {
-  grill: string;
 }
 
 /** GET /api/line: the pool's Line as the engine runs it, null when the pool has none. */

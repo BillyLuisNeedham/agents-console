@@ -45,7 +45,6 @@ import {
   projectPool,
   projectTimeline,
   type ConversationEndView,
-  type ConversationLineStartView,
   type DetailTab,
   type EnrichedSnapshot,
   type KeepTalkingState,
@@ -956,13 +955,9 @@ export class ConsoleSession {
    * The render model: the single derivation point. One `projectPool` per
    * render, over the snapshot with any optimistic overlays drawn on it, and
    * stored so the Detail and the next selection read the same cards.
-   * `endings` and `lineStarts` are the Conversations store's End and Start
-   * the Line marks, which the view owns.
+   * `endings` is the Conversations store's End marks, which the view owns.
    */
-  model(
-    endings: Record<string, ConversationEndView>,
-    lineStarts: Record<string, ConversationLineStartView> = {},
-  ): AppModel {
+  model(endings: Record<string, ConversationEndView>): AppModel {
     const snapshot = this.shownSnapshot();
     this.view = snapshot
       ? this.derivePool(
@@ -973,7 +968,6 @@ export class ConsoleSession {
           Date.now(),
           endings,
           Object.fromEntries(this.keepTalkingMarks),
-          lineStarts,
         )
       : null;
     const cards = this.view?.cards ?? [];

@@ -112,7 +112,7 @@ async fn finish_end_at_boot(engine: &Engine, id: &str, listing: Option<PaneListi
         return;
     };
     if !awaits {
-        let _ = end_with(engine, id, None, listing, AnswerBy::Operator).await;
+        let _ = end_with(engine, id, None, false, listing, AnswerBy::Operator).await;
         return;
     }
     let Ok(rt) = claim_detached(engine, id, listing).await else {

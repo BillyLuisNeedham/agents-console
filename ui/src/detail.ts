@@ -50,7 +50,7 @@ import { h } from "./dom";
 import { keep, placed } from "./morph";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
-import { renderDeliveryWarning, renderGrillBadge } from "./conversations";
+import { offersEndAsClosed, renderDeliveryWarning, renderNodeBadge } from "./conversations";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -88,12 +88,10 @@ export interface DetailHandlers {
    *  the Needs input row's both show it. */
   onUseStewardNote: (ticketId: string, text: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
-  /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
-   *  Conversations store tracks the in-flight/failure state on `endView`. */
-  onEndConversation: (conversationId: string, closing?: string) => void;
-  /** Start the Line on a Grill (ADR-0037): fire-and-forget like End; the
-   *  store tracks the in-flight/refusal state on `lineStart`. */
-  onStartLine: (grillId: string) => void;
+  /** A Conversation's End, or End as closed with `close` (merging nothing):
+   *  fire-and-forget, mirroring onAnswer. The Conversations store tracks the
+   *  in-flight/failure state on `endView`. */
+  onEndConversation: (conversationId: string, closing?: string, close?: boolean) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
   /** "open resolver" on a ticket whose merge a resolver is resolving
@@ -1407,7 +1405,7 @@ export class Detail {
       "div",
       { class: "detail-body conversation-detail" },
       detail.steward ? renderStewardBadge() : null,
-      detail.grill ? renderGrillBadge() : null,
+      detail.node ? renderNodeBadge(detail.node) : null,
       detail.delivery ? renderDeliveryWarning(detail.delivery, { showError: true }) : null,
       h("div", { class: "dim" }, "assignment"),
       h(
@@ -1466,51 +1464,10 @@ export class Detail {
     if (model.logPane && !model.logPane.neverRun) {
       panel.append(this.renderLogPane(model.logPane, detail.conversationId, handlers));
     }
-    if (detail.status === "live" && detail.grill && !detail.endView.ending) {
-      panel.append(this.renderStartLine(detail, handlers));
-    }
     if (detail.status === "live") {
       panel.append(this.renderConversationEnd(detail, handlers));
     }
     return panel;
-  }
-
-  // Start the Line on a live Grill (ADR-0037): the engine reads the Line
-  // brief off the Grill's branch, merges it, writes the Line's first Ticket
-  // and ends the Grill, so there is no End to press after it. A refusal
-  // (no brief, a Line already started) stands beneath until the next press.
-  private renderStartLine(
-    detail: ConversationDetailView,
-    handlers: DetailHandlers,
-  ): HTMLElement {
-    const box = h(
-      "div",
-      { class: "interrupt-box conversation-end-box conversation-line-box" },
-      h(
-        "div",
-        { class: "dim" },
-        "hand the Line brief on: the Grill's branch merges, the Line's first Ticket starts and the Grill ends",
-      ),
-      h(
-        "div",
-        { class: "interrupt-actions" },
-        h(
-          "button",
-          {
-            class: "btn btn-primary conversation-start-line",
-            disabled: detail.lineStart.starting,
-            onclick: () => handlers.onStartLine(detail.conversationId),
-          },
-          detail.lineStart.starting ? "starting..." : "Start the Line",
-        ),
-      ),
-    );
-    if (detail.lineStart.failure) {
-      box.append(
-        h("div", { class: "error-inline conversation-start-line-failure" }, detail.lineStart.failure),
-      );
-    }
-    return box;
   }
 
   // End with an optional closing line: the operator's word to the
@@ -1533,6 +1490,12 @@ export class Detail {
         );
       },
     });
+    const end = (close?: boolean) =>
+      handlers.onEndConversation(
+        detail.conversationId,
+        closing.value.trim() || undefined,
+        close,
+      );
     const box = h(
       "div",
       { class: "interrupt-box conversation-end-box" },
@@ -1545,15 +1508,21 @@ export class Detail {
           {
             class: "btn btn-danger",
             disabled: detail.endView.ending,
-            onclick: () => {
-              handlers.onEndConversation(
-                detail.conversationId,
-                closing.value.trim() || undefined,
-              );
-            },
+            onclick: () => end(),
           },
           detail.endView.ending ? "ending..." : "End",
         ),
+        offersEndAsClosed(detail)
+          ? h(
+              "button",
+              {
+                class: "btn conversation-end-closed",
+                title: "end this conversation, merging nothing",
+                onclick: () => end(true),
+              },
+              "End as closed",
+            )
+          : null,
       ),
     );
     if (detail.endView.failure) {

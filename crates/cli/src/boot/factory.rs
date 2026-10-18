@@ -10,17 +10,17 @@
 //! from keeps the branch it had, whatever else is running there.
 //!
 //! Then the Line begins on its Plan (`POST /api/line`), in one of two ways. Asked for the work (an
-//! issue number or free text), Boot hands it over, and on a Plan that starts with a Conversation it
-//! opens the Grill with the work as its first Turn, which the operator's Start the Line ends on its
-//! brief. Given a ready brief (`--brief`), Boot commits the brief and its spec onto the Line branch
-//! and hands over the brief's path, with no Grill and no question asked.
+//! issue number or free text), Boot hands it over, and on a Plan that starts with a Conversation the
+//! engine opens that node's first pass on it, which ends once its Line brief has merged. Given a
+//! ready brief (`--brief`), Boot commits the brief and its spec onto the Line branch and hands over
+//! the brief's path, with no Conversation opened and no question asked.
 
 use ac_protocol::LineBase;
 use serde_json::{Map, Value};
 
 use ac_core::js;
 use ac_core::line::run::LineBrief;
-use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX};
+use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX, issue_number};
 use ac_core::pool_title::normalise_title;
 
 use super::BootIo;
@@ -41,10 +41,10 @@ pub struct ReadyBrief {
     pub stem: String,
 }
 
-/// What the Line starts from: the Grill's first Turn, or a ready brief.
+/// What the Line starts from: the work, or a ready brief.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineWork {
-    Grill { work: String },
+    Work { work: String },
     Ready(Box<ReadyBrief>),
 }
 
@@ -112,18 +112,12 @@ pub fn first_heading(text: &str) -> Option<String> {
         .and_then(normalise_title)
 }
 
-/// The issue number a piece of work names, when it is only that: `186` or `#186`.
-pub fn issue_number(work: &str) -> Option<String> {
-    let digits = js::trim(work).trim_start_matches('#');
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| digits.to_owned())
-}
-
 /// The Line's slug when `--line` names none: the issue's number, the ready brief's name, or the first
 /// words of the work.
 pub fn derived_slug(work: &LineWork) -> String {
     let slug = match work {
         LineWork::Ready(ready) => slugify(&ready.stem),
-        LineWork::Grill { work } => match issue_number(work) {
+        LineWork::Work { work } => match issue_number(work) {
             Some(number) => number,
             None => {
                 let words: Vec<&str> = work.split_whitespace().take(6).collect();
@@ -150,7 +144,7 @@ pub fn derived_title(work: &LineWork, slug: &str) -> Option<String> {
             .heading
             .clone()
             .or_else(|| normalise_title(&format!("Line {slug}"))),
-        LineWork::Grill { work } => match issue_number(work) {
+        LineWork::Work { work } => match issue_number(work) {
             Some(number) => Some(format!("Issue #{number}")),
             None => normalise_title(work),
         },
@@ -162,31 +156,6 @@ pub const STEWARD_ORDERS: &str = "Steward this pool's Line while the operator is
 Plan moving through the checkpoints and holds your teaching says are yours to answer. The Finish \
 and its act are the operator's: when the Line waits there, say in your pane where the Line stands \
 and what the Finish waits for, and wait. End yourself once the Line is done.";
-
-/// The Grill's first Turn: the work as the operator gave it, an issue number spelled out, and the Line
-/// base it was cut from.
-pub fn grill_opening(work: &str, base: &LineBase) -> String {
-    let cut = format!(
-        "This Line was cut from `{}` at `{}`.",
-        base.base_ref,
-        short_commit(&base.commit)
-    );
-    match issue_number(work) {
-        Some(number) => format!(
-            "The piece of work for this Line is issue #{number}. Read it (gh issue view {number}) \
-             and grill me on it. {cut}"
-        ),
-        None => format!(
-            "The piece of work for this Line:\n\n{}\n\n{cut}",
-            js::trim(work)
-        ),
-    }
-}
-
-/// A commit as Boot shows it: its first seven characters.
-pub fn short_commit(commit: &str) -> &str {
-    commit.get(..7).unwrap_or(commit)
-}
 
 /// A slug whose `line/<slug>` branch and worktree directory are both free: the slug itself, else the
 /// first `-2`, `-3`, … that is. A Line branch is never reused, since what is on it is another Line's.
@@ -423,26 +392,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_an_issue_number_with_or_without_its_hash() {
-        assert_eq!(issue_number("186"), Some("186".to_owned()));
-        assert_eq!(issue_number(" #179 "), Some("179".to_owned()));
-        assert_eq!(issue_number("fix #179"), None);
-        assert_eq!(issue_number("#"), None);
-    }
-
-    #[test]
     fn derives_the_slug_from_the_issue_the_brief_or_the_first_words() {
-        let grill = |work: &str| LineWork::Grill {
+        let work = |work: &str| LineWork::Work {
             work: work.to_owned(),
         };
-        assert_eq!(derived_slug(&grill("#186")), "186");
+        assert_eq!(derived_slug(&work("#186")), "186");
         assert_eq!(
-            derived_slug(&grill(
+            derived_slug(&work(
                 "Make the header strip show the Round and the node too"
             )),
             "make-the-header-strip-show-the"
         );
-        assert_eq!(derived_slug(&grill("!!!")), "line");
+        assert_eq!(derived_slug(&work("!!!")), "line");
         let ready = LineWork::Ready(Box::new(ReadyBrief {
             brief: Map::new(),
             spec_text: None,
@@ -452,7 +413,7 @@ mod tests {
         assert_eq!(derived_slug(&ready), "186");
         assert_eq!(derived_title(&ready, "186"), Some("Line 186".to_owned()));
         assert_eq!(
-            derived_title(&grill("#186"), "186"),
+            derived_title(&work("#186"), "186"),
             Some("Issue #186".to_owned())
         );
     }
@@ -462,22 +423,6 @@ mod tests {
         let taken = ["186", "186-2"];
         assert_eq!(free_line_slug("186", |s| taken.contains(&s)), "186-3");
         assert_eq!(free_line_slug("179", |s| taken.contains(&s)), "179");
-    }
-
-    #[test]
-    fn the_grill_opening_spells_out_an_issue_keeps_free_text_and_names_the_base() {
-        let base = LineBase {
-            base_ref: "experiment/x".to_owned(),
-            commit: "abc1234def5678".to_owned(),
-        };
-        let issue = grill_opening("#186", &base);
-        assert!(issue.starts_with("The piece of work for this Line is issue #186."));
-        assert!(issue.ends_with("This Line was cut from `experiment/x` at `abc1234`."));
-        assert_eq!(
-            grill_opening("  tidy the header  ", &base),
-            "The piece of work for this Line:\n\ntidy the header\n\nThis Line was cut from \
-             `experiment/x` at `abc1234`."
-        );
     }
 
     #[test]
@@ -538,8 +483,6 @@ mod tests {
             "refs/heads/origin/mistake is a local branch named like origin's, which the Line base \
              would read as origin's mistake: rename it, or cut from another branch"
         );
-        assert_eq!(short_commit("abc1234def"), "abc1234");
-        assert_eq!(short_commit("abc"), "abc");
     }
 
     #[test]

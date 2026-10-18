@@ -38,6 +38,10 @@ must keep its node, since moving an iframe reloads it; a pass after it
 checks the frame reads at its height inside the Detail with Open in browser
 beside its heading, and the layout checks find the header's Line strip and
 each Line Ticket's labelled card head inside its card.
+One more presses End on a Line's Conversation pass whose End the fixture
+refuses with a long reason: the reason and End as closed must stay inside the
+card, and inside the Detail's End box once it opens, and an ordinary
+Conversation offers neither.
 
 ## Run it
 

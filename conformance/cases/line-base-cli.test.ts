@@ -6,7 +6,7 @@
  * symbolic HEAD, a tag or a commit, and never from a detached HEAD. The Line's branch never tracks its base. Boot says what it
  * cut from and at which commit, writes both into console.json as
  * `lineBase`, the Line copies them into line.json as it begins, and the
- * Grill's first Turn names them.
+ * first Turn of the Conversation pass the engine opens names them.
  *
  * The remote-tracking cases push to a throwaway bare `origin` beside the
  * checkout (harness/cli.ts); nothing here reaches a real remote.
@@ -54,7 +54,7 @@ function expectNoTracking(w: CliWorld, repo: string, branch: string): void {
   expect(git(w, repo, ["config", `branch.${branch}.merge`])).toEqual({ code: 1, out: "" });
 }
 
-conformance("cli", "Boot --plan --from cuts the Line from a local branch checked out in another worktree, writes lineBase, tracks nothing and tells the Grill", async (t) => {
+conformance("cli", "Boot --plan --from cuts the Line from a local branch checked out in another worktree, writes lineBase, tracks nothing and tells grill-1", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   // A repository with no main: the operator is on develop, and experiment/x is out in a worktree of its own.
   const repo = w.repo("repo", { branch: "develop" });
@@ -77,7 +77,7 @@ conformance("cli", "Boot --plan --from cuts the Line from a local branch checked
   expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
   const tree = treeOf(repo, "193");
   expect(run.stdout).toContain(`line: cut line/193 from experiment/x (${base.slice(0, 7)}) at ${tree}\n`);
-  expect(run.stdout).toContain("grill: conv-1 opened with the work as its first Turn");
+  expect(run.stdout).toContain("line: grill-1 opens on the work\n");
 
   // Cut at the base's commit, from a branch another worktree has out; neither checkout moved.
   expect(gitIn(w, repo, ["rev-parse", "line/193"])).toBe(base);
@@ -96,12 +96,13 @@ conformance("cli", "Boot --plan --from cuts the Line from a local branch checked
   const typed = await until(
     () => herdr.control<string[]>("submitted"),
     (texts) => texts.length >= 1,
-    { what: "the Grill's first Turn" },
+    { what: "grill-1's first Turn" },
   );
-  expect(typed[0]).toStartWith(
-    `The piece of work for this Line is issue #193. Read it (gh issue view 193) and grill me on it. This Line was cut from \`experiment/x\` at \`${base.slice(0, 7)}\`.`,
+  expect(typed[0]).toContain(
+    "## The Line's work\n\nThe piece of work for this Line is issue #193. Read it (gh issue view 193) and grill me on " +
+      `it.\n\nThis Line was cut from \`experiment/x\` at \`${base.slice(0, 7)}\`.`,
   );
-  // The Grill is taught the brief's pushBase grant.
+  // grill-1 is taught the brief's pushBase grant.
   expect(typed[0]).toContain('"pushBase": true');
 });
 

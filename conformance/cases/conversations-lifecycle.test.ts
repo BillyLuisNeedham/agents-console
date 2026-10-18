@@ -358,9 +358,12 @@ conformance("conversations", "a start on a headless pool is refused with a 409 a
 conformance("conversations", "a start with an unknown role or a blank title is refused with a 400", async (t) => {
   const { server } = await startTerminal(t, terminalWorld(t));
 
-  const admin = await server.http.post("/api/conversations", { title: "Talk", role: "admin" });
-  expect(admin.status).toBe(400);
-  expect(admin.json<object>()).toEqual({ reason: 'role must be "steward" or "grill" when given' });
+  // A Line's Conversations are the engine's to open (ADR-0039), so grill is no role a start takes.
+  for (const role of ["admin", "grill"]) {
+    const refused = await server.http.post("/api/conversations", { title: "Talk", role });
+    expect(refused.status).toBe(400);
+    expect(refused.json<object>()).toEqual({ reason: 'role must be "steward" when given' });
+  }
 
   const blank = await server.http.post("/api/conversations", { title: "   " });
   expect(blank.status).toBe(400);
@@ -971,6 +974,32 @@ conformance("conversations", "End with commits merges the branch onto main and r
   const events = readEvents(world.pool, "conv-1");
   expect(kinds(events)).toContain("merged");
   expect(eventOf(events, "ended").payload).toMatchObject({ by: "operator", merged: true });
+});
+
+conformance("conversations", "End as closed merges nothing, removes the worktree and keeps the branch with its commits", async (t) => {
+  const world = terminalWorld(t);
+  const { server } = await startTerminal(t, world);
+  const view = await startConversation(server, { title: "Try something" });
+  const branch = expectPoolBranch(view.branch, "conv-1");
+  const worktree = worktreeOf(world, branch);
+  writeFileSync(join(worktree, "new-file.txt"), "written during the conversation\n");
+  world.git(["-C", worktree, "add", "-A"]);
+  world.git(["-C", worktree, "commit", "-qm", "conversation commit"]);
+  const before = world.git(["rev-parse", "main"]);
+  const tip = world.git(["rev-parse", branch]);
+
+  const end = await server.http.post("/api/conversations/end", { id: "conv-1", close: true });
+  expect(end.status).toBe(202);
+  await until(() => recordStatus(world, "conv-1"), (status) => status === "ended", { what: "conv-1 ended" });
+
+  expect(existsSync(worktree)).toBe(false);
+  expect(world.git(["rev-parse", "main"])).toBe(before);
+  expect(existsSync(join(world.repo, "new-file.txt"))).toBe(false);
+  expect(world.git(["rev-parse", branch])).toBe(tip);
+  const events = readEvents(world.pool, "conv-1");
+  expect(kinds(events)).not.toContain("merged");
+  expect(eventOf(events, "end-requested").payload).toEqual({ closing: null, close: true });
+  expect(eventOf(events, "ended").payload).toEqual({ closing: null, by: "operator", merged: false, close: true });
 });
 
 // conversations.test.ts:602
