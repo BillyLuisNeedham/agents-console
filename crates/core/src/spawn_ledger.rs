@@ -76,6 +76,7 @@ pub fn held_reason_text(
         }
         HeldSpawnReason::Operator => "held by operator".to_owned(),
         HeldSpawnReason::Line => "proposed inside the Line".to_owned(),
+        HeldSpawnReason::Started => "blocks a Ticket that has started".to_owned(),
         HeldSpawnReason::Refused => match refusal {
             Some(refusal) if !refusal.is_empty() => format!("refused at landing: {refusal}"),
             _ => "refused at landing".to_owned(),

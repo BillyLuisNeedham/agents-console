@@ -37,6 +37,7 @@ pub fn interrupt(ticket_id: &str, kind: InterruptKind, body: impl Into<String>) 
         body: body.into(),
         candidates: None,
         steward_note: None,
+        started_since: None,
     }
 }
 

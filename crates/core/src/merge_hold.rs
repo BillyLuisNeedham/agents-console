@@ -508,6 +508,7 @@ mod tests {
             body: String::new(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         }
     }
 

@@ -188,6 +188,7 @@ fn no_defaults() -> MachineDefaults {
         drivers: None,
         engine: None,
         terminal: None,
+        max_live: None,
         factory: None,
     }
 }

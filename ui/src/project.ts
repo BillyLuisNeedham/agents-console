@@ -2028,6 +2028,8 @@ export function heldReasonCopy(
       return refusal ? `refused at landing: ${refusal}` : "refused at landing";
     case "line":
       return "proposed inside the Line";
+    case "started":
+      return "blocks a Ticket that has started";
   }
 }
 
@@ -2042,6 +2044,7 @@ const HELD_SPAWN_REASONS: readonly string[] = [
   "operator",
   "refused",
   "line",
+  "started",
 ];
 
 function isHeldSpawnReason(value: unknown): value is HeldSpawnReason {

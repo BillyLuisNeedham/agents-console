@@ -2233,6 +2233,7 @@ mod tests {
             body: String::new(),
             candidates,
             steward_note: None,
+            started_since: None,
         }
     }
 

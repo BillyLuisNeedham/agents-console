@@ -78,6 +78,7 @@ pub fn persistence_interrupt(error: &str) -> Interrupt {
         ),
         candidates: None,
         steward_note: None,
+        started_since: None,
     }
 }
 
