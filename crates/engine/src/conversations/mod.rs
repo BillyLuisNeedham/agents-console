@@ -59,11 +59,12 @@ use crate::snapshot::emit_snapshot;
 pub use adopt::{
     adopt_enlisted_at_boot, adopt_started_at_boot, crash_stale_at_boot, readopt_pending,
 };
-pub(crate) use end::merge_into_target;
 pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
-pub(crate) use start::{launch_prepared, prepare as prepare_start, prepare_pass, record_refused_pass};
+pub(crate) use start::{
+    launch_prepared, prepare as prepare_start, prepare_pass, record_refused_pass,
+};
 
 /// How often a live Conversation's tick re-reads its pane unless a test shortens it.
 pub const CONVERSATION_POLL_MS: u64 = 2_000;
@@ -463,6 +464,7 @@ fn view_of(
         enlisted: rec.enlisted.is_some(),
         ending,
         role: rec.role,
+        node: rec.node.clone(),
         delivery: runtime.and_then(|rt| rt.with(|r| r.delivery.clone())),
     }
 }
@@ -557,16 +559,6 @@ pub fn steward_id(s: &Session) -> Option<String> {
         .into_iter()
         .find(|rec| {
             rec.role == Some(ConversationRole::Steward) && rec.status == ConversationStatus::Live
-        })
-        .map(|rec| rec.id)
-}
-
-/// The live Grill's id (ADR-0037, ADR-0039); `None` when the pool has none.
-pub fn grill_id(s: &Session) -> Option<String> {
-    load(s)
-        .into_iter()
-        .find(|rec| {
-            rec.role == Some(ConversationRole::Grill) && rec.status == ConversationStatus::Live
         })
         .map(|rec| rec.id)
 }
@@ -721,21 +713,13 @@ pub(crate) fn teaching_for(
     let ledger = js::path_text(&ac_core::spawn_ledger::spawn_ledger_path(runs_dir(s)));
     let defaults = defaults_teaching(config);
     if role != Some(ConversationRole::Steward) {
-        let teaching = ac_core::prompt::build_conversation_teaching(
+        return ac_core::prompt::build_conversation_teaching(
             &spawn_path,
             &own,
             &defaults,
             per_file,
             &ledger,
         );
-        if role != Some(ConversationRole::Grill) {
-            return teaching;
-        }
-        // The Grill is taught the Line's entry Conversation pass it stands in for (ADR-0039).
-        return match s.line.as_ref().and_then(|line| line.grill_pass()) {
-            Some(pass) => format!("{teaching}\n\n{}", pass.opening),
-            None => teaching,
-        };
     }
     stewards::steward_teaching(s, id, &spawn_path, &own, &defaults, per_file, &ledger)
 }

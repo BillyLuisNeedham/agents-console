@@ -13,9 +13,9 @@ use ac_core::conversation_record::ConversationRecord;
 use ac_core::events::{last_attempt, read_events};
 use ac_core::js;
 use ac_core::line::run::{
-    Blocker, ConversationFact, ConversationOutcome, HoldAnswer, LineBrief, LineEvent, LineFacts,
-    LinePlaces, LineRun, LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem,
-    hold_text, ticket_text, verdict_of,
+    Blocker, ConversationFact, HoldAnswer, LineBrief, LineFacts, LinePlaces, LineRun, LineStart,
+    LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text, ticket_text,
+    verdict_of,
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
@@ -23,8 +23,8 @@ use ac_core::plan::{NodeBody, Plan, SpawnPolicy};
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_io::git;
 use ac_protocol::{
-    ConversationRole, ConversationStatus, InterruptKind, LineGraphView, Outcome, OutcomeStatus,
-    TicketEventKind, TicketStatus,
+    ConversationStatus, InterruptKind, LineGraphView, Outcome, OutcomeStatus, TicketEventKind,
+    TicketStatus,
 };
 use serde_json::Value;
 
@@ -622,100 +622,6 @@ fn target_branch(session: &Session) -> String {
     session.merge_target.clone().unwrap_or_else(|| {
         git::git_line(&session.cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default()
     })
-}
-
-/// Start the Line on the Grill (the bridge until slice 5): check the Line brief committed on the
-/// Grill's branch at the path its pass names, merge that branch into the Line's, and hand the brief
-/// to the run as the entry Conversation pass's end, in one stretch so nothing lands between the
-/// merge and the pass's end. The caller ends the Grill after, with nothing left to merge. Refused,
-/// with the reason and nothing changed, when the pool has no Line, no Conversation pass waits, the
-/// id is no live Grill, the brief is missing or invalid, or the merge does not land.
-pub fn start_line_from_grill(
-    session: &mut Session,
-    grill: &str,
-) -> Result<LineGraphView, EngineError> {
-    let Some(run) = &session.line else {
-        return Err(EngineError::refused(
-            "the pool runs no Line: Boot begins one with --plan",
-        ));
-    };
-    let Some(pass) = run.grill_pass() else {
-        return Err(EngineError::refused(
-            "the Line has no Conversation pass waiting for its Grill",
-        ));
-    };
-    let Some(record) = crate::conversations::load(session)
-        .into_iter()
-        .find(|rec| rec.id == grill)
-    else {
-        return Err(EngineError::refused(format!("no Conversation {grill}")));
-    };
-    if record.role != Some(ConversationRole::Grill) {
-        return Err(EngineError::refused(format!(
-            "{grill} is not the Grill: the Line starts only from its Grill"
-        )));
-    }
-    let (branch, ending) = crate::conversations::branch_and_ending(session, grill);
-    if record.status != ConversationStatus::Live || ending {
-        return Err(EngineError::refused(format!(
-            "the Grill {grill} has ended; the Line starts only from a live Grill"
-        )));
-    }
-    let path = run.brief_path(&pass.id);
-    // The branch's committed tree: work the Grill has not committed never merges, so it never counts.
-    let text = git::show_file(&session.cwd, &format!("{branch}:{path}")).ok_or_else(|| {
-        EngineError::refused(format!(
-            "the Grill's committed branch {branch} has no Line brief at {path}"
-        ))
-    })?;
-    let brief = LineBrief::parse(&text)
-        .map_err(|why| EngineError::refused(format!("Line brief {path}: {why}")))?;
-    if let Some(problem) = brief_problem(run.plan().0, &brief) {
-        return Err(EngineError::refused(format!(
-            "Line brief {path}: {problem}"
-        )));
-    }
-    if let Some(spec) = &brief.spec
-        && git::show_file(&session.cwd, &format!("{branch}:{spec}")).is_none()
-    {
-        return Err(EngineError::refused(format!(
-            "Line brief {path}: its spec {spec} is not on the Grill's committed branch {branch}"
-        )));
-    }
-    let merged = crate::conversations::merge_into_target(session, &branch);
-    if !merged.ok {
-        return Err(EngineError::refused(format!(
-            "the Grill's branch {branch} did not merge into the Line's branch, so the Line has not \
-             started and the Grill goes on: {}",
-            if merged.detail.is_empty() {
-                merged.conflicted.join(", ")
-            } else {
-                merged.detail.clone()
-            }
-        )));
-    }
-    session.log(format!(
-        "line: Start the Line merged the Grill {grill}'s branch {branch}"
-    ));
-    let Some(run) = session.line.as_mut() else {
-        unreachable!("the Line was checked above, in this same job");
-    };
-    run.apply(LineEvent::ConversationEnded {
-        node: pass.node,
-        id: pass.id,
-        outcome: ConversationOutcome::Briefed(brief),
-    })
-    .map_err(|refusal| EngineError::refused(refusal.to_string()))?;
-    let view = run.view();
-    save_line(Path::new(&session.pool_dir), run).map_err(|error| {
-        EngineError::refused(format!("line.json could not be written: {error}"))
-    })?;
-    session.log(format!(
-        "line: started from the Grill {grill}'s brief {path}"
-    ));
-    session.wake();
-    crate::snapshot::emit_snapshot(session, session.current_phase());
-    Ok(view)
 }
 
 /// Where a Decide pass's report is, for `GET /api/line/report?node=&pass=`; why there is none.

@@ -91,7 +91,7 @@ fn resolve_start_assignment(
             steward.effort.as_deref(),
             Some(steward.drivers.as_deref().unwrap_or("")),
         )),
-        (None, None) => grill_layer(s, req),
+        (None, None) => None,
     };
     resolve_between(
         s,
@@ -125,39 +125,12 @@ fn resolve_between(
     .map_err(|err| refused(err.0))
 }
 
-// A Grill takes its Assignment and skill from the Line's entry Conversation node (ADR-0039), between
-// the request and the pool defaults, as a Steward takes its own entry.
-fn grill_layer(s: &Session, req: &StartConversationRequest) -> Option<AssignmentLayer> {
-    if req.role != Some(ConversationRole::Grill) {
-        return None;
-    }
-    let pass = s.line.as_ref()?.grill_pass()?;
-    Some(AssignmentLayer::of_fields(
-        pass.assign.harness.as_deref(),
-        pass.assign.model.as_deref(),
-        pass.assign.effort.as_deref(),
-        pass.skill.as_deref(),
-    ))
-}
-
 // The refusals a start meets before it mints or takes its id: a pool that cannot host a Conversation,
 // no title, a second Steward.
 fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), EngineError> {
     check_host(s)?;
     if js::trim(&req.title).is_empty() {
         return Err(refused("conversation start: title is required"));
-    }
-    if req.role == Some(ConversationRole::Grill) {
-        if s.line.as_ref().and_then(|line| line.grill_pass()).is_none() {
-            return Err(refused(
-                "grill start: the pool's Line has no Conversation pass waiting for a Grill",
-            ));
-        }
-        if let Some(grill) = super::grill_id(s) {
-            return Err(refused(format!(
-                "grill start: {grill} is already this pool's Grill"
-            )));
-        }
     }
     if req.role == Some(ConversationRole::Steward)
         && let Some(on_duty) = steward_on_duty(s)
@@ -357,7 +330,12 @@ fn write_crashed(s: &Session, record: ConversationRecord, reason: &str) {
         ..record
     };
     if write_conversation(&conversations_dir(s), &record).is_ok() {
-        event1(s, &record.id, TicketEventKind::Crash, json!({ "reason": reason }));
+        event1(
+            s,
+            &record.id,
+            TicketEventKind::Crash,
+            json!({ "reason": reason }),
+        );
     }
 }
 

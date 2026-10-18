@@ -321,10 +321,6 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(routes::enlist_request(&server, body).await);
         }
-        ("/api/line/start", _) if post => {
-            let body = read_body(body).await;
-            return http_of(routes::start_line_request(&server, body).await);
-        }
         ("/api/line", _) if post => {
             let body = read_body(body).await;
             return http_of(routes::begin_line_request(&server, body).await);

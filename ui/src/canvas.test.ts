@@ -855,7 +855,7 @@ describe("a Grill on the canvas (ADR-0037)", () => {
             children: [],
             enlisted: false,
             ending: overrides.ending ?? false,
-            role,
+            ...(role === "grill" ? { node: "grill" } : { role }),
           },
         ],
         log: [],

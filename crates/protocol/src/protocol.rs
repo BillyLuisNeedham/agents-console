@@ -23,7 +23,7 @@ wire_consts! {
     /// Bumped on every change to a message's shape. The server says its version
     /// in `hello`; a page that was built for another one reloads itself, which is
     /// how a Restart that rebuilt the UI reaches a tab left open across it.
-    pub const PROTOCOL_VERSION: u64 = 3;
+    pub const PROTOCOL_VERSION: u64 = 4;
 
     /// Where the socket is served.
     pub const WS_PATH: &str = "/api/ws";

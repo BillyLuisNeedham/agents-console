@@ -14,8 +14,8 @@ use super::{
 };
 use crate::js;
 use crate::line::{
-    BRIEF_DIR, BaseBranch, EVIDENCE_SUFFIX, LINE_BRANCH_PREFIX, NO_VERDICT, VERIFY_DIR,
-    brief_path, issue_number, line_name_of, prove_verdict, review_verdict, short_commit,
+    BRIEF_DIR, BaseBranch, EVIDENCE_SUFFIX, LINE_BRANCH_PREFIX, NO_VERDICT, VERIFY_DIR, brief_path,
+    issue_number, line_name_of, prove_verdict, review_verdict, short_commit,
 };
 use crate::plan::{
     CheckpointPolicy, EdgeKey, FinishAct, Node, NodeBody, NodeId, SpawnPolicy, TicketKind,

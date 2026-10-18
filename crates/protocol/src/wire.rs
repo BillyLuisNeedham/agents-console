@@ -143,11 +143,8 @@ wire_enum! {
 
 wire_enum! {
     /// The roles a Conversation may carry. Absent is an ordinary Conversation.
-    /// The Grill is a Line's entry Conversation pass (ADR-0039), the one Start
-    /// the Line ends on its brief.
     pub enum ConversationRole {
         Steward = "steward",
-        Grill = "grill",
     }
 }
 
@@ -174,6 +171,10 @@ wire_struct! {
         /// The Steward (ADR-0030): present only on a Conversation in that role.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub role: Option<ConversationRole>,
+        /// The Line's Conversation node this is a pass of (ADR-0039), its id the
+        /// pass's (`grill-1`): present only on a Conversation the Line opened.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub node: Option<String>,
         /// Notices are not reaching this pane: present from the first failed
         /// delivery until one lands. The Turn state may still read waiting, since
         /// a Blocking dialog in the pane looks idle while it swallows every Turn,
@@ -1821,14 +1822,6 @@ wire_struct! {
         pub work: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub brief: Option<String>,
-    }
-}
-
-wire_struct! {
-    /// POST /api/line/start's body: end the Line's live Grill on the brief committed on its
-    /// branch, merging that branch first. Answers 202 with the Line, or the 409 `reason` envelope.
-    pub struct LineStartRequest {
-        pub grill: String,
     }
 }
 

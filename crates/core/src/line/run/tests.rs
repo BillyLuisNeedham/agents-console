@@ -1021,9 +1021,11 @@ fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
     assert_eq!(grill.title, "Grill, pass 1");
     assert_eq!(grill.skill.as_deref(), Some("my-grill-with-docs"));
     assert_eq!(grill.assign.model.as_deref(), Some("opus"));
-    assert!(grill.opening.starts_with(
-        "You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)"
-    ));
+    assert!(
+        grill.opening.starts_with(
+            "You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)"
+        )
+    );
     assert!(grill.opening.contains(
         "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue \
          view 186) and grill me on it.\n\nThis Line was cut from `main` at `abc123`."
@@ -1071,7 +1073,11 @@ fn a_brief_absorbs_its_spec_and_overrides_before_it_hands_on_done_with_its_items
     assert_eq!(written(&advanced), ["implement-1"]);
     assert_eq!(run.places.spec.as_deref(), Some("docs/specs/demo.md"));
     assert!(run.places.push_base);
-    assert_eq!(run.plan().1, 1, "the finish and the node override are one edit");
+    assert_eq!(
+        run.plan().1,
+        1,
+        "the finish and the node override are one edit"
+    );
     assert_eq!(run.finish_act(), &FinishAct::Pr);
     let implement = ticket(&advanced, "implement-1");
     assert_eq!(implement.assign.model.as_deref(), Some("sonnet"));
@@ -1147,7 +1153,11 @@ fn a_handoff_to_a_live_conversation_pass_queues_the_next_pass() {
     );
 
     let text = run.to_json();
-    assert_eq!(LineRun::from_json(&text).unwrap(), run, "line.json keeps a live pass");
+    assert_eq!(
+        LineRun::from_json(&text).unwrap(),
+        run,
+        "line.json keeps a live pass"
+    );
 
     pool.conversations.insert(
         "talk-1".into(),
@@ -1200,7 +1210,11 @@ fn a_brief_is_bounded_and_refuses_what_it_does_not_know() {
     );
     assert!(parse(json!({"items": [{"title": "t", "body": "b", "x": 1}]})).is_err());
     assert_eq!(LineBrief::parse("[]").unwrap_err(), "not a JSON object");
-    assert!(LineBrief::parse("{").unwrap_err().starts_with("not valid JSON"));
+    assert!(
+        LineBrief::parse("{")
+            .unwrap_err()
+            .starts_with("not valid JSON")
+    );
 }
 
 #[test]

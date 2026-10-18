@@ -492,19 +492,13 @@ pub async fn start_conversation_request(server: &Server, body: Body) -> Answer {
     let role = match field_of(&fields, "role") {
         None => None,
         Some(Value::String(role)) if role == "steward" => Some(ConversationRole::Steward),
-        Some(Value::String(role)) if role == "grill" => Some(ConversationRole::Grill),
         Some(_) => {
-            return Answer::refused(
-                400,
-                Field::Reason,
-                r#"role must be "steward" or "grill" when given"#,
-            );
+            return Answer::refused(400, Field::Reason, r#"role must be "steward" when given"#);
         }
     };
     let given = text_of(&fields, "title");
     let title = match js::trim(&given) {
         "" if role == Some(ConversationRole::Steward) => "Steward".to_owned(),
-        "" if role == Some(ConversationRole::Grill) => "Grill".to_owned(),
         trimmed => trimmed.to_owned(),
     };
     if title.is_empty() {
@@ -664,27 +658,6 @@ pub async fn begin_line_request(server: &Server, body: Body) -> Answer {
         return Answer::refused(409, Field::Reason, "pool not started");
     };
     match engine.begin_line(plan, begin).await {
-        Ok(line) => Answer::ok(202, &LineResponse { line: Some(line) }),
-        Err(err) => Answer::refused(409, Field::Reason, err.message()),
-    }
-}
-
-/// POST /api/line/start {grill} (the bridge until Conversation nodes, ADR-0039): Start the Line on the
-/// Grill, which checks the brief on the Grill's branch, merges that branch and ends the Grill. An
-/// operator route: the Steward's routes have no such verb. 202 with the Line; a missing or invalid
-/// brief, no Conversation pass waiting, or a Grill that is not one is the 409 `reason` envelope.
-pub async fn start_line_request(server: &Server, body: Body) -> Answer {
-    let Ok(body) = body else {
-        return Answer::refused(400, Field::Reason, "invalid JSON body");
-    };
-    let grill = match or_empty(body).get("grill") {
-        Some(Value::String(id)) if !js::trim(id).is_empty() => js::trim(id).to_owned(),
-        _ => return Answer::refused(400, Field::Reason, "grill must be a Conversation id"),
-    };
-    let Some(engine) = server.engine() else {
-        return Answer::refused(409, Field::Reason, "pool not started");
-    };
-    match engine.start_line_from_grill(grill).await {
         Ok(line) => Answer::ok(202, &LineResponse { line: Some(line) }),
         Err(err) => Answer::refused(409, Field::Reason, err.message()),
     }

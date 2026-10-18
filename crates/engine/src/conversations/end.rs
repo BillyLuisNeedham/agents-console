@@ -184,20 +184,21 @@ fn dispose_worktree(s: &Session, rt: &Rt) {
 
 pub(crate) fn finish_end(s: &mut Session, rt: &Rt, merged: bool) {
     stop_tick(s, rt);
-    let (id, file, closing, close, by, pane, harness, branch, enlisted, close_tabs) = rt.with(|r| {
-        (
-            r.id.clone(),
-            r.file.clone(),
-            r.closing.clone(),
-            r.close,
-            r.ended_by,
-            r.pane_id.clone(),
-            r.harness.clone(),
-            r.worktree.branch.clone(),
-            r.enlisted,
-            r.close_tabs,
-        )
-    });
+    let (id, file, closing, close, by, pane, harness, branch, enlisted, close_tabs) =
+        rt.with(|r| {
+            (
+                r.id.clone(),
+                r.file.clone(),
+                r.closing.clone(),
+                r.close,
+                r.ended_by,
+                r.pane_id.clone(),
+                r.harness.clone(),
+                r.worktree.branch.clone(),
+                r.enlisted,
+                r.close_tabs,
+            )
+        });
     let _ = write_conversation_status(&file, ConversationStatus::Ended);
     let mut payload = object(json!({
         "closing": closing,
@@ -496,13 +497,7 @@ fn brief_refusal(s: &Session, id: &str) -> Option<String> {
 // leaves the record live, and the next boot finishes this ending rather than calling the Conversation
 // crashed, with the closing line, who asked for it and whether it ends as closed as they were recorded.
 // False when it is already ending.
-fn begin_end(
-    s: &mut Session,
-    rt: &Rt,
-    closing: Option<String>,
-    close: bool,
-    by: AnswerBy,
-) -> bool {
+fn begin_end(s: &mut Session, rt: &Rt, closing: Option<String>, close: bool, by: AnswerBy) -> bool {
     if rt.with(|r| r.ending) {
         return false;
     }
@@ -629,7 +624,7 @@ fn run_end_merge(
 
 /// Merge `branch` into the merge target, in whichever checkout holds it (issue #101): the engine's,
 /// never one an enlisted agent works in.
-pub(crate) fn merge_into_target(s: &Session, branch: &str) -> MergeResult {
+fn merge_into_target(s: &Session, branch: &str) -> MergeResult {
     let merged = git::with_merge_checkout(&s.cwd, s.merge_target.as_deref(), |cwd| {
         git::merge_branch(cwd, branch)
     });

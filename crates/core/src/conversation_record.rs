@@ -146,7 +146,6 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<ConversationRecord> {
         enlisted,
         role: match field(&fields, "role") {
             Some("steward") => Some(ConversationRole::Steward),
-            Some("grill") => Some(ConversationRole::Grill),
             _ => None,
         },
         node: field(&fields, "node")

@@ -1797,7 +1797,7 @@ function projectConversation(
     idleAge: conversationIdleAge(conversation.turn.idleSince, now),
     enlisted: conversation.enlisted,
     steward: conversation.role === "steward",
-    grill: conversation.role === "grill",
+    grill: conversation.node !== undefined,
     delivery: projectDelivery(conversation.delivery),
     terminal: projectTerminalSurface(conversation.paneId, terminal),
     endView: projectConversationEnd(endings[conversation.id], conversation.ending),
@@ -2134,7 +2134,7 @@ export function projectConversationsTray(
       turn: c.turn,
       idleAge: conversationIdleAge(c.turn.idleSince, now),
       steward: c.role === "steward",
-      grill: c.role === "grill",
+      grill: c.node !== undefined,
       delivery: projectDelivery(c.delivery),
     }));
   return rows.sort((a, b) => {
