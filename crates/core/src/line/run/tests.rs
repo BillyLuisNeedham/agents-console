@@ -1553,3 +1553,19 @@ fn only_a_node_that_makes_items_is_taught_the_field() {
     let build = tick(&mut run, &mut pool);
     assert!(!ticket(&build, "build-1.1").body.contains("## Your items"));
 }
+
+#[test]
+fn the_view_names_each_nodes_verdicts_for_its_ports() {
+    let (run, _) = started("none");
+    let view = run.view();
+    let verdicts = |id: &str| {
+        view.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.verdicts.clone())
+            .unwrap()
+    };
+    assert_eq!(verdicts("implement"), ["done", "closed"]);
+    assert_eq!(verdicts("prove"), ["pass", "fail", "closed"]);
+    assert_eq!(verdicts("finish"), ["revise"]);
+}

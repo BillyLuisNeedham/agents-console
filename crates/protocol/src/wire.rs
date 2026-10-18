@@ -2695,6 +2695,8 @@ wire_struct! {
     /// One node of the live graph, every Plan node listed.
     pub struct LineNodeView {
         pub id: String,
+        /// The verdicts an edge out of it may route on, for its ports.
+        pub verdicts: Vec<String>,
         pub passes: u32,
         /// The live pass, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
