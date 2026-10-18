@@ -2064,3 +2064,447 @@ wire_struct! {
         pub line: Option<LineState>,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Plans (ADR-0039)
+// ---------------------------------------------------------------------------
+
+wire_struct! {
+    /// A Plan file: `~/.agent-graphs/plans/<slug>.json`, a compiled-in Preset, or a Line's frozen
+    /// copy. The engine's `ac_core::plan` is the only reader that decides whether one is valid.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanFile {
+        /// The format tag, 1.
+        pub horde: u32,
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub author: Option<String>,
+        /// The author's own file the flow comes from. Every Preset has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+        /// The Steward may edit a Line running this Plan. Off unless set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub steward_edits: Option<bool>,
+        pub nodes: Vec<PlanNodeFile>,
+        pub edges: Vec<PlanEdgeFile>,
+    }
+}
+
+wire_union! {
+    /// One node of a Plan file, told apart by `kind`. Agent, Prove, Review and Decide are Ticket
+    /// nodes, and the kind fixes the verdicts their edges may route.
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub enum PlanNodeFile {
+        Conversation(PlanConversationNode),
+        Agent(PlanTicketNode),
+        Prove(PlanTicketNode),
+        Review(PlanTicketNode),
+        Decide(PlanTicketNode),
+        Merger(PlanMergerNode),
+        Gate(PlanGateNode),
+        Finish(PlanFinishNode),
+    }
+}
+
+wire_struct! {
+    @inline
+    /// Opens a Conversation per pass.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanConversationNode {
+        pub id: String,
+        pub title: String,
+        pub x: i32,
+        pub y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub assign: Option<PlanAssign>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// Writes a Ticket per pass, or one per item.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanTicketNode {
+        pub id: String,
+        pub title: String,
+        pub x: i32,
+        pub y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub assign: Option<PlanAssign>,
+        /// Absent, one copy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub copies: Option<PlanCopies>,
+        /// Taught to return `items` in its Outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub makes_items: Option<bool>,
+        /// Absent, the operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub checkpoint: Option<PlanCheckpoint>,
+        /// Absent, hold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub spawns: Option<PlanSpawns>,
+        /// Added to every Ticket body this node writes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// The fan-in of one per-item Ticket node. Runs no agent.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanMergerNode {
+        pub id: String,
+        pub title: String,
+        pub x: i32,
+        pub y: i32,
+        /// The per-item Ticket node this Merger folds.
+        pub of: String,
+        /// Absent, a resolver on the pool's own resolver settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub conflict: Option<PlanConflict>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// Opened by the operator, the Steward, or at once.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanGateNode {
+        pub id: String,
+        pub title: String,
+        pub x: i32,
+        pub y: i32,
+        /// Absent, the operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub open: Option<PlanOpener>,
+        /// Absent, any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub join: Option<PlanJoin>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// The one Finish: its hold, then the Finish Ticket that carries out its act.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanFinishNode {
+        pub id: String,
+        pub title: String,
+        pub x: i32,
+        pub y: i32,
+        /// Absent, none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub act: Option<PlanFinishAct>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub assign: Option<PlanAssign>,
+    }
+}
+
+wire_struct! {
+    /// A node's harness, model and effort. An absent field falls through to the pool defaults.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanAssign {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub harness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub effort: Option<String>,
+    }
+}
+
+wire_union! {
+    /// One copy per pass, or one per item under a cap.
+    #[serde(untagged)]
+    pub enum PlanCopies {
+        One(PlanOneCopy),
+        PerItem(PlanPerItem),
+    }
+}
+
+wire_enum! {
+    @inline
+    pub enum PlanOneCopy {
+        One = "one",
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanPerItem {
+        pub per_item: PlanCap,
+    }
+}
+
+wire_union! {
+    /// At most this many copies live at once, or every item at once.
+    #[serde(untagged)]
+    pub enum PlanCap {
+        At(u32),
+        All(AllItems),
+    }
+}
+
+wire_enum! {
+    @inline
+    pub enum AllItems {
+        All = "all",
+    }
+}
+
+wire_enum! {
+    /// Who answers a checkpoint a node's Tickets raise.
+    pub enum PlanCheckpoint {
+        Operator = "operator",
+        Steward = "steward",
+    }
+}
+
+wire_enum! {
+    /// What happens to the Spawns a node's Tickets propose: held for the operator, or landed under
+    /// the Spawn caps.
+    pub enum PlanSpawns {
+        Hold = "hold",
+        Land = "land",
+    }
+}
+
+wire_union! {
+    /// A merge conflict on a copy: a resolver on this Assignment, or a wait for the operator.
+    #[serde(untagged)]
+    pub enum PlanConflict {
+        Wait(PlanWait),
+        Resolver(PlanResolver),
+    }
+}
+
+wire_enum! {
+    @inline
+    pub enum PlanWait {
+        Wait = "wait",
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanResolver {
+        pub resolver: PlanAssign,
+    }
+}
+
+wire_enum! {
+    /// Who opens a Gate. `auto` opens it at once, with no hold.
+    pub enum PlanOpener {
+        Operator = "operator",
+        Steward = "steward",
+        Auto = "auto",
+    }
+}
+
+wire_enum! {
+    /// A Gate opens on a handoff from any incoming edge, or waits for all of them.
+    pub enum PlanJoin {
+        Any = "any",
+        All = "all",
+    }
+}
+
+wire_union! {
+    /// What the Finish does once approved: one of the named acts, or free text the Finish Ticket's
+    /// agent carries out.
+    #[serde(untagged)]
+    pub enum PlanFinishAct {
+        Named(PlanNamedAct),
+        Other(PlanOtherAct),
+    }
+}
+
+wire_enum! {
+    @inline
+    pub enum PlanNamedAct {
+        None = "none",
+        DraftPr = "draft-pr",
+        Pr = "pr",
+        FastForward = "fast-forward",
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanOtherAct {
+        pub other: String,
+    }
+}
+
+wire_struct! {
+    /// An edge: `from`'s verdict `on` goes to `to`. `(from, on, to)` is unique in a Plan.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanEdgeFile {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+        /// Present on a capped loop edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cap: Option<PlanLoopCap>,
+    }
+}
+
+wire_struct! {
+    /// A loop edge's limit.
+    #[serde(deny_unknown_fields)]
+    pub struct PlanLoopCap {
+        pub max: u32,
+        /// The Steward may buy one more pass once the loop is spent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub steward_extra: Option<bool>,
+        /// Absent, a loop hold for the operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub when_spent: Option<PlanWhenSpent>,
+    }
+}
+
+wire_union! {
+    /// A spent loop raises a hold, or hands on to another node instead.
+    #[serde(untagged)]
+    pub enum PlanWhenSpent {
+        Hold(PlanHold),
+        To(PlanSpentTo),
+    }
+}
+
+wire_enum! {
+    @inline
+    pub enum PlanHold {
+        Hold = "hold",
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanSpentTo {
+        pub to: String,
+    }
+}
+
+wire_struct! {
+    /// One thing wrong with a Plan, on what the editor marks.
+    pub struct PlanProblem {
+        pub at: PlanProblemAt,
+        pub message: String,
+    }
+}
+
+wire_union! {
+    /// What a problem is on: the Plan as a whole, one node, or one edge.
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub enum PlanProblemAt {
+        Plan(PlanAtPlan),
+        Node(PlanAtNode),
+        Edge(PlanAtEdge),
+    }
+}
+
+wire_struct! {
+    @inline
+    pub struct PlanAtPlan {}
+}
+
+wire_struct! {
+    @inline
+    pub struct PlanAtNode {
+        pub id: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    pub struct PlanAtEdge {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+    }
+}
+
+wire_struct! {
+    /// A Plan as `plans.list` names it: a Preset, or a file in the Plan library with whatever is
+    /// wrong with it.
+    pub struct PlanSummary {
+        pub slug: String,
+        pub preset: bool,
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+        pub problems: Vec<PlanProblem>,
+    }
+}
+
+wire_struct! {
+    /// GET /api/plans: the Presets, then the Plan library by slug.
+    pub struct PlansListResponse {
+        pub plans: Vec<PlanSummary>,
+    }
+}
+
+wire_struct! {
+    /// A Plan named by its slug: the socket form of a /api/plans/<slug> path.
+    pub struct PlanSlugRequest {
+        pub slug: String,
+    }
+}
+
+wire_struct! {
+    /// GET /api/plans/<slug>: the Plan's file as it stands, and what is wrong with it.
+    pub struct PlanResponse {
+        pub slug: String,
+        pub preset: bool,
+        pub plan: Unchecked<PlanFile>,
+        pub problems: Vec<PlanProblem>,
+    }
+}
+
+wire_struct! {
+    /// POST /api/plans/validate's body: a draft Plan, checked whole.
+    pub struct PlanValidateRequest {
+        pub plan: Unchecked<PlanFile>,
+    }
+}
+
+wire_struct! {
+    /// Every problem with the draft, none when it is valid.
+    pub struct PlanValidateResponse {
+        pub problems: Vec<PlanProblem>,
+    }
+}
+
+wire_struct! {
+    /// PUT /api/plans/<slug>: the body is `plan`; the socket form carries `slug` beside it.
+    pub struct PlanSaveRequest {
+        pub slug: String,
+        pub plan: Unchecked<PlanFile>,
+    }
+}
+
+wire_struct! {
+    /// The Plan as saved, in its canonical form.
+    pub struct PlanSaveResponse {
+        pub slug: String,
+        pub plan: PlanFile,
+    }
+}
