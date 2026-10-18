@@ -171,6 +171,18 @@ impl Engine {
             .await?
     }
 
+    /// `line.plan.edit` (ADR-0039): the operator's edit to the running Line's Plan.
+    pub async fn edit_line_plan(
+        &self,
+        base_rev: u64,
+        edits: Vec<ac_core::plan::PlanEdit>,
+    ) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+        self.call(move |s| {
+            crate::line::edit_plan(s, ac_core::line::run::Editor::Operator, base_rev, &edits)
+        })
+        .await?
+    }
+
     /// The Line's graph with live state, `None` in a pool that runs none.
     pub async fn line_view(&self) -> Result<Option<ac_protocol::LineGraphView>, EngineError> {
         Ok(self.call(|s| crate::line::line_view(s)).await?)
@@ -277,6 +289,19 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.call(move |s| {
             crate::steward_actions::steward_reassigned(s, &conversation, &tickets, fields)
+        })
+        .await?
+    }
+
+    /// `steward.plan`: the Steward's edit to the running Line's Plan, which the Plan must allow.
+    pub async fn steward_edit_plan(
+        &self,
+        conversation: String,
+        base_rev: u64,
+        edits: Vec<ac_core::plan::PlanEdit>,
+    ) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+        self.call(move |s| {
+            crate::steward_actions::steward_edit_plan(s, &conversation, base_rev, &edits)
         })
         .await?
     }

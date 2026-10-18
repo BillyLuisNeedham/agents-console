@@ -2,8 +2,10 @@
  * The Steward in a Line pool (ADR-0039), seen from outside the server: it is taught the Plan and
  * which of the Line's checkpoints and holds are its, it answers a Ticket's no-verdict checkpoint
  * and a spent `stewardExtra` loop's hold once until that loop resets, it is never told of the
- * Finish hold and its answer there is refused, and it decides a Held spawn proposed from inside the
- * Line only while `steward.mayAdoptLineSpawns` is true.
+ * Finish hold and its answer there is refused, it decides a Held spawn proposed from inside the
+ * Line only while `steward.mayAdoptLineSpawns` is true, and it edits the Line's Plan only while the
+ * Plan says `stewardEdits`, never widening what it may answer: it opens an `open: steward` gate and
+ * is refused at an `open: operator` one.
  *
  * The Line runs in a terminal-backed pool: each Ticket launches the stand-in TUI as claude, and the
  * case plays its agent, writing the scripted Outcome once the prompt naming it is submitted.
@@ -15,7 +17,8 @@ import { join } from "node:path";
 import type { PoolConfig } from "../../../protocol/wire.ts";
 import { type Case, type CaseServer, conformance } from "../../harness/case.ts";
 import { readEvents } from "../../harness/pool-files.ts";
-import { BRIEF, SPEC, begun } from "../line-support.ts";
+import { BRIEF, SPEC, begun, lineOf } from "../line-support.ts";
+import { edge, node, plan } from "../plans-support.ts";
 import {
   checkpoint,
   done,
@@ -85,6 +88,7 @@ conformance(
       'You may answer a checkpoint on a Ticket of implement, prove, review, decide (a "no verdict" one: resume, asking it to record its Outcome again with a valid verdict); the hold of a spent loop on prove --fail--> implement, once until that loop resets',
     );
     expect(teaching).toContain("the Finish hold and the Finish Ticket are the operator's");
+    expect(teaching).toContain("This Plan does not let you edit it.");
     expect(teaching).toContain("Held spawns proposed from inside the Line are the operator's to adopt or discard");
 
     expect(
@@ -238,6 +242,64 @@ conformance(
       (s) => s.heldSpawns.length === 0 && s.state.tickets.some((ticket) => ticket.id === "implement-1-spawn-1"),
       "the adopted spawn landed as a Ticket",
     );
+  },
+  { timeoutMs: 120_000 },
+);
+
+conformance(
+  "steward",
+  "the Steward edits the Line's Plan only while it says stewardEdits and never widens its own powers, opening a steward gate but refused at an operator one",
+  async (t) => {
+    const sw = await lineStewardWorld(t);
+    driveOutcomes(sw.herdr, { "draft-1": [done()] });
+    const server = await sw.start();
+    const gated = {
+      ...plan(
+        [node.agent("draft"), node.gate("approve", "steward"), node.gate("sign", "operator"), node.finish()],
+        [edge("draft", "done", "approve"), edge("approve", "open", "sign"), edge("sign", "open", "finish")],
+        "Gated",
+      ),
+      stewardEdits: true,
+    };
+    await begun(server, { plan: gated, work: "#1" });
+    await untilInterrupt(server, "approve-1", "checkpoint", 60_000);
+    const id = await enlistSteward(server);
+    expect(turnsInto(sw.herdr, STEWARD_PANE).join("\n")).toContain(
+      "This Plan lets you edit it with plan <rev> <edits>: rev is the `rev` GET /api/line on the Console answers",
+    );
+    const rev = async () => (await lineOf(server))?.rev;
+    const edit = (baseRev: number, edits: unknown[]) => post(server, "/api/steward/plan", { conversation: id, baseRev, edits });
+
+    expect(await edit(0, [{ edit: "setNode", node: node.gate("sign", "steward") }])).toEqual(
+      refused("the Steward may not give itself powers the operator did not: the gate sign opening on steward"),
+    );
+    expect(await rev()).toBe(0);
+    expect(await edit(0, [{ edit: "move", id: "draft", x: 40, y: 400 }])).toEqual({
+      status: 200,
+      body: { ok: true, message: "edited the Plan: now at rev 1" },
+    });
+    expect(await rev()).toBe(1);
+
+    const hold = (await lineOf(server))?.nodes.find((n) => n.id === "approve")?.hold;
+    expect(hold).toBe("approve-1");
+    expect(await post(server, "/api/steward/answer", { conversation: id, ticketId: hold, action: "resume" })).toMatchObject({
+      status: 202,
+    });
+    await untilInterrupt(server, "sign-1", "checkpoint", 60_000);
+    expect((await lineOf(server))?.nodes.find((n) => n.id === "sign")?.hold).toBe("sign-1");
+    expect(await post(server, "/api/steward/answer", { conversation: id, ticketId: "sign-1", action: "resume" })).toEqual(
+      refused("sign-1 is the Line's, and its Plan leaves it to the operator"),
+    );
+    const state = await server.http.get(`/api/steward/state?conversation=${id}`);
+    expect(state.json<{ interrupts: { ticketId: string; answerable: boolean }[] }>().interrupts).toMatchObject([
+      { ticketId: "sign-1", answerable: false },
+    ]);
+
+    expect(await edit(1, [{ edit: "setMeta", name: "Gated", stewardEdits: false }])).toMatchObject({ status: 200 });
+    expect(await edit(2, [{ edit: "move", id: "draft", x: 40, y: 60 }])).toEqual(
+      refused("this Plan does not let the Steward edit it"),
+    );
+    expect(await rev()).toBe(2);
   },
   { timeoutMs: 120_000 },
 );

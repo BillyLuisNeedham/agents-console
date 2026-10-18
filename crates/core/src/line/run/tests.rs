@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
+use ac_protocol::wire::PlanNodeKind;
 use ac_protocol::{LineBase, OutcomeStatus};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::file::OLD_LINE_FILE;
 use super::*;
-use crate::plan::PRESETS;
+use crate::plan::{Edge, GateNode, LoopCap, PRESETS, PlanMeta};
 
 // -------------------------------------------------------------------------------------------------
 // A fake pool
@@ -1295,26 +1296,354 @@ fn a_copy_on_the_stewards_checkpoint_is_the_stewards() {
     assert_eq!(run.node_of(&id("conv-1")), None);
 }
 
+// -------------------------------------------------------------------------------------------------
+// Edits to a running Line's Plan
+// -------------------------------------------------------------------------------------------------
+
+fn edge(from: &str, on: Verdict, to: &str) -> EdgeKey {
+    EdgeKey {
+        from: node(from),
+        on,
+        to: node(to),
+    }
+}
+
+fn link(from: &str, on: Verdict, to: &str) -> PlanEdit {
+    PlanEdit::Link(Edge {
+        key: edge(from, on, to),
+        cap: None,
+    })
+}
+
+fn rev(run: &LineRun) -> u64 {
+    run.plan().1
+}
+
+fn with_steward_edits(plan: Plan) -> Plan {
+    let meta = PlanMeta {
+        steward_edits: true,
+        ..plan.meta().clone()
+    };
+    plan.edit(&[PlanEdit::SetMeta(meta)]).unwrap().plan
+}
+
+fn live_refusal(run: &mut LineRun, edits: &[PlanEdit]) -> String {
+    let before = run.clone();
+    let refused = run.edit(Editor::Operator, rev(run), edits).unwrap_err();
+    assert_eq!(*run, before, "a refused edit changes nothing");
+    let Refusal::Live(why) = refused else {
+        panic!("{refused:?}")
+    };
+    why
+}
+
 #[test]
-fn plan_edits_on_a_running_line_are_refused_for_now() {
-    let (mut run, _) = started("none");
-    let edit = |by, base_rev| LineEvent::PlanEdited {
-        by,
-        base_rev,
-        edits: Vec::new(),
+fn an_edit_bumps_the_rev_and_survives_a_restart_and_a_no_op_or_stale_one_does_not() {
+    let (mut run, mut pool) = work_run(gated("operator"));
+    tick(&mut run, &mut pool);
+    let moved = [PlanEdit::Move {
+        id: node("ship"),
+        at: (500, 500),
+    }];
+    assert_eq!(run.edit(Editor::Operator, 0, &moved), Ok(Vec::new()));
+    assert_eq!(rev(&run), 1);
+    assert_eq!(run.plan().0.node(&node("ship")).unwrap().at, (500, 500));
+    assert_eq!(LineRun::from_json(&run.to_json()).unwrap(), run);
+
+    assert_eq!(run.edit(Editor::Operator, 1, &moved), Ok(Vec::new()));
+    assert_eq!(rev(&run), 1, "an edit that changes nothing is no new rev");
+    let stale = run.edit(Editor::Operator, 0, &moved).unwrap_err();
+    assert_eq!(stale, Refusal::StaleRev { now: 1 });
+    assert_eq!(
+        stale.to_string(),
+        "the Plan has changed since: it is at rev 1"
+    );
+
+    let invalid = run
+        .edit(
+            Editor::Operator,
+            1,
+            &[PlanEdit::Unlink(edge("ship", Verdict::Done, "draft"))],
+        )
+        .unwrap_err();
+    assert_eq!(
+        invalid.to_string(),
+        "the edited Plan is not valid: there is no edge `ship.done -> draft`"
+    );
+    assert_eq!(rev(&run), 1);
+}
+
+#[test]
+fn a_node_ever_handed_anything_is_not_removed() {
+    let (mut run, _) = five_items(false);
+    assert_eq!(
+        live_refusal(&mut run, &[PlanEdit::RemoveNode(node("build"))]),
+        "build has 2 live copies and 3 queued items: its work must end before the node is removed"
+    );
+    assert_eq!(
+        live_refusal(&mut run, &[PlanEdit::RemoveNode(node("tasks"))]),
+        "tasks has run in this Line, so its Tickets keep its id: unlink it instead of removing it"
+    );
+}
+
+#[test]
+fn an_edge_holding_a_loop_hold_is_not_unlinked() {
+    let (mut run, mut pool) = started("none");
+    for n in 1..=3 {
+        pool.agent(&format!("implement-{n}"));
+        tick(&mut run, &mut pool);
+        pool.prove(&format!("prove-{n}"), false);
+        tick(&mut run, &mut pool);
+    }
+    assert_eq!(
+        live_refusal(
+            &mut run,
+            &[PlanEdit::Unlink(edge("prove", Verdict::Fail, "implement"))]
+        ),
+        "the loop hold prove-fail-implement-3 waits on prove.fail -> implement: answer it before \
+         the edge goes"
+    );
+}
+
+#[test]
+fn a_live_pass_keeps_its_merger() {
+    let (mut run, _) = five_items(true);
+    assert_eq!(
+        live_refusal(&mut run, &[PlanEdit::RemoveNode(node("build-merge"))]),
+        "build's pass is live: its Merger cannot be placed or lifted until the pass ends"
+    );
+}
+
+#[test]
+fn a_collecting_gate_keeps_its_incoming_edges() {
+    let (mut run, mut pool) = work_run(plan(
+        json!([
+            {"kind": "agent", "id": "front"},
+            {"kind": "agent", "id": "back"},
+            {"kind": "gate", "id": "both", "open": "operator", "join": "all"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "front", "on": "done", "to": "both"},
+            {"from": "back", "on": "done", "to": "both"},
+            {"from": "both", "on": "open", "to": "finish"}
+        ]),
+    ));
+    tick(&mut run, &mut pool);
+    pool.agent("back-1");
+    tick(&mut run, &mut pool);
+    assert_eq!(
+        live_refusal(
+            &mut run,
+            &[PlanEdit::Unlink(edge("front", Verdict::Done, "both"))]
+        ),
+        "the gate both is still collecting: its join and incoming edges stay until it opens"
+    );
+}
+
+#[test]
+fn linking_a_parked_verdict_hands_it_on_and_the_next_tick_writes_the_ticket() {
+    let (mut run, mut pool) = work_run(plan(
+        json!([
+            {"kind": "agent", "id": "build"},
+            {"kind": "prove", "id": "test"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "build", "on": "done", "to": "test"},
+            {"from": "test", "on": "pass", "to": "finish"}
+        ]),
+    ));
+    tick(&mut run, &mut pool);
+    pool.agent("build-1");
+    tick(&mut run, &mut pool);
+    pool.prove("test-1", false);
+    assert!(written(&tick(&mut run, &mut pool)).is_empty());
+    let test = |run: &LineRun| {
+        run.view()
+            .nodes
+            .into_iter()
+            .find(|n| n.id == "test")
+            .unwrap()
+    };
+    assert_eq!(test(&run).parked, ["fail"]);
+
+    let edits = [
+        PlanEdit::AddNode {
+            kind: PlanNodeKind::Agent,
+            at: (0, 300),
+        },
+        link("test", Verdict::Fail, "agent"),
+        link("agent", Verdict::Done, "finish"),
+    ];
+    run.edit(Editor::Operator, 0, &edits).unwrap();
+    assert!(test(&run).parked.is_empty());
+    assert_eq!(LineRun::from_json(&run.to_json()).unwrap(), run);
+    let fix = tick(&mut run, &mut pool);
+    assert_eq!(written(&fix), ["agent-1"]);
+    assert_eq!(ticket(&fix, "agent-1").blocked_by, [id("test-1")]);
+}
+
+fn per_item(run: &LineRun, id: &str) -> PlanEdit {
+    let NodeBody::Ticket(mut body) = run.plan().0.node(&node(id)).unwrap().body.clone() else {
+        panic!("{id} is a Ticket node")
+    };
+    body.copies = Copies::PerItem { cap: Cap::All };
+    PlanEdit::SetNode {
+        id: node(id),
+        title: id.into(),
+        body: NodeBody::Ticket(body),
+    }
+}
+
+#[test]
+fn a_verdict_parked_before_its_node_gained_a_merger_flows_on_through_the_merger() {
+    let (mut run, mut pool) = work_run(plan(
+        json!([
+            {"kind": "agent", "id": "build"},
+            {"kind": "prove", "id": "test"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "build", "on": "done", "to": "test"},
+            {"from": "test", "on": "pass", "to": "finish"}
+        ]),
+    ));
+    tick(&mut run, &mut pool);
+    pool.agent("build-1");
+    tick(&mut run, &mut pool);
+    pool.prove("test-1", false);
+    tick(&mut run, &mut pool);
+
+    run.edit(Editor::Operator, 0, &[per_item(&run, "test")])
+        .unwrap();
+    let edits = [
+        PlanEdit::AddNode {
+            kind: PlanNodeKind::Agent,
+            at: (0, 300),
+        },
+        link("test", Verdict::Fail, "agent"),
+        link("agent", Verdict::Done, "finish"),
+    ];
+    run.edit(Editor::Operator, 1, &edits).unwrap();
+    assert!(
+        run.plan()
+            .0
+            .out(&node("test-merge"), Verdict::Fail)
+            .next()
+            .is_some(),
+        "the link is made from the Merger"
+    );
+    let fix = tick(&mut run, &mut pool);
+    assert_eq!(written(&fix), ["agent-1"]);
+    assert_eq!(ticket(&fix, "agent-1").blocked_by, [id("test-1")]);
+}
+
+#[test]
+fn a_steward_extra_loop_that_moves_onto_a_merger_is_no_new_power() {
+    let (mut run, _) = work_run(with_steward_edits(plan(
+        json!([
+            {"kind": "agent", "id": "build"},
+            {"kind": "prove", "id": "test"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "build", "on": "done", "to": "test"},
+            {"from": "test", "on": "fail", "to": "build",
+             "cap": {"max": 2, "stewardExtra": true, "whenSpent": "hold"}},
+            {"from": "test", "on": "pass", "to": "finish"}
+        ]),
+    )));
+    run.edit(Editor::Steward, 0, &[per_item(&run, "test")])
+        .unwrap();
+    assert_eq!(rev(&run), 1);
+}
+
+#[test]
+fn the_steward_edits_only_a_plan_that_lets_it_and_never_widens_its_own_powers() {
+    let capped = || {
+        plan(
+            json!([
+                {"kind": "agent", "id": "draft"},
+                {"kind": "prove", "id": "test"},
+                {"kind": "gate", "id": "approve", "open": "steward"},
+                {"kind": "finish", "id": "finish"}
+            ]),
+            json!([
+                {"from": "draft", "on": "done", "to": "test"},
+                {"from": "test", "on": "fail", "to": "draft",
+                 "cap": {"max": 2, "stewardExtra": false, "whenSpent": "hold"}},
+                {"from": "test", "on": "pass", "to": "approve"},
+                {"from": "approve", "on": "open", "to": "finish"},
+                {"from": "approve", "on": "revise", "to": "draft"}
+            ]),
+        )
+    };
+    let (mut closed, _) = work_run(capped());
+    let refused = closed.edit(Editor::Steward, 0, &[]).unwrap_err();
+    assert_eq!(refused, Refusal::StewardMayNotEdit);
+    assert_eq!(
+        refused.to_string(),
+        "this Plan does not let the Steward edit it"
+    );
+
+    let (mut run, _) = work_run(with_steward_edits(capped()));
+    let body = |id: &str| run.plan().0.node(&node(id)).unwrap().body.clone();
+    let NodeBody::Ticket(mut draft) = body("draft") else {
+        panic!()
+    };
+    draft.checkpoint = CheckpointPolicy::Steward;
+    let wider = [
+        PlanEdit::SetNode {
+            id: node("draft"),
+            title: "draft".into(),
+            body: NodeBody::Ticket(draft),
+        },
+        PlanEdit::SetCap {
+            edge: edge("test", Verdict::Fail, "draft"),
+            cap: Some(LoopCap {
+                max: std::num::NonZeroU32::new(2).unwrap(),
+                steward_extra: true,
+                when_spent: WhenSpent::Hold,
+            }),
+        },
+    ];
+    let refused = run.edit(Editor::Steward, 0, &wider).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "the Steward may not give itself powers the operator did not: draft's checkpoints on \
+         steward; stewardExtra on test.fail -> draft"
+    );
+    assert!(
+        run.edit(Editor::Operator, 0, &wider).is_ok(),
+        "the operator may"
+    );
+
+    let narrower = PlanEdit::SetNode {
+        id: node("approve"),
+        title: "approve".into(),
+        body: NodeBody::Gate(GateNode {
+            open: Opener::Operator,
+            join: Join::Any,
+        }),
+    };
+    assert!(run.edit(Editor::Steward, 1, &[narrower]).is_ok());
+    assert!(!run.steward_may_answer(&id("approve-1")));
+    let reopen = PlanEdit::SetNode {
+        id: node("approve"),
+        title: "approve".into(),
+        body: NodeBody::Gate(GateNode {
+            open: Opener::Steward,
+            join: Join::Any,
+        }),
     };
     assert_eq!(
-        run.apply(edit(Editor::Steward, 0)),
-        Err(Refusal::StewardMayNotEdit)
+        run.edit(Editor::Steward, 2, &[reopen])
+            .unwrap_err()
+            .to_string(),
+        "the Steward may not give itself powers the operator did not: the gate approve opening on \
+         steward"
     );
-    assert_eq!(
-        run.apply(edit(Editor::Operator, 7)),
-        Err(Refusal::StaleRev { now: 0 })
-    );
-    assert!(matches!(
-        run.apply(edit(Editor::Operator, 0)),
-        Err(Refusal::Live(_))
-    ));
 }
 
 // -------------------------------------------------------------------------------------------------

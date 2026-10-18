@@ -2,11 +2,11 @@
 //! the operator's own paths, and the budget that bounds it.
 //!
 //! Every action is a plain function over the Session, run as one actor job (`check`, `answer`,
-//! `leave`, `adopt_held_spawn`, `discard_held_spawn`, `reassigned`, `state`) or, where it awaits
-//! (Keep talking, `end`), a flow over the [`Engine`] whose synchronous checks are one job. Every
-//! refusal is the TypeScript's `steward: <why>` text. The pieces the answer path and the snapshot read
-//! (`steward_answer_payload`, `note_answered`, `steward_used_at_boot`, `with_steward_notes`) sit
-//! beside them.
+//! `leave`, `adopt_held_spawn`, `discard_held_spawn`, `edit_plan`, `reassigned`, `state`) or,
+//! where it awaits (Keep talking, `end`), a flow over the [`Engine`] whose synchronous checks are
+//! one job. Every refusal is the TypeScript's `steward: <why>` text. The pieces the answer path and
+//! the snapshot read (`steward_answer_payload`, `note_answered`, `steward_used_at_boot`,
+//! `with_steward_notes`) sit beside them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -527,6 +527,24 @@ pub fn steward_adopt_held_spawn(
         session.steward_adopts.remove(id);
     }
     adopted
+}
+
+/// The Steward's edit to the running Line's Plan: refused in its `steward: ` words unless the frozen
+/// Plan says `stewardEdits`. An edit is no answer, so it spends no budget.
+pub fn steward_edit_plan(
+    session: &mut Session,
+    conversation: &str,
+    base_rev: u64,
+    edits: &[ac_core::plan::PlanEdit],
+) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+    check_steward(session, conversation)?;
+    crate::line::edit_plan(
+        session,
+        ac_core::line::run::Editor::Steward,
+        base_rev,
+        edits,
+    )
+    .map_err(|err| steward_refusal(err.message()))
 }
 
 /// `stewardReassigned`: a Reassign by the Steward is the Console's own write of console.json (the

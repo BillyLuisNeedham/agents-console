@@ -1762,7 +1762,7 @@ wire_struct! {
 }
 
 // ---------------------------------------------------------------------------
-// A Line's verdicts and its verbs (ADR-0037, ADR-0039): POST /api/line, POST /api/line/start, GET /api/line
+// A Line's verdicts and its verbs (ADR-0037, ADR-0039): POST /api/line, POST /api/line/plan, GET /api/line
 // ---------------------------------------------------------------------------
 
 wire_enum! {
@@ -1841,6 +1841,24 @@ wire_struct! {
     /// GET /api/line: the pool's Line as the engine runs it, null when the pool has none.
     pub struct LineResponse {
         pub line: Option<LineGraphView>,
+    }
+}
+
+wire_struct! {
+    /// POST /api/line/plan's body (`line.plan.edit`), and the Steward's POST /api/steward/plan with
+    /// its `conversation`: typed edits to the running Line's frozen Plan, made against the rev they
+    /// were read at.
+    pub struct LinePlanEditRequest {
+        pub base_rev: u64,
+        pub edits: Vec<PlanEditFile>,
+    }
+}
+
+wire_struct! {
+    /// An applied edit: the Plan's rev now, and what the edits moved on their own.
+    pub struct LinePlanEditResponse {
+        pub rev: u64,
+        pub notes: Vec<String>,
     }
 }
 

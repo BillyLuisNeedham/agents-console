@@ -25,9 +25,10 @@ pub const STEWARD_USAGE: &str = "usage: agent-console steward --pool <pool-dir> 
   leave <ticket> <note>
   held adopt|discard <proposal-id>
   reassign <ticket> field=value...   (harness, model, effort, drivers, verify; field= clears)
+  plan <rev> <edits>   (a JSON array of Plan edits; only while the Line's Plan lets the Steward edit it)
   state
   end [closing line]
-A note, message or closing line of \"-\" is read from standard input.";
+A note, message, closing line or edits of \"-\" is read from standard input.";
 
 /// The options (anywhere on the line) and the verb with its words.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -235,6 +236,24 @@ pub fn steward_call(
                     ("tickets", Value::Array(vec![text_value(ticket)])),
                     ("fields", Value::Object(fields)),
                 ],
+            ))
+        }
+        "plan" => {
+            let plan_usage = || {
+                usage(
+                    "plan <rev> <edits>: the rev a whole number, the edits a JSON array of Plan edits",
+                )
+            };
+            let Some(rev) = word(words, 0).and_then(|rev| rev.parse::<u64>().ok()) else {
+                return Err(plan_usage());
+            };
+            let text = free_text(words.get(1..).unwrap_or_default(), stdin);
+            let Ok(edits @ Value::Array(_)) = serde_json::from_str::<Value>(&text) else {
+                return Err(plan_usage());
+            };
+            Ok(post(
+                "/api/steward/plan",
+                vec![("baseRev", Value::from(rev)), ("edits", edits)],
             ))
         }
         "state" => Ok(StewardCall::Get {
@@ -673,6 +692,23 @@ mod tests {
             r#"{"conversation":"conv-1","tickets":["01"],"fields":{"model":"big","effort":null,"verify":2}}"#
         );
         assert_eq!(
+            call("plan", &["3", r#"[{"edit":"removeNode","id":"x"}]"#]),
+            Ok(post(
+                "/api/steward/plan",
+                json!({ "conversation": "conv-1", "baseRev": 3, "edits": [{ "edit": "removeNode", "id": "x" }] })
+            ))
+        );
+        let edits = steward_call("conv-1", "plan", &strings(&["0", "-"]), &mut || {
+            r#"[{"edit": "unlink", "from": "a", "on": "done", "to": "b"}]"#.to_owned()
+        });
+        assert_eq!(
+            edits,
+            Ok(post(
+                "/api/steward/plan",
+                json!({ "conversation": "conv-1", "baseRev": 0, "edits": [{ "edit": "unlink", "from": "a", "on": "done", "to": "b" }] })
+            ))
+        );
+        assert_eq!(
             call("state", &[]),
             Ok(StewardCall::Get {
                 path: "/api/steward/state?conversation=conv-1".to_owned()
@@ -750,6 +786,12 @@ mod tests {
             refused("keep-talking", &["01"]),
             "keep-talking <ticket> <message>"
         );
+        for words in [&["x", "[]"][..], &["1", "{}"], &["1", "not json"], &["1"]] {
+            assert_eq!(
+                refused("plan", words),
+                "plan <rev> <edits>: the rev a whole number, the edits a JSON array of Plan edits"
+            );
+        }
         assert_eq!(refused("dance", &[]), "unknown verb 'dance'");
     }
 

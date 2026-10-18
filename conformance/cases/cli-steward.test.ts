@@ -111,9 +111,10 @@ const USAGE_VERBS = [
   "  leave <ticket> <note>",
   "  held adopt|discard <proposal-id>",
   "  reassign <ticket> field=value...   (harness, model, effort, drivers, verify; field= clears)",
+  "  plan <rev> <edits>   (a JSON array of Plan edits; only while the Line's Plan lets the Steward edit it)",
   "  state",
   "  end [closing line]",
-  'A note, message or closing line of "-" is read from standard input.',
+  'A note, message, closing line or edits of "-" is read from standard input.',
 ];
 
 function expectUsage(stderr: string): void {
@@ -167,6 +168,12 @@ conformance("cli", "the steward command maps each verb onto its route, options a
       out: "done /api/steward/reassign\n",
     },
     {
+      argv: [...on, "plan", "2", "-"],
+      stdin: '[{"edit": "unlink", "from": "test", "on": "fail", "to": "fix"}]\n',
+      sent: post("/api/steward/plan", { baseRev: 2, edits: [{ edit: "unlink", from: "test", on: "fail", to: "fix" }] }),
+      out: "done /api/steward/plan\n",
+    },
+    {
       argv: [...on, "state"],
       sent: { method: "GET", path: "/api/steward/state?conversation=conv-1", body: null },
       out: STATE_TEXT,
@@ -201,6 +208,7 @@ conformance("cli", "the steward command maps each verb onto its route, options a
     [["close", "01"], "steward: close <ticket> <note>"],
     [["answer", "01", "close", "x"], "steward: answer <ticket> resume|approve|reject [note]"],
     [["answer", "01", "maybe"], "steward: answer <ticket> resume|approve|reject [note]"],
+    [["plan", "two", "[]"], "steward: plan <rev> <edits>: the rev a whole number, the edits a JSON array of Plan edits"],
     [["dance"], "steward: unknown verb 'dance'"],
   ];
   const sent = console_.requests.length;
