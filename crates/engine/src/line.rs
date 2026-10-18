@@ -498,8 +498,8 @@ pub enum Begin {
 }
 
 /// `POST /api/line {plan, work | brief}`, sent once by Boot: the engine parses the Plan again (its
-/// boundary is the one that counts), refuses what this build cannot run and harness names the
-/// machine lacks, freezes it in `line.json` and wakes. No Ticket is written here: the first tick
+/// boundary is the one that counts), refuses harness names the machine lacks (a node's or a
+/// Merger's resolver), freezes it in `line.json` and wakes. No Ticket is written here: the first tick
 /// projects them.
 pub fn begin_line(
     session: &mut Session,

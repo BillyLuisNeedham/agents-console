@@ -851,7 +851,7 @@ fn resolve_resolver(session: &Session, merger: &Assign) -> anyhow::Result<Option
         _ => (None, None, None),
     };
     let ahead = |own: &Option<String>, config: Option<String>| {
-        non_empty(own.clone().filter(|t| !js::trim(t).is_empty())).or(config)
+        own.clone().filter(|t| !js::trim(t).is_empty()).or(config)
     };
     let (harness, model, effort) = (
         ahead(&merger.harness, harness),
