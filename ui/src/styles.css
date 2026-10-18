@@ -3493,6 +3493,7 @@ textarea.steward-orders {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  color-scheme: dark;
 }
 
 .plans-head {
