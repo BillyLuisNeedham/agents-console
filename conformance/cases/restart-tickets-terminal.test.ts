@@ -427,6 +427,31 @@ conformance("restart", "answering the adoption checkpoint closes the re-adopted 
   expectSameBytes(readTicketFile(world.pool, "01-a.md"), `${stateLine("01", "done")}\n\n${BODY}\n`);
 });
 
+// ADR-0040: a re-adopted Attempt is a live Ticket Attempt, and its ending frees the slot.
+conformance("restart", "under maxLive 1 a re-adopted Attempt holds a Ready Ticket back until its pane ends", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01", "a", { status: "in-progress", body: BODY }), ticket("02", "b")],
+    config: { ...TERMINAL, maxLive: 1 },
+  });
+  const herdr = await t.herdr(world, { ...HERDR, workspaces: [LAUNCH] });
+  orphanedIn(world, "pane-ghost", "tab-ghost");
+  await herdr.control("injectPane", "pane-ghost", { tabId: "tab-ghost", cwd: world.repo });
+  const server = await startInLaunch(t, world, herdr);
+
+  const adopted = await settle(server, "the adoption checkpoint", quiescentWith("01:checkpoint"));
+  expect(cardOf(adopted, "01").liveAttempt).toMatchObject({ attempt: 1, paneId: "pane-ghost" });
+  expect(cardOf(adopted, "02").status).toBe("ready");
+  expect(readEvents(world.pool, "02")).toEqual([]);
+
+  writeFileSync(join(runsOf(world), "01.outcome.json"), JSON.stringify({ status: "done", summary: "adopted", commitSha: null }));
+  writeFileSync(join(runsOf(world), "01.exitcode"), "0\n");
+  await herdr.control("endPane", "pane-ghost");
+  const review = await settle(server, "02 run and the Review raised", quiescentWith("REVIEW:review"));
+  expect(cardOf(review, "02").status).toBe("done");
+  const exited = eventsOf(world, "01", "exited")[0]!;
+  expect(eventsOf(world, "02", "scheduled")[0]!.at >= exited.at).toBe(true);
+});
+
 // ---------------------------------------------------------------------------
 // An enlisted Ticket's pane gone while no server ran
 // ---------------------------------------------------------------------------
