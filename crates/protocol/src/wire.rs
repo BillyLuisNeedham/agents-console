@@ -2504,3 +2504,277 @@ wire_struct! {
         pub plan: PlanFile,
     }
 }
+
+// ---------------------------------------------------------------------------
+// A Line running a Plan (ADR-0039): line.json and the live graph
+// ---------------------------------------------------------------------------
+
+wire_struct! {
+    /// `line.json` in the pool directory: the frozen Plan, its rev, where the Line lives, and what
+    /// the run has absorbed. `ac_core::line::run` is the only reader that decides whether one is
+    /// valid; a file without `horde` is from before Plans and is refused.
+    pub struct LineFile {
+        /// The format tag, 1.
+        pub horde: u32,
+        pub plan: PlanFile,
+        /// Bumped by every applied plan edit.
+        pub rev: u64,
+        pub places: LinePlacesFile,
+        pub run: LineRunFile,
+    }
+}
+
+wire_struct! {
+    /// Where a Line lives: its branch, the Line base it was cut from, the spec and `pushBase` the
+    /// Line brief set, and the work Boot was given.
+    pub struct LinePlacesFile {
+        pub branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub base: Option<LineBase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub spec: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub push_base: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub work: Option<String>,
+    }
+}
+
+wire_enum! {
+    /// Where a running Line stands. `acting` means the Finish was approved and its Finish Ticket is
+    /// owed or running.
+    pub enum LineRunStatus {
+        Running = "running",
+        Finishing = "finishing",
+        Acting = "acting",
+        Done = "done",
+        Closed = "closed",
+    }
+}
+
+wire_struct! {
+    /// The run state a Line has absorbed. Ticket statuses and merged-ness are never stored here.
+    pub struct LineRunFile {
+        pub status: LineRunStatus,
+        /// The Finish Ticket while `acting`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub act: Option<String>,
+        pub nodes: Vec<LineNodeRunFile>,
+        pub edges: Vec<LineEdgeRunFile>,
+        /// Every done Ticket the run absorbed, in the order it settled.
+        pub settled: Vec<String>,
+    }
+}
+
+wire_struct! {
+    /// One item of work: from an Outcome's `items` or a Line brief's.
+    pub struct LineItem {
+        pub title: String,
+        pub body: String,
+    }
+}
+
+wire_struct! {
+    /// What travels along an edge.
+    pub struct LineHandoffFile {
+        /// Absent for what the Line started with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub from: Option<String>,
+        pub verdict: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub items: Vec<LineItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub halted: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// An edge named by its unique `(from, on, to)`.
+    pub struct LineEdgeKey {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+    }
+}
+
+wire_struct! {
+    /// A `join: all` Gate's arrival on one incoming edge.
+    pub struct LineArrivalFile {
+        pub edge: LineEdgeKey,
+        pub handoff: LineHandoffFile,
+    }
+}
+
+wire_struct! {
+    /// One node's run state.
+    pub struct LineNodeRunFile {
+        pub id: String,
+        pub passes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub current: Option<LinePassFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub inbox: Vec<LineHandoffFile>,
+        /// Handoffs on verdicts with no out edge, one per verdict.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub parked: Vec<LineHandoffFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub arrived: Vec<LineArrivalFile>,
+    }
+}
+
+wire_struct! {
+    /// A node's live pass.
+    pub struct LinePassFile {
+        pub n: u32,
+        pub input: LineHandoffFile,
+        pub work: LinePassWorkFile,
+        /// A Decide pass's Prove and Review Tickets, fixed when the pass started.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub reads: Vec<String>,
+    }
+}
+
+wire_union! {
+    /// What a pass runs, told apart by `kind`.
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub enum LinePassWorkFile {
+        Tickets(LineTicketsWork),
+        Conversation(LineConversationWork),
+        Hold(LineHoldWork),
+        Finish(LineFinishWork),
+    }
+}
+
+wire_struct! {
+    @inline
+    /// A Ticket node's copies, and the items queued past its cap.
+    pub struct LineTicketsWork {
+        pub copies: Vec<LineCopyFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub queue: Vec<LineItem>,
+        pub cap: PlanCap,
+        pub next_seq: u32,
+    }
+}
+
+wire_struct! {
+    @inline
+    pub struct LineConversationWork {
+        pub id: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// An operator or Steward Gate's unanswered hold.
+    pub struct LineHoldWork {
+        pub ticket: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// The Finish has its handoff; `hold` once the Finish hold is written.
+    pub struct LineFinishWork {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One copy of a pass.
+    pub struct LineCopyFile {
+        pub ticket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub item: Option<LineItem>,
+        pub freed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub settled: Option<LineSettledFile>,
+    }
+}
+
+wire_struct! {
+    /// A copy's verdict, once it is done and merged or closed.
+    pub struct LineSettledFile {
+        pub verdict: String,
+        pub done: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub items: Vec<LineItem>,
+    }
+}
+
+wire_struct! {
+    /// One loop edge's counts. `traversals` never resets, so a loop hold's id is never reused.
+    pub struct LineEdgeRunFile {
+        pub edge: LineEdgeKey,
+        pub count: u32,
+        pub traversals: u32,
+        pub bought: u32,
+        pub steward_used: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub held: Option<LineHeldFile>,
+    }
+}
+
+wire_struct! {
+    /// A spent loop's handoff, waiting on its hold Ticket.
+    pub struct LineHeldFile {
+        pub ticket: String,
+        pub handoff: LineHandoffFile,
+    }
+}
+
+wire_struct! {
+    /// The Console's live Line graph (`Snapshot.line`, GET /api/line): the frozen Plan with what
+    /// the run holds on each node and loop edge. Ticket statuses join from the snapshot's tickets.
+    pub struct LineGraphView {
+        pub plan: PlanFile,
+        pub rev: u64,
+        pub status: LineRunStatus,
+        /// What the Finish waits for, as the refusal names it.
+        pub waiting_for: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub act: Option<String>,
+        pub nodes: Vec<LineNodeView>,
+        pub edges: Vec<LineEdgeView>,
+    }
+}
+
+wire_struct! {
+    /// One node of the live graph, every Plan node listed.
+    pub struct LineNodeView {
+        pub id: String,
+        pub passes: u32,
+        /// The live pass, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pass: Option<u32>,
+        /// The live pass's copies, or its Conversation.
+        pub tickets: Vec<String>,
+        pub queued: u32,
+        pub inbox: u32,
+        /// Verdicts with no out edge, waiting for one.
+        pub parked: Vec<String>,
+        /// A `join: all` Gate's arrivals so far.
+        pub arrived: Vec<LineEdgeKey>,
+        /// A Gate's or the Finish's hold Ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One capped loop edge of the live graph.
+    pub struct LineEdgeView {
+        pub edge: LineEdgeKey,
+        pub count: u32,
+        pub max: u32,
+        pub bought: u32,
+        /// The spent loop's hold Ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
+    }
+}

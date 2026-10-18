@@ -1333,6 +1333,191 @@ export interface PlanSaveResponse {
 }
 
 // ---------------------------------------------------------------------------
+// A Line running a Plan (line.json, Snapshot.line, GET /api/line)
+// ---------------------------------------------------------------------------
+
+/**
+ * `line.json` in the pool directory: the frozen Plan, its rev, where the Line lives, and what
+ * the run has absorbed. `ac_core::line::run` is the only reader that decides whether one is
+ * valid; a file without `horde` is from before Plans and is refused.
+ */
+export interface LineFile {
+  /** The format tag, 1. */
+  horde: number;
+  plan: PlanFile;
+  /** Bumped by every applied plan edit. */
+  rev: number;
+  places: LinePlacesFile;
+  run: LineRunFile;
+}
+
+/**
+ * Where a Line lives: its branch, the Line base it was cut from, the spec and `pushBase` the
+ * Line brief set, and the work Boot was given.
+ */
+export interface LinePlacesFile {
+  branch: string;
+  base?: LineBase;
+  spec?: string;
+  pushBase?: boolean;
+  work?: string;
+}
+
+/**
+ * Where a running Line stands. `acting` means the Finish was approved and its Finish Ticket is
+ * owed or running.
+ */
+export type LineRunStatus = "running" | "finishing" | "acting" | "done" | "closed";
+
+/** The run state a Line has absorbed. Ticket statuses and merged-ness are never stored here. */
+export interface LineRunFile {
+  status: LineRunStatus;
+  /** The Finish Ticket while `acting`. */
+  act?: string;
+  nodes: LineNodeRunFile[];
+  edges: LineEdgeRunFile[];
+  /** Every done Ticket the run absorbed, in the order it settled. */
+  settled: string[];
+}
+
+/** One item of work: from an Outcome's `items` or a Line brief's. */
+export interface LineItem {
+  title: string;
+  body: string;
+}
+
+/** What travels along an edge. */
+export interface LineHandoffFile {
+  /** Absent for what the Line started with. */
+  from?: string;
+  verdict: string;
+  items?: LineItem[];
+  after?: string[];
+  notes?: string;
+  halted?: string;
+}
+
+/** An edge named by its unique `(from, on, to)`. */
+export interface LineEdgeKey {
+  from: string;
+  on: string;
+  to: string;
+}
+
+/** A `join: all` Gate's arrival on one incoming edge. */
+export interface LineArrivalFile {
+  edge: LineEdgeKey;
+  handoff: LineHandoffFile;
+}
+
+/** One node's run state. */
+export interface LineNodeRunFile {
+  id: string;
+  passes: number;
+  current?: LinePassFile;
+  inbox?: LineHandoffFile[];
+  /** Handoffs on verdicts with no out edge, one per verdict. */
+  parked?: LineHandoffFile[];
+  arrived?: LineArrivalFile[];
+}
+
+/** A node's live pass. */
+export interface LinePassFile {
+  n: number;
+  input: LineHandoffFile;
+  work: LinePassWorkFile;
+  /** A Decide pass's Prove and Review Tickets, fixed when the pass started. */
+  reads?: string[];
+}
+
+/** What a pass runs, told apart by `kind`. */
+export type LinePassWorkFile =
+  | {
+      kind: "tickets";
+      copies: LineCopyFile[];
+      queue?: LineItem[];
+      cap: PlanCap;
+      nextSeq: number;
+    }
+  | { kind: "conversation"; id: string }
+  | { kind: "hold"; ticket: string }
+  | { kind: "finish"; hold?: string };
+
+/** One copy of a pass. */
+export interface LineCopyFile {
+  ticket: string;
+  item?: LineItem;
+  freed: boolean;
+  settled?: LineSettledFile;
+}
+
+/** A copy's verdict, once it is done and merged or closed. */
+export interface LineSettledFile {
+  verdict: string;
+  done: boolean;
+  items?: LineItem[];
+}
+
+/** One loop edge's counts. `traversals` never resets, so a loop hold's id is never reused. */
+export interface LineEdgeRunFile {
+  edge: LineEdgeKey;
+  count: number;
+  traversals: number;
+  bought: number;
+  stewardUsed: boolean;
+  held?: LineHeldFile;
+}
+
+/** A spent loop's handoff, waiting on its hold Ticket. */
+export interface LineHeldFile {
+  ticket: string;
+  handoff: LineHandoffFile;
+}
+
+/**
+ * The Console's live Line graph (`Snapshot.line`, GET /api/line): the frozen Plan with what
+ * the run holds on each node and loop edge. Ticket statuses join from the snapshot's tickets.
+ */
+export interface LineGraphView {
+  plan: PlanFile;
+  rev: number;
+  status: LineRunStatus;
+  /** What the Finish waits for, as the refusal names it. */
+  waitingFor: string[];
+  act?: string;
+  nodes: LineNodeView[];
+  edges: LineEdgeView[];
+}
+
+/** One node of the live graph, every Plan node listed. */
+export interface LineNodeView {
+  id: string;
+  passes: number;
+  /** The live pass, if any. */
+  pass?: number;
+  /** The live pass's copies, or its Conversation. */
+  tickets: string[];
+  queued: number;
+  inbox: number;
+  /** Verdicts with no out edge, waiting for one. */
+  parked: string[];
+  /** A `join: all` Gate's arrivals so far. */
+  arrived: LineEdgeKey[];
+  /** A Gate's or the Finish's hold Ticket. */
+  hold?: string;
+}
+
+/** One capped loop edge of the live graph. */
+export interface LineEdgeView {
+  edge: LineEdgeKey;
+  count: number;
+  max: number;
+  bought: number;
+  /** The spent loop's hold Ticket. */
+  hold?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Resume (POST /api/resume)
 // ---------------------------------------------------------------------------
 
