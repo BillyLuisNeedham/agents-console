@@ -29,6 +29,8 @@ import type {
   KeepTalkingRequest,
   KeepTalkingResponse,
   LineGraphView,
+  LinePlanEditRequest,
+  LinePlanEditResponse,
   LogAttemptInfo,
   MachineDefaultsRequest,
   MergeQueueEntry,
@@ -73,7 +75,7 @@ import type {
  * in `hello`; a page that was built for another one reloads itself, which is
  * how a Restart that rebuilt the UI reaches a tab left open across it.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Where the socket is served. */
 export const WS_PATH = "/api/ws";
@@ -332,6 +334,7 @@ export interface Requests {
   "plans.save": { payload: PlanSaveRequest; result: PlanSaveResponse };
   "plans.delete": { payload: PlanSlugRequest; result: Empty };
   "plans.boot": { payload: PlanBootRequest; result: PlanBootResponse };
+  "line.plan.edit": { payload: LinePlanEditRequest; result: LinePlanEditResponse };
 }
 
 /** Every request the socket takes, by kind (`keyof Requests`). */
@@ -362,7 +365,8 @@ export type RequestKind =
   | "plans.edit"
   | "plans.save"
   | "plans.delete"
-  | "plans.boot";
+  | "plans.boot"
+  | "line.plan.edit";
 
 export type RequestPayload<K extends RequestKind> = Requests[K]["payload"];
 
@@ -401,6 +405,7 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   "plans.save": "PUT /api/plans/<slug>",
   "plans.delete": "DELETE /api/plans/<slug>",
   "plans.boot": "POST /api/plans/boot",
+  "line.plan.edit": "POST /api/line/plan",
 };
 
 /**
@@ -427,6 +432,7 @@ export const ACTION_KINDS: ReadonlySet<RequestKind> = new Set<RequestKind>([
   "plans.save",
   "plans.delete",
   "plans.boot",
+  "line.plan.edit",
 ]);
 
 /**

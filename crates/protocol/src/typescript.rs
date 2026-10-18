@@ -334,7 +334,7 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
             vec![exported::<TerminalPeekResponse>()],
         ),
         (
-            "A Line's verdicts and verbs (POST /api/line, POST /api/line/start, GET /api/line)",
+            "A Line's verdicts and verbs (POST /api/line, POST /api/line/plan, GET /api/line)",
             vec![
                 exported::<ProveResult>(),
                 exported::<ProveVerdict>(),
@@ -346,6 +346,8 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
                 exported::<LinePlanSource>(),
                 exported::<LineBeginRequest>(),
                 exported::<LineResponse>(),
+                exported::<LinePlanEditRequest>(),
+                exported::<LinePlanEditResponse>(),
             ],
         ),
     ]

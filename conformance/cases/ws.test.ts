@@ -1118,6 +1118,11 @@ conformance(
         { slug: "no-such-plan", work: "#1" },
         { method: "POST", path: "/api/plans/boot", body: { slug: "no-such-plan", work: "#1" } },
       ],
+      // This pool runs no Line, so the edit is refused on both paths.
+      "line.plan.edit": [
+        { baseRev: 0, edits: [] },
+        { method: "POST", path: "/api/line/plan", body: { baseRev: 0, edits: [] } },
+      ],
     };
 
     const seen = new Set<string>();

@@ -21,9 +21,10 @@ use ac_protocol::json::Unchecked;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest, PlanDraftResponse,
-    PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse, PlanValidateResponse,
-    PlansListResponse, RequestKind, ResumeAction, RunPhase, StartConversationRequest,
+    LinePlanEditRequest, LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest,
+    PlanDraftResponse, PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse,
+    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, RunPhase,
+    StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
@@ -756,6 +757,37 @@ pub async fn line_request(server: &Server) -> Answer {
     }
 }
 
+/// A plan edit's `{baseRev, edits}`, the Steward's body with its `conversation` too, read into typed
+/// edits, or why it cannot be.
+pub fn read_plan_edit(body: Value) -> Result<(u64, Vec<PlanEdit>), String> {
+    let request: LinePlanEditRequest =
+        serde_json::from_value(body).map_err(|err| format!("line: {err}"))?;
+    let edits = PlanEdit::read_all(&request.edits).map_err(|problems| {
+        let messages: Vec<_> = problems.into_iter().map(|p| p.message).collect();
+        format!("line: the edits cannot be read: {}", messages.join("; "))
+    })?;
+    Ok((request.base_rev, edits))
+}
+
+/// POST /api/line/plan (`line.plan.edit`, ADR-0039): the operator's typed edits to the running
+/// Line's frozen Plan. 200 with the new rev; a body or an edit that cannot be read is a 400, and a
+/// refusal of the Line's (no Line, a stale rev, an invalid Plan, live run state) the 409 `reason`
+/// envelope.
+pub async fn line_plan_edit_request(server: &Server, body: Body) -> Answer {
+    let read = body.and_then(read_plan_edit);
+    let (base_rev, edits) = match read {
+        Ok(read) => read,
+        Err(err) => return Answer::refused(400, Field::Reason, err),
+    };
+    let Some(engine) = server.engine() else {
+        return Answer::refused(409, Field::Reason, "pool not started");
+    };
+    match engine.edit_line_plan(base_rev, edits).await {
+        Ok(edited) => Answer::ok(200, &edited),
+        Err(err) => Answer::refused(409, Field::Reason, err.message()),
+    }
+}
+
 /// GET /api/line/report?node=&pass=: the report that Decide pass wrote (ADR-0037), as the HTML it is,
 /// for the Finish hold's Detail and Open in browser. 404 with the `reason` envelope when the pool's
 /// Line has no such node or the pass has written none.
@@ -1134,6 +1166,7 @@ pub async fn socket_request(
         RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
         RequestKind::PlansEdit => plan_edit_request(body()),
         RequestKind::PlansBoot => plan_boot_request(server, body()).await,
+        RequestKind::LinePlanEdit => line_plan_edit_request(server, body()).await,
         RequestKind::LogRead => {
             let mut inner = server.lock();
             log_request(

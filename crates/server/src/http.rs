@@ -333,6 +333,10 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(routes::begin_line_request(&server, body).await);
         }
+        ("/api/line/plan", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::line_plan_edit_request(&server, body).await);
+        }
         ("/api/line", _) => {
             return http_of(routes::line_request(&server).await);
         }
@@ -679,6 +683,21 @@ async fn steward_route(
                 format!("reassigned {}; resume to run on it", named.join(", ")),
                 200,
             )
+        }
+        "/api/steward/plan" => {
+            let (base_rev, edits) = match routes::read_plan_edit(body.clone()) {
+                Ok(read) => read,
+                Err(err) => return steward_refusal(400, err),
+            };
+            match engine
+                .steward_edit_plan(conversation, base_rev, edits)
+                .await
+            {
+                Ok(edited) => {
+                    steward_done(format!("edited the Plan: now at rev {}", edited.rev), 200)
+                }
+                Err(err) => engine_refused(err),
+            }
         }
         "/api/steward/end" => {
             if let Err(err) = engine.steward_check(conversation.clone()).await {

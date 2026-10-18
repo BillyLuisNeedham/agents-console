@@ -1948,7 +1948,7 @@ export interface TerminalPeekResponse {
 }
 
 // ---------------------------------------------------------------------------
-// A Line's verdicts and verbs (POST /api/line, POST /api/line/start, GET /api/line)
+// A Line's verdicts and verbs (POST /api/line, POST /api/line/plan, GET /api/line)
 // ---------------------------------------------------------------------------
 
 /** Prove's verdict: the merged work runs end to end, or it does not. */
@@ -2009,4 +2009,20 @@ export interface LineBeginRequest {
 /** GET /api/line: the pool's Line as the engine runs it, null when the pool has none. */
 export interface LineResponse {
   line: LineGraphView | null;
+}
+
+/**
+ * POST /api/line/plan's body (`line.plan.edit`), and the Steward's POST /api/steward/plan with
+ * its `conversation`: typed edits to the running Line's frozen Plan, made against the rev they
+ * were read at.
+ */
+export interface LinePlanEditRequest {
+  baseRev: number;
+  edits: PlanEditFile[];
+}
+
+/** An applied edit: the Plan's rev now, and what the edits moved on their own. */
+export interface LinePlanEditResponse {
+  rev: number;
+  notes: string[];
 }

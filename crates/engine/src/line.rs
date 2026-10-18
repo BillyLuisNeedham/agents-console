@@ -13,18 +13,18 @@ use ac_core::conversation_record::ConversationRecord;
 use ac_core::events::{last_attempt, read_events};
 use ac_core::js;
 use ac_core::line::run::{
-    Blocker, ConversationFact, HoldAnswer, Item, LineBrief, LineFacts, LinePlaces, LineRun,
+    Blocker, ConversationFact, Editor, HoldAnswer, Item, LineBrief, LineFacts, LinePlaces, LineRun,
     LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text,
     ticket_text, verdict_of,
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
-use ac_core::plan::{Conflict, MergerNode, NodeBody, Plan, SpawnPolicy};
+use ac_core::plan::{Conflict, MergerNode, NodeBody, Plan, PlanEdit, SpawnPolicy};
 use ac_core::pool::{TicketMarker, load_pool_tickets};
 use ac_io::git;
 use ac_protocol::{
-    ConversationStatus, InterruptKind, LineGraphView, Outcome, OutcomeStatus, TicketEventKind,
-    TicketStatus,
+    ConversationStatus, InterruptKind, LineGraphView, LinePlanEditResponse, Outcome, OutcomeStatus,
+    TicketEventKind, TicketStatus,
 };
 use serde_json::Value;
 
@@ -558,6 +558,45 @@ pub fn begin_line(
     session.wake();
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(view)
+}
+
+/// `line.plan.edit` and the Steward's `POST /api/steward/plan` (ADR-0039): the edit is made on a
+/// copy of the run and saved before it replaces the live one, so a refusal or an unwritable
+/// `line.json` leaves the Line as it was. The next tick writes what the edit handed on.
+pub fn edit_plan(
+    session: &mut Session,
+    by: Editor,
+    base_rev: u64,
+    edits: &[PlanEdit],
+) -> Result<LinePlanEditResponse, EngineError> {
+    let Some(run) = &session.line else {
+        return Err(EngineError::LineRefusal("this pool runs no Line".into()));
+    };
+    let mut next = run.clone();
+    let notes = next
+        .edit(by, base_rev, edits)
+        .map_err(|refusal| EngineError::LineRefusal(refusal.to_string()))?;
+    let (plan, rev) = next.plan();
+    if let Some(problem) = unknown_harness(session, plan) {
+        return Err(EngineError::LineRefusal(problem));
+    }
+    if rev != run.plan().1 {
+        save_line(Path::new(&session.pool_dir), &next).map_err(|error| {
+            EngineError::LineRefusal(format!("line.json could not be written: {error}"))
+        })?;
+        session.line = Some(next);
+        let who = match by {
+            Editor::Operator => "the operator".to_owned(),
+            Editor::Steward => format!(
+                "the Steward ({})",
+                crate::conversations::steward_id(session).unwrap_or_default()
+            ),
+        };
+        session.log(format!("line: {who} edited the Plan: rev {rev}"));
+        session.wake();
+        crate::snapshot::emit_snapshot(session, session.current_phase());
+    }
+    Ok(LinePlanEditResponse { rev, notes })
 }
 
 // Every harness a node names must be one this machine knows: a Ticket written on an unknown one
