@@ -59,7 +59,7 @@ interface Editing {
   inFlight: PlanChange[] | null;
   queued: PlanChange[];
   moved: Map<string, { at: Point; by: PlanChange }>;
-  fields: Map<string, { text: string; by: PlanChange | null }>;
+  fields: Map<string, { kind: "typed"; text: string } | { kind: "committed"; text: string; by: PlanChange }>;
   selection: PlanSelection;
   refusal: string | null;
   control: Control;
@@ -113,7 +113,7 @@ export class PlansStore {
   private state: Phase = { phase: "closed" };
   private list: PlanSummary[] | null = null;
   private listFailure: string | null = null;
-  private token = 0;
+  private openGeneration = 0;
   private waiters: (() => void)[] = [];
   private readonly canvas: PlanCanvas;
 
@@ -160,14 +160,14 @@ export class PlansStore {
   }
 
   private async readList(): Promise<void> {
-    const token = this.token;
+    const generation = this.openGeneration;
     try {
       const response = await this.options.onListPlans();
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       this.list = response.plans;
       this.listFailure = null;
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       this.listFailure = message(err);
     }
     this.onChange();
@@ -206,39 +206,33 @@ export class PlansStore {
   }
 
   private abandon(): void {
-    this.token += 1;
+    this.openGeneration += 1;
     this.wake(true);
   }
 
   private async load(slug: string): Promise<void> {
     this.abandon();
-    const token = this.token;
+    const generation = this.openGeneration;
     this.state = { phase: "opening", slug };
     this.onChange();
     let got: PlanResponse;
     try {
       got = await this.options.onGetPlan(slug);
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       this.state = { phase: "listing", failure: message(err) };
       this.onChange();
       return;
     }
-    if (token !== this.token) return;
-    let reply: PlanDraftResponse | null = null;
-    let refusal: string | null = null;
-    try {
-      reply = await this.options.onEditPlan(got.plan, []);
-    } catch (err) {
-      refusal = message(err);
-    }
-    if (token !== this.token) return;
+    if (generation !== this.openGeneration) return;
+    const { reply, refusal } = await this.probeDraft(got.plan);
+    if (generation !== this.openGeneration) return;
     const doc = reply?.plan ?? got.plan;
     this.state = {
       phase: "editing",
       slug,
       preset: got.preset,
-      opened: token,
+      opened: generation,
       doc,
       problems: reply?.problems ?? got.problems,
       verdicts: new Map((reply?.verdicts ?? []).map((v) => [v.id, v.verdicts])),
@@ -255,6 +249,14 @@ export class PlansStore {
       failure: null,
     };
     this.onChange();
+  }
+
+  private async probeDraft(plan: PlanFile): Promise<{ reply: PlanDraftResponse | null; refusal: string | null }> {
+    try {
+      return { reply: await this.options.onEditPlan(plan, []), refusal: null };
+    } catch (err) {
+      return { reply: null, refusal: message(err) };
+    }
   }
 
   select(selection: PlanSelection): void {
@@ -297,7 +299,7 @@ export class PlansStore {
   type(key: string, text: string): void {
     const e = this.editing();
     if (!e) return;
-    e.fields.set(key, { text, by: null });
+    e.fields.set(key, { kind: "typed", text });
     this.onChange();
   }
 
@@ -309,13 +311,13 @@ export class PlansStore {
       this.onChange();
       return;
     }
-    e.fields.set(key, { text, by: change });
+    e.fields.set(key, { kind: "committed", text, by: change });
     this.change(change);
   }
 
   blur(key: string): void {
     const e = this.editing();
-    if (e?.fields.get(key)?.by !== null) return;
+    if (!e || e.fields.get(key)?.kind !== "typed") return;
     e.fields.delete(key);
     this.onChange();
   }
@@ -345,10 +347,10 @@ export class PlansStore {
     const batch = e.queued.splice(0);
     e.inFlight = batch;
     const sent = e.doc;
-    const token = this.token;
+    const generation = this.openGeneration;
     this.options.onEditPlan(sent, materialize(sent, batch)).then(
       (reply) => {
-        if (token !== this.token) return;
+        if (generation !== this.openGeneration) return;
         e.doc = reply.plan;
         e.problems = reply.problems;
         e.verdicts = new Map(reply.verdicts.map((v) => [v.id, v.verdicts]));
@@ -361,7 +363,7 @@ export class PlansStore {
         this.land(e, batch);
       },
       (err) => {
-        if (token !== this.token) return;
+        if (generation !== this.openGeneration) return;
         e.refusal = message(err);
         this.land(e, batch);
       },
@@ -371,7 +373,7 @@ export class PlansStore {
   private land(e: Editing, batch: PlanChange[]): void {
     const landed = new Set(batch);
     for (const [id, held] of e.moved) if (landed.has(held.by)) e.moved.delete(id);
-    for (const [key, held] of e.fields) if (held.by && landed.has(held.by)) e.fields.delete(key);
+    for (const [key, held] of e.fields) if (held.kind === "committed" && landed.has(held.by)) e.fields.delete(key);
     e.inFlight = null;
     const sel = e.selection;
     if (
@@ -395,21 +397,21 @@ export class PlansStore {
   async save(): Promise<void> {
     const e = this.editing();
     if (!e || e.preset || e.readOnly || e.control.kind === "saving") return;
-    const token = this.token;
+    const generation = this.openGeneration;
     e.control = { kind: "saving" };
     e.failure = null;
     this.onChange();
     await this.settled();
-    if (token !== this.token) return;
+    if (generation !== this.openGeneration) return;
     const doc = e.doc;
     try {
       await this.options.onSavePlan(e.slug, doc);
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       e.baseline = JSON.stringify(doc);
       e.control = { kind: "none" };
       void this.readList();
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       e.control = { kind: "none" };
       e.failure = message(err);
     }
@@ -446,23 +448,23 @@ export class PlansStore {
       this.onChange();
       return;
     }
-    const token = this.token;
+    const generation = this.openGeneration;
     e.control = { ...e.control, busy: true };
     e.failure = null;
     this.onChange();
     await this.settled();
-    if (token !== this.token) return;
+    if (generation !== this.openGeneration) return;
     const doc = e.doc;
     try {
       await this.options.onSavePlan(slug, doc);
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       e.slug = slug;
       e.preset = false;
       e.baseline = JSON.stringify(doc);
       e.control = { kind: "none" };
       void this.readList();
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       if (e.control.kind === "saveAs") e.control = { ...e.control, busy: false, replace: false };
       e.failure = message(err);
     }
@@ -480,18 +482,18 @@ export class PlansStore {
   async confirmDelete(): Promise<void> {
     const e = this.editing();
     if (e?.control.kind !== "delete" || e.control.busy || e.preset) return;
-    const token = this.token;
+    const generation = this.openGeneration;
     e.control = { kind: "delete", busy: true };
     this.onChange();
     try {
       await this.options.onDeletePlan(e.slug);
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       this.abandon();
       this.state = { phase: "listing", failure: null };
       this.onChange();
       await this.readList();
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       e.control = { kind: "delete", busy: false };
       e.failure = message(err);
       this.onChange();
@@ -523,18 +525,18 @@ export class PlansStore {
     const e = this.editing();
     if (e?.control.kind !== "boot" || e.control.busy) return;
     const work = e.control.work.trim();
-    const token = this.token;
+    const generation = this.openGeneration;
     e.control = { ...e.control, busy: true };
     e.failure = null;
     this.onChange();
     await this.settled();
-    if (token !== this.token) return;
+    if (generation !== this.openGeneration) return;
     try {
       const launched = await this.options.onBootPlan(e.slug, work);
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       e.control = { kind: "booted", launched };
     } catch (err) {
-      if (token !== this.token) return;
+      if (generation !== this.openGeneration) return;
       if (e.control.kind === "boot") e.control = { ...e.control, busy: false };
       e.failure = message(err);
     }
