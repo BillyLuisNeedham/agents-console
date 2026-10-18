@@ -536,6 +536,8 @@ impl LineRun {
             };
             match &pass.work {
                 PassWork::Tickets { copies, .. } => {
+                    // A node that was not taught the field never fans anything out.
+                    let makes_items = matches!(&node.body, NodeBody::Ticket(t) if t.makes_items);
                     for copy in copies {
                         let fact = facts.ticket(&copy.ticket);
                         let ended = matches!(fact, TicketFact::Done { .. } | TicketFact::Closed);
@@ -553,7 +555,9 @@ impl LineRun {
                                 verdict,
                                 items,
                                 merged: true,
-                            } => Some((verdict, true, items)),
+                            } => {
+                                Some((verdict, true, if makes_items { items } else { Vec::new() }))
+                            }
                             TicketFact::Closed => Some((Verdict::Closed, false, Vec::new())),
                             _ => None,
                         };
@@ -1146,6 +1150,11 @@ impl LineRun {
                     .find(|v| *v != ok)
                     .unwrap_or(ok)
             };
+            let closed: Vec<String> = settled
+                .iter()
+                .filter(|(_, s)| s.verdict == Verdict::Closed)
+                .map(|(t, _)| format!("{t} was closed"))
+                .collect();
             let handoff = Handoff {
                 from: Some(node.clone()),
                 verdict,
@@ -1156,7 +1165,11 @@ impl LineRun {
                     .map(|(t, _)| (*t).clone())
                     .collect(),
                 notes: None,
-                halted: pass.input.halted.clone(),
+                halted: if closed.is_empty() {
+                    pass.input.halted.clone()
+                } else {
+                    Some(closed.join("; "))
+                },
             };
             self.emit(node, handoff);
         }

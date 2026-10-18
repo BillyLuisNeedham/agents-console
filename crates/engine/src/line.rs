@@ -13,9 +13,9 @@ use ac_core::conversation_record::ConversationRecord;
 use ac_core::events::{last_attempt, read_events};
 use ac_core::js;
 use ac_core::line::run::{
-    Blocker, ConversationFact, HoldAnswer, LineBrief, LineFacts, LinePlaces, LineRun, LineStart,
-    LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text, ticket_text,
-    verdict_of,
+    Blocker, ConversationFact, HoldAnswer, Item, LineBrief, LineFacts, LinePlaces, LineRun,
+    LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text,
+    ticket_text, verdict_of,
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
@@ -93,6 +93,18 @@ impl<'a> SessionFacts<'a> {
             || !self.unlanded.contains(&marker.id)
     }
 
+    fn items(&self, marker: &TicketMarker) -> Vec<Item> {
+        let outcome = self.session.state.outcomes.get(&marker.id);
+        let items = outcome.and_then(|o| o.items.as_deref()).unwrap_or_default();
+        items
+            .iter()
+            .map(|item| Item {
+                title: item.title.clone(),
+                body: item.body.clone(),
+            })
+            .collect()
+    }
+
     fn verdict(&self, marker: &TicketMarker) -> Option<ac_core::plan::Verdict> {
         let kind = match marker.node.as_deref().and_then(|n| node_body(self.plan, n)) {
             Some(NodeBody::Ticket(t)) => Some(t.kind),
@@ -122,7 +134,7 @@ impl LineFacts for SessionFacts<'_> {
             TicketStatus::Done => match self.verdict(marker) {
                 Some(verdict) => TicketFact::Done {
                     verdict,
-                    items: Vec::new(),
+                    items: self.items(marker),
                     merged: self.merged(marker),
                 },
                 None => TicketFact::Live,

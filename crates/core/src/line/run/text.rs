@@ -17,6 +17,7 @@ use crate::line::{
     BRIEF_DIR, BaseBranch, EVIDENCE_SUFFIX, LINE_BRANCH_PREFIX, NO_VERDICT, VERIFY_DIR, brief_path,
     issue_number, line_name_of, prove_verdict, review_verdict, short_commit,
 };
+use crate::outcome::{ITEM_BODY_MAX, ITEM_TITLE_MAX, ITEMS_MAX};
 use crate::plan::{
     CheckpointPolicy, EdgeKey, FinishAct, Node, NodeBody, NodeId, SpawnPolicy, TicketKind,
     TicketNode, Verdict, WhenSpent,
@@ -569,6 +570,19 @@ fn header(node: &Node, kind: &str, n: u32, spawns: SpawnPolicy) -> String {
     )
 }
 
+// What a node that makes Items is taught about the field it adds to its Outcome.
+fn items_teaching() -> String {
+    format!(
+        "## Your items\n\nThis node hands its work on as items. Add `\"items\": [{{\"title\": \"...\", \
+         \"body\": \"...\"}}]` to your Outcome JSON: one entry for each independent piece of work, \
+         and the engine starts one agent on each. Write every entry so one agent can build it \
+         alone, with all it needs in its body. Never give two entries for the same work. Send at \
+         most {ITEMS_MAX} entries, each with a title of 1 to {ITEM_TITLE_MAX} characters and a body \
+         of up to {} KiB. An entry outside these bounds is dropped, and the rest go on.",
+        ITEM_BODY_MAX / 1024
+    )
+}
+
 pub(super) fn copy_ticket(
     run: &LineRun,
     node: &Node,
@@ -632,6 +646,7 @@ pub(super) fn copy_ticket(
         t.note
             .as_ref()
             .map(|note| format!("## Note for this node\n\n{}", js::trim(note))),
+        t.makes_items.then(items_teaching),
         check
             .teaching()
             .map(|teaching| format!("## Your verdict\n\n{teaching}")),
