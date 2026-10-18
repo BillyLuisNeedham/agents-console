@@ -1338,6 +1338,90 @@ export interface PlanSaveResponse {
   plan: PlanFile;
 }
 
+/** A node the editor puts down. A Merger is not among them: making a node per-item places one. */
+export type PlanNodeKind =
+  | "conversation"
+  | "agent"
+  | "prove"
+  | "review"
+  | "decide"
+  | "gate"
+  | "finish";
+
+/**
+ * One typed edit to a Plan, the wire form of `ac_core::plan::PlanEdit`. `plans.edit` applies a
+ * list of them to a draft, and a running Line's edits carry the same list.
+ */
+export type PlanEditFile =
+  /** A new node of `kind` at `(x, y)`, with its kind's defaults; the core names it. */
+  | { edit: "addNode"; kind: PlanNodeKind; x: number; y: number }
+  | { edit: "removeNode"; id: string }
+  /**
+   * Replace a node's title and fields, kind kept. Its id is `node`'s; its place stays where
+   * the draft has it, since `move` owns place.
+   */
+  | { edit: "setNode"; node: PlanNodeFile }
+  | { edit: "link"; edge: PlanEdgeFile }
+  | { edit: "unlink"; from: string; on: string; to: string }
+  /** An absent `cap` uncaps the edge. */
+  | { edit: "setCap"; from: string; on: string; to: string; cap?: PlanLoopCap }
+  | {
+      edit: "setMeta";
+      name: string;
+      author?: string;
+      source?: string;
+      note?: string;
+      stewardEdits?: boolean;
+    }
+  | { edit: "move"; id: string; x: number; y: number };
+
+/**
+ * POST /api/plans/edit's body: a draft, valid or not, and the edits to apply to it in order.
+ * No edits answers the draft as it stands, which is how the editor opens one.
+ */
+export interface PlanEditRequest {
+  plan: PlanFile;
+  edits: PlanEditFile[];
+}
+
+/**
+ * The draft after the edits: the whole file, everything wrong with it (what `plans.validate`
+ * says of `plan`), what the edits moved on their own (a Merger placed or lifted, a Link made
+ * from a Merger), and each node's verdicts in file order, which the editor draws as ports.
+ */
+export interface PlanDraftResponse {
+  plan: PlanFile;
+  problems: PlanProblem[];
+  notes: string[];
+  verdicts: PlanNodeVerdicts[];
+}
+
+/** A node's verdicts: its kind's, or for a Merger its `of` node's. */
+export interface PlanNodeVerdicts {
+  id: string;
+  verdicts: string[];
+}
+
+/**
+ * POST /api/plans/boot: boot a new Line on a saved Plan (a Preset or a library slug) for a
+ * piece of work, as `boot --plan <slug> --work <work> --yes` would.
+ */
+export interface PlanBootRequest {
+  slug: string;
+  /** An issue number or free text. */
+  work: string;
+}
+
+/**
+ * The Boot started detached: its arguments after the program and `boot`, the directory it
+ * runs in, and the log its output is appended to.
+ */
+export interface PlanBootResponse {
+  argv: string[];
+  cwd: string;
+  log: string;
+}
+
 // ---------------------------------------------------------------------------
 // A Line running a Plan (line.json, Snapshot.line, GET /api/line)
 // ---------------------------------------------------------------------------

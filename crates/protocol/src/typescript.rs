@@ -242,6 +242,13 @@ fn wire_sections() -> Vec<(&'static str, Vec<Entry>)> {
                 exported::<PlanValidateResponse>(),
                 exported::<PlanSaveRequest>(),
                 exported::<PlanSaveResponse>(),
+                exported::<PlanNodeKind>(),
+                exported::<PlanEditFile>(),
+                exported::<PlanEditRequest>(),
+                exported::<PlanDraftResponse>(),
+                exported::<PlanNodeVerdicts>(),
+                exported::<PlanBootRequest>(),
+                exported::<PlanBootResponse>(),
             ],
         ),
         (

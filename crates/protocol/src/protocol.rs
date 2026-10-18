@@ -23,7 +23,7 @@ wire_consts! {
     /// Bumped on every change to a message's shape. The server says its version
     /// in `hello`; a page that was built for another one reloads itself, which is
     /// how a Restart that rebuilt the UI reaches a tab left open across it.
-    pub const PROTOCOL_VERSION: u64 = 3;
+    pub const PROTOCOL_VERSION: u64 = 4;
 
     /// Where the socket is served.
     pub const WS_PATH: &str = "/api/ws";
@@ -579,8 +579,10 @@ requests! {
     PlansGet = "plans.get", "GET /api/plans/<slug>", false, PlanSlugRequest => PlanResponse;
     PlansValidate = "plans.validate", "POST /api/plans/validate", false,
         PlanValidateRequest => PlanValidateResponse;
+    PlansEdit = "plans.edit", "POST /api/plans/edit", false, PlanEditRequest => PlanDraftResponse;
     PlansSave = "plans.save", "PUT /api/plans/<slug>", true, PlanSaveRequest => PlanSaveResponse;
     PlansDelete = "plans.delete", "DELETE /api/plans/<slug>", true, PlanSlugRequest => Empty;
+    PlansBoot = "plans.boot", "POST /api/plans/boot", true, PlanBootRequest => PlanBootResponse;
 }
 
 /// The TypeScript `Requests` interface: each kind's payload and result.

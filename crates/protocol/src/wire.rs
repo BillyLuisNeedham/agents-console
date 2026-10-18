@@ -2283,6 +2283,170 @@ wire_struct! {
     }
 }
 
+wire_enum! {
+    /// A node the editor puts down. A Merger is not among them: making a node per-item places one.
+    pub enum PlanNodeKind {
+        Conversation = "conversation",
+        Agent = "agent",
+        Prove = "prove",
+        Review = "review",
+        Decide = "decide",
+        Gate = "gate",
+        Finish = "finish",
+    }
+}
+
+wire_union! {
+    /// One typed edit to a Plan, the wire form of `ac_core::plan::PlanEdit`. `plans.edit` applies a
+    /// list of them to a draft, and a running Line's edits carry the same list.
+    #[serde(tag = "edit", rename_all = "camelCase")]
+    pub enum PlanEditFile {
+        /// A new node of `kind` at `(x, y)`, with its kind's defaults; the core names it.
+        AddNode(PlanAddNodeEdit),
+        RemoveNode(PlanNodeIdEdit),
+        /// Replace a node's title and fields, kind kept. Its id is `node`'s; its place stays where
+        /// the draft has it, since `move` owns place.
+        SetNode(PlanSetNodeEdit),
+        Link(PlanLinkEdit),
+        Unlink(PlanEdgeKeyEdit),
+        /// An absent `cap` uncaps the edge.
+        SetCap(PlanSetCapEdit),
+        SetMeta(PlanSetMetaEdit),
+        Move(PlanMoveEdit),
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanAddNodeEdit {
+        pub kind: PlanNodeKind,
+        pub x: i32,
+        pub y: i32,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanNodeIdEdit {
+        pub id: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanSetNodeEdit {
+        pub node: PlanNodeFile,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanLinkEdit {
+        pub edge: PlanEdgeFile,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanEdgeKeyEdit {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanSetCapEdit {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cap: Option<PlanLoopCap>,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanSetMetaEdit {
+        pub name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub author: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub steward_edits: Option<bool>,
+    }
+}
+
+wire_struct! {
+    @inline
+    #[serde(deny_unknown_fields)]
+    pub struct PlanMoveEdit {
+        pub id: String,
+        pub x: i32,
+        pub y: i32,
+    }
+}
+
+wire_struct! {
+    /// POST /api/plans/edit's body: a draft, valid or not, and the edits to apply to it in order.
+    /// No edits answers the draft as it stands, which is how the editor opens one.
+    pub struct PlanEditRequest {
+        pub plan: Unchecked<PlanFile>,
+        pub edits: Vec<PlanEditFile>,
+    }
+}
+
+wire_struct! {
+    /// The draft after the edits: the whole file, everything wrong with it (what `plans.validate`
+    /// says of `plan`), what the edits moved on their own (a Merger placed or lifted, a Link made
+    /// from a Merger), and each node's verdicts in file order, which the editor draws as ports.
+    pub struct PlanDraftResponse {
+        pub plan: PlanFile,
+        pub problems: Vec<PlanProblem>,
+        pub notes: Vec<String>,
+        pub verdicts: Vec<PlanNodeVerdicts>,
+    }
+}
+
+wire_struct! {
+    /// A node's verdicts: its kind's, or for a Merger its `of` node's.
+    pub struct PlanNodeVerdicts {
+        pub id: String,
+        pub verdicts: Vec<String>,
+    }
+}
+
+wire_struct! {
+    /// POST /api/plans/boot: boot a new Line on a saved Plan (a Preset or a library slug) for a
+    /// piece of work, as `boot --plan <slug> --work <work> --yes` would.
+    pub struct PlanBootRequest {
+        pub slug: String,
+        /// An issue number or free text.
+        pub work: String,
+    }
+}
+
+wire_struct! {
+    /// The Boot started detached: its arguments after the program and `boot`, the directory it
+    /// runs in, and the log its output is appended to.
+    pub struct PlanBootResponse {
+        pub argv: Vec<String>,
+        pub cwd: String,
+        pub log: String,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A Line running a Plan (ADR-0039): line.json and the live graph
 // ---------------------------------------------------------------------------

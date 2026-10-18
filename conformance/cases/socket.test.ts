@@ -30,7 +30,7 @@ conformance("socket", "a socket opens with the server's hello, then the whole sn
 
   expectParsedEqual(
     socket.frames[0],
-    { type: "hello", protocol: 3, epoch: expect.any(String), heartbeatMs: 20_000 },
+    { type: "hello", protocol: 4, epoch: expect.any(String), heartbeatMs: 20_000 },
     "the first frame",
   );
   expectParsedEqual(

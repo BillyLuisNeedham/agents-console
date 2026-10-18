@@ -35,6 +35,10 @@ import type {
   Outcome,
   PanesResponse,
   PendingSpawnView,
+  PlanBootRequest,
+  PlanBootResponse,
+  PlanDraftResponse,
+  PlanEditRequest,
   PlanResponse,
   PlanSaveRequest,
   PlanSaveResponse,
@@ -69,7 +73,7 @@ import type {
  * in `hello`; a page that was built for another one reloads itself, which is
  * how a Restart that rebuilt the UI reaches a tab left open across it.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Where the socket is served. */
 export const WS_PATH = "/api/ws";
@@ -320,8 +324,10 @@ export interface Requests {
   "plans.list": { payload: Empty; result: PlansListResponse };
   "plans.get": { payload: PlanSlugRequest; result: PlanResponse };
   "plans.validate": { payload: PlanValidateRequest; result: PlanValidateResponse };
+  "plans.edit": { payload: PlanEditRequest; result: PlanDraftResponse };
   "plans.save": { payload: PlanSaveRequest; result: PlanSaveResponse };
   "plans.delete": { payload: PlanSlugRequest; result: Empty };
+  "plans.boot": { payload: PlanBootRequest; result: PlanBootResponse };
 }
 
 /** Every request the socket takes, by kind (`keyof Requests`). */
@@ -349,8 +355,10 @@ export type RequestKind =
   | "plans.list"
   | "plans.get"
   | "plans.validate"
+  | "plans.edit"
   | "plans.save"
-  | "plans.delete";
+  | "plans.delete"
+  | "plans.boot";
 
 export type RequestPayload<K extends RequestKind> = Requests[K]["payload"];
 
@@ -385,8 +393,10 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   "plans.list": "GET /api/plans",
   "plans.get": "GET /api/plans/<slug>",
   "plans.validate": "POST /api/plans/validate",
+  "plans.edit": "POST /api/plans/edit",
   "plans.save": "PUT /api/plans/<slug>",
   "plans.delete": "DELETE /api/plans/<slug>",
+  "plans.boot": "POST /api/plans/boot",
 };
 
 /**
@@ -412,6 +422,7 @@ export const ACTION_KINDS: ReadonlySet<RequestKind> = new Set<RequestKind>([
   "settings.machine.put",
   "plans.save",
   "plans.delete",
+  "plans.boot",
 ]);
 
 /**

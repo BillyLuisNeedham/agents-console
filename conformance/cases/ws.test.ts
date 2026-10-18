@@ -1104,12 +1104,21 @@ conformance(
         { method: "GET", path: `/api/pool-log?before=${logTotal}&limit=3` },
       ],
       // The Plan kinds are asked of what writes nothing: the list, a slug nobody saved, a draft the
-      // validator answers whatever it holds, a bad slug and a Preset's slug.
+      // validator answers whatever it holds, an edit that names no node, a bad slug, a Preset's
+      // slug, and a boot on a slug nobody saved, refused before Boot is started.
       "plans.list": [{}, { method: "GET", path: "/api/plans" }],
       "plans.get": [{ slug: "no-such-plan" }, { method: "GET", path: "/api/plans/no-such-plan" }],
       "plans.validate": [{ plan: NO_PLAN }, { method: "POST", path: "/api/plans/validate", body: { plan: {} } }],
       "plans.save": [{ slug: "BAD", plan: NO_PLAN }, { method: "PUT", path: "/api/plans/BAD", body: {} }],
+      "plans.edit": [
+        { plan: NO_PLAN, edits: [{ edit: "removeNode", id: "nobody" }] },
+        { method: "POST", path: "/api/plans/edit", body: { plan: {}, edits: [{ edit: "removeNode", id: "nobody" }] } },
+      ],
       "plans.delete": [{ slug: "factory-today" }, { method: "DELETE", path: "/api/plans/factory-today" }],
+      "plans.boot": [
+        { slug: "no-such-plan", work: "#1" },
+        { method: "POST", path: "/api/plans/boot", body: { slug: "no-such-plan", work: "#1" } },
+      ],
     };
 
     const seen = new Set<string>();

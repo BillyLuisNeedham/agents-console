@@ -205,7 +205,7 @@ fn a_reply_names_its_kind() {
             .iter()
             .filter(|kind| kind.is_action())
             .count(),
-        17
+        18
     );
 }
 

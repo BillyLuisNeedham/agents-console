@@ -24,7 +24,7 @@ import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 export const WS_PATH = "/api/ws";
 
 /** The protocol version a client says in its hello. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** How many of the pool log's last lines a pushed snapshot carries. */
 export const POOL_LOG_WINDOW = 500;
@@ -68,7 +68,9 @@ const REQUEST_KINDS: Record<RequestKind, true> = {
   "plans.get": true,
   "plans.validate": true,
   "plans.save": true,
+  "plans.edit": true,
   "plans.delete": true,
+  "plans.boot": true,
 };
 
 /** A frame that is not this protocol's, or a delta that does not fit. */

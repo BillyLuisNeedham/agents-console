@@ -1075,6 +1075,9 @@ pub async fn socket_request(
                 .ok_or_else(|| "plan is required".to_owned()),
         ),
         RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
+        RequestKind::PlansEdit | RequestKind::PlansBoot => {
+            Answer::refused(404, Field::Reason, "plans: not built yet")
+        }
         RequestKind::LogRead => {
             let mut inner = server.lock();
             log_request(
