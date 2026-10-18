@@ -814,7 +814,7 @@ async fn decide_round(
     let selection = crate::verify::pick_winner(engine, marker, &attempts, &grades).await?;
     let marker = marker.clone();
     in_merge_chain(engine, move |s| {
-        crate::verify::finish_selection(s, &marker, selection)
+        crate::verify::complete_selection(s, &marker, selection.picked, &selection.why, true)
     })
     .await
 }

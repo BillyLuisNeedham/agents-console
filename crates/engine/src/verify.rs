@@ -1565,17 +1565,6 @@ pub async fn pick_winner(
     Ok(Selection { picked, why })
 }
 
-pub fn finish_selection(
-    session: &mut Session,
-    marker: &TicketMarker,
-    selection: Selection,
-) -> anyhow::Result<()> {
-    if selection.picked.rule == SelectionRule::Outright {
-        close_superseded_head_to_head(session, &marker.id)?;
-    }
-    complete_selection(session, marker, selection.picked, &selection.why, true)
-}
-
 /// `raiseSelectionInterrupt`: the selection point with the human as judge: the interrupt carries every
 /// candidate's grade, and the answer names the attempt whose branch merges. The ticket stays in-progress
 /// with every attempt branch parked; the candidates ride on the interrupt so the answer is validated
@@ -1755,14 +1744,16 @@ pub fn adopt_candidate(
 /// attempt won and under which rule, the winner's branch merges through the existing merge path, the
 /// engine writes the done status (ADR-0005), and every other attempt branch of the ticket, this round's
 /// losers and any superseded round's alike, is discarded. A conflicted merge parks the winner's branch
-/// and checkpoints for the human, the way a lone attempt's conflicted merge does.
-fn complete_selection(
+/// and checkpoints for the human, the way a lone attempt's conflicted merge does. The round's
+/// head-to-head card is settled first, whichever rule picked.
+pub fn complete_selection(
     session: &mut Session,
     marker: &TicketMarker,
     picked: Picked,
     why: &str,
     emit: bool,
 ) -> anyhow::Result<()> {
+    close_superseded_head_to_head(session, &marker.id)?;
     let attempt = picked.attempt;
     let mut payload = Map::new();
     payload.insert(
@@ -2210,8 +2201,8 @@ async fn run_head_to_head(
 
 /// `closeSupersededHeadToHead`: closing a superseded head-to-head card: a review reject resets its
 /// marker to ready along with its build ticket's, and an engine crash mid-judge leaves it behind for
-/// rehydrate to reset; a re-round whose grades then decide outright never rewrites the card, so without
-/// this the run could never pass Review's all-done check. The engine owns the write, and the card's own
+/// rehydrate to reset; a re-round whose selection then needs no judge never rewrites the card, so
+/// without this the run could never pass Review's all-done check. The engine owns the write, and the card's own
 /// ticket log already holds the round it judged.
 fn close_superseded_head_to_head(session: &mut Session, build_id: &str) -> anyhow::Result<()> {
     let h2h_id = head_to_head_id_for(build_id);
