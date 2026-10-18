@@ -48,7 +48,7 @@ import { nextFrame } from "./frame";
 import { KEEP_CHILDREN, keep } from "./morph";
 import { renderTerminalSurface } from "./terminal";
 import { renderStewardBadge } from "./steward";
-import { renderDeliveryWarning, renderGrillBadge } from "./conversations";
+import { renderDeliveryWarning, renderNodeBadge } from "./conversations";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
@@ -213,12 +213,6 @@ function interruptDot(interrupt: InterruptView): HTMLElement {
       ? `answered · waiting · ${interrupt.kind}`
       : `interrupt · ${interrupt.kind}`,
   });
-}
-
-// A Line Ticket's label (ADR-0039), in its card's head beside the id: the
-// Grill badge's chip, naming the Plan node the Ticket works.
-function nodeBadge(node: string): HTMLElement {
-  return h("span", { class: "node-badge", title: `the Line's ${node} node` }, node);
 }
 
 type Drag =
@@ -457,7 +451,6 @@ export class Canvas {
   private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
-  private readonly onStartLine: (grillId: string) => void;
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
   private readonly onConfirmStop: () => void;
@@ -492,9 +485,6 @@ export class Canvas {
     /** A Conversation card's End button. Fire-and-forget: the Conversations
      *  store tracks the in-flight/failure state the card reads back. */
     onEndConversation: (conversationId: string) => void;
-    /** A Grill card's Start the Line button (ADR-0037), the End button's
-     *  way: the Conversations store tracks what the card reads back. */
-    onStartLine: (grillId: string) => void;
     /** The header's Stop control (issue #97): arm the inline confirmation,
      *  drop it, and send the stop. Cancel sends nothing. */
     onArmStop: () => void;
@@ -516,7 +506,6 @@ export class Canvas {
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
     this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
-    this.onStartLine = options.onStartLine;
     this.onArmStop = options.onArmStop;
     this.onCancelStop = options.onCancelStop;
     this.onConfirmStop = options.onConfirmStop;
@@ -702,7 +691,7 @@ export class Canvas {
       "div",
       { class: "node-card-head" },
       h("span", { class: "node-card-id" }, card.ticketId),
-      card.node ? nodeBadge(card.node) : null,
+      card.node ? renderNodeBadge(card.node) : null,
       h(
         "span",
         {
@@ -823,9 +812,8 @@ export class Canvas {
   // A Conversation card (ADR-0018): title, Assignment, the Turn state badge
   // (waiting on you / agent working), the last line said, idle age, status
   // once ended or crashed, the same read-only terminal peek ticket cards
-  // carry, and an End button; a live Grill offers Start the Line beside it
-  // (ADR-0037). No blockers, no grade, no Vitals: a Conversation is not a
-  // Ticket and holds no attempt.
+  // carry, and an End button. No blockers, no grade, no Vitals: a
+  // Conversation is not a Ticket and holds no attempt.
   private renderConversationCard(
     card: ConversationCardView,
     selection: CanvasSelection,
@@ -836,7 +824,7 @@ export class Canvas {
       { class: "node-card-head" },
       h("span", { class: "node-card-id" }, card.conversationId),
       card.steward ? renderStewardBadge() : null,
-      card.grill ? renderGrillBadge() : null,
+      card.node ? renderNodeBadge(card.node) : null,
       h(
         "span",
         { class: `node-card-state conversation-turn-${card.turn.state}` },
@@ -870,24 +858,10 @@ export class Canvas {
       );
     }
     if (card.status === "live") {
-      const offerLine = card.grill && !card.endView.ending;
       body.push(
         h(
           "div",
           { class: "conversation-end-row" },
-          offerLine
-            ? h(
-                "button",
-                {
-                  class: "btn btn-primary conversation-start-line",
-                  type: "button",
-                  disabled: card.lineStart.starting,
-                  title: card.lineStart.failure ?? "hand the Grill's brief to its Line",
-                  onclick: () => this.onStartLine(card.conversationId),
-                },
-                card.lineStart.starting ? "starting..." : "Start the Line",
-              )
-            : null,
           h(
             "button",
             {
@@ -903,13 +877,6 @@ export class Canvas {
             ? h("span", { class: "error-inline conversation-end-failure" }, card.endView.failure)
             : null,
         ),
-        offerLine && card.lineStart.failure
-          ? h(
-              "div",
-              { class: "error-inline conversation-start-line-failure" },
-              card.lineStart.failure,
-            )
-          : null,
       );
     }
     return h(
@@ -918,7 +885,7 @@ export class Canvas {
         class:
           `node-card conversation-card conversation-card-${card.status}` +
           (card.steward ? " conversation-card-steward" : "") +
-          (card.grill ? " conversation-card-grill" : "") +
+          (card.node ? " conversation-card-node" : "") +
           this.flowClass(card.id, selection),
         key: card.id,
         "data-node-id": card.id,

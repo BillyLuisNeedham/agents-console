@@ -3385,10 +3385,33 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
-      grill: false,
-      lineStart: { starting: false, failure: null },
+      node: null,
       delivery: null,
     });
+  });
+});
+
+describe("a Line Conversation's node", () => {
+  it("rides the card, its Detail and the tray row, and is null on an ordinary Conversation", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [conversation("grill-1", { node: "grill" }), conversation("conv-2")],
+      },
+    });
+    const view = projectPool(snap);
+    const nodes = view.cards.flatMap((card) =>
+      card.kind === "conversation" ? [[card.conversationId, card.node]] : [],
+    );
+    expect(nodes).toEqual([
+      ["grill-1", "grill"],
+      ["conv-2", null],
+    ]);
+    expect((detailOf(snap, "conversation:grill-1") as { node: string | null }).node).toBe("grill");
+    expect(projectConversationsTray(snap.state.conversations).map((row) => row.node)).toEqual([
+      "grill",
+      null,
+    ]);
   });
 });
 

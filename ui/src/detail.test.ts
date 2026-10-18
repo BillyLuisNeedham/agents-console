@@ -153,7 +153,6 @@ function rig(detail: TicketDetailView) {
     onUseStewardNote: () => {},
     onSelectTab: () => {},
     onEndConversation: () => {},
-    onStartLine: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
     onFocusResolver: () => Promise.resolve(true),
     renderSpawnDecision: () => document.createElement("div"),
@@ -512,7 +511,6 @@ describe("Detail: Keep talking (issue #139)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -620,7 +618,6 @@ describe("Detail: Adopt (ADR-0035)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -746,7 +743,6 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -880,8 +876,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
             onUseStewardNote: () => {},
             onSelectTab: () => {},
             onEndConversation: () => {},
-            onStartLine: () => {},
-            onFocusConversationTerminal: () => Promise.resolve(true),
+                  onFocusConversationTerminal: () => Promise.resolve(true),
             onFocusResolver: () => Promise.resolve(true),
             renderSpawnDecision: () => document.createElement("div"),
             reassign: new ReassignStore({
@@ -914,7 +909,6 @@ describe("Detail: the Steward (ADR-0030)", () => {
       onUseStewardNote: (ticketId, text) => uses.push({ ticketId, text }),
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1087,7 +1081,6 @@ describe("Detail: a long timeline (issue #161)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1304,7 +1297,6 @@ describe("Detail: a closed ticket (issue #154)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1389,31 +1381,32 @@ describe("Detail: a closed ticket (issue #154)", () => {
   });
 });
 
-describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
-  function grillDetail(overrides: Partial<ConversationDetailView> = {}): ConversationDetailView {
+describe("Detail: a Line's Conversation (ADR-0039)", () => {
+  function lineConversation(
+    overrides: Partial<ConversationDetailView> = {},
+  ): ConversationDetailView {
     return {
       kind: "conversation",
-      conversationId: "conv-2",
+      conversationId: "grill-1",
       title: "grill the next feature",
       status: "live",
       spawnedBy: null,
       assignment: { harness: "claude", model: "opus", drivers: "implement" },
       paneId: null,
-      branch: "pool/x/conv-2",
+      branch: "pool/x/grill-1",
       turn: { state: "waiting", lastLine: "brief committed", idleSince: null },
       idleAge: null,
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
-      grill: true,
-      lineStart: { starting: false, failure: null },
+      node: "grill",
       delivery: null,
       ...overrides,
     };
   }
 
   function paint(detail: ConversationDetailView) {
-    const starts: string[] = [];
+    const ends: [string, string | undefined][] = [];
     const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const handlers: DetailHandlers = {
       onSelectAttempt: () => {},
@@ -1423,8 +1416,7 @@ describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
       onKeepTalking: () => {},
       onUseStewardNote: () => {},
       onSelectTab: () => {},
-      onEndConversation: () => {},
-      onStartLine: (grillId) => starts.push(grillId),
+      onEndConversation: (id, closing) => ends.push([id, closing]),
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1452,48 +1444,23 @@ describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
       );
       return shell;
     });
-    return { root, starts };
+    return { root, ends };
   }
 
-  const button = (root: HTMLElement) =>
-    root.querySelector<HTMLButtonElement>(".conversation-start-line");
-
-  it("offers Start the Line on a live Grill, marked as the Grill", () => {
-    const { root } = paint(grillDetail());
-    expect(button(root)?.textContent).toBe("Start the Line");
-    expect(button(root)?.disabled).toBe(false);
-    expect(root.querySelector(".grill-badge")?.textContent).toBe("Grill");
+  it("names the node on the Detail and offers no Start the Line", () => {
+    const { root } = paint(lineConversation());
+    expect(root.querySelector(".node-badge")?.textContent).toBe("grill");
+    expect(root.querySelector(".conversation-start-line")).toBeNull();
+    expect(root.textContent).not.toContain("Start the Line");
   });
 
-  it("offers it on no other Conversation, and not on a Grill that is ending or ended", () => {
+  it("names no node on an ordinary Conversation or the Steward", () => {
     for (const detail of [
-      grillDetail({ grill: false }),
-      grillDetail({ steward: true, grill: false }),
-      grillDetail({ endView: { ending: true, failure: null } }),
-      grillDetail({ status: "ended" }),
+      lineConversation({ node: null }),
+      lineConversation({ node: null, steward: true }),
     ]) {
-      expect(button(paint(detail).root)).toBeNull();
+      expect(paint(detail).root.querySelector(".node-badge")).toBeNull();
     }
-  });
-
-  it("sends the Grill's id when pressed", () => {
-    const { root, starts } = paint(grillDetail());
-    button(root)!.click();
-    expect(starts).toEqual(["conv-2"]);
-  });
-
-  it("disables itself while the start is in flight", () => {
-    const { root } = paint(grillDetail({ lineStart: { starting: true, failure: null } }));
-    expect(button(root)?.disabled).toBe(true);
-    expect(button(root)?.textContent).toBe("starting...");
-  });
-
-  it("shows the refusal's reason beside the button", () => {
-    const reason =
-      "no Line brief: docs/specs/ in the Grill's committed branch pool/x/conv-2 holds no *.brief.json";
-    const { root } = paint(grillDetail({ lineStart: { starting: false, failure: reason } }));
-    expect(root.querySelector(".conversation-start-line-failure")?.textContent).toBe(reason);
-    expect(button(root)?.disabled).toBe(false);
   });
 });
 
@@ -1511,7 +1478,6 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),

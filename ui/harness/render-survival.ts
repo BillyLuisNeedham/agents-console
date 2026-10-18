@@ -52,6 +52,8 @@ const STEWARD_NOTE =
 const FINISH_TICKET = "finish-1";
 const DECIDE_TICKET = "decide-1";
 const LINE_NODES = ["implement", "prove", "review", "decide", "finish"] as const;
+/** A Line's Conversation pass (ADR-0039), its card head carrying the node. */
+const GRILL = "grill-1";
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -219,6 +221,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
           role: "steward",
           turn: { state: "waiting", lastLine: "left t-3 to you", idleSince: "2026-09-21T10:00:00Z" },
         }),
+        conversation(GRILL, { title: "grill the work", node: "grill" }),
         ...Array.from({ length: 30 }, (_, i) =>
           conversation(`c-${i + 1}`, {
             // One whose Notices are not landing, so its tray row wraps a
@@ -416,7 +419,6 @@ const view = new ConsoleView({
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
-  onStartLine: () => Promise.resolve(),
 });
 
 const handlers: Handlers = {
@@ -992,6 +994,24 @@ function layoutChecks(name: string): void {
         ? `heads overflow: ${spilled.map((head) => head.textContent).join(", ")}`
         : null,
     `${labelled.length} labelled heads, each inside its card`,
+  );
+  // A Line Conversation's card head carries the node beside its id and state.
+  const nodeHeads = [
+    ...root.querySelectorAll<HTMLElement>(".conversation-card .node-card-head .node-badge"),
+  ].map((badge) => badge.parentElement as HTMLElement);
+  const nodeSpilled = nodeHeads.filter(
+    (head) =>
+      overflowOf(head, head.closest<HTMLElement>(".node-card")!) !== null ||
+      [...head.children].some((kid) => overflowOf(kid as HTMLElement, head) !== null),
+  );
+  push(
+    "line conversation card head holds its width",
+    nodeHeads.length !== 1
+      ? `${nodeHeads.length} node badges on Conversation cards, expected 1`
+      : nodeSpilled.length
+        ? `head overflows: ${nodeSpilled[0]!.textContent}`
+        : null,
+    `"${nodeHeads[0]?.textContent}" inside its card`,
   );
   const tray = q<HTMLElement>(".conversations-tray");
   for (const [assertion, selector] of [

@@ -20,7 +20,6 @@ import {
   endingConversation,
 } from "./optimistic";
 import type { PoolConfigPatch } from "./project";
-import { postStartLine } from "./conversations";
 import { ConsoleSession } from "./session";
 import {
   ConsoleSocket,
@@ -170,7 +169,6 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
           endingConversation(id),
         )
         .then(() => undefined),
-    onStartLine: (grillId) => postStartLine(grillId),
   });
 
   const handlers: Handlers = {
@@ -232,11 +230,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     renders,
     handlers,
     draw() {
-      view.render(
-        root,
-        session.model(view.conversationEndState(), view.conversationLineStartState()),
-        handlers,
-      );
+      view.render(root, session.model(view.conversationEndState()), handlers);
     },
     start() {
       // A render the operator's own press asked for is not left for the

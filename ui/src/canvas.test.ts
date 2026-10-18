@@ -165,7 +165,6 @@ function mountCanvas(
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
-    onStartLine: () => {},
     onArmStop: () => {},
     onCancelStop: () => {},
     onConfirmStop: () => {},
@@ -824,12 +823,8 @@ describe("the Steward on the canvas (ADR-0030)", () => {
 });
 
 
-describe("a Grill on the canvas (ADR-0037)", () => {
-  function grillPool(
-    overrides: { ending?: boolean } = {},
-    lineStart: { starting: boolean; failure: string | null } = { starting: false, failure: null },
-    role: "grill" | "steward" = "grill",
-  ): CanvasModel {
+describe("a Line's Conversation on the canvas (ADR-0039)", () => {
+  function conversationPool(extra: { node?: string; role?: "steward" } = {}): CanvasModel {
     const snapshot: EnrichedSnapshot = {
       seq: 1,
       phase: "running",
@@ -844,7 +839,7 @@ describe("a Grill on the canvas (ADR-0037)", () => {
         tickets: [],
         conversations: [
           {
-            id: "conv-2",
+            id: "grill-1",
             title: "grill the next feature",
             status: "live",
             spawnedBy: null,
@@ -854,8 +849,9 @@ describe("a Grill on the canvas (ADR-0037)", () => {
             turn: { state: "waiting", lastLine: "", idleSince: null },
             children: [],
             enlisted: false,
-            ending: overrides.ending ?? false,
-            ...(role === "grill" ? { node: "grill" } : { role }),
+            ending: false,
+            ...(extra.node ? { node: extra.node } : {}),
+            ...(extra.role ? { role: extra.role } : {}),
           },
         ],
         log: [],
@@ -866,48 +862,29 @@ describe("a Grill on the canvas (ADR-0037)", () => {
         config: {},
       },
     };
-    const lineStarts = { "conv-2": lineStart };
-    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), {}, {}, lineStarts).cards });
+    return model({ cards: projectPool(snapshot).cards });
   }
 
-  it("marks a Grill's card and offers Start the Line on it", () => {
-    const starts: string[] = [];
-    const { root, commit } = mountCanvas(grillPool(), {
-      onStartLine: (grillId) => starts.push(grillId),
-    });
+  it("marks the card with the node it works, and offers no Start the Line", () => {
+    const { root, commit } = mountCanvas(conversationPool({ node: "grill" }));
     commit();
-    const card = root.querySelector('[data-conversation-id="conv-2"]')!;
-    expect(card.classList.contains("conversation-card-grill")).toBe(true);
-    expect(card.querySelector(".grill-badge")?.textContent).toBe("Grill");
-    const start = card.querySelector<HTMLButtonElement>(".conversation-start-line")!;
-    expect(start.textContent).toBe("Start the Line");
-    expect(start.disabled).toBe(false);
-    start.click();
-    expect(starts).toEqual(["conv-2"]);
+    const card = root.querySelector('[data-conversation-id="grill-1"]')!;
+    expect(card.classList.contains("conversation-card-node")).toBe(true);
+    expect(card.querySelector(".node-card-head .node-badge")?.textContent).toBe("grill");
+    expect(card.querySelector(".conversation-start-line")).toBeNull();
+    expect(card.textContent).not.toContain("Start the Line");
   });
 
-  it("disables Start the Line in flight and shows its refusal", () => {
-    const busy = mountCanvas(grillPool({}, { starting: true, failure: null }));
-    busy.commit();
-    const button = busy.root.querySelector<HTMLButtonElement>(".conversation-start-line")!;
-    expect(button.disabled).toBe(true);
-    expect(button.textContent).toBe("starting...");
-
-    const refused = mountCanvas(grillPool({}, { starting: false, failure: "the Line has already started" }));
-    refused.commit();
-    expect(refused.root.querySelector(".conversation-start-line-failure")?.textContent).toBe(
-      "the Line has already started",
-    );
-  });
-
-  it("offers no Start the Line on a Grill that is ending, or on a Conversation that is not a Grill", () => {
-    for (const pool of [grillPool({ ending: true }), grillPool({}, undefined, "steward")]) {
+  it("marks no node on an ordinary Conversation or the Steward", () => {
+    for (const pool of [conversationPool(), conversationPool({ role: "steward" })]) {
       const { root, commit } = mountCanvas(pool);
       commit();
-      expect(root.querySelector(".conversation-start-line")).toBeNull();
+      expect(root.querySelector(".node-badge")).toBeNull();
+      expect(root.querySelector(".conversation-card-node")).toBeNull();
     }
   });
 });
+
 describe("Notices not landing on the canvas", () => {
   it("warns on the card, the error on hover", () => {
     const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };
