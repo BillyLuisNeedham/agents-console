@@ -3,7 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import type { PlanFile, PlanNodeKind } from "../../protocol/wire.ts";
 import { commit } from "./morph";
-import { PlanCanvas, type PlanCanvasModel, type PlanSelection } from "./plan-canvas";
+import { PlanCanvas, VIEW_ORIGIN, type PlanCanvasModel, type PlanSelection } from "./plan-canvas";
 import type { EdgeKey } from "./plan-projection";
 import type { Point } from "./geometry";
 import { useDom } from "./test-dom";
@@ -35,14 +35,14 @@ function setup(editable = true) {
     remove: () => {},
   });
   const model: PlanCanvasModel = {
-    docKey: "1",
+    fitKey: "1",
     plan,
     problems: [],
     verdicts: new Map([
       ["build", ["done", "closed"]],
       ["finish", ["revise"]],
     ]),
-    moved: new Map(),
+    pendingDrops: new Map(),
     selection: null,
     editable,
   };
@@ -53,11 +53,11 @@ function setup(editable = true) {
   };
   draw();
   const viewport = () => root.querySelector<HTMLElement>(".plan-viewport")!;
-  // Before a fit the view is panned by (24, 24) at zoom 1, and happy-dom
-  // lays nothing out, so a client point is its world point plus 24.
+  // Before a fit the view is panned by VIEW_ORIGIN at zoom 1, and happy-dom
+  // lays nothing out, so a client point is its world point plus VIEW_ORIGIN.
   const pointer = (type: string, target: Element, world: Point) =>
     target.dispatchEvent(
-      new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, clientX: world.x + 24, clientY: world.y + 24 }),
+      new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, clientX: world.x + VIEW_ORIGIN.x, clientY: world.y + VIEW_ORIGIN.y }),
     );
   return { canvas, root, draw, viewport, pointer, seen };
 }

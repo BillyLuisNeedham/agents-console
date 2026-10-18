@@ -826,11 +826,11 @@ export class PlansStore {
       { class: "plans-main", key: "plans-main" },
       banner,
       this.canvas.render({
-        docKey: String(e.opened),
+        fitKey: String(e.opened),
         plan: e.doc,
         problems: e.problems,
         verdicts: e.verdicts,
-        moved,
+        pendingDrops: moved,
         selection: e.selection,
         editable: !e.readOnly,
       }),

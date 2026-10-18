@@ -19,6 +19,9 @@ import {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const DRAG_THRESHOLD = 4;
+const LABEL_CHAR_WIDTH = 6.2;
+const LABEL_PADDING = 12;
+export const VIEW_ORIGIN: Point = { x: 24, y: 24 };
 
 export type PlanSelection = { kind: "node"; id: string } | { kind: "edge"; key: EdgeKey } | null;
 
@@ -33,11 +36,11 @@ export const SHELF: readonly PlanNodeKind[] = [
 ];
 
 export interface PlanCanvasModel {
-  docKey: string;
+  fitKey: string;
   plan: PlanFile;
   problems: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
-  moved: ReadonlyMap<string, Point>;
+  pendingDrops: ReadonlyMap<string, Point>;
   selection: PlanSelection;
   editable: boolean;
 }
@@ -57,7 +60,7 @@ type Gesture =
   | { kind: "link"; from: string; on: string; start: Point; end: Point; over: string | null; moved: boolean };
 
 export class PlanCanvas {
-  private view: ViewTransform = { x: 24, y: 24, zoom: 1 };
+  private view: ViewTransform = { ...VIEW_ORIGIN, zoom: 1 };
   private gesture: Gesture = { kind: "none" };
   private model: PlanCanvasModel | null = null;
   private drawing: PlanDrawing | null = null;
@@ -68,7 +71,7 @@ export class PlanCanvas {
   constructor(private readonly events: PlanCanvasEvents) {
     if (typeof window !== "undefined") {
       window.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && this.gesture.kind === "link") this.endGesture(null);
+        if (event.key === "Escape" && this.gesture.kind === "link") this.cancelGesture();
       });
     }
   }
@@ -89,7 +92,7 @@ export class PlanCanvas {
         onpointerdown: (event: PointerEvent) => this.pointerDown(event),
         onpointermove: (event: PointerEvent) => this.pointerMove(event),
         onpointerup: (event: PointerEvent) => this.endGesture(event),
-        onpointercancel: () => this.endGesture(null),
+        onpointercancel: () => this.cancelGesture(),
         onwheel: (event: WheelEvent) => this.wheel(event),
         onkeydown: (event: KeyboardEvent) => this.keyDown(event),
       },
@@ -134,8 +137,8 @@ export class PlanCanvas {
 
   bind(viewport: HTMLElement): void {
     this.viewport = viewport;
-    if (this.model && this.fitted !== this.model.docKey && viewport.clientWidth > 0) {
-      this.fitted = this.model.docKey;
+    if (this.model && this.fitted !== this.model.fitKey && viewport.clientWidth > 0) {
+      this.fitted = this.model.fitKey;
       this.fit();
     }
   }
@@ -148,7 +151,7 @@ export class PlanCanvas {
   private project(): PlanDrawing {
     const model = this.model!;
     const g = this.gesture;
-    const places = g.kind === "node" && g.moved ? new Map(model.moved).set(g.id, g.at) : model.moved;
+    const places = g.kind === "node" && g.moved ? new Map(model.pendingDrops).set(g.id, g.at) : model.pendingDrops;
     this.drawing = projectPlan({ plan: model.plan, problems: model.problems, verdicts: model.verdicts, places });
     return this.drawing;
   }
@@ -367,30 +370,14 @@ export class PlanCanvas {
     }
   }
 
-  private endGesture(event: PointerEvent | null): void {
+  private endGesture(event: PointerEvent): void {
     const g = this.gesture;
     if (g.kind === "none") return;
     if (g.kind === "node" && g.moved) this.paint();
-    if (g.kind === "link" && g.moved && event && this.drawing) {
+    if (g.kind === "link" && g.moved && this.drawing) {
       g.over = hitNode(this.drawing.nodes, this.toWorld({ x: event.clientX, y: event.clientY }));
     }
-    this.gesture = { kind: "none" };
-    const viewport = this.viewport;
-    if (viewport) {
-      if (event) {
-        try {
-          viewport.releasePointerCapture(event.pointerId);
-        } catch {
-          // never captured, or already released
-        }
-      }
-      viewport.classList.remove("plan-panning", "plan-linking");
-      viewport.querySelector('[data-key="plan-ghost"]')?.remove();
-      for (const card of viewport.querySelectorAll(".plan-node-drop, .plan-node-dragging")) {
-        card.classList.remove("plan-node-drop", "plan-node-dragging");
-      }
-    }
-    if (!event) return;
+    this.clearGesture(event);
     if (g.kind === "pan") {
       if (!g.moved) this.events.select(g.tap);
     } else if (g.kind === "node") {
@@ -403,6 +390,28 @@ export class PlanCanvas {
       this.events.select({ kind: "node", id: g.from });
     } else if (g.over) {
       this.events.link({ from: g.from, on: g.on, to: g.over });
+    }
+  }
+
+  private cancelGesture(): void {
+    if (this.gesture.kind !== "none") this.clearGesture(null);
+  }
+
+  private clearGesture(released: PointerEvent | null): void {
+    this.gesture = { kind: "none" };
+    const viewport = this.viewport;
+    if (!viewport) return;
+    if (released) {
+      try {
+        viewport.releasePointerCapture(released.pointerId);
+      } catch {
+        // never captured, or already released
+      }
+    }
+    viewport.classList.remove("plan-panning", "plan-linking");
+    viewport.querySelector('[data-key="plan-ghost"]')?.remove();
+    for (const card of viewport.querySelectorAll(".plan-node-drop, .plan-node-dragging")) {
+      card.classList.remove("plan-node-drop", "plan-node-dragging");
     }
   }
 
@@ -458,7 +467,7 @@ export class PlanCanvas {
 }
 
 function labelBox(edge: DrawnEdge): { x: number; y: number; width: number } {
-  const width = edge.label.length * 6.2 + 12;
+  const width = edge.label.length * LABEL_CHAR_WIDTH + LABEL_PADDING;
   return { x: edge.route.label.x - width / 2, y: edge.route.label.y - 9, width };
 }
 
