@@ -1000,7 +1000,8 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
         .map_err(|e| refused(e.to_string()))?;
     let phase = session.current_phase();
     emit_snapshot(session, phase);
-    session.wake().map_err(|e| refused(e.to_string()))
+    session.wake();
+    Ok(())
 }
 
 pub fn discard_held_spawn(

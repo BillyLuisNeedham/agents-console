@@ -151,9 +151,7 @@ pub fn start_line(session: &mut Session, brief: Option<String>) -> Result<String
         ..PoolUpdate::default()
     });
     session.log(format!("line: started from {path}; {id} written"));
-    session
-        .wake()
-        .map_err(|e| EngineError::refused(e.to_string()))?;
+    session.wake();
     crate::snapshot::emit_snapshot(session, session.current_phase());
     Ok(id)
 }

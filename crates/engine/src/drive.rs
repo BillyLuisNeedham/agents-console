@@ -44,22 +44,17 @@ pub fn start_drive(session: &mut Session) {
 }
 
 impl Session {
-    pub fn wake(&mut self) -> anyhow::Result<()> {
+    pub fn wake(&mut self) {
         self.wakes.ring();
         if self.driving {
             self.wake.notify_one();
-            return Ok(());
+        } else if self.drive_startable() {
+            start_drive(self);
         }
-        if !self.store_open || self.children.stopping {
-            return Ok(());
-        }
-        let answered = !self.answers.pending().is_empty();
-        crate::answers::drain_answers(self)?;
-        start_drive(self);
-        if answered {
-            emit_snapshot(self, RunPhase::Running);
-        }
-        Ok(())
+    }
+
+    pub fn drive_startable(&self) -> bool {
+        !self.driving && self.store_open && !self.children.stopping
     }
 }
 
@@ -603,7 +598,7 @@ fn on_exit(session: &mut Session, id: &str, result: Result<TicketResult, String>
     if let Err(error) = recorded {
         session.drive_failure.get_or_insert(error);
     }
-    let _ = session.wake();
+    session.wake();
 }
 
 fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()> {
@@ -721,7 +716,7 @@ fn grading_ended(session: &mut Session, outcome: anyhow::Result<()>) {
     if let Err(error) = outcome {
         session.drive_failure.get_or_insert(error.to_string());
     }
-    let _ = session.wake();
+    session.wake();
 }
 
 async fn writing_in_pool_checkout<T, F>(
@@ -1075,7 +1070,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             settle_drive(s, Some(phase), None);
             drive_turned(s);
             if again {
-                s.wake()?;
+                s.wake();
             }
             Ok(())
         })
@@ -1270,7 +1265,7 @@ mod tests {
         let mut session = crate::testkit::bare_session(publisher);
         session.driving = true;
         session.wakes.see_all();
-        session.wake().unwrap();
+        session.wake();
         let waited = futures::FutureExt::now_or_never(session.wake.notified());
         assert!(
             waited.is_some(),

@@ -519,7 +519,7 @@ fn finish_or_chain(s: &mut Session, rt: &Rt) {
         end_merge_link(&engine, rt).await;
         let _ = engine
             .call(|s| {
-                let _ = s.wake();
+                s.wake();
             })
             .await;
     });

@@ -203,6 +203,6 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     let phase = s.current_phase();
     emit_snapshot(s, phase);
     if pending {
-        let _ = s.wake();
+        s.wake();
     }
 }

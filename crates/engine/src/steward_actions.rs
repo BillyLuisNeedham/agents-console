@@ -393,10 +393,15 @@ pub fn steward_answer(
         StewardAnswerAction::Reject => ResumeAction::Reject,
         StewardAnswerAction::Close => ResumeAction::Close,
     };
-    crate::answers::accept_answer(session, ticket_id, note, resume, None, Some(conversation))?;
-    session
-        .wake()
-        .map_err(|e| EngineError::refused(e.to_string()))
+    crate::answers::submit_answer(
+        session,
+        ticket_id,
+        note,
+        resume,
+        None,
+        Some(conversation),
+        None,
+    )
 }
 
 /// The checks `stewardKeepTalking` makes before it calls Keep talking, all synchronous: the

@@ -1154,7 +1154,7 @@ pub fn finish_adopted_finalize(session: &mut Session) {
         RunPhase::Quiescent
     };
     emit_snapshot(session, phase);
-    let _ = session.wake();
+    session.wake();
 }
 
 // ---------------------------------------------------------------------------------------------------

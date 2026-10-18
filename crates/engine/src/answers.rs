@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde_json::{Map, Value};
+use tokio::sync::oneshot;
 
 use ac_core::assignment::{engine_ticket_build_id, resolve_unseen_assignments};
 use ac_core::events::{append_event, event_now, last_attempt, read_events};
@@ -214,6 +215,42 @@ pub fn accept_answer(
         emit_snapshot(session, RunPhase::Running);
     }
     Ok(record)
+}
+
+/// The one way an answer enters the pool. An idle pool drains it in this job, so the answerer's
+/// reply already holds the processed state; a drive in flight drains it at its next Tick.
+pub fn submit_answer(
+    session: &mut Session,
+    ticket_id: &str,
+    note: Option<String>,
+    action: ResumeAction,
+    attempt: Option<u64>,
+    steward: Option<&str>,
+    waiter: Option<oneshot::Sender<Result<(), EngineError>>>,
+) -> Result<(), EngineError> {
+    let record = accept_answer(session, ticket_id, note, action, attempt, steward)?;
+    if let Some(waiter) = waiter {
+        if record.processed_at.is_some() {
+            let _ = waiter.send(Ok(()));
+            return Ok(());
+        }
+        session
+            .answer_waiters
+            .entry(record.seq)
+            .or_default()
+            .push(waiter);
+    }
+    if !session.drive_startable() {
+        session.wake();
+        return Ok(());
+    }
+    let queued = !session.answers.pending().is_empty();
+    drain_answers(session).map_err(fs_refused)?;
+    session.wake();
+    if queued {
+        emit_snapshot(session, RunPhase::Running);
+    }
+    Ok(())
 }
 
 /// `drainAnswers`: every queued answer applied in submission order. One that fails processing
