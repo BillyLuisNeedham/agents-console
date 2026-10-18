@@ -1124,7 +1124,7 @@ pub fn chain_enlisted_merge(
             let merge_marker = marker.clone();
             let merge_branch = branch.clone();
             let merged = through_pool_checkout_gate(&engine, Some(deferred), move |s| {
-                let merge = merge_with_issue_aside(s, &merge_marker, &merge_branch)?;
+                let merge = merge_with_issue_aside(s, &merge_marker, &merge_branch)?.result;
                 if merge.ok {
                     s.merge_line.settled(&merge_marker.id);
                     append_event(

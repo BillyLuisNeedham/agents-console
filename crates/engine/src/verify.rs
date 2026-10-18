@@ -54,7 +54,7 @@ use crate::interrupts::{
     raise_interrupt,
 };
 use crate::jev::Jev;
-use crate::merges::{merge_target_ref, merge_target_sha, merge_ticket, merged_payload};
+use crate::merges::{merge_ticket, merged_payload};
 use crate::restart::abandon_adoption;
 use crate::session::{PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
@@ -1308,20 +1308,17 @@ fn complete_lone_attempt(
         "ticket {}: attempt {attempt} passed grading; ticket done",
         marker.id
     );
-    // Captured before mergeTicket runs (it removes the worktree and its branch on success): a verify
-    // ticket spawned by a Conversation still gets a done-Notice with a real diff summary.
-    let before_sha = merge_target_sha(session);
     if session.git {
         let worktree = result.worktree.clone().unwrap_or_else(|| WorktreeInfo {
             path: git::worktree_path_for(&session.cwd, &marker.id, attempt_number(attempt)),
             branch: git::branch_for(&session.cwd, &marker.id, attempt_number(attempt)),
         });
         let merge = merge_ticket(session, marker, &worktree)?;
-        if !merge.ok {
+        if !merge.result.ok {
             // The conflict machinery re-attempts the solo branch on resume, and a lone attempt has
             // none, so the conflict surfaces as a checkpoint instead: the Brief names the conflicted
             // files and the parked attempt branch, and resume re-runs the ticket from the moved HEAD.
-            let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge);
+            let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge.result);
             checkpoint_ticket_by_engine(
                 session,
                 marker,
@@ -1331,7 +1328,7 @@ fn complete_lone_attempt(
                     "ticket {}: attempt {attempt} passed grading but its {}; checkpoint raised for \
                      the human",
                     marker.id,
-                    if merge.reason == Some(MergeFailure::Blocked) {
+                    if merge.result.reason == Some(MergeFailure::Blocked) {
                         "merge was blocked"
                     } else {
                         "merge conflicted"
@@ -1347,11 +1344,10 @@ fn complete_lone_attempt(
             &marker.id,
             attempt,
             TicketEventKind::Merged,
-            merged_payload(&merge),
+            merged_payload(&merge.result),
         )?;
         close_attempt_tab(session, &marker.id, attempt);
-        let range = (!before_sha.is_empty())
-            .then(|| format!("{before_sha}..{}", merge_target_ref(session)));
+        let range = merge.range(session);
         crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
         log = format!(
             "ticket {}: attempt {attempt} passed grading; merged {} onto the working branch",
@@ -1794,7 +1790,7 @@ fn complete_selection(
             path: git::worktree_path_for(&session.cwd, &marker.id, attempt_number(attempt)),
             branch: git::branch_for(&session.cwd, &marker.id, attempt_number(attempt)),
         };
-        let merge = merge_ticket(session, marker, &worktree)?;
+        let merge = merge_ticket(session, marker, &worktree)?.result;
         if !merge.ok {
             discard_losers(session, &marker.id, attempt);
             let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge);

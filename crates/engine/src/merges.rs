@@ -146,13 +146,26 @@ pub fn merge_target_branch(session: &Session) -> String {
         .unwrap_or_else(|| git::current_branch(&session.cwd))
 }
 
-/// `mergeTargetSha`: the merge target's commit, captured just before a merge for the range a
-/// done-Notice's diff summary covers; empty in a git-less pool.
+/// `mergeTargetSha`: the merge target's commit; empty in a git-less pool.
 pub fn merge_target_sha(session: &Session) -> String {
     if session.git {
         git::rev_parse(&session.cwd, &merge_target_ref(session))
     } else {
         String::new()
+    }
+}
+
+/// A merge and the target's tip from before it, which a done-Notice's diff summary starts from.
+pub struct TipMerge {
+    pub result: MergeResult,
+    pub before_sha: String,
+}
+
+impl TipMerge {
+    /// `before..after` once the merge has moved the target; none in a git-less pool.
+    pub fn range(&self, session: &Session) -> Option<String> {
+        (!self.before_sha.is_empty())
+            .then(|| format!("{}..{}", self.before_sha, merge_target_ref(session)))
     }
 }
 
@@ -178,7 +191,8 @@ pub fn merge_with_issue_aside(
     session: &mut Session,
     marker: &TicketMarker,
     branch: &str,
-) -> anyhow::Result<MergeResult> {
+) -> anyhow::Result<TipMerge> {
+    let before_sha = merge_target_sha(session);
     let ours = js::read_text(&marker.file)?;
     let file = file_text(marker);
     // The base for the reconcile's fallback, taken before the merge lands: once the branch is merged,
@@ -194,11 +208,16 @@ pub fn merge_with_issue_aside(
     });
     let merged = match merged {
         Ok(merged) => merged,
-        Err(err) => return Ok(blocked(err.to_string())),
+        Err(err) => {
+            return Ok(TipMerge {
+                result: blocked(err.to_string()),
+                before_sha,
+            });
+        }
     };
     let (result, theirs) = (merged.result, merged.theirs);
     let Some(theirs) = theirs.filter(|_| result.ok) else {
-        return Ok(result);
+        return Ok(TipMerge { result, before_sha });
     };
     let (content, conflicted) = reconcile_ticket_file(
         session,
@@ -212,7 +231,7 @@ pub fn merge_with_issue_aside(
     if conflicted {
         record_ticket_file_conflict(session, marker, branch)?;
     }
-    Ok(result)
+    Ok(TipMerge { result, before_sha })
 }
 
 /// The two copies of a ticket file changed the same lines: the conflict markers stay in the file of
@@ -348,12 +367,12 @@ pub fn merge_ticket(
     session: &mut Session,
     marker: &TicketMarker,
     worktree: &WorktreeInfo,
-) -> anyhow::Result<MergeResult> {
-    let result = merge_with_issue_aside(session, marker, &worktree.branch)?;
-    if result.ok {
+) -> anyhow::Result<TipMerge> {
+    let merge = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    if merge.result.ok {
         remove_merge_worktree(session, marker, worktree);
     }
-    Ok(result)
+    Ok(merge)
 }
 
 /// `removeMergeWorktree`: never for an enlisted ticket (issue #101), whose checkout and branch are the
@@ -439,21 +458,23 @@ async fn merge_link(
     let (merge_marker, merge_worktree) = (marker.clone(), worktree);
     let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
         let (marker, worktree) = (merge_marker, merge_worktree);
-        let before_sha = merge_target_sha(s);
         let merge = merge_ticket(s, &marker, &worktree)?;
-        if !merge.ok {
-            return Ok(Some(merge));
+        if !merge.result.ok {
+            return Ok(Some(merge.result));
         }
         let id = &marker.id;
         s.merge_line.settled(id);
         append_event(
             Path::new(&s.runs_dir),
             id,
-            &event_now(attempt, TicketEventKind::Merged, merged_payload(&merge)),
+            &event_now(
+                attempt,
+                TicketEventKind::Merged,
+                merged_payload(&merge.result),
+            ),
         )?;
         close_attempt_tab(s, id, attempt);
-        let range =
-            (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(s)));
+        let range = merge.range(s);
         crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
         let branch = &worktree.branch;
         s.log(match &what {
@@ -462,7 +483,7 @@ async fn merge_link(
             }
             None => format!(
                 "ticket {id}: merged {branch} onto the working branch{}",
-                landed_detail(&merge)
+                landed_detail(&merge.result)
             ),
         });
         Ok(None)
@@ -598,21 +619,23 @@ fn record_answer_merge(
     session: &mut Session,
     marker: &TicketMarker,
     worktree: &WorktreeInfo,
-    result: &MergeResult,
-    before_sha: &str,
+    merge: &TipMerge,
 ) -> anyhow::Result<()> {
     remove_merge_worktree(session, marker, worktree);
     let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
     append_event(
         Path::new(&session.runs_dir),
         &marker.id,
-        &event_now(attempt, TicketEventKind::Merged, merged_payload(result)),
+        &event_now(
+            attempt,
+            TicketEventKind::Merged,
+            merged_payload(&merge.result),
+        ),
     )?;
     if !session.enlisted_work.contains_key(&marker.id) {
         close_attempt_tabs(session, &marker.id);
     }
-    let range =
-        (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(session)));
+    let range = merge.range(session);
     crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
     Ok(())
 }
@@ -627,14 +650,14 @@ pub fn resume_merge(
 ) -> anyhow::Result<()> {
     let worktree = ticket_worktree(session, marker, None);
     let branch = worktree.branch.clone();
-    let before_sha = merge_target_sha(session);
-    let result = merge_with_issue_aside(session, marker, &branch)?;
+    let merge = merge_with_issue_aside(session, marker, &branch)?;
+    let result = &merge.result;
     append_resume_note(marker, note)?;
     if !result.ok {
         let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
-        record_failed_merge(session, &marker.id, attempt, &result)?;
+        record_failed_merge(session, &marker.id, attempt, result)?;
         let mut interrupts = without(&session.state.interrupts, pending);
-        interrupts.push(merge_conflict_interrupt(session, marker, &result));
+        interrupts.push(merge_conflict_interrupt(session, marker, result));
         session.apply(PoolUpdate {
             interrupts: Some(interrupts),
             log: Some(vec![format!(
@@ -650,14 +673,14 @@ pub fn resume_merge(
         });
         return Ok(());
     }
-    record_answer_merge(session, marker, &worktree, &result, &before_sha)?;
+    record_answer_merge(session, marker, &worktree, &merge)?;
     let interrupts = without(&session.state.interrupts, pending);
     session.apply(PoolUpdate {
         interrupts: Some(interrupts),
         log: Some(vec![format!(
             "interrupt answered for {} (merge-conflict): merge landed{}",
             marker.id,
-            landed_detail(&result)
+            landed_detail(result)
         )]),
         ..PoolUpdate::default()
     });
@@ -674,16 +697,16 @@ pub fn approve_merge(
     let worktree = ticket_worktree(session, marker, None);
     git::commit_merge(&worktree);
     append_resume_note(marker, note)?;
-    let before_sha = merge_target_sha(session);
-    let result = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    let merge = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    let result = &merge.result;
     if !result.ok {
         let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
-        record_failed_merge(session, &marker.id, attempt, &result)?;
+        record_failed_merge(session, &marker.id, attempt, result)?;
         let mut interrupts = without(&session.state.interrupts, pending);
         interrupts.push(manual_merge_interrupt(
             session,
             marker,
-            &result,
+            result,
             "the resolver's resolution did not merge cleanly on approval",
         ));
         session.apply(PoolUpdate {
@@ -701,7 +724,7 @@ pub fn approve_merge(
         });
         return Ok(());
     }
-    record_answer_merge(session, marker, &worktree, &result, &before_sha)?;
+    record_answer_merge(session, marker, &worktree, &merge)?;
     let interrupts = without(&session.state.interrupts, pending);
     session.apply(PoolUpdate {
         interrupts: Some(interrupts),
