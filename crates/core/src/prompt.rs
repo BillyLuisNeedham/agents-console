@@ -538,6 +538,15 @@ fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
     } else {
         format!("You may answer {}.", yours.join("; "))
     };
+    let edits = if plan.meta().steward_edits {
+        "This Plan lets you edit it with plan <rev> <edits>: rev is the `rev` GET /api/line on the \
+         Console answers, and edits a JSON array of Plan edits, or \"-\" to read it from standard \
+         input. Edit it only when your orders call for it, such as linking a parked verdict onward; \
+         the engine refuses a stale rev (read it again), an edit that would orphan live run state, \
+         and any edit that gives you a power the operator did not."
+    } else {
+        "This Plan does not let you edit it."
+    };
     let spawns = if parts.may_adopt_line_spawns {
         "The operator lets you decide Held spawns proposed from inside the Line \
          (steward.mayAdoptLineSpawns): adopt one only when the Line needs it and its spec covers it, \
@@ -548,9 +557,9 @@ fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
     };
     format!(
         "This pool runs one Line on the Plan \"{}\" (ADR-0039): the engine writes its Tickets and \
-         holds from the Plan and routes each verdict. {yours} Nothing else of the Line is yours: the \
-         Finish hold and the Finish Ticket are the operator's, so you are not told of them and the \
-         engine refuses your answer. Never propose a node's work yourself. {spawns}\n\n",
+         holds from the Plan and routes each verdict. {yours} {edits} Nothing else of the Line is \
+         yours: the Finish hold and the Finish Ticket are the operator's, so you are not told of \
+         them and the engine refuses your answer. Never propose a node's work yourself. {spawns}\n\n",
         plan.meta().name
     )
 }

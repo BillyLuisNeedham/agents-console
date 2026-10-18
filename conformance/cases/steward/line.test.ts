@@ -88,6 +88,7 @@ conformance(
       'You may answer a checkpoint on a Ticket of implement, prove, review, decide (a "no verdict" one: resume, asking it to record its Outcome again with a valid verdict); the hold of a spent loop on prove --fail--> implement, once until that loop resets',
     );
     expect(teaching).toContain("the Finish hold and the Finish Ticket are the operator's");
+    expect(teaching).toContain("This Plan does not let you edit it.");
     expect(teaching).toContain("Held spawns proposed from inside the Line are the operator's to adopt or discard");
 
     expect(
@@ -263,6 +264,9 @@ conformance(
     await begun(server, { plan: gated, work: "#1" });
     await untilInterrupt(server, "approve-1", "checkpoint", 60_000);
     const id = await enlistSteward(server);
+    expect(turnsInto(sw.herdr, STEWARD_PANE).join("\n")).toContain(
+      "This Plan lets you edit it with plan <rev> <edits>: rev is the `rev` GET /api/line on the Console answers",
+    );
     const rev = async () => (await lineOf(server))?.rev;
     const edit = (baseRev: number, edits: unknown[]) => post(server, "/api/steward/plan", { conversation: id, baseRev, edits });
 
