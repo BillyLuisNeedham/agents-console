@@ -8,7 +8,7 @@ Amends ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), 
 
 Merged has three rules, applied in this order. A hold Ticket and an engine-run Ticket (grader, head-to-head) count as merged by rule, because neither has a branch; the engine never infers this from a missing branch. A pool outside git counts every Done Ticket as merged. Otherwise the branch must be an ancestor of the target. ADR-0014's missing-branch reading still covers a branch the operator merged or deleted by hand. The Merge queue stays as ADR-0014's amendments describe it, derived and never persisted.
 
-**Every Ticket runs in its own worktree.** The lone ready Ticket no longer runs in the pool checkout: with rolling starts there is no "lone" Ticket, and a Ticket in the checkout would share the tree that merges write to. The pool checkout is written only by merges, through the checkout gate (ADR-0027).
+**Every Ticket runs in its own worktree.** The lone ready Ticket no longer runs in the pool checkout: with rolling starts there is no "lone" Ticket, and a Ticket in the checkout would share the tree that merges write to. The pool checkout is written only by merges, and they pass no gate (ADR-0041).
 
 **What replaces each boundary duty.**
 
