@@ -105,27 +105,68 @@ asks only for what is left, starts the server and opens the browser. It takes
 `[pool-dir] [--yes] [--relaunch] [--port <n>] [--setup <name>] [--no-open]`.
 `skills/link.sh` puts it on PATH; from this checkout it is `bun run boot -- <dir>`.
 
-### Factory mode
+### Line mode
 
-`agent-console --factory` boots a Factory pool, which runs one Line
-(`docs/adr/0037-the-factory-is-an-engine-owned-recipe.md`). Boot cuts
-`line/<slug>` from its Line base, the branch the checkout has out (or the one
-`--from` names), into a worktree of its own at
-`.scratch/lines/<slug>`, so the checkout it runs from keeps its branch, and
-makes the pool inside that worktree at `<worktree>/.scratch/<name>`: the pool's
-target branch is the Line's, never a shared one (ADR-0038). A Factory pool is
-terminal-backed (`"terminal": "herdr"`).
+`agent-console --plan <slug>` boots a pool that runs one Line on a Plan
+(`docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md`). A Plan is a
+graph of nodes and edges saved as a file. The engine reads each node's verdict
+and starts whatever the Plan's edges name next. Agents never choose what runs
+next.
+
+Boot cuts `line/<slug>` from its Line base, the branch the checkout has out (or
+the one `--from` names), into a worktree of its own at `.scratch/lines/<slug>`,
+so the checkout it runs from keeps its branch. It makes the pool inside that
+worktree at `<worktree>/.scratch/<name>`, so the pool's target branch is the
+Line's, never a shared one (ADR-0038). A Line pool is terminal-backed
+(`"terminal": "herdr"`).
+
+#### Plans
+
+A Preset is a Plan built into the Console. It is read-only and names its author
+and the file the flow comes from. Saved under a new name, it becomes a Plan in
+your Plan library, one file per Plan in `~/.agent-graphs/plans/<slug>.json`.
+Boot offers the Presets first, then the library.
+
+| Preset | Flow from |
+| --- | --- |
+| `factory-today` | Agent Console: Grill, Implement, Prove, Review, Decide, Finish (the default) |
+| `matt-pocock-main`, `matt-pocock-quick`, `matt-pocock-bug`, `matt-pocock-foggy` | Matt Pocock |
+| `pstack-feature`, `pstack-bug-fix` | Pstack (Lauren Tan) |
+| `pclaude-feature`, `pclaude-bug-fix` | PClaude |
+| `addy-commands`, `addy-bug-fix` | Addy Osmani |
+
+Build, edit, save and boot a Plan from the **Plans** button in the Console's
+header or from Settings. The view marks every problem on the node or edge that
+causes it, and a Plan that has problems cannot be saved or booted. A Line copies
+its Plan into `line.json` when it starts, so editing the Plan afterwards never
+changes a running Line.
+
+Each node of a Plan is one of these:
+
+- A **Conversation node** opens a Conversation for each pass and hands on when
+  the operator ends it.
+- A **Ticket node** runs Tickets. Its kind sets the verdicts it can give (Agent,
+  Prove, Review or Decide). It runs `one` copy, or one copy per Item (a
+  per-item node). A per-item node runs at most its cap of copies at once, and
+  the Items over the cap queue and start as copies finish. The Plan places a
+  **Merger** after each per-item node. The Merger hands on once every copy has
+  merged, and on a merge conflict it runs a resolver or waits for you.
+- A **Gate** runs no agent. You, the Steward or nobody (`auto`) opens it.
+- The **Finish** is the one node every Line ends at (below).
+
+The engine names a node's passes `<node>-<n>`, so the first Implement pass is
+`implement-1`, its second is `implement-2`, and the first Finish hold is
+`finish-1`. Tickets and Conversations carry those ids on their cards.
 
 #### Using it
 
 Before the first Line on a machine:
 
-- herdr is running, and the harness the Stations use (claude by default) is
+- herdr is running, and the harness your Plan's nodes use (claude by default) is
   on PATH.
-- The Stations' default skills are in `~/.claude/skills`: `implement`,
-  `my-verify`, `code-review`, `html` and, for the Grill, `my-grill-with-docs`
-  and `show-me`. Run `skills/link.sh` for this repo's own skills, including
-  `my-console-steward`.
+- The skills your Plan names are in `~/.claude/skills`. `factory-today` uses
+  `my-grill-with-docs`, `tdd`, `my-verify`, `code-review` and `html`. Run
+  `skills/link.sh` for this repo's own skills, including `my-console-steward`.
 - The checkout Boot runs from has a branch out (not a detached HEAD), or
   `--from` names one. Boot cuts the Line from it and never fetches first.
 - For a `draft-pr` or `pr` Finish, `gh` is logged in with push rights on the
@@ -133,89 +174,121 @@ Before the first Line on a machine:
 
 A Line from an issue, with the operator in the room:
 
-1. From the project's checkout, run `agent-console --factory --work 123`. You
-   can give free text instead of an issue number. Boot cuts `line/123`, opens
-   the Console and starts the Grill.
-2. Answer the Grill. It writes the spec and the Line brief. The brief sets the
-   Finish, `none` by default; say if you want `draft-pr` or `pr`. It can also
-   override any Station setting for this one Line.
-3. Press **Start the Line** on the Grill card. The engine merges the Grill's
-   branch, ends the Grill and creates `r1-implement`. From here the engine
-   routes every Station: Implement, Prove, Review, then Decide, which either
-   starts another Round or finishes the Line.
-4. You only answer checkpoints:
-   - **No verdict:** a Station ended without a valid verdict. Resume it or use
-     Keep talking.
-   - **Prove limit:** Prove failed too often in one Round. Resume with a note
-     to buy one more fix, or Close to halt the Line.
-   - **Finish:** read the report in the checkpoint's Detail. Resume with
-     `approved`, or with no note, to end the Line. Resume with notes to start
-     another Round on them.
-5. When the Line is done, stop the pool and remove its worktree (below).
+1. From the project's checkout, run
+   `agent-console --plan factory-today --work 123`. You can give free text
+   instead of an issue number, and without `--plan` Boot asks "start from which
+   plan" and takes `factory-today` on Enter. Boot cuts `line/123`, opens the
+   Console and hands the engine the work.
+2. Talk to `grill-1`. The engine opens the Plan's entry Conversation node on its
+   Assignment and skill, with the work as its first Turn. The Conversation writes
+   the spec to `docs/specs/<line>.md` and a Line brief to
+   `docs/specs/<line>.grill-1.brief.json` on its own branch.
+3. End the Conversation from the Console. **End** is refused, with the reasons
+   shown, while the branch holds no valid brief and spec. **End as closed**
+   merges nothing and sends the Line straight to its Finish.
+4. The engine merges the Conversation's branch, reads the brief and hands on to
+   the Plan's next nodes (`implement-1` in `factory-today`). The brief sets the
+   Finish act, `none` by default, so say if you want `draft-pr` or `pr`. It can
+   also override a node's Assignment or note for this one Line, and it hands
+   Items to a per-item node.
+5. You answer only what the Plan hands you. A Ticket node that ends without a
+   valid verdict raises a "no verdict" checkpoint, which you can Resume or reach
+   with Keep talking. A loop whose cap is spent holds the Line (in
+   `factory-today`, Prove failing twice in a Round holds as
+   `prove-fail-implement-3`). Resume buys one more crossing of the loop, and
+   Close halts it. An operator Gate holds as a Ticket you Resume to open, Resume
+   with notes to send the notes on, or Close.
+6. When the work is shipped, or a node hands on `closed`, the Line reaches the
+   Finish (see The Finish below).
+7. When the Line is done, stop the pool and remove its worktree (below).
 
-A Line from a spec you already have: write the spec, and a brief beside it
-such as `{"spec": "docs/specs/123.md", "finish": "draft-pr", "factory": {}}`.
-Then run `agent-console --brief path/to/123.brief.json`. There is no Grill:
-Round 1 starts at once and nothing is asked. This is the way to run a Line
-unattended (see the example below).
+A Line from a spec you already have: write the spec, and a Line brief beside it
+such as `{"spec": "docs/specs/123.md", "finish": "draft-pr"}`. Then run
+`agent-console --brief path/to/123.brief.json`. There is no Conversation: the
+engine absorbs the brief at once and starts the Plan's entry Tickets, and
+nothing is asked. A Plan with no Conversation node at its entry gets the brief
+applied to the Line directly. This is the way to run a Line unattended (see the
+example below).
 
-Station settings (each Station's skills, Assignment and extra note, the Prove
-and Review off switches, the two limits and the default Finish) live under
-`factory` in the Machine defaults and the Pool settings. Each field falls
-through on its own, and the Settings pane edits both layers. A Line brief's
-`factory` overrides them for that Line.
+#### The Finish
+
+When a verdict reaches the Finish, the Line is finishing. It cannot complete
+while any copy runs or queues, any Gate or spent loop holds, a Conversation pass
+is open, a Ticket is unmerged, or a Held or Pending spawn waits. The Console
+lists whatever it still waits for. When that list is empty, the engine writes the
+Finish hold `finish-1`. Read the report in the hold's Detail, which shows the
+Decide node's `runs/<line>-decide-<n>-report.html` when the Plan has one, and
+answer:
+
+- **Resume** approves the Line. Approving while anything still blocks is refused
+  with the list.
+- **Resume with notes** hands the notes on along the Finish's `revise` edge (in
+  `factory-today`, back to Implement) and is refused when the Plan gives the
+  Finish no such edge.
+- **Close** ends the Line closed.
+
+Nothing leaves the pool before you approve. After approval, the Finish act
+runs. `none` ends the Line at once. `draft-pr`, `pr`, `fast-forward` or free text
+runs one Finish Ticket, `finish-1-act`. It deletes the spec, the briefs and
+`.verify/` in a final commit and pushes the Line's branch. Then it opens the PR
+against the Line base, fast-forwards the base, or does what the free text says.
+For `pr` and `draft-pr` it checks the base on `origin` first. It pushes the base
+only when the brief sets `"pushBase": true`, and then only to create it or
+fast-forward it, never forcing. Without the grant, a base `origin` lacks means no
+PR. The Line is done once that Ticket has merged.
+
+Boot writes the Line base into the pool's `console.json` as
+`"lineBase": {"ref": "experiment/x", "commit": "<sha>"}` and prints
+`line: cut line/<slug> from experiment/x (<short sha>)`. The run copies it into
+`line.json`'s `base`. Review diffs from that commit, and a PR's base is the Line
+base's branch on `origin`. A Line pool raises no run-wide Review, because
+approving the Finish is the Review. `GET /api/line/report?node=&pass=` serves a
+Decide pass's report.
+
+#### The Steward
+
+A Line pool starts a Steward by default, and `--no-steward` starts none. Its
+powers on a Line are opt-in, set by the Plan. It answers a checkpoint only on a
+Ticket node set to `checkpoint: steward`, opens only a Gate set to
+`open: steward`, and gives a spent loop one extra pass only when the loop's edge
+is marked `stewardExtra`. It edits the running Plan only when the Plan sets
+`stewardEdits`. Otherwise it steers the Line through the nodes as drawn. It
+never answers the Finish. It decides Held spawns proposed from inside the Line
+only while `steward.mayAdoptLineSpawns` is true in the pool's settings (default
+false).
 
 #### Boot flags
 
-- `--work <issue number or text>`, or the question Boot asks without it: Boot
-  opens the Grill, a Conversation on the Grill Station's skills with the work as
-  its first Turn. The Grill writes `docs/specs/<slug>.md` and
-  `docs/specs/<slug>.brief.json` on its branch, and the operator presses Start
-  the Line on it, which merges that branch and starts Round 1.
+- `--plan <slug>` enters Line mode on a Preset or a Plan in your library. Without
+  it, `--work` alone enters Line mode and Boot asks which Plan, with `--yes`
+  taking `factory-today`.
+- `--work <issue number or text>`, or the question Boot asks without it: the
+  piece of work. The engine opens the Plan's entry Conversation node on it. A
+  Plan whose entry is a Ticket node starts that node's Tickets on it.
 - `--brief <path>`: a ready Line brief and the spec it names (found from the
-  working directory first, then beside the brief). No Grill: Boot commits both
-  onto the Line branch as `docs/specs/<slug>.md` and `docs/specs/<slug>.brief.json`
-  and starts Round 1 at once. It implies `--factory` and `--yes`, so nothing is
-  asked.
+  working directory first, then beside the brief). Boot commits both onto the
+  Line branch as `docs/specs/<slug>.md` and `docs/specs/<slug>.brief.json` and
+  begins the Line at once. It implies Line mode and `--yes`, so nothing is asked,
+  and takes `factory-today` unless `--plan` names another Plan. `--work` and
+  `--brief` together are refused.
 - `--from <branch>` cuts the Line from that branch instead of the current one:
   a local branch, else origin's as written (`origin/x`), else origin's by its
   name there. Another remote's branch, `HEAD`, tags and commits are refused. The
   branch may be checked out in another worktree. The Line's branch never tracks
   it.
 - `--line <slug>` names the Line (default: the issue number, the brief's file
-  name, or the work's first words); a slug already taken gets `-2`, `-3`, ….
-  `--name <dir>` names the pool directory, `--title <title>` titles the pool, and
-  `--config <json file>` lays its keys over the new pool's `console.json` before
-  the server starts (a `steward` block, say).
-- The Steward is on by default: Boot starts one once the Grill or Round 1 is
-  up, and `--no-steward` starts none. It may answer a Station's "no verdict"
-  checkpoint and the Prove limit, never the Finish checkpoint. It decides Held
-  spawns proposed from inside the Line only while `steward.mayAdoptLineSpawns`
-  is true in the pool's settings (default false).
-
-Boot marks the pool `"factoryPool": true` in `console.json`, and a Factory pool
-raises no run-wide Review: approving the Finish checkpoint is the Review. Boot
-also writes the Line base there, `"lineBase": {"ref": "experiment/x", "commit":
-"<sha>"}`, and prints `line: cut line/<slug> from experiment/x (<short sha>)`;
-Start the Line copies it into `line.json`'s `base`. Review diffs from that
-commit, and a PR's base is the Line base's branch on `origin`. At the
-Finish, Decide carries out the brief's `finish` (`none`, `draft-pr`, `pr`, or an
-act it names) and writes the report to `runs/<slug>-report.html` in the pool.
-For `pr` and `draft-pr` it checks the base on `origin` first. It pushes the base
-only when the brief sets `"pushBase": true`, and then only to create it or
-fast-forward it, never forcing. Without the grant, a base `origin` lacks means
-no PR.
-The Finish checkpoint's Brief links it, the Console shows it in that checkpoint's
-Detail with Open in browser, and `GET /api/line/report` serves it. The header
-shows the Line (`Round 2 · Prove · fails 1/2 · Finish: draft PR`) and each card
-its Station.
+  name, or the work's first words). A slug already taken gets `-2`, `-3`, and so
+  on. `--name <dir>` names the pool directory, `--title <title>` titles the pool,
+  and `--config <json file>` lays its keys over the new pool's `console.json`
+  before the server starts (a `steward` block, say).
+- `--no-steward` starts no Steward.
 
 Unattended, for example:
 
 ```sh
 # steward.json: {"steward": {"budget": 10, "mayAdoptLineSpawns": true}}
-agent-console --brief docs/specs/123.brief.json --title "Issue #123" \
-  --config steward.json --port 8792 --no-open
+agent-console --plan factory-today --brief docs/specs/123.brief.json \
+  --title "Issue #123" --config steward.json --port 8792 --no-open
 ```
 
 When the Line is done, stop its pool and remove the worktree with
