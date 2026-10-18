@@ -3,7 +3,7 @@
   "name": "PClaude · Bug fix",
   "author": "PClaude",
   "source": "skills/pclaude/pclaude-poteto-mode/playbooks/bug-fix.md",
-  "note": "Pstack's bug-fix playbook ported to Claude Code (a port still in progress, see PORTING.md): reproduce and verify drive the real surface with claude-in-chrome or run, a stubborn hunt runs under Claude Code /loop, and Opening a PR runs simplify before pclaude-no-comments. The verify loop has no stated limit, so it is capped at 2.",
+  "note": "Pstack's bug-fix playbook ported to Claude Code (a port still in progress, see PORTING.md): reproduce and verify drive the real surface with claude-in-chrome or run, a stubborn hunt runs under Claude Code /loop, and Opening a PR runs simplify before pclaude-no-comments. The verify loop has no stated limit, so it is capped at 2. Its why step starts one harness per item with no cap, so set the pool's maxLive for a long list.",
   "nodes": [
     {"kind":"agent","id":"reproduce","title":"Reproduce on the surface (claude-in-chrome or run)","x":40,"y":60,"skill":"claude-in-chrome","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
     {"kind":"agent","id":"how","title":"How does it work?","x":340,"y":60,"skill":"pclaude-how","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},
