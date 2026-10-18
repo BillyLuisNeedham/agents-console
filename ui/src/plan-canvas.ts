@@ -6,6 +6,7 @@ import {
   CARD_H,
   CARD_W,
   KIND_LABEL,
+  edgeDomKey,
   edgeKeyText,
   fitView,
   freeSpot,
@@ -250,7 +251,7 @@ export class PlanCanvas {
           svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "plan-arrow" }),
         ),
       ),
-      ...drawing.edges.map((edge) => renderEdge(edge, edge.key === selectedKey)),
+      ...drawing.edges.map((edge) => renderEdge(edge, edgeDomKey(edge) === selectedKey)),
       g.kind === "link" && g.moved ? svg("path", ghostAttrs(this.portAt(g.from, g.on), g.end)) : null,
     );
   }
@@ -291,7 +292,7 @@ export class PlanCanvas {
       this.gesture = { kind: "node", id, start, startAt: at, at, moved: false };
     } else {
       const key = label?.getAttribute("data-edge");
-      const edge = key ? this.drawing?.edges.find((e) => e.key === key)?.edge : undefined;
+      const edge = key ? this.drawing?.edges.find((e) => edgeDomKey(e) === key)?.edge : undefined;
       this.gesture = {
         kind: "pan",
         start,
@@ -351,7 +352,7 @@ export class PlanCanvas {
       }
       for (const edge of drawing.edges) {
         if (edge.edge.from !== g.id && edge.edge.to !== g.id) continue;
-        const el = viewport.querySelector(`[data-key="edge:${CSS.escape(edge.key)}"]`);
+        const el = viewport.querySelector(`[data-key="edge:${CSS.escape(edgeDomKey(edge))}"]`);
         if (el) paintEdge(el, edge);
       }
       return;
@@ -476,7 +477,7 @@ function renderEdge(edge: DrawnEdge, selected: boolean): SVGElement {
   return svg(
     "g",
     {
-      "data-key": `edge:${edge.key}`,
+      "data-key": `edge:${edgeDomKey(edge)}`,
       class:
         "plan-edge" +
         (edge.route.back ? " plan-edge-back" : "") +
@@ -486,7 +487,7 @@ function renderEdge(edge: DrawnEdge, selected: boolean): SVGElement {
     svg("path", { class: "plan-edge-path", d: edge.route.d, "marker-end": "url(#plan-arrow)" }),
     svg(
       "g",
-      { class: "plan-edge-label", "data-edge": edge.key },
+      { class: "plan-edge-label", "data-edge": edgeDomKey(edge) },
       svg("title", {}, edge.problems.length ? edge.problems.join("\n") : edgeKeyText(edge.edge)),
       svg("rect", { ...box, height: 18, rx: 9 }),
       svg("text", { x: edge.route.label.x, y: edge.route.label.y + 3.5, "text-anchor": "middle" }, edge.label),

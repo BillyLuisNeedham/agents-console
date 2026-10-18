@@ -5,6 +5,7 @@ import type { PlanFile, PlanProblem } from "../../protocol/wire.ts";
 import {
   CARD_H,
   CARD_W,
+  edgeDomKey,
   edgeRoute,
   fitView,
   freeSpot,
@@ -60,10 +61,11 @@ describe("projectPlan", () => {
     expect(edges.map((e) => e.route.back)).toEqual([false, false, true]);
   });
 
-  it("keys a duplicate edge apart, so both are drawn", () => {
+  it("numbers a duplicate edge apart for the DOM, so both are drawn, and keeps its key the edge's text", () => {
     const twice = { ...plan, edges: [...plan.edges, plan.edges[0]!] };
-    const keys = projectPlan({ plan: twice, problems: [], verdicts, places: new Map() }).edges.map((e) => e.key);
-    expect(keys).toContain("build.done>prove#1");
+    const edges = projectPlan({ plan: twice, problems: [], verdicts, places: new Map() }).edges;
+    expect(edges.slice(-1)[0]!.key).toBe("build.done>prove");
+    expect(edges.map(edgeDomKey)).toContain("build.done>prove#1");
   });
 
   it("puts each problem on its node or edge, and the rest on the Plan", () => {

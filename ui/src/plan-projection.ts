@@ -57,6 +57,7 @@ export interface EdgeRoute {
 
 export interface DrawnEdge {
   key: string;
+  copy: number;
   edge: PlanEdgeFile;
   label: string;
   problems: string[];
@@ -121,14 +122,15 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
     const to = byId.get(edge.to);
     if (!from || !to) continue;
     const base = edgeKeyText(edge);
-    const n = seen.get(base) ?? 0;
-    seen.set(base, n + 1);
+    const copy = seen.get(base) ?? 0;
+    seen.set(base, copy + 1);
     const port = from.ports.find((p) => p.on === edge.on)?.at ?? {
       x: from.at.x + CARD_W / 2,
       y: from.at.y + CARD_H,
     };
     edges.push({
-      key: n === 0 ? base : `${base}#${n}`,
+      key: base,
+      copy,
       edge,
       label: edgeLabel(edge),
       problems: edgeProblems.get(base) ?? [],
@@ -145,6 +147,10 @@ function push(map: Map<string, string[]>, key: string, message: string): void {
   const list = map.get(key);
   if (list) list.push(message);
   else map.set(key, [message]);
+}
+
+export function edgeDomKey(edge: Pick<DrawnEdge, "key" | "copy">): string {
+  return edge.copy === 0 ? edge.key : `${edge.key}#${edge.copy}`;
 }
 
 export function edgeLabel(edge: PlanEdgeFile): string {
@@ -195,13 +201,15 @@ function copiesText(copies: PlanCopies | undefined): string {
 
 export function edgeRoute(from: Point, port: Point, to: Point): EdgeRoute {
   const { x: px, y: py } = port;
-  if (to.y >= from.y + CARD_H && Math.abs(to.x - from.x) < CARD_W) {
+  const straightDown = to.y >= from.y + CARD_H && Math.abs(to.x - from.x) < CARD_W;
+  const forward = to.x >= from.x + CARD_W;
+  if (straightDown) {
     const tx = to.x + CARD_W / 2;
     const ty = to.y;
     const dy = Math.max(20, (ty - py) / 2);
     return cubic([px, py], [px, py + dy], [tx, ty - dy], [tx, ty], false);
   }
-  if (to.x >= from.x + CARD_W) {
+  if (forward) {
     const tx = to.x;
     const ty = to.y + HEAD_H / 2;
     return cubic([px, py], [px, py + 40], [tx - 60, ty], [tx, ty], false);
