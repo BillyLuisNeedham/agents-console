@@ -1,0 +1,16 @@
+{
+  "horde": 1,
+  "name": "Matt Pocock · Bug",
+  "author": "Matt Pocock",
+  "source": "skills/engineering/diagnosing-bugs/SKILL.md",
+  "note": "diagnosing-bugs reproduces, ranks hypotheses, fixes and adds the regression test itself, then retro runs in the same session to ask what would have prevented the bug. Where retro finds there is no good seam, the author follows up with improve-codebase-architecture, which a link cannot choose for you.",
+  "nodes": [
+    {"kind":"agent","id":"diagnose","title":"Diagnose the bug","x":40,"y":60,"skill":"diagnosing-bugs","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"retro","title":"Retro","x":340,"y":60,"skill":"retro","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":640,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"diagnose","on":"done","to":"retro"},
+    {"from":"retro","on":"done","to":"finish"}
+  ]
+}

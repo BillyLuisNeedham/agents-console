@@ -6,6 +6,7 @@ import { conformance } from "../harness/case.ts";
 import { cardOf, commitAll, gitCommonDir, gitIn, poolKey, ticketWorktree, worktreeList } from "../harness/git-pool.ts";
 import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
+import { events } from "./formats-helpers.ts";
 import {
   CONFIG,
   answer,
@@ -123,10 +124,11 @@ function doneUnmerged(world: World, id: string): { path: string; branch: string 
   return { path, branch };
 }
 
-// engine/merge-hold.test.ts:526
+// A pool checkout gate (ADR-0027) once recorded the merge it held as `merge-deferred`, and a boot chained
+// it again. No merge waits at a gate now, so a line an older engine wrote is skipped as an unknown kind.
 conformance(
   "restart",
-  "a boot takes on a merge a shutdown dropped at the gate first, and lists the unmerged Tickets it never took after it, by id",
+  "a merge-deferred line an older engine wrote is skipped at boot, and its Ticket is listed unmerged beside the others, by id",
   async (t) => {
     const world = t.world({
       config: { ...CONFIG, resolver: "claude" },
@@ -135,63 +137,20 @@ conformance(
     doneUnmerged(world, "03");
     const seven = doneUnmerged(world, "07");
     doneUnmerged(world, "09");
-    writeFileSync(join(seven.path, "shared.txt"), "from-07\n");
-    commitAll(seven.path, "shared-07");
-    writeFileSync(join(world.repo, "shared.txt"), "from-main\n");
-    commitAll(world.repo, "shared-main");
     mkdirSync(join(world.pool, "runs"), { recursive: true });
     writeFileSync(
       join(world.pool, "runs", "07.events.jsonl"),
       `${JSON.stringify({ at: "2026-09-05T00:00:00.000Z", attempt: 1, kind: "merge-deferred", payload: seven })}\n`,
     );
-    const release = join(world.root, "release-07");
-    world.stubs.script("07.resolver", {
-      run: [
-        `for _ in $(seq 1 600); do [ -e '${release}' ] && break; sleep 0.05; done`,
-        "git merge main >/dev/null 2>&1 || true",
-        "printf '%s\\n' resolved-07 > shared.txt",
-        "git add shared.txt",
-      ].join("\n"),
-      outcomeRaw: JSON.stringify({ resolved: true, note: "kept both" }),
-    });
 
     const server = await t.start(world);
-    const taken = await untilState(
-      server,
-      "07's merge taken on and at its resolver",
-      (s) => s.state.mergeQueue.length === 3 && cardOf(s, "07").liveAttempt?.role === "resolver",
-      60_000,
-    );
-    expect(taken.state.mergeQueue).toEqual([
-      { ticketId: "07", state: "resolving" },
-      { ticketId: "03", state: "stalled" },
-      { ticketId: "09", state: "stalled" },
-    ]);
-    expect(interruptsOf(taken)).toEqual([]);
-    expect(await poolLog(server)).toContain("ticket 07: merge dropped at the last shutdown chained again");
+    const listed = await untilState(server, "the three unmerged Tickets listed", (s) => s.state.mergeQueue.length === 3);
+    expect(queueOf(listed)).toEqual(["03:stalled", "07:stalled", "09:stalled"]);
+    expect(interruptsOf(listed)).toEqual([]);
+    expect(launchKeys(world)).toEqual([]);
+    expect((await poolLog(server)).join("\n")).not.toContain("chained again");
+    expect((await events(server.http, "07")).events.map((event) => event.kind)).not.toContain("merge-deferred");
     expect(gitIn(world.repo, ["log", "main", "--format=%s"]).split("\n")).not.toContain("work-07");
-
-    writeFileSync(release, "");
-    const approving = await untilState(server, "07's merge-approval", (s) => interruptsOf(s).join(" ") === "07:merge-approval");
-    expect(approving.state.mergeQueue).toEqual([
-      { ticketId: "07", state: "awaiting-approval" },
-      { ticketId: "03", state: "stalled" },
-      { ticketId: "09", state: "stalled" },
-    ]);
-
-    await answer(server, { ticketId: "07", action: "approve" });
-    const landed = await untilState(
-      server,
-      "07 merged, 03 and 09 left",
-      (s) => s.state.mergeQueue.map((entry) => entry.ticketId).join(" ") === "03 09",
-      60_000,
-    );
-    expect(landed.state.mergeQueue).toEqual([
-      { ticketId: "03", state: "stalled" },
-      { ticketId: "09", state: "stalled" },
-    ]);
-    expect(gitIn(world.repo, ["show", "main:07.txt"])).toBe("07's work\n");
-    expect(gitIn(world.repo, ["show", "main:shared.txt"])).toBe("resolved-07\n");
   },
   { timeoutMs: 120_000 },
 );

@@ -23,7 +23,7 @@ import type {
   RequestPayload,
   ServerMessage,
 } from "../../protocol/protocol.ts";
-import type { EnrichedSnapshot, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
+import type { EnrichedSnapshot, PlanFile, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { openSocket, framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { PROTOCOL_VERSION, WS_PATH, applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { bootRecorder } from "../harness/boot-recorder.ts";
@@ -1016,7 +1016,10 @@ conformance("http", "GET /api/pool-log › serves the pool log's lines before a 
 // socket and HTTP parity
 // ---------------------------------------------------------------------------
 
-type Twin = { method: "GET" | "POST" | "PUT"; path: string; body?: unknown };
+type Twin = { method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown };
+
+// A draft that is no Plan at all, for the kinds whose answer does not depend on its content.
+const NO_PLAN = {} as PlanFile;
 
 /** One kind asked on the socket and over its HTTP twin, compared. */
 async function parity<K extends RequestKind>(
@@ -1100,6 +1103,13 @@ conformance(
         { before: logTotal, limit: 3 },
         { method: "GET", path: `/api/pool-log?before=${logTotal}&limit=3` },
       ],
+      // The Plan kinds are asked of what writes nothing: the list, a slug nobody saved, a draft the
+      // validator answers whatever it holds, a bad slug and a Preset's slug.
+      "plans.list": [{}, { method: "GET", path: "/api/plans" }],
+      "plans.get": [{ slug: "no-such-plan" }, { method: "GET", path: "/api/plans/no-such-plan" }],
+      "plans.validate": [{ plan: NO_PLAN }, { method: "POST", path: "/api/plans/validate", body: { plan: {} } }],
+      "plans.save": [{ slug: "BAD", plan: NO_PLAN }, { method: "PUT", path: "/api/plans/BAD", body: {} }],
+      "plans.delete": [{ slug: "factory-today" }, { method: "DELETE", path: "/api/plans/factory-today" }],
     };
 
     const seen = new Set<string>();

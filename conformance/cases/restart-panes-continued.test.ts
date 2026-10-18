@@ -14,7 +14,6 @@ import {
   quiescentWith,
   restartCase,
   settle,
-  snapshotOf,
   startLeg,
   stateLine,
   ticket,
@@ -32,11 +31,6 @@ const BRIEF = "\n\n---\n\n## Brief\n\nask me";
 function pause() {
   return { status: "checkpoint", brief: "ask me", hold: 150 } as const;
 }
-
-const CHECKPOINT = { status: "checkpoint", summary: "paused", commitSha: null, brief: "ask me" };
-
-/** A frame both claude's and opencode's readiness patterns match, with claude's idle prompt. */
-const BOTH_READY = "Claude Code v · Ask anything\n❯ ";
 
 function cardOf(snapshot: EnrichedSnapshot, id: string): EnrichedTicketState {
   const card = snapshot.state.tickets.find((each) => each.id === id);
@@ -104,20 +98,6 @@ function eventsOf(world: World, id: string, kind: string) {
   return readEvents(world.pool, id).filter((event) => event.kind === kind);
 }
 
-/** A Ticket's events as `<attempt> <kind>`, in order. */
-function eventLines(world: World, id: string): string[] {
-  return readEvents(world.pool, id).map((event) => `${event.attempt} ${event.kind}`);
-}
-
-/** The events of a done Ticket whose merge a stop dropped at the gate, once redone and landed. */
-const DEFERRED_TWICE = ["1 scheduled", "1 spawned", "1 exited", "1 merge-deferred", "1 merge-deferred", "1 merged", "1 tab-closed"];
-
-/** A Ticket's event lines once its merged attempt's tab-closed has landed: on Bun it follows the merge by 200 to
- * 400 ms, so a read straight after `merged` races it (NOT-PORTED.md, restart). */
-async function eventLinesAfterTabClose(world: World, id: string): Promise<string[]> {
-  return until(() => eventLines(world, id), (lines) => lines.includes("1 tab-closed"), { what: `${id}'s tab-closed` });
-}
-
 /** Commit one file in a worktree. */
 function commitIn(worktree: string, file: string): void {
   writeFileSync(join(worktree, file), "work\n");
@@ -162,14 +142,6 @@ function spawnedIn(world: World, worktree: string, branch: string, paneId: strin
     pane_id: paneId,
     tab_id: tabId,
   };
-}
-
-async function leftInCheckout(world: World, herdr: HerdrProcess): Promise<void> {
-  writeEvents(world, "01", [
-    { attempt: 1, kind: "scheduled", payload: {} },
-    { attempt: 1, kind: "spawned", payload: spawnedIn(world, world.repo, "main", "p-01", "t-01") },
-  ]);
-  await herdr.control("injectPane", "p-01", { tabId: "t-01", cwd: world.repo, workspaceId: "w1" });
 }
 
 /** Make Ticket `id`'s pool worktree and branch, as the engine makes them for an Attempt. */
@@ -253,121 +225,6 @@ restartCase("a verify Ticket's Continued attempt that ended done while no server
   // No fresh fan-out: 01 never ran again.
   expect(eventsOf(world, "01", "spawned").map((event) => event.attempt)).toEqual(spawnedBefore);
 }, { timeoutMs: 120_000 });
-
-// engine/keep-talking.test.ts:832
-restartCase(
-  "a merge held at the pool checkout's gate is recorded at once, kept out across a restart, and redone once the Continued attempt ends",
-  async (t) => {
-    const world = t.world({
-      tickets: [
-        ticket("01", "a", { status: "in-progress", body: BODY }),
-        ticket("02", "b", { status: "in-progress", body: "# 02\n\nWork on 02." }),
-      ],
-      config: TERMINAL,
-    });
-    const worktree = makeWorktree(world, "02");
-    writeEvents(world, "02", [
-      { attempt: 1, kind: "scheduled", payload: {} },
-      { attempt: 1, kind: "spawned", payload: spawnedIn(world, worktree.path, worktree.branch, "p-02", "t-02") },
-    ]);
-    const herdr = await t.herdr(world, { rendered: CLAUDE_READY });
-    await leftInCheckout(world, herdr);
-    await herdr.control("injectPane", "p-02", { tabId: "t-02", cwd: worktree.path, workspaceId: "w1" });
-    const first = await startLeg(t, world, 0, { herdr });
-    await untilLogged(first, "ticket 02: attempt 1 re-adopted from live pane p-02; waiting on its exit");
-    await untilLogged(first, "ticket 01: attempt 1 re-adopted from live pane p-01; waiting on its exit");
-    writeOutcome(world, "01.outcome.json", CHECKPOINT);
-    const paneId = await untilHeld(first, "01");
-    await keepTalking(first, herdr, paneId, join(world.pool, "runs", "01.outcome.json"));
-
-    // 02 ends done with work on its branch while 01 talks in the checkout:
-    // its merge meets the held gate, recorded at once with no drive running.
-    commitIn(worktree.path, "held.txt");
-    writeOutcome(world, "02.outcome.json", { status: "done", summary: "done", commitSha: null });
-    await until(() => eventsOf(world, "02", "merge-deferred").length, (n) => n > 0, {
-      what: "02's merge-deferred record",
-      ms: 30_000,
-    });
-    expect(existsSync(join(world.repo, "held.txt"))).toBe(false);
-    await first.stop();
-
-    const second = await startLeg(t, world, 1, { herdr });
-    await untilLive(second, "01", 2);
-    await untilLogged(second, `ticket 01: continued attempt 2 re-adopted from live pane ${paneId}; waiting on its Outcome`);
-    // The Continued attempt holds the checkout again: the redone merge waits.
-    await untilLogged(second, "ticket 02: merge dropped at the last shutdown chained again");
-    expect(cardOf(await snapshotOf(second), "02")).toMatchObject({ status: "done", mergeState: "queued" });
-    expect(existsSync(join(world.repo, "held.txt"))).toBe(false);
-    expect(eventsOf(world, "02", "merged")).toEqual([]);
-
-    writeOutcome(world, "01.outcome.json", { status: "done", summary: "talked", commitSha: null });
-    await until(() => existsSync(join(world.repo, "held.txt")), Boolean, { what: "the redone merge", ms: 30_000 });
-    await until(() => eventsOf(world, "02", "merged").length, (n) => n === 1, { what: "02's merged record", ms: 30_000 });
-    expect(await eventLinesAfterTabClose(world, "02")).toEqual(DEFERRED_TWICE);
-    await settle(second, "both done and the Review raised", quiescentWith("REVIEW:review"));
-  },
-  { timeoutMs: 120_000 },
-);
-
-// engine/keep-talking.test.ts:889
-restartCase(
-  "a merge a stop dropped at the pool checkout's gate is redone after the restart once the Continued attempt ends",
-  async (t) => {
-    const world = t.world({ tickets: [ticket("01", "a", { status: "in-progress", body: BODY })], config: TERMINAL });
-    // The Conversation talks on opencode, its stub held in its pane; the
-    // Ticket it proposes runs on claude and commits its work.
-    world.stubs.script("_opencode", { hold: 150 });
-    world.stubs.script("conv-1-spawn-1", { work: { file: "side.txt", line: "side", message: "side work" } });
-    const herdr = await t.herdr(world, { rendered: BOTH_READY });
-    await leftInCheckout(world, herdr);
-    const first = await startLeg(t, world, 0, { herdr });
-    await untilLogged(first, "ticket 01: attempt 1 re-adopted from live pane p-01; waiting on its exit");
-    writeOutcome(world, "01.outcome.json", CHECKPOINT);
-    const paneId = await untilHeld(first, "01");
-    await keepTalking(first, herdr, paneId, join(world.pool, "runs", "01.outcome.json"));
-    const started = await first.http.post("/api/conversations", { title: "Spawner", assign: { harness: "opencode" } });
-    expect(started.status, started.text).toBe(201);
-    writeFileSync(
-      join(world.pool, "runs", "conv-1.spawn.json"),
-      JSON.stringify({
-        spawn: [
-          {
-            title: "Side ticket",
-            body: "do a small side thing please, in its own worktree",
-            assign: { harness: "claude" },
-          },
-        ],
-      }),
-    );
-    // The proposed Ticket runs in its own worktree and ends done while 01
-    // talks in the checkout: its merge waits at the gate.
-    await until(() => eventsOf(world, "conv-1-spawn-1", "merge-deferred").length, (n) => n > 0, {
-      what: "conv-1-spawn-1's merge-deferred record",
-      ms: 60_000,
-    });
-    expect(String(eventsOf(world, "conv-1-spawn-1", "spawned")[0]!.payload.cwd)).not.toBe(world.repo);
-    expect(existsSync(join(world.repo, "side.txt"))).toBe(false);
-    await first.stop();
-
-    const second = await startLeg(t, world, 1, { herdr });
-    await untilLive(second, "01", 2);
-    await untilLogged(second, "ticket conv-1-spawn-1: merge dropped at the last shutdown chained again");
-    expect(cardOf(await snapshotOf(second), "conv-1-spawn-1")).toMatchObject({ status: "done", mergeState: "queued" });
-    // Re-adopted, the Continued attempt still holds the checkout: the redone merge waits at the gate again.
-    expect(existsSync(join(world.repo, "side.txt"))).toBe(false);
-    expect(eventsOf(world, "conv-1-spawn-1", "merged")).toEqual([]);
-
-    writeOutcome(world, "01.outcome.json", { status: "done", summary: "talked", commitSha: null });
-    await until(() => eventsOf(world, "conv-1-spawn-1", "merged").length, (n) => n === 1, {
-      what: "conv-1-spawn-1's redone merge",
-      ms: 30_000,
-    });
-    expect(existsSync(join(world.repo, "side.txt"))).toBe(true);
-    // Deferred once at the gate before the stop and once more by the redo.
-    expect(await eventLinesAfterTabClose(world, "conv-1-spawn-1")).toEqual(DEFERRED_TWICE);
-  },
-  { timeoutMs: 120_000 },
-);
 
 // engine/keep-talking.test.ts:993
 conformance("restart", "an Attempt re-adopted at boot in its worktree that ends done is merged onto the target", async (t) => {

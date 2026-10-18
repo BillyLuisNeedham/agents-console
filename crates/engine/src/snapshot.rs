@@ -209,7 +209,7 @@ fn hold_watch_emitted(session: &mut Session, hold: &[String]) {
                             if s.hold_watch.changed(&derived) {
                                 let phase = s.current_phase();
                                 emit_snapshot(s, phase);
-                                let _ = s.wake();
+                                s.wake();
                             }
                             s.hold_watch_timer == generation && s.hold_watch.ticking()
                         })

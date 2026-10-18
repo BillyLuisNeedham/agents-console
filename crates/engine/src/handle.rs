@@ -16,13 +16,6 @@ use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
 
-// What an answer waits on once accepted: the next settle at once (a retry of an answer already
-// processed), or its processing first.
-enum Accepted {
-    Processed,
-    Waiting(tokio::sync::oneshot::Receiver<Result<(), EngineError>>),
-}
-
 impl Engine {
     pub async fn accept(
         &self,
@@ -32,15 +25,15 @@ impl Engine {
         attempt: Option<u32>,
     ) -> Result<(), EngineError> {
         self.call(move |s| {
-            crate::answers::accept_answer(
+            crate::answers::submit_answer(
                 s,
                 &ticket_id,
                 note,
                 action,
                 attempt.map(u64::from),
                 None,
-            )?;
-            s.wake().map_err(|e| EngineError::refused(e.to_string()))
+                None,
+            )
         })
         .await?
     }
@@ -54,31 +47,22 @@ impl Engine {
         action: ResumeAction,
         attempt: Option<u32>,
     ) -> Result<RunPhase, EngineError> {
-        let accepted = self
-            .call(move |s| -> Result<Accepted, EngineError> {
-                let record = crate::answers::accept_answer(
-                    s,
-                    &ticket_id,
-                    note,
-                    action,
-                    attempt.map(u64::from),
-                    None,
-                )?;
-                // A retry of an answer that was already processed: nothing new to wait for.
-                if record.processed_at.is_some() {
-                    return Ok(Accepted::Processed);
-                }
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                s.answer_waiters.entry(record.seq).or_default().push(tx);
-                s.wake().map_err(|e| EngineError::refused(e.to_string()))?;
-                Ok(Accepted::Waiting(rx))
-            })
-            .await??;
-        if let Accepted::Waiting(processed) = accepted {
-            processed
-                .await
-                .unwrap_or(Err(EngineError::from(crate::actor::EngineGone::Stopped)))?;
-        }
+        let (waiter, processed) = tokio::sync::oneshot::channel();
+        self.call(move |s| {
+            crate::answers::submit_answer(
+                s,
+                &ticket_id,
+                note,
+                action,
+                attempt.map(u64::from),
+                None,
+                Some(waiter),
+            )
+        })
+        .await??;
+        processed
+            .await
+            .unwrap_or(Err(EngineError::from(crate::actor::EngineGone::Stopped)))?;
         self.settled().await
     }
 
@@ -170,7 +154,8 @@ impl Engine {
                         crate::snapshot::emit_snapshot(s, phase);
                     }
                 }
-                s.wake()
+                s.wake();
+                Ok(())
             })
             .await;
     }

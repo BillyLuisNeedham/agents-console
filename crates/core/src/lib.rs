@@ -19,6 +19,7 @@ mod marker_file;
 pub mod merge_hold;
 pub mod notices;
 pub mod outcome;
+pub mod plan;
 pub mod pool;
 pub mod pool_settings;
 pub mod pool_title;

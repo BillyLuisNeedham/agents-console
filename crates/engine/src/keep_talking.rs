@@ -54,8 +54,6 @@ use crate::verify::{checkpoint_ticket_by_engine, grade_round, resolve_lone_attem
 pub struct ContinuedAttempt {
     pub attempt: u64,
     pub work: HeldPane,
-    /// Whether it works inside the pool checkout's tree, decided once at its start.
-    pub in_pool_checkout: bool,
     /// Lets its pane go without an ending.
     pub release: ContinuedRelease,
     pub log_path: String,
@@ -99,7 +97,7 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
     };
     if interrupt.kind != InterruptKind::Checkpoint
-        || session.state.tickets.get(ticket_id) != Some(&TicketStatus::Checkpoint)
+        || session.status_of(ticket_id) != Some(TicketStatus::Checkpoint)
         || session.adopted.contains_key(ticket_id)
     {
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
@@ -381,7 +379,7 @@ fn claim_pane(
     let mut entry = LiveAttemptEntry::new(attempt, Some(held.pane_id.clone()), held.tab_id.clone());
     entry.started_at = at;
     crate::live_attempts::register(session, ticket_id, entry);
-    let _ = crate::persist::persist(session);
+    session.wake();
     Ok(attempt)
 }
 
@@ -449,7 +447,6 @@ fn start_continued(session: &mut Session, marker: &TicketMarker, started: Starte
         marker.id.clone(),
         ContinuedAttempt {
             attempt: started.attempt,
-            in_pool_checkout: in_pool_checkout(session, &started.work.cwd),
             work: started.work,
             release: run.release,
             log_path: started.log_path,
@@ -1191,7 +1188,6 @@ mod tests {
             ContinuedAttempt {
                 attempt: 2,
                 work,
-                in_pool_checkout: false,
                 release: ContinuedRelease::detached(),
                 log_path: js::path_text(&runs.join("01.log")),
                 outcome_path,

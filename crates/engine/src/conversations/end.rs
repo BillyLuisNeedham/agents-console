@@ -12,9 +12,7 @@ use super::*;
 use crate::actor::Engine;
 use crate::attempt_ending::PaneEnding;
 use crate::attempt_ending::wait_for_pane_ending;
-use crate::checkout_gate::{
-    hold_pool_checkout, pool_checkout_free, pool_checkout_held, release_pool_checkout,
-};
+use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::error::EngineError;
 use crate::interrupts::{clear_interrupt, interrupt, raise_interrupt};
 use crate::pane_survey::{PaneListing, listed_as_recorded};
@@ -509,54 +507,32 @@ fn finish_or_chain(s: &mut Session, rt: &Rt) {
         return;
     }
     // The End answers once its ending is recorded and its tab closed; the merge goes on behind it (issue
-    // #140), on the merge chain, which may wait on a Continued attempt in the pool checkout (ADR-0027),
-    // and its outcome is reported the usual way: the ended record and snapshot, or a merge interrupt. A
-    // merge-chain failure must never wedge the End: the Conversation is left `ending` with its worktree
-    // intact, visible as a stuck End, and the chain itself stays usable for the next caller.
+    // #140), on the merge chain, and its outcome is reported the usual way: the ended record and
+    // snapshot, or a merge interrupt. A merge-chain failure must never wedge the End: the Conversation is
+    // left `ending` with its worktree intact, visible as a stuck End, and the chain itself stays usable
+    // for the next caller.
     let engine = s.engine();
     let rt = rt.clone();
     crate::merges::chain_link(s, async move {
         end_merge_link(&engine, rt).await;
         let _ = engine
             .call(|s| {
-                let _ = s.wake();
+                s.wake();
             })
             .await;
     });
 }
 
-// The merge, inside its chain link and the pool checkout's gate (ADR-0027): checked as the merge is
-// about to run, and a merge dropped there at a shutdown is an End the next boot finishes. A merge counts
-// as in flight from the gate until it settles (including the resolver's run), which Keep talking refuses
-// beside.
+// The merge, inside its chain link. A merge that does not land counts as a writer in the pool checkout
+// until its resolver's run settles, which Keep talking refuses beside.
 async fn end_merge_link(engine: &Engine, rt: Rt) {
     const WHAT: &str = "a Conversation's merge into the pool checkout is in flight";
-    let first = {
+    let outcome = {
         let rt = rt.clone();
-        engine
-            .call(move |s| {
-                if pool_checkout_held(s) {
-                    return None;
-                }
-                Some(run_end_merge(s, &rt, WHAT))
-            })
-            .await
-    };
-    let outcome = match first {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => {
-            // Held: the link waits until the Continued attempt ends, and so does everything chained
-            // behind it.
-            if !matches!(pool_checkout_free(engine).await, Ok(true)) {
-                return;
-            }
-            let rt = rt.clone();
-            match engine.call(move |s| run_end_merge(s, &rt, WHAT)).await {
-                Ok(outcome) => outcome,
-                Err(_) => return,
-            }
+        match engine.call(move |s| run_end_merge(s, &rt, WHAT)).await {
+            Ok(outcome) => outcome,
+            Err(_) => return,
         }
-        Err(_) => return,
     };
     let Some((hold, result)) = outcome else {
         return;
@@ -574,14 +550,13 @@ async fn end_merge_link(engine: &Engine, rt: Rt) {
         .await;
 }
 
-// The merge itself, one job: the hold taken, the branch merged. A landed merge finishes the End and lets
-// the hold go; a failed one hands its result and the hold back for the resolver.
+// The merge itself, one job. A landed merge finishes the End; a failed one hands its result and a hold
+// back for the resolver.
 fn run_end_merge(
     s: &mut Session,
     rt: &Rt,
     what: &str,
 ) -> Option<(crate::checkout_gate::CheckoutHold, MergeResult)> {
-    let hold = hold_pool_checkout(s, what);
     let branch = rt.with(|r| r.worktree.branch.clone());
     let result = merge_into_target(s, &branch);
     if result.ok {
@@ -589,10 +564,9 @@ fn run_end_merge(
         let id = rt.id();
         event(s, &id, TicketEventKind::Merged, merged_payload(&result), 1);
         finish_end(s, rt, true);
-        release_pool_checkout(s, hold);
         return None;
     }
-    Some((hold, result))
+    Some((hold_pool_checkout(s, what), result))
 }
 
 /// Merge `branch` into the merge target, in whichever checkout holds it (issue #101): the engine's,

@@ -36,7 +36,7 @@ fn refused(message: impl Into<String>) -> EngineError {
 
 // What the start's first stretch settled: everything the launch needs, and nothing that needs the
 // session.
-struct Prepared {
+pub(crate) struct Prepared {
     id: String,
     title: String,
     opening: String,
@@ -175,17 +175,11 @@ fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), Engine
     Ok(())
 }
 
-// The synchronous stretch of `start` up to the launch: the checks, the id, the reservation, the
-// Assignment, the worktree and the teaching.
-fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, EngineError> {
-    if let Err(err) = check_start(s, req) {
-        // A Spawn's id was reserved when its start was fired (`land_spawn`), so a refusal gives it
-        // back, or the parent's next Spawn would skip the number.
-        if let Some(id) = &req.id {
-            unreserve(s, id);
-        }
-        return Err(err);
-    }
+pub(crate) fn prepare(
+    s: &mut Session,
+    req: &StartConversationRequest,
+) -> Result<Prepared, EngineError> {
+    check_start(s, req)?;
     let is_steward = req.role == Some(ConversationRole::Steward);
     let existing = load(s);
     let id = match (&req.id, &req.spawned_by) {
@@ -197,8 +191,6 @@ fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, 
             s.conversations.reserved.contains(id)
         }),
     };
-    // Reserved before the first await, so an adoption that reads the reserved ids right after firing
-    // this start already sees it.
     s.conversations.reserved.insert(id.clone());
     if is_steward {
         s.conversations.steward_starting = Some(id.clone());
@@ -270,6 +262,13 @@ pub async fn start(
     req: StartConversationRequest,
 ) -> Result<ConversationView, EngineError> {
     let prepared = engine.call(move |s| prepare(s, &req)).await??;
+    launch_prepared(engine, prepared).await
+}
+
+pub(crate) async fn launch_prepared(
+    engine: &Engine,
+    prepared: Prepared,
+) -> Result<ConversationView, EngineError> {
     let id = prepared.id.clone();
     let view = launch(engine, prepared).await;
     engine.call(move |s| unreserve(s, &id)).await?;
@@ -435,10 +434,6 @@ fn after_launch(
     // resolves the same way a grader or spawned ticket inherits from its own parent.
     record_assignment(s, &id, p.assignment.clone());
     super::tick::start_tick(s, &runtime);
-    // start is called directly off the handle (the server route, or a fire-and-forget spawn adoption),
-    // never through the drive loop, so nothing else emits a snapshot that would tell the socket this
-    // Conversation now exists; a pool with no other ticket activity in flight could otherwise go
-    // arbitrarily long before the next unrelated emit.
     publish(s);
     Ok(view_of(s, &record, &load(s)))
 }

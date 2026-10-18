@@ -1,0 +1,21 @@
+{
+  "horde": 1,
+  "name": "Addy Osmani · Bug fix",
+  "author": "Addy Osmani",
+  "source": "skills/addy/addy-using-agent-skills/SKILL.md",
+  "note": "Debug, prove it with a failing test, review, and the human makes the final call; debugging checkpoints wait for you, because it never runs commands found in error messages without your confirmation. No loop limit is stated, so review loops back at most 2.",
+  "nodes": [
+    {"kind":"agent","id":"debug","title":"Debug and recover","x":40,"y":60,"skill":"addy-debugging-and-error-recovery","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"tdd","title":"Test-driven fix","x":340,"y":60,"skill":"addy-test-driven-development","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"review","id":"review","title":"Review","x":640,"y":60,"skill":"addy-code-review-and-quality","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"gate","id":"final-call","title":"You make the final call","x":940,"y":60,"open":"operator","join":"any"},
+    {"kind":"finish","id":"finish","title":"Finish","x":1240,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"debug","on":"done","to":"tdd"},
+    {"from":"tdd","on":"done","to":"review"},
+    {"from":"review","on":"findings","to":"tdd","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"review","on":"clean","to":"final-call"},
+    {"from":"final-call","on":"open","to":"finish"}
+  ]
+}

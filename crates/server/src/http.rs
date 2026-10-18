@@ -259,6 +259,23 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(routes::resume_request(&server, body).await);
         }
+        ("/api/plans/validate", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_validate_request(body));
+        }
+        ("/api/plans", &Method::GET) => return http_of(routes::plans_list_request(&server)),
+        (plan_path, _) if plan_path.starts_with("/api/plans/") => {
+            let slug = decode_component(&plan_path["/api/plans/".len()..]);
+            match method {
+                Method::GET => return http_of(routes::plan_get_request(&server, &slug)),
+                Method::PUT => {
+                    let body = read_body(body).await;
+                    return http_of(routes::plan_save_request(&server, &slug, body));
+                }
+                Method::DELETE => return http_of(routes::plan_delete_request(&server, &slug)),
+                _ => {}
+            }
+        }
         ("/api/events", _) => {
             let ticket = param("ticket").unwrap_or_default();
             let mut inner = server.lock();

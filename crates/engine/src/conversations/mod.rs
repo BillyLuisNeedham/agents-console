@@ -63,6 +63,7 @@ pub(crate) use end::merge_into_target;
 pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
+pub(crate) use start::{launch_prepared, prepare as prepare_start};
 
 /// How often a live Conversation's tick re-reads its pane unless a test shortens it.
 pub const CONVERSATION_POLL_MS: u64 = 2_000;
@@ -203,11 +204,6 @@ impl Conversations {
     /// counter never mints one twice before its record reaches disk.
     pub fn reserved_ids(&self) -> Vec<String> {
         self.reserved.iter().cloned().collect()
-    }
-
-    /// Reserve an id for a start about to be fired (idempotent). The start releases it when it ends.
-    pub fn reserve(&mut self, id: &str) {
-        self.reserved.insert(id.to_owned());
     }
 }
 
@@ -537,8 +533,6 @@ pub fn reserved_ids(s: &Session) -> Vec<String> {
     s.conversations.reserved_ids()
 }
 
-/// Reserve an id for a start about to be fired (idempotent): Spawn adoption reserves the id it mints
-/// in its own job, so a second adoption before the start's own job runs cannot mint it again.
 pub fn reserve(s: &mut Session, id: &str) {
     s.conversations.reserved.insert(id.to_owned());
 }

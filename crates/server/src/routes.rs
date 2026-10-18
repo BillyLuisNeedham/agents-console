@@ -12,6 +12,8 @@ use ac_core::config::read_config;
 use ac_core::js;
 use ac_core::line::normalise_factory;
 use ac_core::machine_defaults::write_machine_defaults;
+use ac_core::plan::Plan;
+use ac_core::plan::library::{self, LibraryError};
 use ac_core::pool_settings::{relaunch_port, require_known_station_harnesses, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
@@ -19,9 +21,11 @@ use ac_io::herdr::PaneReadSource;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LineResponse, LineStartResponse, LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction,
-    RunPhase, StartConversationRequest,
+    LineResponse, LineStartResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanResponse,
+    PlanSaveResponse, PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, RunPhase,
+    StartConversationRequest,
 };
+use ac_protocol::json::Unchecked;
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
 use crate::reassign::{ReassignContext, ReassignError, ReassignOutcome, write_reassign};
@@ -324,6 +328,78 @@ pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
     match saved.and_then(|()| server.settings_payload()) {
         Ok(payload) => Answer::ok(200, &payload),
         Err(err) => Answer::refused(400, Field::Error, err),
+    }
+}
+
+fn library_refusal(err: LibraryError) -> Answer {
+    let status = match err {
+        LibraryError::BadSlug(_) | LibraryError::Invalid(_) => 400,
+        LibraryError::PresetSlug(_) => 409,
+        LibraryError::NotFound(_) => 404,
+        LibraryError::Unreadable(_) => 422,
+        LibraryError::Io(_) => 500,
+    };
+    Answer::refused(status, Field::Reason, err.to_string())
+}
+
+/// GET /api/plans: the Presets, then the Plan library.
+pub fn plans_list_request(server: &Server) -> Answer {
+    let plans = library::list(&server.0.home);
+    Answer::ok(200, &PlansListResponse { plans })
+}
+
+/// GET /api/plans/<slug>: the Plan's file as it stands, with what is wrong with it.
+pub fn plan_get_request(server: &Server, slug: &str) -> Answer {
+    match library::get(&server.0.home, slug) {
+        Ok(stored) => Answer::ok(
+            200,
+            &PlanResponse {
+                slug: stored.slug,
+                preset: stored.preset,
+                plan: Unchecked::new(stored.file),
+                problems: stored.problems,
+            },
+        ),
+        Err(err) => library_refusal(err),
+    }
+}
+
+/// POST /api/plans/validate: a draft Plan, checked whole.
+pub fn plan_validate_request(body: Body) -> Answer {
+    let checked = body.and_then(|body| {
+        field_of(&body, "plan")
+            .map(Plan::check)
+            .ok_or_else(|| "plan is required".to_owned())
+    });
+    match checked {
+        Ok(problems) => Answer::ok(200, &PlanValidateResponse { problems }),
+        Err(err) => Answer::refused(400, Field::Reason, err),
+    }
+}
+
+/// PUT /api/plans/<slug>: `plan` is the Plan file, the HTTP body itself or the socket payload's field.
+pub fn plan_save_request(server: &Server, slug: &str, plan: Body) -> Answer {
+    let saved = match plan {
+        Ok(plan) => library::save(&server.0.home, slug, &plan),
+        Err(err) => return Answer::refused(400, Field::Reason, err),
+    };
+    match saved {
+        Ok(plan) => Answer::ok(
+            200,
+            &PlanSaveResponse {
+                slug: slug.to_owned(),
+                plan: plan.to_file(),
+            },
+        ),
+        Err(err) => library_refusal(err),
+    }
+}
+
+/// DELETE /api/plans/<slug>.
+pub fn plan_delete_request(server: &Server, slug: &str) -> Answer {
+    match library::delete(&server.0.home, slug) {
+        Ok(()) => Answer::ok_value(200, json!({})),
+        Err(err) => library_refusal(err),
     }
 }
 
@@ -961,6 +1037,18 @@ pub async fn socket_request(
         RequestKind::SettingsPoolPut => pool_settings_request(server, body()).await,
         RequestKind::SettingsMachinePut => machine_settings_request(server, body()),
         RequestKind::PanesList => panes_request(server).await,
+        RequestKind::PlansList => plans_list_request(server),
+        RequestKind::PlansGet => plan_get_request(server, &field("slug")),
+        RequestKind::PlansValidate => plan_validate_request(body()),
+        RequestKind::PlansSave => plan_save_request(
+            server,
+            &field("slug"),
+            payload
+                .get("plan")
+                .cloned()
+                .ok_or_else(|| "plan is required".to_owned()),
+        ),
+        RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
         RequestKind::LogRead => {
             let mut inner = server.lock();
             log_request(

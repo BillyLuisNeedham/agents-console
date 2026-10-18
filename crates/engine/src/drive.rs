@@ -12,11 +12,11 @@ use ac_io::git;
 use ac_protocol::{InterruptKind, RunPhase, SpawnKind, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
-use crate::checkout_gate::{hold_pool_checkout, pool_checkout_free, release_pool_checkout};
+use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::error::EngineError;
 use crate::interrupts::{interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt};
 use crate::merges::{chain_ticket_merge, in_merge_chain, merge_hold, merge_target_sha};
-use crate::persist::{close_store, persist_with_retry, write_markers};
+use crate::persist::{close_store, persist, persist_with_retry, retry_persist, write_markers};
 use crate::session::{PoolState, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::spawns::spawns_await_tick;
@@ -44,22 +44,17 @@ pub fn start_drive(session: &mut Session) {
 }
 
 impl Session {
-    pub fn wake(&mut self) -> anyhow::Result<()> {
+    pub fn wake(&mut self) {
         self.wakes.ring();
         if self.driving {
             self.wake.notify_one();
-            return Ok(());
+        } else if self.drive_startable() {
+            start_drive(self);
         }
-        if !self.store_open || self.children.stopping {
-            return Ok(());
-        }
-        let answered = !self.answers.pending().is_empty();
-        crate::answers::drain_answers(self)?;
-        start_drive(self);
-        if answered {
-            emit_snapshot(self, RunPhase::Running);
-        }
-        Ok(())
+    }
+
+    pub fn drive_startable(&self) -> bool {
+        !self.driving && self.store_open && !self.children.stopping
     }
 }
 
@@ -418,11 +413,16 @@ pub async fn drive_loop(engine: &Engine) -> anyhow::Result<()> {
             next,
             changed,
         } = engine.call(tick).await??;
+        let refused = if changed {
+            engine.call(persist).await?.err()
+        } else {
+            None
+        };
         for launch in launches {
             tokio::spawn(run_launch(engine.clone(), launch));
         }
-        if changed {
-            persist_with_retry(engine).await?;
+        if let Some(refused) = refused {
+            retry_persist(engine, refused).await?;
         }
         if next == Next::Close {
             break;
@@ -440,17 +440,23 @@ fn persistence_pending(session: &Session) -> bool {
         .any(|i| i.kind == InterruptKind::Persistence)
 }
 
+const TICK_STEPS: [fn(&mut Session) -> anyhow::Result<()>; 6] = [
+    crate::config_reload::reload_config,
+    crate::answers::drain_answers,
+    crate::interrupts::reconcile_deadlocks,
+    crate::line::route_line,
+    crate::spawns::adopt_spawn_proposals,
+    start_owed_grading,
+];
+
 pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     if let Some(failure) = session.drive_failure.take() {
         anyhow::bail!(failure);
     }
     let before = serde_json::to_value(&session.state)?;
-    crate::config_reload::reload_config(session)?;
-    crate::answers::drain_answers(session)?;
-    crate::interrupts::reconcile_deadlocks(session)?;
-    crate::line::route_line(session)?;
-    crate::spawns::adopt_spawn_proposals(session)?;
-    start_owed_grading(session)?;
+    for step in TICK_STEPS {
+        step(session)?;
+    }
     let held = persistence_pending(session);
     let launches = if held {
         Vec::new()
@@ -603,7 +609,7 @@ fn on_exit(session: &mut Session, id: &str, result: Result<TicketResult, String>
     if let Err(error) = recorded {
         session.drive_failure.get_or_insert(error);
     }
-    let _ = session.wake();
+    session.wake();
 }
 
 fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()> {
@@ -721,24 +727,21 @@ fn grading_ended(session: &mut Session, outcome: anyhow::Result<()>) {
     if let Err(error) = outcome {
         session.drive_failure.get_or_insert(error.to_string());
     }
-    let _ = session.wake();
+    session.wake();
 }
 
 async fn writing_in_pool_checkout<T, F>(
     engine: &Engine,
     what: String,
     work: impl FnOnce() -> F,
-) -> anyhow::Result<Option<T>>
+) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    if !pool_checkout_free(engine).await? {
-        return Ok(None);
-    }
     let hold = engine.call(move |s| hold_pool_checkout(s, what)).await?;
     let done = work().await;
     engine.call(move |s| release_pool_checkout(s, hold)).await?;
-    done.map(Some)
+    done
 }
 
 async fn verify_grade_flow(
@@ -754,8 +757,7 @@ async fn verify_grade_flow(
     let outcome = writing_in_pool_checkout(&engine, what, || {
         decide_round(&engine, &marker, &ended, verify)
     })
-    .await
-    .map(drop);
+    .await;
     let id = marker.id;
     let _ = engine
         .call(move |s| {
@@ -814,7 +816,7 @@ async fn decide_round(
     let selection = crate::verify::pick_winner(engine, marker, &attempts, &grades).await?;
     let marker = marker.clone();
     in_merge_chain(engine, move |s| {
-        crate::verify::finish_selection(s, &marker, selection)
+        crate::verify::complete_selection(s, &marker, selection.picked, &selection.why, true)
     })
     .await
 }
@@ -836,17 +838,10 @@ async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::Continu
             "the lone grade of {}'s continued attempt is deciding its merge",
             marker.id
         );
-        let (attempt, work) = (owed.attempt, owed.work.clone());
-        let graded = writing_in_pool_checkout(&engine, what, || {
-            crate::keep_talking::grade_continued_attempt(&engine, &marker, attempt, work)
+        writing_in_pool_checkout(&engine, what, || {
+            crate::keep_talking::grade_continued_attempt(&engine, &marker, owed.attempt, owed.work)
         })
-        .await?;
-        if graded.is_none() {
-            engine
-                .call(move |s| s.continued_grades.insert(0, owed))
-                .await?;
-        }
-        Ok(())
+        .await
     }
     .await;
     let _ = engine.call(move |s| grading_ended(s, outcome)).await;
@@ -943,8 +938,7 @@ fn rebuilt_group(session: &Session, id: &str) -> Option<VerifyGroup> {
 // ---------------------------------------------------------------------------------------------------
 
 pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
-    // A closed ticket (issue #154) is finished too.
-    let (pending, closed_ids, raised, merging_at_gate) = engine
+    let (mut phase, quiet) = engine
         .call(|s| {
             let pending: Vec<String> = s
                 .markers
@@ -952,37 +946,21 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .filter(|m| !is_finished(s.status_of(&m.id)))
                 .map(|m| m.id.clone())
                 .collect();
-            let closed: Vec<String> = s
+            let closed_ids: Vec<String> = s
                 .markers
                 .iter()
                 .filter(|m| s.status_of(&m.id) == Some(TicketStatus::Closed))
                 .map(|m| m.id.clone())
                 .collect();
             let merging = s.merge_line.unsettled();
-            let raise = pending.is_empty()
+            let raised = pending.is_empty()
                 && !crate::line::is_factory_pool(s)
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
                 && merging.is_empty();
-            if raise {
+            if raised {
                 let review = crate::interrupts::review_interrupt(s);
                 raise_interrupt(s, review);
-            }
-            (pending, closed, raise, merging)
-        })
-        .await?;
-    if raised {
-        persist_with_retry(engine).await?;
-    }
-    let pending_c = pending.clone();
-    let (mut phase, quiet) = engine
-        .call(move |s| {
-            let pending = pending_c;
-            let mut merging = s.merge_line.unsettled();
-            for id in merging_at_gate {
-                if !merging.contains(&id) {
-                    merging.push(id);
-                }
             }
             let mut outside: Vec<&String> = pending
                 .iter()
@@ -1075,7 +1053,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
             settle_drive(s, Some(phase), None);
             drive_turned(s);
             if again {
-                s.wake()?;
+                s.wake();
             }
             Ok(())
         })
@@ -1270,7 +1248,7 @@ mod tests {
         let mut session = crate::testkit::bare_session(publisher);
         session.driving = true;
         session.wakes.see_all();
-        session.wake().unwrap();
+        session.wake();
         let waited = futures::FutureExt::now_or_never(session.wake.notified());
         assert!(
             waited.is_some(),

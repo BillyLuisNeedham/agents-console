@@ -563,8 +563,6 @@ fn land_spawn(
     proposal: &SpawnProposal,
 ) -> anyhow::Result<bool> {
     if proposal.kind == Some(SpawnKind::Conversation) {
-        crate::conversations::reserve(session, id);
-        let engine = session.engine();
         let request = StartConversationRequest {
             title: js::trim(&proposal.title).to_owned(),
             opening: Some(proposal.body.clone()),
@@ -578,28 +576,41 @@ fn land_spawn(
             spawned_by: Some(parent_id.to_owned()),
             id: Some(id.to_owned()),
         };
-        let parent_id = parent_id.to_owned();
-        let title = proposal.title.clone();
-        tokio::spawn(async move {
-            let Err(error) = engine.start_conversation(request).await else {
-                return;
-            };
-            let reason = format!("conversation start failed: {}", error.message());
-            let _ = engine
-                .call(move |s| {
-                    let _ = append_now(
-                        s,
-                        &parent_id,
-                        TicketEventKind::SpawnRejected,
-                        json!({ "title": title, "reason": reason }),
-                    );
-                })
-                .await;
-        });
+        match crate::conversations::prepare_start(session, &request) {
+            Ok(prepared) => {
+                let engine = session.engine();
+                let (parent_id, title) = (parent_id.to_owned(), proposal.title.clone());
+                tokio::spawn(async move {
+                    let Err(error) = crate::conversations::launch_prepared(&engine, prepared).await
+                    else {
+                        return;
+                    };
+                    let _ = engine
+                        .call(move |s| reject_conversation_spawn(s, &parent_id, &title, &error))
+                        .await;
+                });
+            }
+            Err(error) => reject_conversation_spawn(session, parent_id, &proposal.title, &error),
+        }
         return Ok(false);
     }
     write_spawn_ticket(Path::new(&session.issues_dir), parent_id, id, proposal)?;
     Ok(true)
+}
+
+fn reject_conversation_spawn(
+    session: &mut Session,
+    parent_id: &str,
+    title: &str,
+    error: &EngineError,
+) {
+    let reason = format!("conversation start failed: {}", error.message());
+    let _ = append_now(
+        session,
+        parent_id,
+        TicketEventKind::SpawnRejected,
+        json!({ "title": title, "reason": reason }),
+    );
 }
 
 // A parent's adopted Spawns, each with the tickets it blocked.
@@ -989,7 +1000,8 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
         .map_err(|e| refused(e.to_string()))?;
     let phase = session.current_phase();
     emit_snapshot(session, phase);
-    session.wake().map_err(|e| refused(e.to_string()))
+    session.wake();
+    Ok(())
 }
 
 pub fn discard_held_spawn(
