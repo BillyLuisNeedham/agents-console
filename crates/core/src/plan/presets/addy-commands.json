@@ -1,0 +1,38 @@
+{
+  "horde": 1,
+  "name": "Addy Osmani · Commands",
+  "author": "Addy Osmani",
+  "source": "skills/addy/addy-using-agent-skills/SKILL.md",
+  "note": "Spec first, with you approving SPEC.md and tasks/plan.md, then addy-build takes the next task red then green and stops, with a human checkpoint every 2 to 3 tasks, and simplify ends in a second review. addy-ship fans out its own three personas into GO or NO-GO, no model is named, and no loop has a limit, so every loop is capped at 2.",
+  "nodes": [
+    {"kind":"agent","id":"spec","title":"Spec","x":40,"y":60,"skill":"addy-spec","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"confirm-spec","title":"Confirm SPEC.md","x":340,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"tasks","title":"Plan the tasks","x":640,"y":60,"skill":"addy-plan","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"review-plan","title":"Review tasks/plan.md","x":940,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"build","title":"Build: next task, red then green","x":1240,"y":60,"skill":"addy-build","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":{"perItem":1},"checkpoint":"operator","spawns":"hold"},
+    {"kind":"merger","id":"build-merge","title":"Merge Build: next task, red then green","x":1240,"y":310,"of":"build","conflict":{"resolver":{"harness":"claude","model":"opus","effort":"high"}}},
+    {"kind":"prove","id":"test","title":"Test","x":1540,"y":60,"skill":"addy-test","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"review","id":"review","title":"Review","x":1840,"y":60,"skill":"addy-review","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"simplify","title":"Simplify","x":2140,"y":60,"skill":"addy-code-simplify","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"review","id":"recheck","title":"Review the simplification","x":2440,"y":60,"skill":"addy-code-review-and-quality","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"decide","id":"ship","title":"Ship: three personas, GO or NO-GO","x":2740,"y":60,"skill":"addy-ship","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":3040,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"build","on":"done","to":"build-merge"},
+    {"from":"spec","on":"done","to":"confirm-spec"},
+    {"from":"confirm-spec","on":"open","to":"tasks"},
+    {"from":"tasks","on":"done","to":"review-plan"},
+    {"from":"review-plan","on":"open","to":"build"},
+    {"from":"build-merge","on":"done","to":"test"},
+    {"from":"test","on":"fail","to":"build","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"test","on":"pass","to":"review"},
+    {"from":"review","on":"findings","to":"build","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"review","on":"clean","to":"simplify"},
+    {"from":"simplify","on":"done","to":"recheck"},
+    {"from":"recheck","on":"findings","to":"simplify","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"recheck","on":"clean","to":"ship"},
+    {"from":"ship","on":"ship","to":"finish"},
+    {"from":"ship","on":"another-round","to":"build","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}}
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "horde": 1,
+  "name": "PClaude · Bug fix",
+  "author": "PClaude",
+  "source": "skills/pclaude/pclaude-poteto-mode/playbooks/bug-fix.md",
+  "note": "Pstack's bug-fix playbook ported to Claude Code (a port still in progress, see PORTING.md): reproduce and verify drive the real surface with claude-in-chrome or run, a stubborn hunt runs under Claude Code /loop, and Opening a PR runs simplify before pclaude-no-comments. The verify loop has no stated limit, so it is capped at 2.",
+  "nodes": [
+    {"kind":"agent","id":"reproduce","title":"Reproduce on the surface (claude-in-chrome or run)","x":40,"y":60,"skill":"claude-in-chrome","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"how","title":"How does it work?","x":340,"y":60,"skill":"pclaude-how","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"why","title":"Why: one investigator per source","x":640,"y":60,"skill":"pclaude-why","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":{"perItem":"all"},"checkpoint":"operator","spawns":"hold"},
+    {"kind":"merger","id":"why-merge","title":"Merge Why: one investigator per source","x":640,"y":310,"of":"why","conflict":{"resolver":{"harness":"claude","model":"opus","effort":"high"}}},
+    {"kind":"agent","id":"architect","title":"Architect, if it crosses a boundary","x":940,"y":60,"skill":"pclaude-architect","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"fix","title":"Fix: one owner","x":1240,"y":60,"skill":"pclaude-poteto-mode","assign":{"harness":"claude","model":"sonnet","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"prove","id":"verify","title":"Verify on the same surface (claude-in-chrome or run)","x":1540,"y":60,"skill":"claude-in-chrome","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"tdd","title":"Failing repro commits first","x":1840,"y":60,"skill":"pclaude-tdd","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"simplify","title":"Simplify","x":2140,"y":60,"skill":"simplify","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"no-comments","title":"No comments","x":2440,"y":60,"skill":"pclaude-no-comments","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"writing","title":"Technical writing","x":2740,"y":60,"skill":"pclaude-technical-writing","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"unslop","title":"Unslop: open the PR","x":3040,"y":60,"skill":"pclaude-unslop","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":3340,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"why","on":"done","to":"why-merge"},
+    {"from":"reproduce","on":"done","to":"how"},
+    {"from":"how","on":"done","to":"why"},
+    {"from":"why-merge","on":"done","to":"architect"},
+    {"from":"architect","on":"done","to":"fix"},
+    {"from":"fix","on":"done","to":"verify"},
+    {"from":"verify","on":"fail","to":"fix","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"verify","on":"pass","to":"tdd"},
+    {"from":"tdd","on":"done","to":"simplify"},
+    {"from":"simplify","on":"done","to":"no-comments"},
+    {"from":"no-comments","on":"done","to":"writing"},
+    {"from":"writing","on":"done","to":"unslop"},
+    {"from":"unslop","on":"done","to":"finish"}
+  ]
+}

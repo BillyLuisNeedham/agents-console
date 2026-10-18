@@ -37,6 +37,13 @@ import type {
   PendingSpawnRequest,
   PendingSpawnResponse,
   PendingSpawnView,
+  PlanResponse,
+  PlanSaveRequest,
+  PlanSaveResponse,
+  PlanSlugRequest,
+  PlanValidateRequest,
+  PlanValidateResponse,
+  PlansListResponse,
   PoolSettingsRequest,
   QueuedAnswer,
   ReassignRequest,
@@ -64,7 +71,7 @@ import type {
  * in `hello`; a page that was built for another one reloads itself, which is
  * how a Restart that rebuilt the UI reaches a tab left open across it.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Where the socket is served. */
 export const WS_PATH = "/api/ws";
@@ -314,6 +321,11 @@ export interface Requests {
   "log.read": { payload: LogReadRequest; result: TicketLogResponse };
   "log.follow": { payload: LogFollowRequest; result: LogFollowResult };
   "poolLog.read": { payload: PoolLogReadRequest; result: PoolLogRange };
+  "plans.list": { payload: Empty; result: PlansListResponse };
+  "plans.get": { payload: PlanSlugRequest; result: PlanResponse };
+  "plans.validate": { payload: PlanValidateRequest; result: PlanValidateResponse };
+  "plans.save": { payload: PlanSaveRequest; result: PlanSaveResponse };
+  "plans.delete": { payload: PlanSlugRequest; result: Empty };
 }
 
 /** Every request the socket takes, by kind (`keyof Requests`). */
@@ -339,7 +351,12 @@ export type RequestKind =
   | "panes.list"
   | "log.read"
   | "log.follow"
-  | "poolLog.read";
+  | "poolLog.read"
+  | "plans.list"
+  | "plans.get"
+  | "plans.validate"
+  | "plans.save"
+  | "plans.delete";
 
 export type RequestPayload<K extends RequestKind> = Requests[K]["payload"];
 
@@ -373,6 +390,11 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   "log.read": "GET /api/log",
   "log.follow": "GET /api/log",
   "poolLog.read": "GET /api/pool-log",
+  "plans.list": "GET /api/plans",
+  "plans.get": "GET /api/plans/<slug>",
+  "plans.validate": "POST /api/plans/validate",
+  "plans.save": "PUT /api/plans/<slug>",
+  "plans.delete": "DELETE /api/plans/<slug>",
 };
 
 /**
@@ -398,6 +420,8 @@ export const ACTION_KINDS: ReadonlySet<RequestKind> = new Set<RequestKind>([
   "conversations.end",
   "settings.pool.put",
   "settings.machine.put",
+  "plans.save",
+  "plans.delete",
 ]);
 
 /**

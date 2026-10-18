@@ -1,0 +1,33 @@
+{
+  "horde": 1,
+  "name": "Matt Pocock · Foggy",
+  "author": "Matt Pocock",
+  "source": "skills/engineering/wayfinder/SKILL.md",
+  "note": "wayfinder charts the fog and resolves each research ticket with a subagent on the research skill, looping until no fog is left; the author gives no limit, so the loop is capped at 2. Then the main flow, with implement taking one ticket at a time (/clear between tickets, which a graph cannot say) and retro closing the loop.",
+  "nodes": [
+    {"kind":"review","id":"chart","title":"wayfinder: chart the fog","x":40,"y":60,"skill":"wayfinder","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","makesItems":true,"checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"research","title":"wayfinder: research tickets","x":340,"y":290,"skill":"research","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":{"perItem":"all"},"checkpoint":"operator","spawns":"hold"},
+    {"kind":"merger","id":"research-merge","title":"Merge wayfinder: research tickets","x":340,"y":540,"of":"research","conflict":{"resolver":{"harness":"claude","model":"opus","effort":"high"}}},
+    {"kind":"agent","id":"to-spec","title":"To spec","x":640,"y":60,"skill":"to-spec","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"seams","title":"Seams match? (to-spec)","x":940,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"to-tickets","title":"To tickets","x":1240,"y":60,"skill":"to-tickets","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"breakdown","title":"Approve the breakdown","x":1540,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"implement","title":"Implement, one ticket at a time","x":1840,"y":60,"skill":"implement","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":{"perItem":1},"checkpoint":"steward","spawns":"hold"},
+    {"kind":"merger","id":"implement-merge","title":"Merge Implement, one ticket at a time","x":1840,"y":310,"of":"implement","conflict":{"resolver":{"harness":"claude","model":"opus","effort":"high"}}},
+    {"kind":"agent","id":"retro","title":"Retro","x":2140,"y":60,"skill":"retro","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":2440,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"research","on":"done","to":"research-merge"},
+    {"from":"implement","on":"done","to":"implement-merge"},
+    {"from":"chart","on":"findings","to":"research"},
+    {"from":"research-merge","on":"done","to":"chart","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"chart","on":"clean","to":"to-spec"},
+    {"from":"to-spec","on":"done","to":"seams"},
+    {"from":"seams","on":"open","to":"to-tickets"},
+    {"from":"to-tickets","on":"done","to":"breakdown"},
+    {"from":"breakdown","on":"open","to":"implement"},
+    {"from":"implement-merge","on":"done","to":"retro"},
+    {"from":"retro","on":"done","to":"finish"}
+  ]
+}

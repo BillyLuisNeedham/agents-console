@@ -1063,6 +1063,276 @@ export interface TicketReassignView {
 }
 
 // ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+/**
+ * A Plan file: `~/.agent-graphs/plans/<slug>.json`, a compiled-in Preset, or a Line's frozen
+ * copy. The engine's `ac_core::plan` is the only reader that decides whether one is valid.
+ */
+export interface PlanFile {
+  /** The format tag, 1. */
+  horde: number;
+  name: string;
+  author?: string;
+  /** The author's own file the flow comes from. Every Preset has one. */
+  source?: string;
+  note?: string;
+  /** The Steward may edit a Line running this Plan. Off unless set. */
+  stewardEdits?: boolean;
+  nodes: PlanNodeFile[];
+  edges: PlanEdgeFile[];
+}
+
+/**
+ * One node of a Plan file, told apart by `kind`. Agent, Prove, Review and Decide are Ticket
+ * nodes, and the kind fixes the verdicts their edges may route.
+ */
+export type PlanNodeFile =
+  | {
+      kind: "conversation";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      note?: string;
+    }
+  | {
+      kind: "agent";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "prove";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "review";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "decide";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "merger";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** The per-item Ticket node this Merger folds. */
+      of: string;
+      /** Absent, a resolver on the pool's own resolver settings. */
+      conflict?: PlanConflict;
+    }
+  | {
+      kind: "gate";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** Absent, the operator. */
+      open?: PlanOpener;
+      /** Absent, any. */
+      join?: PlanJoin;
+    }
+  | {
+      kind: "finish";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** Absent, none. */
+      act?: PlanFinishAct;
+      assign?: PlanAssign;
+    };
+
+/** A node's harness, model and effort. An absent field falls through to the pool defaults. */
+export interface PlanAssign {
+  harness?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** One copy per pass, or one per item under a cap. */
+export type PlanCopies = "one" | { perItem: PlanCap };
+
+/** At most this many copies live at once, or every item at once. */
+export type PlanCap = number | "all";
+
+/** Who answers a checkpoint a node's Tickets raise. */
+export type PlanCheckpoint = "operator" | "steward";
+
+/**
+ * What happens to the Spawns a node's Tickets propose: held for the operator, or landed under
+ * the Spawn caps.
+ */
+export type PlanSpawns = "hold" | "land";
+
+/** A merge conflict on a copy: a resolver on this Assignment, or a wait for the operator. */
+export type PlanConflict = "wait" | { resolver: PlanAssign };
+
+/** Who opens a Gate. `auto` opens it at once, with no hold. */
+export type PlanOpener = "operator" | "steward" | "auto";
+
+/** A Gate opens on a handoff from any incoming edge, or waits for all of them. */
+export type PlanJoin = "any" | "all";
+
+/**
+ * What the Finish does once approved: one of the named acts, or free text the Finish Ticket's
+ * agent carries out.
+ */
+export type PlanFinishAct = "none" | "draft-pr" | "pr" | "fast-forward" | { other: string };
+
+/** An edge: `from`'s verdict `on` goes to `to`. `(from, on, to)` is unique in a Plan. */
+export interface PlanEdgeFile {
+  from: string;
+  on: string;
+  to: string;
+  /** Present on a capped loop edge. */
+  cap?: PlanLoopCap;
+}
+
+/** A loop edge's limit. */
+export interface PlanLoopCap {
+  max: number;
+  /** The Steward may buy one more pass once the loop is spent. */
+  stewardExtra?: boolean;
+  /** Absent, a loop hold for the operator. */
+  whenSpent?: PlanWhenSpent;
+}
+
+/** A spent loop raises a hold, or hands on to another node instead. */
+export type PlanWhenSpent = "hold" | { to: string };
+
+/** One thing wrong with a Plan, on what the editor marks. */
+export interface PlanProblem {
+  at: PlanProblemAt;
+  message: string;
+}
+
+/** What a problem is on: the Plan as a whole, one node, or one edge. */
+export type PlanProblemAt =
+  | { kind: "plan" }
+  | { kind: "node"; id: string }
+  | { kind: "edge"; from: string; on: string; to: string };
+
+/**
+ * A Plan as `plans.list` names it: a Preset, or a file in the Plan library with whatever is
+ * wrong with it.
+ */
+export interface PlanSummary {
+  slug: string;
+  preset: boolean;
+  name: string;
+  author?: string;
+  source?: string;
+  note?: string;
+  problems: PlanProblem[];
+}
+
+/** GET /api/plans: the Presets, then the Plan library by slug. */
+export interface PlansListResponse {
+  plans: PlanSummary[];
+}
+
+/** A Plan named by its slug: the socket form of a /api/plans/<slug> path. */
+export interface PlanSlugRequest {
+  slug: string;
+}
+
+/** GET /api/plans/<slug>: the Plan's file as it stands, and what is wrong with it. */
+export interface PlanResponse {
+  slug: string;
+  preset: boolean;
+  plan: PlanFile;
+  problems: PlanProblem[];
+}
+
+/** POST /api/plans/validate's body: a draft Plan, checked whole. */
+export interface PlanValidateRequest {
+  plan: PlanFile;
+}
+
+/** Every problem with the draft, none when it is valid. */
+export interface PlanValidateResponse {
+  problems: PlanProblem[];
+}
+
+/** PUT /api/plans/<slug>: the body is `plan`; the socket form carries `slug` beside it. */
+export interface PlanSaveRequest {
+  slug: string;
+  plan: PlanFile;
+}
+
+/** The Plan as saved, in its canonical form. */
+export interface PlanSaveResponse {
+  slug: string;
+  plan: PlanFile;
+}
+
+// ---------------------------------------------------------------------------
 // Resume (POST /api/resume)
 // ---------------------------------------------------------------------------
 

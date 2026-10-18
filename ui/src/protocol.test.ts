@@ -289,7 +289,7 @@ describe("the envelope", () => {
     for (const text of [
       JSON.stringify({ type: "delta", delta: { rev: 2 } }),
       JSON.stringify({ type: "reply", id: 1, kind: "stop", rev: 1, ok: false }),
-      JSON.stringify({ type: "hello", protocol: 1, epoch: "e" }),
+      JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, epoch: "e" }),
     ]) {
       expect(() => decodeServerMessage(text)).toThrow(ProtocolError);
     }
@@ -297,7 +297,7 @@ describe("the envelope", () => {
 
   it("names an HTTP twin for every request kind", () => {
     for (const twin of Object.values(HTTP_TWINS)) {
-      expect(twin).toMatch(/^(GET|POST|PUT) \/api\//);
+      expect(twin).toMatch(/^(GET|POST|PUT|DELETE) \/api\//);
     }
   });
 });
