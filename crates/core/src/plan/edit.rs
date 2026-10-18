@@ -98,7 +98,7 @@ impl Editing {
         match edit {
             PlanEdit::AddNode { kind, at } => {
                 let id = std::iter::once(kind.as_str().to_owned())
-                    .chain((2..).map(|n| format!("{}-{}", kind.as_str(), letters(n))))
+                    .chain((2..).map(|n| format!("{}-{}", kind.as_str(), letter_suffix(n))))
                     .map(NodeId)
                     .find(|id| self.position(id).is_none())
                     .expect("the names never run out");
@@ -349,7 +349,7 @@ fn new_node(kind: PlanNodeKind, id: NodeId, at: (i32, i32)) -> Node {
     }
 }
 
-fn letters(mut n: usize) -> String {
+fn letter_suffix(mut n: usize) -> String {
     let mut out = Vec::new();
     while n > 0 {
         n -= 1;
