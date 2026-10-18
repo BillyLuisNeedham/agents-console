@@ -3,7 +3,6 @@ import type {
   PlanDraftResponse,
   PlanEditFile,
   PlanFile,
-  PlanNodeKind,
   PlanProblem,
   PlanResponse,
   PlanSaveResponse,
@@ -13,8 +12,9 @@ import type {
 import { h } from "./dom";
 import type { Point } from "./geometry";
 import { PlanCanvas, type PlanSelection } from "./plan-canvas";
-import { renderInspector, type FieldChange, type PlanChange, type PlanMeta } from "./plan-inspector";
-import { edgeKeyText, projectPlan } from "./plan-projection";
+import { PendingEdits, addition, kept, materialize, removal } from "./plan-edits";
+import { renderInspector, type FieldChange, type PlanChange } from "./plan-inspector";
+import { projectPlan } from "./plan-projection";
 
 export type ListPlansHandler = () => Promise<PlansListResponse>;
 export type GetPlanHandler = (slug: string) => Promise<PlanResponse>;
@@ -45,10 +45,13 @@ type Control =
   | { kind: "booted"; launched: PlanBootResponse }
   | { kind: "discard"; then: "close" | { open: string } };
 
+/** Where the open Plan came from: a Preset and a running Line's copy save only as a new library Plan. */
+type Origin = "preset" | "library" | "line";
+
 interface Editing {
   phase: "editing";
   slug: string;
-  preset: boolean;
+  origin: Origin;
   opened: number;
   doc: PlanFile;
   problems: PlanProblem[];
@@ -56,10 +59,7 @@ interface Editing {
   notes: string[];
   readOnly: boolean;
   baseline: string;
-  inFlight: PlanChange[] | null;
-  queued: PlanChange[];
-  moved: Map<string, { at: Point; by: PlanChange }>;
-  fields: Map<string, { kind: "typed"; text: string } | { kind: "committed"; text: string; by: PlanChange }>;
+  edits: PendingEdits;
   selection: PlanSelection;
   refusal: string | null;
   control: Control;
@@ -74,40 +74,13 @@ type Phase =
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-function materialize(doc: PlanFile, batch: readonly PlanChange[]): PlanEditFile[] {
-  const nodes = new Map(doc.nodes.map((node) => [node.id, node]));
-  const caps = new Map(doc.edges.map((edge) => [edgeKeyText(edge), edge.cap]));
-  let meta: PlanMeta = {
-    name: doc.name,
-    author: doc.author,
-    source: doc.source,
-    note: doc.note,
-    stewardEdits: doc.stewardEdits,
-  };
-  const edits: PlanEditFile[] = [];
-  for (const change of batch) {
-    if (change.kind === "edit") {
-      if (change.edit.edit === "removeNode") nodes.delete(change.edit.id);
-      edits.push(change.edit);
-    } else if (change.kind === "node") {
-      const node = nodes.get(change.id);
-      if (!node) continue;
-      const next = change.change(node);
-      nodes.set(change.id, next);
-      edits.push({ edit: "setNode", node: next });
-    } else if (change.kind === "meta") {
-      meta = change.change(meta);
-      edits.push({ edit: "setMeta", ...meta });
-    } else {
-      const key = edgeKeyText(change.key);
-      if (!caps.has(key)) continue;
-      const cap = change.change(caps.get(key));
-      caps.set(key, cap);
-      edits.push(cap ? { edit: "setCap", ...change.key, cap } : { edit: "setCap", ...change.key });
-    }
-  }
-  return edits;
-}
+/** A library slug from a Plan's name, with room left for Save as's "-copy-b". */
+const slugOf = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .slice(0, 50)
+    .replace(/^-+|-+$/g, "") || "line-plan";
 
 export class PlansStore {
   private state: Phase = { phase: "closed" };
@@ -122,8 +95,8 @@ export class PlansStore {
       select: (selection) => this.select(selection),
       move: (id, at) => this.move(id, at),
       link: (key) => this.change({ kind: "edit", edit: { edit: "link", edge: { ...key } } }),
-      add: (kind, at) => this.add(kind, at),
-      remove: (selection) => this.remove(selection),
+      add: (kind, at) => this.change(addition(kind, at)),
+      remove: (selection) => this.change(removal(selection)),
     });
   }
 
@@ -137,7 +110,7 @@ export class PlansStore {
 
   get dirty(): boolean {
     const e = this.editing();
-    return !!e && (JSON.stringify(e.doc) !== e.baseline || e.inFlight !== null || e.queued.length > 0);
+    return !!e && (JSON.stringify(e.doc) !== e.baseline || e.edits.busy);
   }
 
   async open(): Promise<void> {
@@ -225,24 +198,44 @@ export class PlansStore {
       return;
     }
     if (generation !== this.openGeneration) return;
-    const { reply, refusal } = await this.probeDraft(got.plan);
+    await this.begin(slug, got.preset ? "preset" : "library", got.plan, got.problems, generation);
+  }
+
+  /**
+   * "Save as" on the Line view: the running Line's frozen Plan opened as an
+   * unsaved copy, Save as armed, so it reaches the library the way a Preset's
+   * copy does. Unsaved edits to an open Plan are kept rather than replaced.
+   */
+  openCopy(plan: PlanFile): void {
+    if (this.dirty) return;
+    const closed = this.state.phase === "closed";
+    this.abandon();
+    const generation = this.openGeneration;
+    const slug = slugOf(plan.name);
+    this.state = { phase: "opening", slug };
+    this.onChange();
+    if (closed) void this.readList();
+    void this.begin(slug, "line", plan, [], generation).then(() => {
+      if (generation === this.openGeneration) this.armSaveAs();
+    });
+  }
+
+  private async begin(slug: string, origin: Origin, plan: PlanFile, problems: PlanProblem[], generation: number): Promise<void> {
+    const { reply, refusal } = await this.probeDraft(plan);
     if (generation !== this.openGeneration) return;
-    const doc = reply?.plan ?? got.plan;
+    const doc = reply?.plan ?? plan;
     this.state = {
       phase: "editing",
       slug,
-      preset: got.preset,
+      origin,
       opened: generation,
       doc,
-      problems: reply?.problems ?? got.problems,
+      problems: reply?.problems ?? problems,
       verdicts: new Map((reply?.verdicts ?? []).map((v) => [v.id, v.verdicts])),
       notes: [],
       readOnly: reply === null,
       baseline: JSON.stringify(doc),
-      inFlight: null,
-      queued: [],
-      moved: new Map(),
-      fields: new Map(),
+      edits: new PendingEdits(),
       selection: null,
       refusal,
       control: { kind: "none" },
@@ -269,37 +262,28 @@ export class PlansStore {
   change(change: PlanChange): void {
     const e = this.editing();
     if (!e || e.readOnly) return;
-    e.queued.push(change);
+    e.edits.push(change);
+    this.send(e);
+  }
+
+  move(id: string, at: Point): void {
+    const e = this.editing();
+    if (!e || e.readOnly) return;
+    e.edits.move(id, at);
+    this.send(e);
+  }
+
+  private send(e: Editing): void {
     e.refusal = null;
     e.notes = [];
     this.flush(e);
     this.onChange();
   }
 
-  move(id: string, at: Point): void {
-    const e = this.editing();
-    if (!e || e.readOnly) return;
-    const change: PlanChange = { kind: "edit", edit: { edit: "move", id, x: Math.round(at.x), y: Math.round(at.y) } };
-    e.moved.set(id, { at, by: change });
-    this.change(change);
-  }
-
-  add(kind: PlanNodeKind, at: Point): void {
-    this.change({ kind: "edit", edit: { edit: "addNode", kind, x: Math.round(at.x), y: Math.round(at.y) } });
-  }
-
-  remove(selection: Exclude<PlanSelection, null>): void {
-    this.change(
-      selection.kind === "node"
-        ? { kind: "edit", edit: { edit: "removeNode", id: selection.id } }
-        : { kind: "edit", edit: { edit: "unlink", ...selection.key } },
-    );
-  }
-
   type(key: string, text: string): void {
     const e = this.editing();
     if (!e) return;
-    e.fields.set(key, { kind: "typed", text });
+    e.edits.type(key, text);
     this.onChange();
   }
 
@@ -307,45 +291,39 @@ export class PlansStore {
     const e = this.editing();
     if (!e) return;
     if (change.kind === "none" || text === fromDoc) {
-      e.fields.delete(key);
+      e.edits.forget(key);
       this.onChange();
       return;
     }
-    e.fields.set(key, { kind: "committed", text, by: change });
-    this.change(change);
+    if (e.readOnly) return;
+    e.edits.commit(key, text, change);
+    this.send(e);
   }
 
   blur(key: string): void {
-    const e = this.editing();
-    if (!e || e.fields.get(key)?.kind !== "typed") return;
-    e.fields.delete(key);
-    this.onChange();
+    if (this.editing()?.edits.blur(key)) this.onChange();
   }
 
   textOf(key: string, fromDoc: string): string {
-    return this.editing()?.fields.get(key)?.text ?? fromDoc;
+    return this.editing()?.edits.textOf(key, fromDoc) ?? fromDoc;
   }
 
   settled(): Promise<void> {
-    const e = this.editing();
-    if (!e || (e.inFlight === null && e.queued.length === 0)) return Promise.resolve();
+    if (!this.editing()?.edits.busy) return Promise.resolve();
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
   private wake(always = false): void {
-    const e = this.editing();
-    if (!always && e && (e.inFlight !== null || e.queued.length > 0)) return;
+    if (!always && this.editing()?.edits.busy) return;
     for (const resolve of this.waiters.splice(0)) resolve();
   }
 
   private flush(e: Editing): void {
-    if (e.inFlight) return;
-    if (e.queued.length === 0) {
+    const batch = e.edits.take();
+    if (!batch) {
       this.wake();
       return;
     }
-    const batch = e.queued.splice(0);
-    e.inFlight = batch;
     const sent = e.doc;
     const generation = this.openGeneration;
     this.options.onEditPlan(sent, materialize(sent, batch)).then(
@@ -360,28 +338,19 @@ export class PlansStore {
           const last = added[added.length - 1];
           if (last) e.selection = { kind: "node", id: last.id };
         }
-        this.land(e, batch);
+        this.land(e);
       },
       (err) => {
         if (generation !== this.openGeneration) return;
         e.refusal = message(err);
-        this.land(e, batch);
+        this.land(e);
       },
     );
   }
 
-  private land(e: Editing, batch: PlanChange[]): void {
-    const landed = new Set(batch);
-    for (const [id, held] of e.moved) if (landed.has(held.by)) e.moved.delete(id);
-    for (const [key, held] of e.fields) if (held.kind === "committed" && landed.has(held.by)) e.fields.delete(key);
-    e.inFlight = null;
-    const sel = e.selection;
-    if (
-      (sel?.kind === "node" && !e.doc.nodes.some((n) => n.id === sel.id)) ||
-      (sel?.kind === "edge" && !e.doc.edges.some((edge) => edgeKeyText(edge) === edgeKeyText(sel.key)))
-    ) {
-      e.selection = null;
-    }
+  private land(e: Editing): void {
+    e.edits.land();
+    e.selection = kept(e.selection, e.doc);
     this.flush(e);
     this.onChange();
   }
@@ -396,7 +365,7 @@ export class PlansStore {
 
   async save(): Promise<void> {
     const e = this.editing();
-    if (!e || e.preset || e.readOnly || e.control.kind === "saving") return;
+    if (!e || e.origin !== "library" || e.readOnly || e.control.kind === "saving") return;
     const generation = this.openGeneration;
     e.control = { kind: "saving" };
     e.failure = null;
@@ -441,7 +410,7 @@ export class PlansStore {
     const e = this.editing();
     if (e?.control.kind !== "saveAs" || e.control.busy) return;
     const slug = e.control.slug.trim();
-    const own = e.preset ? null : e.slug;
+    const own = e.origin === "library" ? e.slug : null;
     const taken = (this.list ?? []).some((p) => !p.preset && p.slug === slug && p.slug !== own);
     if (taken && !e.control.replace) {
       e.control = { ...e.control, replace: true };
@@ -459,7 +428,7 @@ export class PlansStore {
       await this.options.onSavePlan(slug, doc);
       if (generation !== this.openGeneration) return;
       e.slug = slug;
-      e.preset = false;
+      e.origin = "library";
       e.baseline = JSON.stringify(doc);
       e.control = { kind: "none" };
       void this.readList();
@@ -473,7 +442,7 @@ export class PlansStore {
 
   armDelete(): void {
     const e = this.editing();
-    if (!e || e.preset) return;
+    if (!e || e.origin !== "library") return;
     e.control = { kind: "delete", busy: false };
     e.failure = null;
     this.onChange();
@@ -481,7 +450,7 @@ export class PlansStore {
 
   async confirmDelete(): Promise<void> {
     const e = this.editing();
-    if (e?.control.kind !== "delete" || e.control.busy || e.preset) return;
+    if (e?.control.kind !== "delete" || e.control.busy || e.origin !== "library") return;
     const generation = this.openGeneration;
     e.control = { kind: "delete", busy: true };
     this.onChange();
@@ -502,7 +471,7 @@ export class PlansStore {
 
   get bootable(): boolean {
     const e = this.editing();
-    return !!e && !e.readOnly && !this.dirty && e.problems.length === 0;
+    return !!e && e.origin !== "line" && !e.readOnly && !this.dirty && e.problems.length === 0;
   }
 
   armBoot(): void {
@@ -588,7 +557,7 @@ export class PlansStore {
     const dirty = this.dirty;
     const tools: (HTMLElement | null)[] = e
       ? [
-          !e.preset && !e.readOnly
+          e.origin === "library" && !e.readOnly
             ? h(
                 "button",
                 {
@@ -604,7 +573,7 @@ export class PlansStore {
           !e.readOnly
             ? h("button", { class: "btn plans-save-as", type: "button", onclick: () => this.armSaveAs() }, "Save as…")
             : null,
-          !e.preset
+          e.origin === "library"
             ? h("button", { class: "btn btn-danger plans-delete", type: "button", onclick: () => this.armDelete() }, "Delete")
             : null,
           !e.readOnly
@@ -638,7 +607,9 @@ export class PlansStore {
             h(
               "span",
               { class: "plans-doc-origin dim" },
-              `${e.preset ? "preset" : "library"} ${e.slug}${e.readOnly ? " · read-only" : dirty ? " · unsaved" : ""}`,
+              e.origin === "line"
+                ? "copy of the running Line · unsaved"
+                : `${e.origin} ${e.slug}${e.readOnly ? " · read-only" : dirty ? " · unsaved" : ""}`,
             ),
           )
         : h("span", { class: "plans-doc" }),
@@ -753,7 +724,8 @@ export class PlansStore {
 
   private renderList(): HTMLElement {
     const list = this.list;
-    const open = this.editing()?.slug ?? (this.state.phase === "opening" ? this.state.slug : null);
+    const e = this.editing();
+    const open = e ? (e.origin === "line" ? null : e.slug) : this.state.phase === "opening" ? this.state.slug : null;
     const item = (plan: PlanSummary) =>
       h(
         "button",
@@ -808,7 +780,7 @@ export class PlansStore {
   }
 
   private renderEditor(e: Editing): HTMLElement[] {
-    const moved = new Map([...e.moved].map(([id, held]) => [id, held.at]));
+    const moved = e.edits.drops();
     const drawing = projectPlan({ plan: e.doc, problems: e.problems, verdicts: e.verdicts, places: moved });
     const banner =
       drawing.planProblems.length || e.notes.length || e.refusal

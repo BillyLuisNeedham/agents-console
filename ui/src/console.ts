@@ -175,6 +175,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     onSavePlan: (slug, plan) => socket.request("plans.save", { slug, plan }),
     onDeletePlan: (slug) => socket.request("plans.delete", { slug }).then(() => undefined),
     onBootPlan: (slug, work) => socket.request("plans.boot", { slug, work }),
+    onEditLine: (baseRev, edits) => socket.request("line.plan.edit", { baseRev, edits }),
   });
 
   const handlers: Handlers = {

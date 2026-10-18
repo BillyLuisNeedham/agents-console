@@ -52,9 +52,15 @@ and asserts the dots repaint on the same nodes, the new dot appears and the
 pan holds. A pointer tap on a copy dot (the pointer pair, then the click the
 browser makes of it) must open that Ticket's Detail beside the still-open
 view, select its card and leave the graph where it was, and a second tap must
-keep the Detail open. At the narrow window the layout run opens the view
-and checks its head holds one line and each live card's text, state word and
-pass summary stay inside the card, uncut.
+keep the Detail open. A second Line scenario edits the running Plan: Review's
+parked verdict dragged onto Decide must send exactly one `line.plan.edit`
+carrying that Link at the rev the view drew, the Link must not be drawn from
+the reply alone, and the snapshot at the next rev must draw it and stop the
+verdict parking. A card drag that core refuses must leave its long reason
+inside the view and the card back where it was. At the narrow window the
+layout run opens the view and checks its head holds one line, each live
+card's text, state word and pass summary stay inside the card, uncut, and a
+refused edit's reason wraps inside the view.
 One more presses End on a Line's Conversation pass whose End the fixture
 refuses with a long reason: the reason and End as closed must stay inside the
 card, and inside the Detail's End box once it opens, and an ordinary

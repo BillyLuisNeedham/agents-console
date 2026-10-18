@@ -3571,7 +3571,8 @@ textarea.steward-orders {
   overflow-wrap: anywhere;
 }
 
-.plans-body {
+.plans-body,
+.line-body {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -3667,7 +3668,8 @@ textarea.steward-orders {
   color: var(--interrupt);
 }
 
-.plans-main {
+.plans-main,
+.line-main {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -3679,7 +3681,8 @@ textarea.steward-orders {
   justify-content: center;
 }
 
-.plans-banner {
+.plans-banner,
+.line-banner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3691,11 +3694,13 @@ textarea.steward-orders {
   flex-shrink: 0;
 }
 
-.plans-note {
+.plans-note,
+.line-note {
   color: var(--accent);
 }
 
-.plans-side {
+.plans-side,
+.line-side {
   width: 310px;
   flex-shrink: 0;
   min-height: 0;
@@ -3979,14 +3984,8 @@ textarea.steward-orders {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 
-/* The Line view (ADR-0039): the same canvas, read-only, with the run's state
+/* The Line view (ADR-0039): the same canvas, editable, with the run's state
    on each card. A tone colours the card's border and its state word. */
-.plan-canvas-live .plan-node,
-.plan-canvas-live .plan-port,
-.plan-canvas-live .plan-edge-label {
-  cursor: default;
-}
-
 .plan-node-live .plan-node-head {
   gap: 4px;
   padding: 0 8px;
@@ -4177,9 +4176,18 @@ button.plan-dot::after {
   font-size: 12px;
 }
 
-.line-close {
+.line-save-as {
   margin-left: auto;
   white-space: nowrap;
+}
+
+.line-close {
+  white-space: nowrap;
+}
+
+.line-refusal {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .plan-inspector {

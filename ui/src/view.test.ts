@@ -102,6 +102,7 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     onSavePlan: () => new Promise(() => {}),
     onDeletePlan: () => new Promise(() => {}),
     onBootPlan: () => new Promise(() => {}),
+    onEditLine: () => new Promise(() => {}),
   });
   const handlers: Handlers = {
     onToggleLog: () => session.toggleLog(),

@@ -46,7 +46,7 @@ import {
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
 import { PlansStore, type PlansHandlers } from "./plans";
-import { LinePane } from "./line-pane";
+import { LinePane, type EditLineHandler } from "./line-pane";
 import type { LineLive } from "./line-projection";
 import {
   HeldSpawnsStore,
@@ -243,6 +243,9 @@ export type ConsoleViewOptions = NeedsInputOptions &
      *  both are optimistic (issue #161). */
     onAdoptHeldSpawn: HeldSpawnHandler;
     onDiscardHeldSpawn: HeldSpawnHandler;
+    /** An edit to the running Line's Plan (ADR-0039). The snapshot carrying
+     *  the new rev redraws the Line view; the reply only names that rev. */
+    onEditLine: EditLineHandler;
   };
 
 /**
@@ -332,6 +335,8 @@ export class ConsoleView {
     this.linePane = new LinePane({
       onChange: options.onChange,
       onOpenCard: (cardId) => this.focusCard(cardId),
+      onEditLine: options.onEditLine,
+      onSaveAs: (plan) => this.plans.openCopy(plan),
     });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,

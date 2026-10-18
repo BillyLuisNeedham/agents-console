@@ -26,7 +26,15 @@ import type {
   TicketLogResponse,
 } from "../src/project";
 import type { LogPush } from "../../protocol/protocol.ts";
-import type { LineGraphView, LineNodeView, PlanDraftResponse, PlanEditFile, PlanFile } from "../../protocol/wire.ts";
+import type {
+  LineGraphView,
+  LineNodeView,
+  LinePlanEditRequest,
+  LinePlanEditResponse,
+  PlanDraftResponse,
+  PlanEditFile,
+  PlanFile,
+} from "../../protocol/wire.ts";
 import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -464,6 +472,17 @@ function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftRespo
   return Promise.resolve(reply);
 }
 
+/** Every `line.plan.edit` the Line view sent; core applies each at the next rev unless `lineRefusal` is set. */
+const lineEdits: LinePlanEditRequest[] = [];
+let lineRefusal: string | null = null;
+const LINE_REFUSAL =
+  "implement has 3 live copies: their work must end before the node is removed (pool/harness/implement-1, pool/harness/implement-2, pool/harness/implement-3)";
+
+function fakeLineEdit(baseRev: number, edits: PlanEditFile[]): Promise<LinePlanEditResponse> {
+  lineEdits.push({ baseRev, edits });
+  return lineRefusal ? Promise.reject(new Error(lineRefusal)) : Promise.resolve({ rev: baseRev + 1, notes: [] });
+}
+
 const root = document.getElementById("app") as HTMLElement;
 let current = snapshot(0, null);
 
@@ -555,6 +574,7 @@ const view = new ConsoleView({
   onDeletePlan: () => Promise.resolve(),
   onBootPlan: (slug, work) =>
     Promise.resolve({ argv: ["--plan", slug, "--work", work, "--yes"], cwd: "/tmp/harness-repo", log: "/tmp/harness-pool/runs/boot.log" }),
+  onEditLine: fakeLineEdit,
 });
 
 const handlers: Handlers = {
@@ -1776,6 +1796,114 @@ async function lineChecks(): Promise<void> {
   await settleAll();
 }
 
+/** The Line once core took a Link for Review's parked findings: the next rev, the edge drawn, nothing parked. */
+function lineLinked(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  return {
+    ...snap,
+    seq: 501,
+    line: {
+      ...line,
+      rev: line.rev + 1,
+      plan: { ...line.plan, edges: [...line.plan.edges, { from: "review", on: "findings", to: "decide" }] },
+      nodes: line.nodes.map((n) => (n.id === "review" ? { ...n, parked: [] } : n)),
+    },
+  };
+}
+
+/** A Line card dragged by its head, the way the operator moves it. */
+function dragLineCard(id: string, dx: number, dy: number): void {
+  const head = lineCard(id)?.querySelector(".plan-node-title");
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  if (!head || !viewport) return;
+  const { x, y } = middle(head);
+  pointer("pointerdown", head, x, y);
+  pointer("pointermove", viewport, x + dx / 2, y + dy / 2);
+  pointer("pointermove", viewport, x + dx, y + dy);
+  pointer("pointerup", viewport, x + dx, y + dy);
+}
+
+/** A refused edit's reason stands inside the Line view, wrapped rather than cut, and the card it moved is back. */
+async function lineRefusalChecks(push: (assertion: string, failure: string | null, ok: string) => void): Promise<void> {
+  const before = lineCard("finish")?.style.left;
+  const sent = lineEdits.length;
+  lineRefusal = LINE_REFUSAL;
+  dragLineCard("finish", 0, 60);
+  await settleAll();
+  lineRefusal = null;
+  const pane = q<HTMLElement>(".line-pane");
+  const shown = q<HTMLElement>(".line-pane .line-refusal");
+  const box = shown?.getBoundingClientRect();
+  const view = pane?.getBoundingClientRect();
+  push(
+    "a refused edit's reason stands inside the Line view",
+    lineEdits.length !== sent + 1
+      ? `${lineEdits.length - sent} edits sent`
+      : !shown || !pane || !box || !view
+        ? "no .line-refusal in the view"
+        : shown.textContent !== LINE_REFUSAL
+          ? `reads "${shown.textContent}"`
+          : (overflowOf(shown, pane) ??
+            (box.top < view.top || box.bottom > view.bottom
+              ? `${Math.round(box.top)}-${Math.round(box.bottom)} outside ${Math.round(view.top)}-${Math.round(view.bottom)}`
+              : lineCard("finish")?.style.left !== before
+                ? `finish at ${lineCard("finish")?.style.left}, was ${before}`
+                : null)),
+    `${Math.round(box?.height ?? 0)}px of reason inside a ${pane?.clientWidth}px view, finish back at ${before}`,
+  );
+  q<HTMLButtonElement>(".line-dismiss")?.click();
+  await settleAll();
+}
+
+async function lineEditChecks(): Promise<void> {
+  const name = "line view edits";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openLine();
+  const shown = lineMovedOn(current);
+  const rev = shown.line!.rev;
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  const port = q<HTMLElement>('.line-pane .plan-port[data-node="review"][data-on="findings"]');
+  const decide = lineCard("decide");
+  if (!viewport || !port || !decide) {
+    push("a parked verdict dragged onto a node sends its Link", `viewport ${!!viewport}, parked port ${!!port}, decide ${!!decide}`, "");
+    return;
+  }
+  const from = middle(port);
+  const to = middle(decide);
+  const before = lineEdits.length;
+  pointer("pointerdown", port, from.x, from.y);
+  pointer("pointermove", viewport, (from.x + to.x) / 2, (from.y + to.y) / 2);
+  pointer("pointermove", viewport, to.x, to.y);
+  pointer("pointerup", viewport, to.x, to.y);
+  await settleAll();
+  const sent = lineEdits.slice(before);
+  const want: LinePlanEditRequest[] = [{ baseRev: rev, edits: [{ edit: "link", edge: { from: "review", on: "findings", to: "decide" } }] }];
+  push(
+    "a parked verdict dragged onto a node sends one line.plan.edit with its Link at the rev drawn",
+    JSON.stringify(sent) === JSON.stringify(want) ? null : `sent ${JSON.stringify(sent)}`,
+    `one Link review.findings → decide at rev ${rev}`,
+  );
+  push(
+    "the Link waits for the snapshot that carries it",
+    lineEdge("review.findings>decide") ? "drawn before the snapshot" : null,
+    "not drawn from the reply alone",
+  );
+  session.setSnapshot(lineLinked(shown));
+  await settleAll();
+  const after = q('.line-pane .plan-port[data-node="review"][data-on="findings"]')?.textContent;
+  push(
+    "the snapshot at the next rev draws the Link, and the verdict no longer parks",
+    lineEdge("review.findings>decide") && after === "findings" ? null : `edge ${!!lineEdge("review.findings>decide")}, port reads "${after}"`,
+    "review.findings>decide drawn, the port reads findings",
+  );
+
+  stage = `${name}: refusal`;
+  await lineRefusalChecks(push);
+}
+
 /**
  * The Line view at the narrow window: its head holds one line, and each live
  * card's text stays inside its card, nothing clipped by the card's fixed height.
@@ -1831,6 +1959,7 @@ async function lineLayoutChecks(name: string): Promise<void> {
     const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
     push("line card text is readable at the fit zoom", onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`, `card titles are ${onScreen.toFixed(1)}px on screen`);
   }
+  await lineRefusalChecks(push);
 }
 
 async function plansLayoutChecks(name: string): Promise<void> {
@@ -1954,6 +2083,7 @@ async function main(): Promise<void> {
   await settingsTyping();
   await plansChecks();
   await lineChecks();
+  await lineEditChecks();
   await lineConversationChecks();
 
   for (const selector of DEAD_SELECTORS) {

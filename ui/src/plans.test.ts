@@ -415,6 +415,27 @@ describe("PlansStore: save, save as, delete", () => {
     expect(t.lists).toHaveLength(2);
   });
 
+  it("opens a running Line's frozen Plan as an unsaved copy with Save as armed, and saves it into the library as it was", async () => {
+    const t = setup();
+    t.store.openCopy({ ...DOC, name: "Factory today" });
+    t.lists[0]!.resolve({ plans: LIST });
+    await tick();
+    expect(t.edits[0]!.plan).toEqual({ ...DOC, name: "Factory today" });
+    t.edits[0]!.d.resolve(reply({ ...DOC, name: "Factory today" }));
+    await tick();
+    expect(t.$(".plans-doc-origin")?.textContent).toBe("copy of the running Line · unsaved");
+    expect(t.$(".plans-save")).toBeNull();
+    expect(t.$(".plans-delete")).toBeNull();
+    expect(t.$<HTMLButtonElement>(".plans-boot")!.disabled).toBe(true);
+    expect(t.$(".plans-item-on")).toBeNull();
+    expect(t.$<HTMLInputElement>(".plans-slug")!.value).toBe("factory-today-copy");
+    await t.click(".plans-save-as-confirm");
+    expect(t.saves.map((s) => [s.slug, s.plan])).toEqual([["factory-today-copy", { ...DOC, name: "Factory today" }]]);
+    t.saves[0]!.d.resolve({ slug: "factory-today-copy", plan: { ...DOC, name: "Factory today" } });
+    await tick();
+    expect(t.$(".plans-doc-origin")?.textContent).toBe("library factory-today-copy");
+  });
+
   it("asks before Save as replaces a library Plan already listed", async () => {
     const t = setup();
     await t.opened("factory-today");

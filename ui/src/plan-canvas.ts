@@ -46,7 +46,7 @@ export interface PlanCanvasModel {
   pendingDrops: ReadonlyMap<string, Point>;
   selection: PlanSelection;
   editable: boolean;
-  /** The running Line's state drawn over `plan`: cards show copies and holds, edges their counts. Read-only. */
+  /** The running Line's state drawn over `plan`: cards show copies and holds, edges their counts. */
   live?: LineLive;
 }
 
@@ -58,12 +58,6 @@ export interface PlanCanvasEvents {
   remove(selection: Exclude<PlanSelection, null>): void;
   /** A copy dot or hold chip of the live Line was tapped: the card it names. */
   open?(card: string): void;
-}
-
-/** The events of a canvas that only shows the Line: a tap on a copy opens it, everything else does nothing. */
-export function liveEvents(open: (card: string) => void): PlanCanvasEvents {
-  const none = () => {};
-  return { select: none, move: none, link: none, add: none, remove: none, open };
 }
 
 type Gesture =
@@ -121,7 +115,7 @@ export class PlanCanvas {
     );
     return h(
       "div",
-      { class: "plan-canvas" + (model.live ? " plan-canvas-live" : ""), key: "plan-canvas" },
+      { class: "plan-canvas", key: "plan-canvas" },
       h(
         "div",
         { class: "plan-shelf" },
@@ -245,10 +239,8 @@ export class PlanCanvas {
                   key: port.on,
                   "data-node": node.id,
                   "data-on": port.on,
-                  title: live
-                    ? live.parked.includes(port.on)
-                      ? `${node.id} said ${port.on}, and no edge takes it: waiting`
-                      : `${node.id} says ${port.on}`
+                  title: live?.parked.includes(port.on)
+                    ? `${node.id} said ${port.on}, and no edge takes it: drag it onto the node that should`
                     : `drag onto the node that follows when ${node.id} says ${port.on}`,
                 },
                 live?.parked.includes(port.on) ? `● ${port.on}` : port.on,
