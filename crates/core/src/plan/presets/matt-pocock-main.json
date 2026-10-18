@@ -1,0 +1,37 @@
+{
+  "horde": 1,
+  "name": "Matt Pocock · Main",
+  "author": "Matt Pocock",
+  "source": "skills/engineering/ask-matt/SKILL.md",
+  "note": "You approve the seams and the ticket breakdown, implement-spec builds the ready tickets in parallel into one integration branch, then one code-review and a single fixer with no re-review loop. Not expressible here: grill, spec and tickets share one context window while prototype is a detour you /handoff out to in a fresh session and back from, the draft PR opens inside implement-spec, and retro prefers the session it looks back on.",
+  "nodes": [
+    {"kind":"conversation","id":"grill-with-docs","title":"Grill with docs","x":40,"y":60,"skill":"grill-with-docs","assign":{"harness":"claude","model":"opus","effort":"high"}},
+    {"kind":"agent","id":"prototype","title":"Prototype","x":340,"y":60,"skill":"prototype","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"to-spec","title":"To spec","x":640,"y":60,"skill":"to-spec","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"seams","title":"Seams match? (to-spec)","x":940,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"to-tickets","title":"To tickets","x":1240,"y":60,"skill":"to-tickets","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","makesItems":true,"checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"breakdown","title":"Approve the breakdown","x":1540,"y":60,"open":"operator","join":"any"},
+    {"kind":"agent","id":"implementers","title":"implement-spec: implementers","x":1840,"y":60,"skill":"tdd","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":{"perItem":"all"},"checkpoint":"operator","spawns":"hold"},
+    {"kind":"merger","id":"implementers-merge","title":"implement-spec: merger","x":1840,"y":310,"of":"implementers","conflict":{"resolver":{"harness":"claude","model":"opus","effort":"high"}}},
+    {"kind":"review","id":"code-review","title":"Code review","x":2140,"y":60,"skill":"code-review","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"fixer","title":"Fix all review issues","x":2440,"y":290,"skill":"tdd","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"pr","title":"Mark the PR ready","x":2740,"y":60,"skill":"pr","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"retro","title":"Retro","x":3040,"y":60,"skill":"retro","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":3340,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"implementers","on":"done","to":"implementers-merge"},
+    {"from":"grill-with-docs","on":"done","to":"prototype"},
+    {"from":"prototype","on":"done","to":"to-spec"},
+    {"from":"to-spec","on":"done","to":"seams"},
+    {"from":"seams","on":"open","to":"to-tickets"},
+    {"from":"to-tickets","on":"done","to":"breakdown"},
+    {"from":"breakdown","on":"open","to":"implementers"},
+    {"from":"implementers-merge","on":"done","to":"code-review"},
+    {"from":"code-review","on":"findings","to":"fixer"},
+    {"from":"code-review","on":"clean","to":"pr"},
+    {"from":"fixer","on":"done","to":"pr"},
+    {"from":"pr","on":"done","to":"retro"},
+    {"from":"retro","on":"done","to":"finish"}
+  ]
+}

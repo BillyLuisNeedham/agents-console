@@ -1,0 +1,42 @@
+{
+  "horde": 1,
+  "name": "PClaude · Feature",
+  "author": "PClaude",
+  "source": "skills/pclaude/pclaude-poteto-mode/playbooks/feature.md",
+  "note": "Pstack's feature playbook ported to Claude Code (a port still in progress, see PORTING.md): sonnet writes the code and opus judges, with effort left unset per models.md, verify drives the real surface with claude-in-chrome or run, and Opening a PR runs simplify before pclaude-no-comments. feature.md gives the verify loop no limit, so verify.fail -> build is capped at 2.",
+  "nodes": [
+    {"kind":"agent","id":"how","title":"How does it work?","x":40,"y":60,"skill":"pclaude-how","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"architect","title":"Architect","x":340,"y":60,"skill":"pclaude-architect","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"build","title":"Build: one owner","x":640,"y":60,"skill":"pclaude-poteto-mode","assign":{"harness":"claude","model":"sonnet","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"prove","id":"verify","title":"Verify on the matching surface (claude-in-chrome or run)","x":940,"y":60,"skill":"claude-in-chrome","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"rebase","title":"Rebase into small, ordered commits","x":1240,"y":60,"skill":"pclaude-poteto-mode","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"interrogate","title":"Interrogate, if contested","x":1540,"y":60,"skill":"pclaude-interrogate","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"simplify","title":"Simplify","x":1840,"y":60,"skill":"simplify","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"no-comments","title":"No comments","x":2140,"y":60,"skill":"pclaude-no-comments","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"writing","title":"Technical writing","x":2440,"y":60,"skill":"pclaude-technical-writing","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"agent","id":"unslop","title":"Unslop: open the PR","x":2740,"y":60,"skill":"pclaude-unslop","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"ask-babysit","title":"Babysit? Only when you ask","x":3040,"y":60,"open":"operator","join":"any"},
+    {"kind":"prove","id":"babysit","title":"Babysit to READY","x":3340,"y":60,"skill":"pclaude-poteto-mode","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"agent","id":"ci-retry","title":"Retry the CI flake","x":3340,"y":290,"skill":"pclaude-poteto-mode","assign":{"harness":"claude","model":"sonnet","effort":"medium"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"gate","id":"merge","title":"Merge: only on your explicit ask","x":3640,"y":60,"open":"operator","join":"any"},
+    {"kind":"finish","id":"finish","title":"Finish","x":3940,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"how","on":"done","to":"architect"},
+    {"from":"architect","on":"done","to":"build"},
+    {"from":"build","on":"done","to":"verify"},
+    {"from":"verify","on":"fail","to":"build","cap":{"max":2,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"verify","on":"pass","to":"rebase"},
+    {"from":"rebase","on":"done","to":"interrogate"},
+    {"from":"interrogate","on":"done","to":"simplify"},
+    {"from":"simplify","on":"done","to":"no-comments"},
+    {"from":"no-comments","on":"done","to":"writing"},
+    {"from":"writing","on":"done","to":"unslop"},
+    {"from":"unslop","on":"done","to":"ask-babysit"},
+    {"from":"ask-babysit","on":"open","to":"babysit"},
+    {"from":"babysit","on":"fail","to":"ci-retry"},
+    {"from":"ci-retry","on":"done","to":"babysit","cap":{"max":1,"stewardExtra":false,"whenSpent":"hold"}},
+    {"from":"babysit","on":"pass","to":"merge"},
+    {"from":"merge","on":"open","to":"finish"}
+  ]
+}

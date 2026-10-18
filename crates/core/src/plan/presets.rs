@@ -6,7 +6,52 @@ pub struct Preset {
     pub json: &'static str,
 }
 
-pub const PRESETS: &[Preset] = &[];
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        slug: "factory-today",
+        json: include_str!("presets/factory-today.json"),
+    },
+    Preset {
+        slug: "matt-pocock-main",
+        json: include_str!("presets/matt-pocock-main.json"),
+    },
+    Preset {
+        slug: "matt-pocock-quick",
+        json: include_str!("presets/matt-pocock-quick.json"),
+    },
+    Preset {
+        slug: "matt-pocock-bug",
+        json: include_str!("presets/matt-pocock-bug.json"),
+    },
+    Preset {
+        slug: "matt-pocock-foggy",
+        json: include_str!("presets/matt-pocock-foggy.json"),
+    },
+    Preset {
+        slug: "pstack-feature",
+        json: include_str!("presets/pstack-feature.json"),
+    },
+    Preset {
+        slug: "pstack-bug-fix",
+        json: include_str!("presets/pstack-bug-fix.json"),
+    },
+    Preset {
+        slug: "pclaude-feature",
+        json: include_str!("presets/pclaude-feature.json"),
+    },
+    Preset {
+        slug: "pclaude-bug-fix",
+        json: include_str!("presets/pclaude-bug-fix.json"),
+    },
+    Preset {
+        slug: "addy-commands",
+        json: include_str!("presets/addy-commands.json"),
+    },
+    Preset {
+        slug: "addy-bug-fix",
+        json: include_str!("presets/addy-bug-fix.json"),
+    },
+];
 
 #[cfg(test)]
 mod tests {
