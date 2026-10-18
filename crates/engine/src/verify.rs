@@ -29,9 +29,7 @@ use ac_core::jev_evidence::{BuiltEvidence, EvidenceInput, build_evidence};
 use ac_core::jev_rubric::{QUESTIONS, RUBRIC_VERSION, THRESHOLDS, compose};
 use ac_core::js;
 use ac_core::outcome::{ValidOutcome, validate_outcome};
-use ac_core::pool::{
-    TicketMarker, is_finished, load_pool_tickets, read_marker, write_marker_status,
-};
+use ac_core::pool::{TicketMarker, load_pool_tickets, read_marker, write_marker_status};
 use ac_core::verify_prompts::{
     GraderPromptParts, HeadToHeadPromptParts, HeadToHeadSideParts, build_grader_prompt,
     build_head_to_head_prompt,
@@ -1752,7 +1750,6 @@ pub fn complete_selection(
     why: &str,
     emit: bool,
 ) -> anyhow::Result<()> {
-    close_superseded_head_to_head(session, &marker.id)?;
     let attempt = picked.attempt;
     let mut payload = Map::new();
     payload.insert(
@@ -1936,7 +1933,9 @@ pub fn validate_verdict(parsed: &Value, candidates: [u64; 2]) -> Result<HeadToHe
 /// `writeHeadToHeadTicket`: a real ticket in the pool's directory with the ordinary blocking edge from
 /// its build ticket, so it renders as a node card and its assignment is editable like any ticket's. The
 /// engine rewrites it every time the tight band is reached, rebinding the same card to the round's top
-/// two instead of accumulating one per round.
+/// two instead of accumulating one per round. It is written in-progress, because the card lives only
+/// as long as its round: it closes done when the judge ends or a restart finds it in-progress, and is
+/// never ready on disk for a later round to find.
 fn write_head_to_head_ticket(
     session: &Session,
     build: &TicketMarker,
@@ -1956,7 +1955,7 @@ fn write_head_to_head_ticket(
     };
     let build_id = &build.id;
     let body = format!(
-        "<!-- state: id={h2h_id} blocked-by={build_id} status=ready -->\n\n\
+        "<!-- state: id={h2h_id} blocked-by={build_id} status=in-progress -->\n\n\
          # {h2h_id}: pick between attempts {} and {} of ticket {build_id}\n\n\
          **Head-to-head for:** ticket {build_id}. Attempts {} and {} graded {} and {}, inside the \
          two-point outright margin, so the pairwise call decides.\n\n\
@@ -2198,30 +2197,6 @@ async fn run_head_to_head(
     Ok(verdict)
 }
 
-fn close_superseded_head_to_head(session: &mut Session, build_id: &str) -> anyhow::Result<()> {
-    let h2h_id = head_to_head_id_for(build_id);
-    let file = runs_parent_issue(session, &format!("{h2h_id}.md"));
-    if !js::exists(&file) {
-        return Ok(());
-    }
-    if is_finished(Some(read_marker(Path::new(&file))?.status)) {
-        return Ok(());
-    }
-    write_marker_status(Path::new(&file), TicketStatus::Done)?;
-    if let Some(marker) = session.marker_mut(&h2h_id) {
-        marker.status = TicketStatus::Done;
-    }
-    session.apply(PoolUpdate {
-        tickets: Some(IndexMap::from([(h2h_id.clone(), TicketStatus::Done)])),
-        log: Some(vec![format!(
-            "ticket {build_id}: closed superseded head-to-head card {h2h_id} (this round's \
-             selection did not need it)"
-        )]),
-        ..PoolUpdate::default()
-    });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2233,6 +2208,7 @@ mod tests {
             body: String::new(),
             candidates,
             steward_note: None,
+            started_since: None,
         }
     }
 

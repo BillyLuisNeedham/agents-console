@@ -6,6 +6,7 @@ import {
   poolDraftFrom,
   poolPatchFrom,
   SettingsStore,
+  validateMachineDraft,
   validatePoolDraft,
   type PoolDraft,
 } from "./settings";
@@ -163,6 +164,11 @@ describe("poolDraftFrom", () => {
     expect(draft.spawnsPerAttempt).toBe("");
     expect(EMPTY.spawnsPerRun).toBe("");
   });
+
+  it("seeds maxLive the file sets, and none as an empty field (ADR-0040)", () => {
+    expect(poolDraftFrom({ maxLive: 3 }).maxLive).toBe("3");
+    expect(EMPTY.maxLive).toBe("");
+  });
 });
 
 describe("poolPatchFrom", () => {
@@ -221,6 +227,11 @@ describe("poolPatchFrom", () => {
     expect(poolPatchFrom(EMPTY).spawnCaps).toEqual({ perAttempt: null, perRun: null });
   });
 
+  it("sends maxLive as a number, and an emptied one as null for the machine default (ADR-0040)", () => {
+    expect(poolPatchFrom({ ...EMPTY, maxLive: " 2 " }).maxLive).toBe(2);
+    expect(poolPatchFrom(EMPTY).maxLive).toBeNull();
+  });
+
   it("drops a selection that is neither auto nor human", () => {
     expect(poolPatchFrom({ ...EMPTY, selection: "sometimes" }).selection).toBeNull();
   });
@@ -254,6 +265,15 @@ describe("validatePoolDraft", () => {
       perRun: null,
     });
   });
+
+  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0040)", () => {
+    for (const bad of ["0", "1.5", "-1", "lots"]) {
+      expect(validatePoolDraft({ ...EMPTY, maxLive: bad })).toBe(
+        "max live must be a whole number of 1 or more, or empty for the machine default",
+      );
+    }
+    expect(validatePoolDraft({ ...EMPTY, maxLive: " 1 " })).toBeNull();
+  });
 });
 
 describe("machineDefaultsFrom", () => {
@@ -266,6 +286,7 @@ describe("machineDefaultsFrom", () => {
         drivers: "",
         terminal: false,
         engine: "",
+        maxLive: "",
       }),
     ).toEqual({});
   });
@@ -279,6 +300,7 @@ describe("machineDefaultsFrom", () => {
         drivers: " implement ",
         terminal: true,
         engine: "/repo/engine",
+        maxLive: " 4 ",
       }),
     ).toEqual({
       harness: "claude",
@@ -286,7 +308,25 @@ describe("machineDefaultsFrom", () => {
       drivers: "implement",
       engine: "/repo/engine",
       terminal: "herdr",
+      maxLive: 4,
     });
+  });
+
+  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0040)", () => {
+    const draft = {
+      harness: "",
+      model: "",
+      effort: "",
+      drivers: "",
+      terminal: false,
+      engine: "",
+    };
+    for (const bad of ["0", "2.5", "-3", "x"]) {
+      expect(validateMachineDraft({ ...draft, maxLive: bad })).toBe(
+        "max live must be a whole number of 1 or more, or empty for no bound",
+      );
+    }
+    expect(validateMachineDraft({ ...draft, maxLive: "" })).toBeNull();
   });
 });
 
@@ -469,6 +509,19 @@ describe("SettingsStore", () => {
     expect(rig.store.poolField("model")).toBe("sonnet");
   });
 
+  it("refuses a machine maxLive of 0 on the spot and sends a whole one as a number", async () => {
+    const rig = await opened();
+    rig.store.setMachineField("maxLive", "0");
+    await rig.store.saveMachine();
+    expect(rig.machineSaves).toHaveLength(0);
+    expect(rig.store.machineFailure).toBe(
+      "max live must be a whole number of 1 or more, or empty for no bound",
+    );
+    rig.store.setMachineField("maxLive", "3");
+    void rig.store.saveMachine();
+    expect(rig.machineSaves[0]!.defaults).toEqual({ harness: "claude", maxLive: 3 });
+  });
+
   it("badges what the engine reports stale after a save", async () => {
     const rig = await opened();
     expect([...rig.store.badges()]).toEqual([]);
@@ -596,7 +649,9 @@ describe("SettingsStore.render", () => {
       ["pool", "pool-title-input", "Release train", ""],
       ["pool", "pool-port-input", "4301", "4300"],
       ["pool", "pool-spawnsPerRun-input", "40", ""],
+      ["pool", "pool-maxLive-input", "2", ""],
       ["machine", "machine-model-input", "sonnet", ""],
+      ["machine", "machine-maxLive-input", "3", ""],
       ["machine", "machine-engine-input", "/other/engine", ""],
     ] as const) {
       expect(saveButton(root, which).disabled).toBe(true);
@@ -645,6 +700,31 @@ describe("SettingsStore.render", () => {
     // They reload at the next Tick: never badged for a Restart.
     expect(root.querySelector('[data-key="pool-spawnsPerAttempt"] .settings-badge')).toBeNull();
     expect(root.querySelector('[data-key="pool-spawnsPerRun"] .settings-badge')).toBeNull();
+  });
+
+  it("offers maxLive in both forms, the pool's placeholder the machine's bound (ADR-0040)", async () => {
+    const unbound = await opened();
+    const first = mount(unbound.store);
+    first.paint();
+    const placeholder = (root: HTMLElement, key: string) =>
+      root.querySelector<HTMLInputElement>(`[data-key="${key}"]`)?.getAttribute("placeholder");
+    expect(placeholder(first.root, "pool-maxLive-input")).toBe("unlimited");
+    expect(placeholder(first.root, "machine-maxLive-input")).toBe("unlimited");
+    expect(first.root.querySelector('[data-key="pool-maxLive"] .settings-badge')).toBeNull();
+
+    const bound = await opened(
+      settings({
+        pool: { ...settings().pool, config: { maxLive: 2 } },
+        machine: { ...settings().machine, defaults: { maxLive: 4 }, own: { maxLive: 4 } },
+      }),
+    );
+    const second = mount(bound.store);
+    second.paint();
+    const input = (key: string) =>
+      second.root.querySelector<HTMLInputElement>(`[data-key="${key}"]`);
+    expect(input("pool-maxLive-input")?.value).toBe("2");
+    expect(placeholder(second.root, "pool-maxLive-input")).toBe("4 (machine default)");
+    expect(input("machine-maxLive-input")?.value).toBe("4");
   });
 
   it("gives the body its own scroll region, keyed so the scroll survives", async () => {

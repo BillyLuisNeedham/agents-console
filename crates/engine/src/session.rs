@@ -522,6 +522,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         });
         apply_update(
             &mut state,

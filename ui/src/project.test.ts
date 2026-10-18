@@ -1844,6 +1844,30 @@ describe("projectTimeline", () => {
     ]);
   });
 
+  it("words a spawn held for blocking a started Ticket, with the ids when the event has them (ADR-0040)", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-1", title: "Gate it", reason: "started", startedIds: ["02"] }],
+        }),
+        event(1, "spawn-held", {
+          held: [
+            { id: "proposal-2", title: "Gate more", reason: "started", startedIds: ["02", "03"] },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-3", title: "Gate any", reason: "started" }],
+        }),
+      ]),
+      "done",
+    );
+    expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
+      "1 spawn held (blocks 02, which has started): 'Gate it'",
+      "1 spawn held (blocks 02, 03, which have started): 'Gate more'",
+      "1 spawn held (blocks a Ticket that has started): 'Gate any'",
+    ]);
+  });
+
   it("names both caps when one Tick held spawns under each", () => {
     const view = projectTimeline(
       response([

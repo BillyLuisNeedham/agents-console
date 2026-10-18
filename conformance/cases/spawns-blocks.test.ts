@@ -8,6 +8,7 @@ import {
   eventKinds,
   eventsOf,
   hasTicket,
+  ledger,
   poolLog,
   proposal,
   releaseFile,
@@ -66,7 +67,82 @@ conformance("spawns", "refuses an Adopt whose blocks names a done ticket, and ke
   expect(restarted.heldSpawns.map((h) => h.id)).toEqual(["proposal-2"]);
 });
 
-conformance("spawns", "lands an Adopt whose blocks names a running ticket at the next Tick", async (t) => {
+conformance("spawns", "holds a spawn whose blocks names a running ticket as started, then lands it on Adopt", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01"), ticket("02"), ticket("03", "02")],
+    config: CONFIG,
+  });
+  const releaseOne = releaseFile(world, "01");
+  const releaseTwo = releaseFile(world, "02");
+  world.stubs.script("01", {
+    waitFor: releaseOne.path,
+    spawn: [proposal("Before two", { blocks: ["02"] }), proposal("Before two and three", { blocks: ["02", "03"] })],
+  });
+  world.stubs.script("02", { waitFor: releaseTwo.path });
+  const server = await t.start(world);
+
+  await snapshotUntil(
+    server,
+    (snap) => statuses(snap)["01"] === "in-progress" && statuses(snap)["02"] === "in-progress",
+    "01 and 02 both running",
+  );
+  releaseOne.release();
+  const held = await snapshotUntil(server, (snap) => snap.heldSpawns.length === 2, "both spawns held");
+  expect(held.heldSpawns.map((h) => [h.id, h.reason])).toEqual([
+    ["proposal-1", "started"],
+    ["proposal-2", "started"],
+  ]);
+  expect(held.pendingSpawns).toEqual([]);
+  expect(hasTicket(world, "01-spawn-1.md")).toBe(false);
+  expectSameBytes(
+    readStateLine(world.pool, "02-t.md").line,
+    "<!-- state: id=02 blocked-by=none status=in-progress -->",
+    "02's state line",
+  );
+  expectSameBytes(
+    readStateLine(world.pool, "03-t.md").line,
+    "<!-- state: id=03 blocked-by=02 status=ready -->",
+    "03's state line",
+  );
+  expect(eventsOf(world, "01", "spawn-held").map((e) => e.payload)).toEqual([
+    { held: [{ id: "proposal-1", title: "Before two", reason: "started", startedIds: ["02"] }] },
+    { held: [{ id: "proposal-2", title: "Before two and three", reason: "started", startedIds: ["02"] }] },
+  ]);
+  expect(logged(await poolLog(server), "ticket 01: proposal-1 ('Before two') held: it blocks 02, which has started")).toBe(
+    true,
+  );
+  expect(ledger(world)).toContain("| proposal-1 | 01 | ticket | blocks 02, which has started | Before two |");
+
+  expect((await server.http.post("/api/spawns/held/adopt", { id: "proposal-1" })).status).toBe(202);
+  await snapshotUntil(server, (snap) => statuses(snap)["01-spawn-1"] !== undefined, "01-spawn-1 landed while 02 runs");
+  expect((await server.http.post("/api/spawns/held/adopt", { id: "proposal-2" })).status).toBe(202);
+  const landed = await snapshotUntil(
+    server,
+    (snap) => statuses(snap)["01-spawn-2"] !== undefined,
+    "01-spawn-2 landed while 02 runs",
+  );
+  expect(landed.heldSpawns).toEqual([]);
+  expect(statuses(landed)["02"]).toBe("in-progress");
+  expectSameBytes(
+    readStateLine(world.pool, "02-t.md").line,
+    "<!-- state: id=02 blocked-by=none status=in-progress -->",
+    "02's state line",
+  );
+  expectSameBytes(
+    readStateLine(world.pool, "03-t.md").line,
+    "<!-- state: id=03 blocked-by=02,01-spawn-2 status=ready -->",
+    "03's state line",
+  );
+  expect(logged(await poolLog(server), "ticket 01-spawn-2: not blocking 02, which has started")).toBe(true);
+  releaseTwo.release();
+
+  await runAndApprove(server);
+  expect(eventKinds(world, "02").filter((kind) => kind === "spawned")).toHaveLength(1);
+  expect(readStateLine(world.pool, "01-spawn-2.md").status).toBe("done");
+  expect(readStateLine(world.pool, "03-t.md").status).toBe("done");
+});
+
+conformance("spawns", "lands an Adopt of a cap-held spawn whose blocks names a running ticket without blocking it", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", "01")],
     config: withCaps({ perAttempt: 1 }),
@@ -94,7 +170,7 @@ conformance("spawns", "lands an Adopt whose blocks names a running ticket at the
   expect(statuses(landed)["02"]).toBe("in-progress");
   expectSameBytes(
     readStateLine(world.pool, "02-t.md").line,
-    "<!-- state: id=02 blocked-by=01,01-spawn-2 status=in-progress -->",
+    "<!-- state: id=02 blocked-by=01 status=in-progress -->",
     "02's state line",
   );
   release.release();

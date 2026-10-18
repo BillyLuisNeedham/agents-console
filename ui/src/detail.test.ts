@@ -970,6 +970,22 @@ describe("Detail: the Steward (ADR-0030)", () => {
     expect(r.answers).toEqual([]);
   });
 
+  it("says how many Tickets started since a merge conflict was raised, and nothing when none has", () => {
+    const conflict = (startedSince?: number): TicketDetailView["interrupt"] => ({
+      ...interrupt()!,
+      kind: "merge-conflict",
+      stewardNote: undefined,
+      startedSince,
+    });
+    const line = (startedSince?: number) =>
+      paintProgress(
+        detailView({ status: "checkpoint", interrupt: conflict(startedSince) }),
+      ).root.querySelector(".interrupt-started-since")?.textContent ?? null;
+    expect(line(1)).toBe("1 Ticket has started since this conflict was raised.");
+    expect(line(3)).toBe("3 Tickets have started since this conflict was raised.");
+    expect(line(undefined)).toBeNull();
+  });
+
   it("says a queued Close is closing in the waiting line (issue #154)", () => {
     const closing = { ...interrupt(true)!, closing: true };
     const r = paintProgress(detailView({ status: "checkpoint", interrupt: closing }));

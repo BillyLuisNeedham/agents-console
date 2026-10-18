@@ -9,6 +9,7 @@ import type { World } from "../harness/world.ts";
 import {
   answer,
   approveReview,
+  launchKeys,
   poolLog,
   quiescentWith,
   restartCase,
@@ -182,6 +183,60 @@ restartCase("a round stopped after every Candidate exited is graded once at the 
   expect(inCheckout(world, "cand-1.txt")).toBe(true);
   expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
 }, { timeoutMs: 120_000 });
+
+// The judge is killed with the engine, so the round that wrote its card is over; the next boot judges afresh.
+restartCase("a head-to-head judge a kill interrupted has its card closed done at the next boot, and its round judged afresh to the Review", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(2) });
+  for (const n of [1, 2]) world.stubs.script(`01.attempt-${n}`, { work: { file: `cand-${n}.txt`, message: `cand-${n}` } });
+  world.stubs.script("01-grader-1", grade(9));
+  world.stubs.script("01-grader-2", grade(8));
+  const judge = world.stubs.hold("01-head-to-head", { winner: 1 });
+  const first = await startLeg(t, world, 0);
+  await until(() => launchKeys(world), (keys) => keys.includes("01-head-to-head"), {
+    what: "the head-to-head judge launched",
+    ms: 30_000,
+  });
+  expect(readStateLine(world.pool, "01-head-to-head.md").status).toBe("in-progress");
+  await first.kill();
+
+  const second = await startLeg(t, world, 1);
+  await judge.release(30_000);
+  await approveReview(second);
+
+  const log = await poolLog(second);
+  expect(log).toContain(
+    "ticket 01-head-to-head: head-to-head card was in-progress at boot; its round is over and the card closes done",
+  );
+  expect(log.some((line) => line.startsWith("ticket 01-head-to-head: orphan attempt 1 (pid "))).toBe(true);
+  expect(launchKeys(world).filter((key) => key === "01-head-to-head")).toHaveLength(2);
+  expect(readStateLine(world.pool, "01-head-to-head.md").line).toContain("id=01-head-to-head blocked-by=01 status=done");
+  expect(eventsOf(world, "01", "selected")).toEqual([[1, { score: 9, margin: 1, rule: "head-to-head" }]]);
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+}, { timeoutMs: 120_000 });
+
+// A card still in-progress beside a done build Ticket is a round the engine died in; it must not hold the Review back.
+conformance("restart", "an in-progress head-to-head card beside a done build Ticket closes done at boot and the Review is raised", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "01-t.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+      {
+        file: "01-head-to-head.md",
+        content: "<!-- state: id=01-head-to-head blocked-by=01 status=in-progress -->\n\n# 01-head-to-head\n",
+      },
+    ],
+    config: verifyConfig(2),
+  });
+  const server = await t.start(world);
+
+  const done = await approveReview(server);
+
+  expect(statusesOf(done)).toEqual({ "01": "done", "01-head-to-head": "done" });
+  expect(readStateLine(world.pool, "01-head-to-head.md").line).toContain("id=01-head-to-head blocked-by=01 status=done");
+  expect(await poolLog(server)).toContain(
+    "ticket 01-head-to-head: head-to-head card was in-progress at boot; its round is over and the card closes done",
+  );
+  expect(launchKeys(world)).toEqual([]);
+});
 
 // engine/engine.test.ts:3354
 takeover("restart", "a human selection Interrupt is kept pending and answerable across each takeover", {

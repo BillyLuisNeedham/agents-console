@@ -409,7 +409,10 @@ fn reconcile_marker(
             .interrupts
             .iter()
             .any(|i| i.ticket_id == id && i.kind == InterruptKind::Checkpoint);
-    if marker.status != TicketStatus::Ready && !mid_adoption {
+    // An engine-run ticket's orphan is never adopted, whatever its marker says: rehydrate closes a
+    // head-to-head card done rather than ready, and its dead judge's pane still needs releasing.
+    if marker.status != TicketStatus::Ready && !mid_adoption && engine_ticket_build_id(id).is_none()
+    {
         return Ok((MarkerStep::Done, log));
     }
     if !terminal_adoptable(session, id, orphan.attempt) {

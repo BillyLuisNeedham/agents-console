@@ -253,7 +253,7 @@ async fn fetch(server: Server, request: Request) -> Response {
         }
         ("/api/settings/machine", &Method::PUT) => {
             let body = read_body(body).await;
-            return http_of(routes::machine_settings_request(&server, body));
+            return http_of(routes::machine_settings_request(&server, body).await);
         }
         ("/api/resume", _) if post => {
             let body = read_body(body).await;

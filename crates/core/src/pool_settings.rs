@@ -10,13 +10,14 @@ use crate::js;
 use crate::machine_defaults::{
     MachineDefaultsPaths, read_machine_defaults, read_machine_defaults_file,
 };
+use crate::max_live::is_max_live;
 use crate::pool_title::normalise_title;
 use crate::spawn_caps::is_spawn_cap;
 use crate::steward::is_steward_budget;
 
 /// The keys the Settings pane owns. A patch may carry any subset; anything else in a patch body is
 /// ignored rather than written, so a stale tab cannot smuggle `assign` through the pane.
-pub const POOL_SETTINGS_KEYS: [&str; 10] = [
+pub const POOL_SETTINGS_KEYS: [&str; 11] = [
     "defaults",
     "resolver",
     "terminal",
@@ -26,6 +27,7 @@ pub const POOL_SETTINGS_KEYS: [&str; 10] = [
     "checkpoint",
     "title",
     "spawnCaps",
+    "maxLive",
     "steward",
 ];
 
@@ -131,6 +133,7 @@ fn normalise_key(
         "reviewer" | "checkpoint" => normalise_prose(key, value),
         "title" => normalise_pool_title(value),
         "spawnCaps" => normalise_spawn_caps(value),
+        "maxLive" => normalise_max_live(value),
         _ => normalise_steward(value, harnesses),
     }
 }
@@ -277,6 +280,20 @@ fn normalise_spawn_caps(value: &Value) -> Result<Option<Value>, ConfigError> {
         out.insert(field.to_owned(), entry);
     }
     Ok(non_empty(out))
+}
+
+// maxLive (ADR-0040) is a text input, so digits typed as text are its number; empty clears it back to
+// the Machine default.
+fn normalise_max_live(value: &Value) -> Result<Option<Value>, ConfigError> {
+    let Some(max) = text_number(value) else {
+        return Ok(None);
+    };
+    if !is_max_live(&max) {
+        return Err(refused(
+            "pool settings: maxLive must be a whole number, 1 or more".into(),
+        ));
+    }
+    Ok(Some(max))
 }
 
 // The Pool title (issue #100) is one line: whatever was typed is folded onto it rather than refused.
@@ -773,6 +790,49 @@ mod tests {
             .unwrap(),
             json!({})
         );
+    }
+
+    #[test]
+    fn saves_max_live_as_a_number_or_typed_digits_and_clears_it_on_empty() {
+        let pool = Pool::new(Some(json!({ "port": 8787 })));
+        assert_eq!(
+            pool.write(json!({ "maxLive": 3 }), &[]).unwrap(),
+            json!({ "port": 8787, "maxLive": 3 })
+        );
+        assert_eq!(
+            pool.write(json!({ "maxLive": " 2 " }), &[]).unwrap()["maxLive"],
+            json!(2)
+        );
+        assert_eq!(
+            pool.write(json!({ "maxLive": "" }), &[]).unwrap(),
+            json!({ "port": 8787 })
+        );
+        pool.write(json!({ "maxLive": 4 }), &[]).unwrap();
+        assert_eq!(
+            pool.write(json!({ "maxLive": null }), &[]).unwrap(),
+            json!({ "port": 8787 })
+        );
+    }
+
+    #[test]
+    fn refuses_a_max_live_below_one_naming_the_field_and_writing_nothing() {
+        let pool = Pool::new(Some(json!({ "maxLive": 2 })));
+        for bad in [
+            json!(0),
+            json!("0"),
+            json!(-1),
+            json!(1.5),
+            json!("many"),
+            json!(true),
+            json!({}),
+        ] {
+            assert_eq!(
+                pool.write(json!({ "maxLive": bad }), &[]).unwrap_err(),
+                "pool settings: maxLive must be a whole number, 1 or more",
+                "{bad}"
+            );
+        }
+        assert_eq!(pool.on_disk(), json!({ "maxLive": 2 }));
     }
 
     #[test]

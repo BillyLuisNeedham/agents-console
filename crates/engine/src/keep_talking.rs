@@ -930,6 +930,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         });
         if held {
             session.held.insert(

@@ -280,6 +280,12 @@ export interface Interrupt {
    * Never persisted with the Interrupt; steward.ts's store keeps it.
    */
   stewardNote?: StewardNote;
+  /**
+   * A Ticket's merge-conflict Interrupt, on the snapshot's copy only: how
+   * many other Tickets have started since it was raised (ADR-0040),
+   * derived from their events and absent while none has.
+   */
+  startedSince?: number;
 }
 
 /** What an Interrupt asks. */
@@ -418,6 +424,12 @@ export interface PoolConfig {
    */
   spawnCaps?: SpawnCapsConfig;
   /**
+   * How many Ticket Attempts the engine runs at once (ADR-0040), a whole
+   * number of 1 or more; absent falls back to the Machine default, and
+   * absent there means no bound.
+   */
+  maxLive?: number;
+  /**
    * Who picks the winner of a verify fan-out: the engine's arithmetic rule
    * (default) or the human, via a selection interrupt carrying the grades.
    */
@@ -542,8 +554,10 @@ export interface HeldPaneRecord {
  * Why a proposal is held: which cap had no room (the attempt's, or a
  * spawn.json's, own; or the run's), the proposing agent's own `overlaps`
  * mark (the ids ride on the proposal), the operator's Hold of a Pending
- * spawn, or a Pending spawn a Tick refused to land because the pool
- * moved after it was taken (the reason rides as `adoptError`).
+ * spawn, a Pending spawn a Tick refused to land because the pool moved
+ * after it was taken (the reason rides as `adoptError`), or a Pending
+ * spawn whose named `blocks` reached a Ticket that had already started
+ * (ADR-0040).
  */
 export type HeldSpawnReason =
   | "per-attempt"
@@ -555,7 +569,8 @@ export type HeldSpawnReason =
    * Proposed from inside a Line (ADR-0037): anything that lands merges
    * into the Line's branch, so only the operator lands it.
    */
-  | "line";
+  | "line"
+  | "started";
 
 /**
  * One Pending spawn as the Console shows it: a proposal within the caps that
@@ -925,6 +940,8 @@ export interface MachineDefaults {
   engine?: string;
   /** Terminal backing every new pool starts with; the only legal value is "herdr". */
   terminal?: "herdr";
+  /** The machine's maxLive, under every pool's own; read afresh at each Tick. */
+  maxLive?: number;
 }
 
 /**

@@ -132,7 +132,8 @@ fn build_snapshot(session: &mut Session, phase: RunPhase) -> PoolSnapshot {
             .records(|id| conversations.is_live(id))
     };
     let listing_finished = crate::held::finished_terminals_now(session);
-    let state = crate::steward_actions::with_steward_notes(session);
+    let mut state = crate::steward_actions::with_steward_notes(session);
+    crate::merges::with_started_since(session, &mut state);
     let assignments = session
         .assignments
         .iter()

@@ -299,8 +299,9 @@ fn write_reassign_request(
     })
 }
 
-/// The Machine defaults, written whole: a field left empty is the operator clearing it.
-pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
+/// The Machine defaults, written whole: a field left empty is the operator clearing it. The run is
+/// woken, so a pool that sets no `maxLive` of its own launches under the new one at once.
+pub async fn machine_settings_request(server: &Server, body: Body) -> Answer {
     let saved = (|| -> Result<(), String> {
         let body = body?;
         let Some(defaults @ Value::Object(_)) = field_of(&body, "defaults") else {
@@ -310,6 +311,11 @@ pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
             .map_err(|err| err.to_string())?;
         Ok(())
     })();
+    if saved.is_ok()
+        && let Some(engine) = server.engine()
+    {
+        engine.reload_config().await;
+    }
     match saved.and_then(|()| server.settings_payload()) {
         Ok(payload) => Answer::ok(200, &payload),
         Err(err) => Answer::refused(400, Field::Error, err),
@@ -1058,7 +1064,7 @@ pub async fn socket_request(
             .without_snapshot(),
         RequestKind::SettingsGet => settings_request(server),
         RequestKind::SettingsPoolPut => pool_settings_request(server, body()).await,
-        RequestKind::SettingsMachinePut => machine_settings_request(server, body()),
+        RequestKind::SettingsMachinePut => machine_settings_request(server, body()).await,
         RequestKind::PanesList => panes_request(server).await,
         RequestKind::PlansList => plans_list_request(server),
         RequestKind::PlansGet => plan_get_request(server, &field("slug")),
