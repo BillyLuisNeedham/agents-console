@@ -40,7 +40,7 @@ const CONVERSATION: ConversationView = {
 function trayHarness() {
   const startCalls: StartConversationRequest[] = [];
   const startDeferreds: Deferred<ConversationView>[] = [];
-  const endCalls: { id: string; closing?: string }[] = [];
+  const endCalls: { id: string; closing?: string; close?: boolean }[] = [];
   const endDeferreds = new Map<string, Deferred<void>>();
   let changes = 0;
   const tray = new ConversationsTray({
@@ -50,8 +50,8 @@ function trayHarness() {
       startDeferreds.push(d);
       return d.promise;
     },
-    onEnd: (id, closing) => {
-      endCalls.push({ id, closing });
+    onEnd: (id, closing, close) => {
+      endCalls.push({ id, closing, close });
       const d = deferred<void>();
       endDeferreds.set(id, d);
       return d.promise;
@@ -193,6 +193,14 @@ describe("ConversationsTray End", () => {
     endDeferreds.get("conv-1")!.resolve();
     await ended;
     expect(endCalls).toEqual([{ id: "conv-1", closing: "wrapping up" }]);
+  });
+
+  it("passes End as closed through to onEnd, with the closing line", async () => {
+    const { tray, endCalls, endDeferreds } = trayHarness();
+    const ended = tray.endConversation("grill-1", "not needed", true);
+    endDeferreds.get("grill-1")!.resolve();
+    await ended;
+    expect(endCalls).toEqual([{ id: "grill-1", closing: "not needed", close: true }]);
   });
 
   it("marks a failed End inline, keyed by conversation id", async () => {

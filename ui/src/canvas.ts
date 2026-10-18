@@ -48,7 +48,7 @@ import { nextFrame } from "./frame";
 import { KEEP_CHILDREN, keep } from "./morph";
 import { renderTerminalSurface } from "./terminal";
 import { renderStewardBadge } from "./steward";
-import { renderDeliveryWarning, renderNodeBadge } from "./conversations";
+import { offersEndAsClosed, renderDeliveryWarning, renderNodeBadge } from "./conversations";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ARROW_ID = "canvas-arrow";
@@ -450,7 +450,7 @@ export class Canvas {
   private readonly onOpenSettings: () => void;
   private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
-  private readonly onEndConversation: (conversationId: string) => void;
+  private readonly onEndConversation: (conversationId: string, close?: boolean) => void;
   private readonly onArmStop: () => void;
   private readonly onCancelStop: () => void;
   private readonly onConfirmStop: () => void;
@@ -482,9 +482,10 @@ export class Canvas {
      *  own card positions: resets what other modules lay out (the Needs
      *  input tray's dragged width, issue #147). */
     onResetLayout: () => void;
-    /** A Conversation card's End button. Fire-and-forget: the Conversations
-     *  store tracks the in-flight/failure state the card reads back. */
-    onEndConversation: (conversationId: string) => void;
+    /** A Conversation card's End button, or its End as closed with `close`.
+     *  Fire-and-forget: the Conversations store tracks the in-flight/failure
+     *  state the card reads back. */
+    onEndConversation: (conversationId: string, close?: boolean) => void;
     /** The header's Stop control (issue #97): arm the inline confirmation,
      *  drop it, and send the stop. Cancel sends nothing. */
     onArmStop: () => void;
@@ -812,8 +813,9 @@ export class Canvas {
   // A Conversation card (ADR-0018): title, Assignment, the Turn state badge
   // (waiting on you / agent working), the last line said, idle age, status
   // once ended or crashed, the same read-only terminal peek ticket cards
-  // carry, and an End button. No blockers, no grade, no Vitals: a
-  // Conversation is not a Ticket and holds no attempt.
+  // carry, and an End button; a Line's Conversation whose End was refused
+  // offers End as closed beside it (ADR-0039). No blockers, no grade, no
+  // Vitals: a Conversation is not a Ticket and holds no attempt.
   private renderConversationCard(
     card: ConversationCardView,
     selection: CanvasSelection,
@@ -873,10 +875,22 @@ export class Canvas {
             },
             card.endView.ending ? "ending..." : "End",
           ),
-          card.endView.failure
-            ? h("span", { class: "error-inline conversation-end-failure" }, card.endView.failure)
+          offersEndAsClosed(card)
+            ? h(
+                "button",
+                {
+                  class: "btn conversation-end-closed",
+                  type: "button",
+                  title: "end this conversation, merging nothing",
+                  onclick: () => this.onEndConversation(card.conversationId, true),
+                },
+                "End as closed",
+              )
             : null,
         ),
+        card.endView.failure
+          ? h("div", { class: "error-inline conversation-end-failure" }, card.endView.failure)
+          : null,
       );
     }
     return h(

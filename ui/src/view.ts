@@ -332,8 +332,8 @@ export class ConsoleView {
       onOpenSettings: () => this.settings.toggle(),
       onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
-      onEndConversation: (conversationId) => {
-        void this.conversationsTray.endConversation(conversationId);
+      onEndConversation: (conversationId, close) => {
+        void this.conversationsTray.endConversation(conversationId, undefined, close);
       },
       onArmStop: () => this.headerHandlers?.onArmStop(),
       onCancelStop: () => this.headerHandlers?.onCancelStop(),
@@ -380,8 +380,8 @@ export class ConsoleView {
     };
     const detailHandlers: DetailHandlers = {
       ...handlers,
-      onEndConversation: (conversationId: string, closing?: string) => {
-        void this.conversationsTray.endConversation(conversationId, closing);
+      onEndConversation: (conversationId: string, closing?: string, close?: boolean) => {
+        void this.conversationsTray.endConversation(conversationId, closing, close);
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),

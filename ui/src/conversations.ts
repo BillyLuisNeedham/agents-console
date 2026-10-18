@@ -12,6 +12,7 @@
 import {
   conversationTurnLabel,
   stewardLiveReason,
+  type ConversationEndView,
   type ConversationTrayRow,
   type ConversationView,
   type DeliveryWarningView,
@@ -25,6 +26,14 @@ import { renderStewardBadge } from "./steward";
 /** The badge naming the Plan node a Line's Conversation or Ticket works
  *  (ADR-0039): on a card, in a Detail and on a tray row, the Steward badge's
  *  way. */
+/** A Line Conversation whose End was refused can still be ended as closed. */
+export function offersEndAsClosed(view: {
+  node: string | null;
+  endView: ConversationEndView;
+}): boolean {
+  return view.node !== null && view.endView.failure !== null && !view.endView.ending;
+}
+
 export function renderNodeBadge(node: string): HTMLElement {
   return h("span", { class: "node-badge", title: `the Line's ${node} node` }, node);
 }
@@ -52,9 +61,11 @@ export type StartConversationHandler = (
   request: StartConversationRequest,
 ) => Promise<ConversationView>;
 
+/** `close` ends the Conversation merging nothing (the engine's `close`). */
 export type EndConversationHandler = (
   conversationId: string,
   closing?: string,
+  close?: boolean,
 ) => Promise<void>;
 
 export interface ConversationsOptions {
@@ -350,15 +361,17 @@ export class ConversationsTray {
   /**
    * End a Conversation, from either the card or the Detail. A second click
    * while one is already in flight for the same id is a no-op: the button
-   * on both surfaces reads `endView(id).ending` and disables itself.
+   * on both surfaces reads `endView(id).ending` and disables itself. `close`
+   * is End as closed: it merges nothing, and a refused End on a Line
+   * Conversation offers it.
    */
-  async endConversation(id: string, closing?: string): Promise<void> {
+  async endConversation(id: string, closing?: string, close?: boolean): Promise<void> {
     if (this.ending.has(id)) return;
     this.ending.add(id);
     this.endFailures.delete(id);
     this.onChange();
     try {
-      await this.onEnd(id, closing);
+      await this.onEnd(id, closing, close);
     } catch (err) {
       this.endFailures.set(id, err instanceof Error ? err.message : String(err));
     } finally {

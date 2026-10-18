@@ -2219,7 +2219,9 @@ body {
 }
 
 .conversation-end-failure {
+  margin-top: 4px;
   font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 /* The Detail's End form: the same interrupt-box shell, in the neutral

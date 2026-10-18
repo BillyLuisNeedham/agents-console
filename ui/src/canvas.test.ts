@@ -824,7 +824,10 @@ describe("the Steward on the canvas (ADR-0030)", () => {
 
 
 describe("a Line's Conversation on the canvas (ADR-0039)", () => {
-  function conversationPool(extra: { node?: string; role?: "steward" } = {}): CanvasModel {
+  function conversationPool(
+    extra: { node?: string; role?: "steward"; ending?: boolean } = {},
+    end: { ending: boolean; failure: string | null } = { ending: false, failure: null },
+  ): CanvasModel {
     const snapshot: EnrichedSnapshot = {
       seq: 1,
       phase: "running",
@@ -849,7 +852,7 @@ describe("a Line's Conversation on the canvas (ADR-0039)", () => {
             turn: { state: "waiting", lastLine: "", idleSince: null },
             children: [],
             enlisted: false,
-            ending: false,
+            ending: extra.ending ?? false,
             ...(extra.node ? { node: extra.node } : {}),
             ...(extra.role ? { role: extra.role } : {}),
           },
@@ -862,8 +865,12 @@ describe("a Line's Conversation on the canvas (ADR-0039)", () => {
         config: {},
       },
     };
-    return model({ cards: projectPool(snapshot).cards });
+    const endings = { "grill-1": end };
+    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), endings).cards });
   }
+
+  const REFUSED =
+    "grill-1's committed branch pool/x/grill-1 has no Line brief at docs/specs/main.grill-1.brief.json";
 
   it("marks the card with the node it works, and offers no Start the Line", () => {
     const { root, commit } = mountCanvas(conversationPool({ node: "grill" }));
@@ -881,6 +888,33 @@ describe("a Line's Conversation on the canvas (ADR-0039)", () => {
       commit();
       expect(root.querySelector(".node-badge")).toBeNull();
       expect(root.querySelector(".conversation-card-node")).toBeNull();
+    }
+  });
+
+  it("shows a refused End inline and then offers End as closed, sending close", () => {
+    const ends: [string, boolean | undefined][] = [];
+    const { root, commit } = mountCanvas(
+      conversationPool({ node: "grill" }, { ending: false, failure: REFUSED }),
+      { onEndConversation: (id, close) => ends.push([id, close]) },
+    );
+    commit();
+    const card = root.querySelector('[data-conversation-id="grill-1"]')!;
+    expect(card.querySelector(".conversation-end-failure")?.textContent).toBe(REFUSED);
+    const closed = card.querySelector<HTMLButtonElement>(".conversation-end-closed")!;
+    expect(closed.textContent).toBe("End as closed");
+    closed.click();
+    expect(ends).toEqual([["grill-1", true]]);
+  });
+
+  it("offers End as closed before any End is refused, on an ordinary Conversation, or while ending", () => {
+    for (const pool of [
+      conversationPool({ node: "grill" }),
+      conversationPool({}, { ending: false, failure: "pool resume failed: 500" }),
+      conversationPool({ node: "grill" }, { ending: true, failure: REFUSED }),
+    ]) {
+      const { root, commit } = mountCanvas(pool);
+      commit();
+      expect(root.querySelector(".conversation-end-closed")).toBeNull();
     }
   });
 });

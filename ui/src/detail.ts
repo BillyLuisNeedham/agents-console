@@ -50,7 +50,7 @@ import { h } from "./dom";
 import { keep, placed } from "./morph";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
-import { renderDeliveryWarning, renderNodeBadge } from "./conversations";
+import { offersEndAsClosed, renderDeliveryWarning, renderNodeBadge } from "./conversations";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -88,9 +88,10 @@ export interface DetailHandlers {
    *  the Needs input row's both show it. */
   onUseStewardNote: (ticketId: string, text: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
-  /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
-   *  Conversations store tracks the in-flight/failure state on `endView`. */
-  onEndConversation: (conversationId: string, closing?: string) => void;
+  /** A Conversation's End, or End as closed with `close` (merging nothing):
+   *  fire-and-forget, mirroring onAnswer. The Conversations store tracks the
+   *  in-flight/failure state on `endView`. */
+  onEndConversation: (conversationId: string, closing?: string, close?: boolean) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
   /** "open resolver" on a ticket whose merge a resolver is resolving
@@ -1489,6 +1490,12 @@ export class Detail {
         );
       },
     });
+    const end = (close?: boolean) =>
+      handlers.onEndConversation(
+        detail.conversationId,
+        closing.value.trim() || undefined,
+        close,
+      );
     const box = h(
       "div",
       { class: "interrupt-box conversation-end-box" },
@@ -1501,15 +1508,21 @@ export class Detail {
           {
             class: "btn btn-danger",
             disabled: detail.endView.ending,
-            onclick: () => {
-              handlers.onEndConversation(
-                detail.conversationId,
-                closing.value.trim() || undefined,
-              );
-            },
+            onclick: () => end(),
           },
           detail.endView.ending ? "ending..." : "End",
         ),
+        offersEndAsClosed(detail)
+          ? h(
+              "button",
+              {
+                class: "btn conversation-end-closed",
+                title: "end this conversation, merging nothing",
+                onclick: () => end(true),
+              },
+              "End as closed",
+            )
+          : null,
       ),
     );
     if (detail.endView.failure) {

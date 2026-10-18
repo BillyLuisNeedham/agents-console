@@ -161,11 +161,11 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
       session.optimistic("spawns.held.discard", { id }, discardedSpawn(id)),
     onStart: (request) =>
       socket.request("conversations.start", request).then((result) => result.conversation),
-    onEnd: (id, closing) =>
+    onEnd: (id, closing, close) =>
       session
         .optimistic(
           "conversations.end",
-          closing ? { id, closing } : { id },
+          { id, closing, close },
           endingConversation(id),
         )
         .then(() => undefined),

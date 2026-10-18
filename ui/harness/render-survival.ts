@@ -52,8 +52,10 @@ const STEWARD_NOTE =
 const FINISH_TICKET = "finish-1";
 const DECIDE_TICKET = "decide-1";
 const LINE_NODES = ["implement", "prove", "review", "decide", "finish"] as const;
-/** A Line's Conversation pass (ADR-0039), its card head carrying the node. */
+/** A Line's Conversation pass (ADR-0039) whose End the engine refuses with a
+ *  reason as long as a real one, so the card and the Detail offer End as closed. */
 const GRILL = "grill-1";
+const GRILL_REFUSAL = `${GRILL}'s committed branch pool/harness/${GRILL} has no Line brief at docs/specs/main.${GRILL}.brief.json`;
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -418,7 +420,7 @@ const view = new ConsoleView({
   onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
-  onEnd: () => Promise.resolve(),
+  onEnd: (id) => (id === GRILL ? Promise.reject(new Error(GRILL_REFUSAL)) : Promise.resolve()),
 });
 
 const handlers: Handlers = {
@@ -1062,6 +1064,53 @@ function publish(outcome: string): void {
 }
 
 /**
+ * A refused End on a Line's Conversation (ADR-0039): End from the card, the
+ * engine's reason stands inside the card with End as closed beside End, and
+ * the Detail's End box offers the same inside the panel. An ordinary
+ * Conversation's card offers neither.
+ */
+async function lineConversationChecks(): Promise<void> {
+  const name = "line conversation end";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const cardOf = (id: string) => q<HTMLElement>(`.node-card[data-node-id="conversation:${id}"]`);
+  const grill = cardOf(GRILL);
+  push(
+    "ordinary Conversation offers no End as closed",
+    cardOf("c-1")?.querySelector(".conversation-end-closed") ? "c-1 offers it" : null,
+    "no End as closed on c-1",
+  );
+  if (!grill) {
+    push("refused End offers End as closed on the card", "no grill card", "");
+    return;
+  }
+  grill.querySelector<HTMLButtonElement>(".conversation-end")!.click();
+  await settleAll();
+  const closed = cardOf(GRILL)!.querySelector<HTMLElement>(".conversation-end-closed");
+  const failure = cardOf(GRILL)!.querySelector<HTMLElement>(".conversation-end-failure");
+  push(
+    "refused End offers End as closed on the card",
+    !closed || !failure
+      ? `closed ${closed !== null}, failure ${failure !== null}`
+      : (overflowOf(closed, cardOf(GRILL)!) ?? overflowOf(failure, cardOf(GRILL)!)),
+    `End as closed and ${failure?.textContent?.length} characters of reason inside the card`,
+  );
+  session.select(`conversation:${GRILL}`);
+  await settleAll();
+  const panel = q<HTMLElement>(".detail-open");
+  const box = q<HTMLElement>(".detail-open .conversation-end-box");
+  const detailClosed = box?.querySelector<HTMLElement>(".conversation-end-closed");
+  push(
+    "refused End offers End as closed in the Detail",
+    !panel || !box || !detailClosed
+      ? "no End as closed in the Detail's End box"
+      : (overflowOf(box, panel) ?? overflowOf(detailClosed, box)),
+    `inside a ${Math.round(box?.getBoundingClientRect().width ?? 0)}px End box`,
+  );
+}
+
+/**
  * Close selected (issue #154): two closable rows ticked from their boxes
  * keep their tick box nodes and their ticks across poll renders and a live
  * snapshot, and the close bar (count, shared note, button) is on screen and
@@ -1308,6 +1357,7 @@ async function main(): Promise<void> {
   await stewardChecks();
   await closeSelectedChecks();
   await settingsTyping();
+  await lineConversationChecks();
 
   for (const selector of DEAD_SELECTORS) {
     report.push({ scenario: "-", assertion: `scroll ${selector}`, pass: null, detail: "selector in styles.css but no live module renders it" });

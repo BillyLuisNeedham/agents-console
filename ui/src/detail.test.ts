@@ -1406,7 +1406,7 @@ describe("Detail: a Line's Conversation (ADR-0039)", () => {
   }
 
   function paint(detail: ConversationDetailView) {
-    const ends: [string, string | undefined][] = [];
+    const ends: [string, string | undefined, boolean | undefined][] = [];
     const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const handlers: DetailHandlers = {
       onSelectAttempt: () => {},
@@ -1416,7 +1416,7 @@ describe("Detail: a Line's Conversation (ADR-0039)", () => {
       onKeepTalking: () => {},
       onUseStewardNote: () => {},
       onSelectTab: () => {},
-      onEndConversation: (id, closing) => ends.push([id, closing]),
+      onEndConversation: (id, closing, close) => ends.push([id, closing, close]),
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1447,6 +1447,11 @@ describe("Detail: a Line's Conversation (ADR-0039)", () => {
     return { root, ends };
   }
 
+  const closeButton = (root: HTMLElement) =>
+    root.querySelector<HTMLButtonElement>(".conversation-end-closed");
+  const REFUSED =
+    "grill-1's committed branch pool/x/grill-1 has no Line brief at docs/specs/main.grill-1.brief.json";
+
   it("names the node on the Detail and offers no Start the Line", () => {
     const { root } = paint(lineConversation());
     expect(root.querySelector(".node-badge")?.textContent).toBe("grill");
@@ -1461,6 +1466,34 @@ describe("Detail: a Line's Conversation (ADR-0039)", () => {
     ]) {
       expect(paint(detail).root.querySelector(".node-badge")).toBeNull();
     }
+  });
+
+  it("shows a refused End and then offers End as closed, sending close with the closing note", () => {
+    const { root, ends } = paint(
+      lineConversation({ endView: { ending: false, failure: REFUSED } }),
+    );
+    expect(root.querySelector(".conversation-end-box .error-inline")?.textContent).toBe(REFUSED);
+    expect(closeButton(root)?.textContent).toBe("End as closed");
+    root.querySelector<HTMLTextAreaElement>(".conversation-end-box textarea")!.value =
+      " dropping it ";
+    closeButton(root)!.click();
+    expect(ends).toEqual([["grill-1", "dropping it", true]]);
+  });
+
+  it("offers End as closed before an End is refused, on an ordinary Conversation, or while ending", () => {
+    for (const detail of [
+      lineConversation(),
+      lineConversation({ node: null, endView: { ending: false, failure: "boom" } }),
+      lineConversation({ endView: { ending: true, failure: REFUSED } }),
+    ]) {
+      expect(closeButton(paint(detail).root)).toBeNull();
+    }
+  });
+
+  it("leaves End sending no close", () => {
+    const { root, ends } = paint(lineConversation({ endView: { ending: false, failure: REFUSED } }));
+    root.querySelector<HTMLButtonElement>(".conversation-end-box .btn-danger")!.click();
+    expect(ends).toEqual([["grill-1", undefined, undefined]]);
   });
 });
 
