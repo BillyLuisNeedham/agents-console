@@ -911,8 +911,10 @@ fn pr_base(places: &LinePlaces) -> String {
     }
 }
 
-const NOT_CARRIED_OUT: &str = "push nothing and open no PR, and say in your Outcome's summary \
-                               that the Finish was not carried out, and why";
+// A Finish not carried out is the operator's to answer, so it is a checkpoint: a done `pr` or
+// `draft-pr` Outcome must carry the PR's url.
+const NOT_CARRIED_OUT: &str = "push nothing and open no PR, and record a checkpoint Outcome whose \
+                               brief says the Finish was not carried out, and why";
 
 /// What the Finish Ticket carries out, by its act.
 fn act_text(act: &FinishAct, places: &LinePlaces) -> String {
@@ -969,7 +971,7 @@ fn fast_forward(places: &LinePlaces) -> String {
         BaseBranch::Local(name) => format!(
             "Then fast-forward the local branch `{name}` to your HEAD with `git fetch . \
              HEAD:refs/heads/{name}`, which refuses anything but a fast-forward; if it refuses, \
-             stop and say so in your summary. {}",
+             stop and record a checkpoint Outcome saying so. {}",
             if places.push_base {
                 format!(
                     "The Line brief grants `pushBase`: then push it with `git push origin \
@@ -983,12 +985,12 @@ fn fast_forward(places: &LinePlaces) -> String {
         BaseBranch::Origin(name) if places.push_base => format!(
             "Then fast-forward origin's `{name}` to your HEAD with `git push origin \
              HEAD:refs/heads/{name}`, never forcing; if origin refuses it as not a fast-forward, \
-             stop and say so in your summary."
+             stop and record a checkpoint Outcome saying so."
         ),
         BaseBranch::Origin(name) => format!(
             "The Line was cut from origin's `{name}` and the Line brief does not grant \
-             `pushBase`, so push nothing to `{name}`: say in your Outcome's summary that the \
-             Finish was not carried out, and why."
+             `pushBase`, so push nothing to `{name}`: record a checkpoint Outcome whose brief says \
+             the Finish was not carried out, and why."
         ),
     }
 }
