@@ -14,6 +14,7 @@ use tokio::sync::{Notify, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use ac_core::machine_defaults::default_machine_defaults_paths;
+use ac_protocol::PROTOCOL_VERSION;
 use ac_engine::{Engine, PoolSnapshot, PoolState};
 use ac_protocol::{RunPhase, SpawnUsage, StewardBudgetView, TicketStatus};
 
@@ -556,7 +557,7 @@ async fn serves_the_page_with_the_boot_snapshot_the_socket_repeats() {
     let mut socket = rig.socket().await;
     let hello = socket.frame().await;
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["protocol"], PROTOCOL_VERSION);
     assert_eq!(hello["heartbeatMs"], 20000);
     assert_eq!(hello["epoch"], boot["epoch"]);
     let first = socket.frame().await;
@@ -1014,7 +1015,7 @@ async fn answers_before_the_pool_starts_without_tearing_anything_down() {
             boot["rev"].clone(),
             boot["snapshot"].clone()
         ),
-        (json!(1), json!(0), Value::Null)
+        (json!(PROTOCOL_VERSION), json!(0), Value::Null)
     );
     let mut socket = rig.socket().await;
     socket.frame_of("hello").await;
@@ -1509,4 +1510,44 @@ async fn answers_every_concurrent_machine_defaults_save_and_keeps_one_whole() {
         temp_files_beside(&dir, "defaults.json"),
         Vec::<String>::new()
     );
+}
+
+// A Plan library save goes through a temp file and a rename, so the last of several concurrent saves of
+// one slug wins whole. Each must answer 200 and leave one of the saved Plans on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn answers_every_concurrent_plan_save_and_keeps_one_whole() {
+    let rig = rig(RigOptions::default()).await;
+    let dir = rig.dir.path().join("home/.agent-graphs/plans");
+    let plan = |name: &str| {
+        json!({
+            "horde": 1,
+            "name": name,
+            "nodes": [
+                { "kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0 },
+                { "kind": "finish", "id": "finish", "title": "Finish", "x": 300, "y": 0 },
+            ],
+            "edges": [{ "from": "build", "on": "done", "to": "finish" }],
+        })
+    };
+    for round in 0..5 {
+        let names: Vec<String> = (0..8).map(|n| format!("plan {round}-{n}")).collect();
+        let bodies: Vec<String> = names.iter().map(|name| plan(name).to_string()).collect();
+        let saved = futures::future::join_all(
+            bodies
+                .iter()
+                .map(|body| rig.json("PUT", "/api/plans/mine", Some(body))),
+        )
+        .await;
+        for (status, answer) in saved {
+            assert_eq!(status, 200, "round {round}: {answer}");
+        }
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("mine.json")).unwrap()).unwrap();
+        let name = on_disk["name"].as_str().unwrap();
+        assert!(
+            names.iter().any(|saved| saved == name),
+            "round {round}: {name} is none of the saves"
+        );
+    }
+    assert_eq!(temp_files_beside(&dir, "mine.json"), Vec::<String>::new());
 }
