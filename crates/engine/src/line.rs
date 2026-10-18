@@ -302,23 +302,30 @@ pub fn advance_line(session: &mut Session) -> anyhow::Result<()> {
         });
         session.log(format!("line: wrote {}", written.join(", ")));
     }
+    let mut refused = false;
     for pass in &effects.conversations {
-        open_pass(session, pass);
+        refused |= !open_pass(session, pass);
     }
-    raise_unraised_holds(session)
+    raise_unraised_holds(session)?;
+    // A refused pass's crashed record is a fact this tick must absorb: a drive that closes on it
+    // would never be woken to read it.
+    if refused {
+        return advance_line(session);
+    }
+    Ok(())
 }
 
 // A Conversation pass opens on the id the Line named, reserved in this job so the next tick reads it
-// open. A start that cannot be had is recorded crashed, which hands the pass on closed; so is one
-// whose launch never got a pane. Either way the drive wakes once the start is over.
-fn open_pass(session: &mut Session, pass: &ac_core::line::run::NewConversation) {
+// open. A start that cannot be had is recorded crashed, which hands the pass on closed, and answers
+// false; so is one whose launch never got a pane, and the drive wakes once that start is over.
+fn open_pass(session: &mut Session, pass: &ac_core::line::run::NewConversation) -> bool {
     let id = pass.id.to_string();
     let prepared = match crate::conversations::prepare_pass(session, pass) {
         Ok(prepared) => prepared,
         Err(err) => {
             session.log(format!("line: {id} did not open: {}", err.message()));
             crate::conversations::record_refused_pass(session, pass, err.message());
-            return;
+            return false;
         }
     };
     session.log(format!("line: {id} opens"));
@@ -334,6 +341,7 @@ fn open_pass(session: &mut Session, pass: &ac_core::line::run::NewConversation) 
             })
             .await;
     });
+    true
 }
 
 fn issue_file(session: &Session, id: &str) -> std::path::PathBuf {
