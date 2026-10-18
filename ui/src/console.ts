@@ -18,7 +18,6 @@ import {
   adoptingSpawn,
   discardedSpawn,
   endingConversation,
-  heldSpawn,
 } from "./optimistic";
 import type { PoolConfigPatch } from "./project";
 import { postStartLine } from "./conversations";
@@ -161,9 +160,6 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     onAdoptHeldSpawn: (id) => session.optimistic("spawns.held.adopt", { id }, adoptingSpawn(id)),
     onDiscardHeldSpawn: (id) =>
       session.optimistic("spawns.held.discard", { id }, discardedSpawn(id)),
-    onHoldPendingSpawn: (id) => session.optimistic("spawns.pending.hold", { id }, heldSpawn(id)),
-    onDiscardPendingSpawn: (id) =>
-      session.optimistic("spawns.pending.discard", { id }, discardedSpawn(id)),
     onStart: (request) =>
       socket.request("conversations.start", request).then((result) => result.conversation),
     onEnd: (id, closing) =>

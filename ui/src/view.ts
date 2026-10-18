@@ -19,7 +19,6 @@ import {
   type DetailView,
   type EnlistBlockRow,
   type HeldSpawnRow,
-  type PendingSpawnRow,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
@@ -49,7 +48,6 @@ import { ReassignStore, type ReassignHandler } from "./reassign";
 import {
   HeldSpawnsStore,
   type HeldSpawnHandler,
-  type PendingSpawnHandler,
 } from "./held-spawns";
 import { Detail, type DetailHandlers } from "./detail";
 import { DraftAnswers } from "./drafts";
@@ -144,8 +142,6 @@ export interface AppModel {
   spawnLine: SpawnLineView | null;
   /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
   lineStrip: string | null;
-  /** The Pending spawns the Spawn caps line's list shows first (issue #150). */
-  pendingSpawns: PendingSpawnRow[];
   /** The Held spawns list the Spawn caps line opens (issue #149). */
   heldSpawns: HeldSpawnRow[];
   detail: DetailView | null;
@@ -242,9 +238,6 @@ export type ConsoleViewOptions = NeedsInputOptions &
      *  both are optimistic (issue #161). */
     onAdoptHeldSpawn: HeldSpawnHandler;
     onDiscardHeldSpawn: HeldSpawnHandler;
-    /** A Pending spawn's Hold and Discard (issue #150), the same way. */
-    onHoldPendingSpawn: PendingSpawnHandler;
-    onDiscardPendingSpawn: PendingSpawnHandler;
   };
 
 /**
@@ -318,8 +311,6 @@ export class ConsoleView {
     this.heldSpawns = new HeldSpawnsStore({
       onAdopt: options.onAdoptHeldSpawn,
       onDiscard: options.onDiscardHeldSpawn,
-      onHold: options.onHoldPendingSpawn,
-      onDiscardPending: options.onDiscardPendingSpawn,
       onChange: options.onChange,
     });
     this.settings = new SettingsStore({
@@ -386,9 +377,7 @@ export class ConsoleView {
     // that started an Attempt or finished loses its draft rather than
     // holding an edit that can no longer land.
     this.reassign.pruneDrafts(new Set(model.reassignTickets.map((row) => row.id)));
-    this.heldSpawns.prune(
-      new Set([...model.pendingSpawns, ...model.heldSpawns].map((row) => row.id)),
-    );
+    this.heldSpawns.prune(new Set(model.heldSpawns.map((row) => row.id)));
     // The harness list is read once, when a Reassign surface first needs it.
     if (model.detail?.kind === "ticket" && model.detail.reassign.eligible) {
       this.reassign.ensureHarnesses();
@@ -417,7 +406,7 @@ export class ConsoleView {
         this.onChange();
       },
       reassign: this.reassign,
-      renderSpawnDecision: (row, state) => this.heldSpawns.renderDecision(row, state),
+      renderSpawnDecision: (row) => this.heldSpawns.renderDecision(row),
     };
     // The two trays overlay the canvas column, not the window: anchored to
     // its edges they stay clear of the Detail beside it, however wide the
@@ -445,7 +434,7 @@ export class ConsoleView {
       this.settings.render(model.restart, handlers),
       this.reassign.render(model.reassignTickets),
       model.spawnLine
-        ? this.heldSpawns.render(model.pendingSpawns, model.heldSpawns, model.spawnLine)
+        ? this.heldSpawns.render(model.heldSpawns, model.spawnLine)
         : null,
     );
     const content = h(

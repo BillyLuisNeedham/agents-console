@@ -687,15 +687,14 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
   });
 });
 
-describe("faded cards for Pending and Held spawns (issue #150)", () => {
+describe("faded cards for Held spawns (issue #150)", () => {
   const spawnCard = (
     overrides: Partial<Extract<CanvasModel["cards"][number], { kind: "spawn" }>> = {},
   ): CanvasModel["cards"][number] => ({
     kind: "spawn",
     id: "spawn:proposal-1",
     proposalId: "proposal-1",
-    state: "pending",
-    label: "lands next Tick",
+    label: "held · per-run cap",
     title: "Write the migration guide",
     parentCardId: "ticket:01",
     parentId: "01",
@@ -717,7 +716,6 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
           spawnCard({
             id: "spawn:proposal-2",
             proposalId: "proposal-2",
-            state: "held",
             label: "held · overlaps 02",
             spawnKind: "conversation",
           }),
@@ -725,11 +723,11 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
       }),
     );
     commit();
-    const pending = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
-    expect(pending.classList.contains("spawn-card-pending")).toBe(true);
-    expect(pending.dataset.nodeId).toBe("spawn:proposal-1");
-    expect(pending.querySelector(".spawn-card-label")?.textContent).toBe("lands next Tick");
-    expect(pending.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
+    const first = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
+    expect(first.classList.contains("spawn-card-held")).toBe(true);
+    expect(first.dataset.nodeId).toBe("spawn:proposal-1");
+    expect(first.querySelector(".spawn-card-label")?.textContent).toBe("held · per-run cap");
+    expect(first.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
     const held = root.querySelector<HTMLElement>('[data-key="spawn:proposal-2"]')!;
     expect(held.classList.contains("spawn-card-held")).toBe(true);
     expect(held.querySelector(".spawn-card-label")?.textContent).toBe("held · overlaps 02");

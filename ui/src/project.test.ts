@@ -47,7 +47,6 @@ import {
   projectLogPane,
   projectNeedsInput,
   projectHeldSpawns,
-  projectPendingSpawns,
   projectPool,
   projectTimeline,
   timelineEvent,
@@ -71,7 +70,6 @@ import {
   type TerminalSurfaceView,
   type TicketActivityResponse,
   type HeldSpawnView,
-  type PendingSpawnView,
   type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
@@ -3637,23 +3635,6 @@ describe("a Conversation the engine says is ending (issue #140)", () => {
   });
 });
 
-/** A Pending spawn as the wire carries it (issue #150). */
-function pendingSpawn(overrides: Partial<PendingSpawnView> = {}): PendingSpawnView {
-  return {
-    id: "proposal-1",
-    parentId: "04",
-    origin: "ticket",
-    kind: "ticket",
-    title: "Write the migration guide",
-    body: "Document every renamed flag.",
-    blockedBy: [],
-    blocks: null,
-    overlaps: [],
-    at: "2026-09-29T10:10:00Z",
-    ...overrides,
-  };
-}
-
 /** A Held spawn as the wire carries it (issue #149). */
 function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
   return {
@@ -3706,44 +3687,8 @@ describe("the Spawn caps header line (issue #149)", () => {
   });
 });
 
-describe("the Spawn caps header line with Pending spawns (issue #150)", () => {
-  it("counts the Pending spawns before the held ones, without a warning of their own", () => {
-    const view = projectPool(
-      snapshot({
-        spawnUsage: { spawnedThisRun: 1, perAttempt: 5, perRun: 20 },
-        pendingSpawns: [pendingSpawn(), pendingSpawn({ id: "proposal-2" })],
-      }),
-    );
-    expect(view.spawnLine).toEqual({
-      text: "Spawns 1/20 this run · 5 per attempt · 2 pending",
-      warn: false,
-    });
-    expect(
-      projectPool(
-        snapshot({ pendingSpawns: [pendingSpawn()], heldSpawns: [heldSpawn()] }),
-      ).spawnLine.text,
-    ).toBe("Spawns 0/20 this run · 5 per attempt · 1 pending · 1 held");
-  });
-});
-
-describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
+describe("the hold reasons (issue #150)", () => {
   const NOW = Date.parse("2026-09-29T10:12:00Z");
-
-  it("words a Pending spawn as the list shows it", () => {
-    const [row] = projectPendingSpawns([pendingSpawn({ overlaps: ["02"] })], NOW);
-    expect(row).toEqual({
-      id: "proposal-1",
-      title: "Write the migration guide",
-      kind: "ticket",
-      parent: "from 04",
-      waited: "2m ago",
-      at: "2026-09-29T10:10:00Z",
-      blockedBy: null,
-      blocks: null,
-      overlaps: "overlaps 02",
-      body: "Document every renamed flag.",
-    });
-  });
 
   it("says a spawn was held for overlapping named work, or by the operator", () => {
     const [overlapping, operator] = projectHeldSpawns(
@@ -3777,21 +3722,23 @@ describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
   });
 });
 
-describe("faded cards for Pending and Held spawns (issue #150)", () => {
+describe("faded cards for Held spawns (issue #150)", () => {
   const snap = () =>
     snapshot({
       state: { tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] },
-      pendingSpawns: [pendingSpawn({ parentId: "01", blockedBy: ["01"], blocks: ["02"] })],
-      heldSpawns: [heldSpawn({ id: "proposal-2", parentId: "02", reason: "operator" })],
+      heldSpawns: [
+        heldSpawn({ id: "proposal-1", parentId: "01", blockedBy: ["01"], blocks: ["02"] }),
+        heldSpawn({ id: "proposal-2", parentId: "02", reason: "operator" }),
+      ],
     });
 
-  it("draws one faded card per proposal under its own key, saying when it lands or why it is held", () => {
+  it("draws one faded card per proposal under its own key, saying why it is held", () => {
     const spawns = projectPool(snap()).cards.filter((c) => c.kind === "spawn");
     expect(
-      spawns.map((c) => c.kind === "spawn" && [c.id, c.state, c.label, c.title, c.parentCardId]),
+      spawns.map((c) => c.kind === "spawn" && [c.id, c.label, c.title, c.parentCardId]),
     ).toEqual([
-      ["spawn:proposal-1", "pending", "lands next Tick", "Write the migration guide", "ticket:01"],
-      ["spawn:proposal-2", "held", "held · held by operator", "Fix the flaky login test", "ticket:02"],
+      ["spawn:proposal-1", "held · per-run cap", "Fix the flaky login test", "ticket:01"],
+      ["spawn:proposal-2", "held · held by operator", "Fix the flaky login test", "ticket:02"],
     ]);
   });
 
@@ -3836,12 +3783,12 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     const withSpawns = snapshot({
       ...base,
       state: base.state,
-      pendingSpawns: [
-        pendingSpawn({ parentId: "01" }),
-        pendingSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
-        pendingSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+      heldSpawns: [
+        heldSpawn({ id: "proposal-1", parentId: "01" }),
+        heldSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
+        heldSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+        heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] }),
       ],
-      heldSpawns: [heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] })],
     });
     const where = (snap: EnrichedSnapshot) =>
       Object.fromEntries(
@@ -3871,7 +3818,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     const base = snapshot({ state: { tickets: [ticket("01")] } });
     const withSpawn = snapshot({
       state: base.state,
-      pendingSpawns: [pendingSpawn({ parentId: "01", kind: "conversation" })],
+      heldSpawns: [heldSpawn({ id: "proposal-1", parentId: "01", kind: "conversation" })],
     });
     const cards = projectPool(withSpawn).cards;
     const at = (id: string) => cards.find((c) => c.id === id)!;
@@ -3883,18 +3830,14 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
 
   it("opens a Detail with the whole proposal and the row its decisions act on", () => {
     const view = projectPool(snap());
-    const detail = projectDetail(view.cards, "spawn:proposal-1", {
-      pending: view.pendingSpawns,
-      held: view.heldSpawns,
-    });
+    const detail = projectDetail(view.cards, "spawn:proposal-1", view.heldSpawns);
     expect(detail).toMatchObject({
       kind: "spawn",
       proposalId: "proposal-1",
-      state: "pending",
-      label: "lands next Tick",
-      title: "Write the migration guide",
+      label: "held · per-run cap",
+      title: "Fix the flaky login test",
       parentId: "01",
-      body: "Document every renamed flag.",
+      body: "The login test fails one run in five.",
       blockedBy: ["01"],
       blocks: ["02"],
       overlaps: [],

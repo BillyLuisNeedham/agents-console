@@ -60,7 +60,6 @@ const SNAPSHOT: EnrichedSnapshot = {
 function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
   const answers: { ticketId: string; action: ResumeAction; note?: string }[] = [];
   const adopted: string[] = [];
-  const held: string[] = [];
   // One Console on the page at a time: the Detail's fullscreen writes find
   // the page's panel by class, as they do in the app.
   document.body.replaceChildren();
@@ -98,11 +97,6 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
       return new Promise(() => {});
     },
     onDiscardHeldSpawn: () => new Promise(() => {}),
-    onHoldPendingSpawn: (id) => {
-      held.push(id);
-      return new Promise(() => {});
-    },
-    onDiscardPendingSpawn: () => new Promise(() => {}),
   });
   const handlers: Handlers = {
     onToggleLog: () => session.toggleLog(),
@@ -138,7 +132,7 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     el.value = value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  return { root, session, render, answers, adopted, held, q, trayNote, detailNote, type };
+  return { root, session, render, answers, adopted, q, trayNote, detailNote, type };
 }
 
 describe("ConsoleView: one Draft answer per ticket (issue #147)", () => {
@@ -274,11 +268,11 @@ describe("ConsoleView: the Held spawns list (issue #149)", () => {
   });
 });
 
-describe("ConsoleView: Pending spawns in the list, on the canvas and in the Detail (issue #150)", () => {
-  const PENDING: EnrichedSnapshot = {
+describe("ConsoleView: a Held spawn's faded card and its Detail (issue #150)", () => {
+  const HELD: EnrichedSnapshot = {
     ...SNAPSHOT,
-    spawnUsage: { spawnedThisRun: 2, perAttempt: 5, perRun: 20 },
-    pendingSpawns: [
+    spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
+    heldSpawns: [
       {
         id: "proposal-1",
         parentId: "A",
@@ -289,38 +283,32 @@ describe("ConsoleView: Pending spawns in the list, on the canvas and in the Deta
         blockedBy: [],
         blocks: ["B"],
         overlaps: [],
+        unknownOverlaps: [],
+        reason: "per-run",
         at: "2026-09-29T10:00:00Z",
+        adopting: false,
       },
     ],
   };
 
-  it("counts it on the header line and holds it from the list", () => {
-    const c = mountConsole(PENDING);
-    const line = c.q<HTMLButtonElement>(".canvas-spawn-line")!;
-    expect(line.textContent).toBe("Spawns 2/20 this run · 5 per attempt · 1 pending");
-    line.click();
-    c.q<HTMLButtonElement>('[data-key="pending-spawn-proposal-1"] .held-spawn-hold')!.click();
-    expect(c.held).toEqual(["proposal-1"]);
-  });
-
   it("draws a faded card whose Detail shows the proposal and shares the list's decisions", () => {
-    const c = mountConsole(PENDING);
+    const c = mountConsole(HELD);
     const card = c.q<HTMLElement>('.spawn-card[data-key="spawn:proposal-1"]')!;
-    expect(card.textContent).toContain("lands next Tick");
+    expect(card.textContent).toContain("held · per-run cap");
     c.session.select("spawn:proposal-1");
     expect(c.q(".detail-title")?.textContent).toBe("proposal-1");
     const detail = c.q<HTMLElement>(".spawn-detail")!;
     expect(detail.textContent).toContain("Document every renamed flag.");
     expect(detail.textContent).toContain("blocks");
     expect(detail.querySelector(".peek, .log-pane")).toBeNull();
-    detail.querySelector<HTMLButtonElement>(".held-spawn-hold")!.click();
-    expect(c.held).toEqual(["proposal-1"]);
+    detail.querySelector<HTMLButtonElement>(".held-spawn-adopt")!.click();
+    expect(c.adopted).toEqual(["proposal-1"]);
     c.q<HTMLButtonElement>(".canvas-spawn-line")!.click();
     expect(
-      c.q<HTMLButtonElement>('[data-key="pending-spawn-proposal-1"] .held-spawn-hold')!.disabled,
+      c.q<HTMLButtonElement>('[data-key="held-spawn-proposal-1"] .held-spawn-adopt')!.disabled,
     ).toBe(true);
-    // Once it lands the faded card and its Detail go with the snapshot.
-    c.session.setSnapshot({ ...PENDING, seq: 2, pendingSpawns: [] });
+    // Once the Tick lands it the faded card and its Detail go with the snapshot.
+    c.session.setSnapshot({ ...HELD, seq: 2, heldSpawns: [] });
     expect(c.q('[data-key="spawn:proposal-1"]')).toBeNull();
     expect(c.q(".spawn-detail")).toBeNull();
   });

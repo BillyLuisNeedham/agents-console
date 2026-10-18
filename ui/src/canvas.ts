@@ -937,7 +937,7 @@ export class Canvas {
   }
 
   // A Pending or Held spawn's faded card (issue #150): work on its way, not
-  // in the pool. It says when it lands, or why it is held, and where it came
+  // in the pool. It says why it is held, and where it came
   // from; a click selects it and the Detail offers its decisions. Its key is
   // the `spawn:` card id, so the morph never mistakes it for a ticket's card,
   // and the ticket it lands as arrives as a card of its own.
@@ -947,7 +947,7 @@ export class Canvas {
       "div",
       {
         class:
-          `node-card spawn-card spawn-card-${card.state}` + this.flowClass(card.id, selection),
+          "node-card spawn-card spawn-card-held" + this.flowClass(card.id, selection),
         key: card.id,
         "data-node-id": card.id,
         "data-proposal-id": card.proposalId,
@@ -1059,7 +1059,7 @@ export class Canvas {
                 class: "canvas-spawn-line" + (model.spawnLine.warn ? " spawn-line-warn" : ""),
                 type: "button",
                 // The line ellipsises in a narrow header, so the hover says it whole.
-                title: `${model.spawnLine.text} (open the pending and held spawns)`,
+                title: `${model.spawnLine.text} (open the held spawns)`,
                 onclick: () => this.onOpenHeldSpawns(),
               },
               model.spawnLine.text,

@@ -89,40 +89,11 @@ export function adoptingSpawn(id: string): Overlay {
   };
 }
 
-/** A Discard, of a Pending or a Held spawn: it is gone from its list. */
+/** A Held spawn's Discard: it is gone from the list. */
 export function discardedSpawn(id: string): Overlay {
   return (snapshot) => {
-    const pendingSpawns = snapshot.pendingSpawns.filter((s) => s.id !== id);
     const heldSpawns = snapshot.heldSpawns.filter((s) => s.id !== id);
-    if (
-      pendingSpawns.length === snapshot.pendingSpawns.length &&
-      heldSpawns.length === snapshot.heldSpawns.length
-    ) {
-      return snapshot;
-    }
-    return { ...snapshot, pendingSpawns, heldSpawns };
-  };
-}
-
-/**
- * A Pending spawn's Hold: it leaves the pending list and waits at the end
- * of the held one, held by the operator, under the same id.
- */
-export function heldSpawn(id: string): Overlay {
-  return (snapshot) => {
-    const spawn = snapshot.pendingSpawns.find((s) => s.id === id);
-    if (!spawn) return snapshot;
-    const held: HeldSpawnView = {
-      ...spawn,
-      reason: "operator",
-      adopting: false,
-      unknownOverlaps: [],
-    };
-    return {
-      ...snapshot,
-      pendingSpawns: snapshot.pendingSpawns.filter((s) => s.id !== id),
-      heldSpawns: [...snapshot.heldSpawns, held],
-    };
+    return heldSpawns.length === snapshot.heldSpawns.length ? snapshot : { ...snapshot, heldSpawns };
   };
 }
 

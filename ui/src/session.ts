@@ -981,10 +981,7 @@ export class ConsoleSession {
       ? projectDetail(
           cards,
           this.selectedId,
-          {
-            pending: this.view?.pendingSpawns ?? [],
-            held: this.view?.heldSpawns ?? [],
-          },
+          this.view?.heldSpawns ?? [],
           snapshot?.line ?? null,
         )
       : null;
@@ -1067,7 +1064,6 @@ export class ConsoleSession {
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
       lineStrip: this.view?.lineStrip ?? null,
-      pendingSpawns: this.view?.pendingSpawns ?? [],
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,
       detailTabs:

@@ -29,8 +29,8 @@ loop (issue #157), which folds every ask before the next frame into one; the
 burst must cost exactly one render. The loop's frame is a timer here, since
 under `--virtual-time-budget` a `requestAnimationFrame` may never fire.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
-one is on screen at a time, one more the Detail of a Pending spawn's faded
-card (issue #150), whose card and a Held spawn's keep their nodes too, and one
+one is on screen at a time, one more the Detail of a Held spawn's faded
+card (issue #150), whose card keeps its node too, and one
 the Steward's Detail opened from the tray's Steward box (ADR-0030), whose
 card and the Steward note on a tray row keep theirs. One more opens the
 Finish checkpoint's Detail on a Factory Line (ADR-0037), whose report frame

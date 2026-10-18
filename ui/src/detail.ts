@@ -31,7 +31,6 @@ import {
   type DetailTabView,
   type DetailView,
   type HeldSpawnRow,
-  type PendingSpawnRow,
   type ResumeAction,
   type SpawnDetailView,
   type InterruptView,
@@ -108,14 +107,11 @@ export interface DetailHandlers {
    */
   reassign: ReassignStore;
   /**
-   * A Pending or Held spawn's decisions (issue #150): Hold and Discard, or
-   * Adopt and Discard, drawn by the Spawns list's store so the Detail and
-   * the list share one in-flight and refusal state.
+   * A Held spawn's decisions (issue #150): Adopt and Discard, drawn by the
+   * Spawns list's store so the Detail and the list share one in-flight and
+   * refusal state.
    */
-  renderSpawnDecision: (
-    row: PendingSpawnRow | HeldSpawnRow,
-    state: "pending" | "held",
-  ) => HTMLElement;
+  renderSpawnDecision: (row: HeldSpawnRow) => HTMLElement;
 }
 
 export class Detail {
@@ -1563,7 +1559,7 @@ export class Detail {
     return box;
   }
 
-  // A Pending or Held spawn's Detail (issue #150): the proposal whole, and
+  // A Held spawn's Detail (issue #150): the proposal whole, and
   // the Spawns list's own decisions, so the two never disagree about one in
   // flight. No Peek, logs or Assignment: it is not in the pool yet.
   private renderSpawnDetail(detail: SpawnDetailView, handlers: DetailHandlers): HTMLElement {
@@ -1582,8 +1578,8 @@ export class Detail {
       { class: "detail-body spawn-detail" },
       h(
         "div",
-        { class: `spawn-detail-state spawn-detail-${detail.state}` },
-        `${detail.state === "pending" ? "Pending" : "Held"} spawn · ${detail.label}`,
+        { class: "spawn-detail-state spawn-detail-held" },
+        `Held spawn · ${detail.label}`,
       ),
       ...field("title", detail.title),
       ...field("from", detail.parentId),
@@ -1593,7 +1589,7 @@ export class Detail {
       ...(detail.overlaps.length > 0 ? field("overlaps", detail.overlaps.join(", ")) : []),
       h("div", { class: "dim" }, "body"),
       h("div", { class: "card-text spawn-detail-body" }, detail.body),
-      handlers.renderSpawnDecision(detail.row, detail.state),
+      handlers.renderSpawnDecision(detail.row),
     );
   }
 

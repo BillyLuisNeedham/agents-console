@@ -1,20 +1,17 @@
 /**
- * The Spawns list (CONTEXT.md: Pending spawn, Held spawn; issues #149 and
- * #150, ADR-0029): what the canvas header's Spawn caps line opens. Two
- * sections: the Pending spawns, each landing at the next Tick unless the
- * operator Holds or Discards it first, and the Held spawns, each waiting for
- * the operator's Adopt or Discard. One module owns the whole session state:
- * whether the list is open, which bodies are expanded, which Discard is
- * asking to be confirmed, the request in flight per spawn and its refusal,
- * so a refused decision says why beside that spawn's buttons rather than on
- * the global banner. A spawn keeps its id from pending to held, so that
- * state follows it across a Hold.
+ * The Spawns list (CONTEXT.md: Held spawn; issues #149 and #150, ADR-0029,
+ * ADR-0041): what the canvas header's Spawn caps line opens. It lists the
+ * Held spawns, each waiting for the operator's Adopt or Discard. One module
+ * owns the whole session state: whether the list is open, which bodies are
+ * expanded, which Discard is asking to be confirmed, the request in flight
+ * per spawn and its refusal, so a refused decision says why beside that
+ * spawn's buttons rather than on the global banner.
  *
  * The spawns themselves are read from the snapshot, never cached here: an
  * Adopt shows as the engine's `adopting` until the next Tick writes the
- * ticket and the row goes, and a Hold or Discard shows with the snapshot the
- * engine pushes once it is done. Discard is final, so it asks first, inline,
- * the way the header's Stop does (issue #97). The Detail of a spawn's faded
+ * ticket and the row goes, and a Discard shows with the snapshot the engine
+ * pushes once it is done. Discard is final, so it asks first, inline, the
+ * way the header's Stop does (issue #97). The Detail of a held spawn's faded
  * card offers the same decisions through `renderDecision`, so the list and
  * the Detail can never disagree about a spawn in flight.
  */
@@ -24,29 +21,19 @@ import { REFUSED_AT_LANDING } from "./project";
 import type {
   HeldSpawnResponse,
   HeldSpawnRow,
-  PendingSpawnResponse,
-  PendingSpawnRow,
   SpawnLineView,
 } from "./project";
 
 export type HeldSpawnHandler = (id: string) => Promise<HeldSpawnResponse>;
-export type PendingSpawnHandler = (id: string) => Promise<PendingSpawnResponse>;
 
 export interface HeldSpawnsOptions {
   onAdopt: HeldSpawnHandler;
   onDiscard: HeldSpawnHandler;
-  /** Hold a Pending spawn back from the next Tick (issue #150). */
-  onHold: PendingSpawnHandler;
-  /** Discard a Pending spawn before it lands (issue #150). */
-  onDiscardPending: PendingSpawnHandler;
   /** Store state changed outside a render: the composition re-renders. */
   onChange: () => void;
 }
 
-type Decision = "adopt" | "discard" | "hold";
-
-/** Which list a spawn is on: its decisions depend on it. */
-export type SpawnState = "pending" | "held";
+type Decision = "adopt" | "discard";
 
 export class HeldSpawnsStore {
   private isListOpen = false;
@@ -88,8 +75,7 @@ export class HeldSpawnsStore {
     this.options.onChange();
   }
 
-  /** Drop the state of every spawn no longer pending or held (landed,
-   *  adopted or discarded). */
+  /** Drop the state of every spawn no longer held (adopted or discarded). */
   prune(live: Set<string>): void {
     for (const set of [this.armed, this.expanded]) {
       for (const id of set) if (!live.has(id)) set.delete(id);
@@ -100,12 +86,7 @@ export class HeldSpawnsStore {
   }
 
   async adopt(id: string): Promise<void> {
-    await this.decide(id, "adopt", "held");
-  }
-
-  /** Hold a Pending spawn back from the next Tick (issue #150). */
-  async hold(id: string): Promise<void> {
-    await this.decide(id, "hold", "pending");
+    await this.decide(id, "adopt");
   }
 
   /** Raise the inline "Discard for good?" confirmation; nothing is sent. */
@@ -121,23 +102,16 @@ export class HeldSpawnsStore {
     this.options.onChange();
   }
 
-  async confirmDiscard(id: string, state: SpawnState = "held"): Promise<void> {
-    await this.decide(id, "discard", state);
+  async confirmDiscard(id: string): Promise<void> {
+    await this.decide(id, "discard");
   }
 
-  private async decide(id: string, decision: Decision, state: SpawnState): Promise<void> {
+  private async decide(id: string, decision: Decision): Promise<void> {
     if (this.inFlight.has(id)) return;
     this.inFlight.set(id, decision);
     this.failures.delete(id);
     this.options.onChange();
-    const send =
-      decision === "adopt"
-        ? this.options.onAdopt
-        : decision === "hold"
-          ? this.options.onHold
-          : state === "pending"
-            ? this.options.onDiscardPending
-            : this.options.onDiscard;
+    const send = decision === "adopt" ? this.options.onAdopt : this.options.onDiscard;
     try {
       await send(id);
     } catch (err) {
@@ -153,11 +127,7 @@ export class HeldSpawnsStore {
   // -------------------------------------------------------------------------
 
   /** The list, or null while it is closed. */
-  render(
-    pending: PendingSpawnRow[],
-    held: HeldSpawnRow[],
-    line: SpawnLineView,
-  ): HTMLElement | null {
+  render(held: HeldSpawnRow[], line: SpawnLineView): HTMLElement | null {
     if (!this.isListOpen) return null;
     return h(
       "div",
@@ -182,23 +152,6 @@ export class HeldSpawnsStore {
         { class: "held-spawns-scroll", key: "held-spawns-scroll" },
         h(
           "div",
-          { class: "held-spawns-section-head", key: "pending-head" },
-          `pending · ${pending.length}`,
-        ),
-        h(
-          "div",
-          { class: "held-spawns-note dim", key: "pending-note" },
-          "proposals within the caps. Each lands at the next Tick unless you Hold it (it waits for you) or Discard it.",
-        ),
-        pending.length === 0
-          ? h("div", { class: "held-spawns-empty", key: "pending-empty" }, "no pending spawns")
-          : h(
-              "div",
-              { class: "held-spawns-list", key: "pending-list" },
-              ...pending.map((row) => this.renderRow(row, "pending")),
-            ),
-        h(
-          "div",
           { class: "held-spawns-section-head", key: "held-head" },
           `held · ${held.length}`,
         ),
@@ -212,26 +165,26 @@ export class HeldSpawnsStore {
           : h(
               "div",
               { class: "held-spawns-list", key: "held-list" },
-              ...held.map((row) => this.renderRow(row, "held")),
+              ...held.map((row) => this.renderRow(row)),
             ),
       ),
     );
   }
 
-  private renderRow(row: PendingSpawnRow | HeldSpawnRow, state: SpawnState): HTMLElement {
+  private renderRow(row: HeldSpawnRow): HTMLElement {
     const open = this.expanded.has(row.id);
     const meta = [
       row.parent,
-      "reason" in row ? row.reason : null,
-      row.overlaps && !("reason" in row && row.reason === row.overlaps) ? row.overlaps : null,
+      row.reason,
+      row.overlaps && row.reason !== row.overlaps ? row.overlaps : null,
       row.blockedBy,
       row.blocks,
     ].filter((part): part is string => part !== null);
     return h(
       "div",
       {
-        class: `held-spawn held-spawn-${state}`,
-        key: `${state === "pending" ? "pending" : "held"}-spawn-${row.id}`,
+        class: "held-spawn held-spawn-held",
+        key: `held-spawn-${row.id}`,
       },
       h(
         "div",
@@ -258,41 +211,38 @@ export class HeldSpawnsStore {
         row.waited ? h("span", { title: row.at }, row.waited) : null,
       ),
       open ? h("div", { class: "held-spawn-body", key: "body" }, row.body) : null,
-      ...this.renderDecisionParts(row, state),
+      ...this.renderDecisionParts(row),
     );
   }
 
   /**
-   * A spawn's decisions and any refusal, for the Detail of its faded card
-   * (issue #150): the same buttons and state the list shows.
+   * A held spawn's decisions and any refusal, for the Detail of its faded
+   * card: the same buttons and state the list shows.
    */
-  renderDecision(row: PendingSpawnRow | HeldSpawnRow, state: SpawnState): HTMLElement {
+  renderDecision(row: HeldSpawnRow): HTMLElement {
     return h(
       "div",
       { class: "held-spawn-decision", key: `decision-${row.id}` },
-      ...this.renderDecisionParts(row, state),
+      ...this.renderDecisionParts(row),
     );
   }
 
-  private renderDecisionParts(
-    row: PendingSpawnRow | HeldSpawnRow,
-    state: SpawnState,
-  ): (HTMLElement | null)[] {
+  private renderDecisionParts(row: HeldSpawnRow): (HTMLElement | null)[] {
     // This tab's own refusal is the newer news; the engine's is from a
     // Tick that refused an Adopt queued earlier, or refused to land the
-    // spawn while it was pending (issue #150).
+    // spawn (issue #150).
     const failure =
       this.failures.get(row.id) ??
-      ("adoptError" in row && row.adoptError && !row.adopting
+      (row.adoptError && !row.adopting
         ? `${row.reason === REFUSED_AT_LANDING ? "the Tick could not land it" : "last Adopt refused"}: ${row.adoptError}`
         : null);
     return [
-      this.renderActions(row, state),
+      this.renderActions(row),
       failure ? h("span", { class: "error-inline held-spawn-failure" }, failure) : null,
     ];
   }
 
-  private renderActions(row: PendingSpawnRow | HeldSpawnRow, state: SpawnState): HTMLElement {
+  private renderActions(row: HeldSpawnRow): HTMLElement {
     const pending = this.inFlight.get(row.id) ?? null;
     if (this.armed.has(row.id)) {
       return h(
@@ -305,7 +255,7 @@ export class HeldSpawnsStore {
             class: "btn btn-danger held-spawn-confirm",
             type: "button",
             disabled: pending !== null,
-            onclick: () => void this.confirmDiscard(row.id, state),
+            onclick: () => void this.confirmDiscard(row.id),
           },
           pending === "discard" ? "discarding…" : "Discard",
         ),
@@ -321,34 +271,21 @@ export class HeldSpawnsStore {
         ),
       );
     }
-    const adopting = "adopting" in row && row.adopting;
-    const busy = pending !== null || adopting;
+    const busy = pending !== null || row.adopting;
     return h(
       "div",
       { class: "held-spawn-actions", key: "actions" },
-      state === "pending"
-        ? h(
-            "button",
-            {
-              class: "btn held-spawn-hold",
-              type: "button",
-              title: "keep it back from the next Tick until you Adopt it",
-              disabled: busy,
-              onclick: () => void this.hold(row.id),
-            },
-            pending === "hold" ? "holding…" : "Hold",
-          )
-        : h(
-            "button",
-            {
-              class: "btn btn-primary held-spawn-adopt",
-              type: "button",
-              title: "add it to the pool past both caps",
-              disabled: busy,
-              onclick: () => void this.adopt(row.id),
-            },
-            adopting || pending === "adopt" ? "adopting…" : "Adopt",
-          ),
+      h(
+        "button",
+        {
+          class: "btn btn-primary held-spawn-adopt",
+          type: "button",
+          title: "add it to the pool past both caps",
+          disabled: busy,
+          onclick: () => void this.adopt(row.id),
+        },
+        row.adopting || pending === "adopt" ? "adopting…" : "Adopt",
+      ),
       h(
         "button",
         {

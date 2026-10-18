@@ -159,33 +159,21 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     poolDir: "/tmp/harness-pool",
     finishedTerminals: 0,
     spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
-    // Pending spawns (issue #150) above the held ones in the list, each a
-    // faded card on the canvas with dashed edges from its parent and to what
-    // it would block.
-    // The last lands as a Conversation, so it joins the Conversations lane.
-    pendingSpawns: Array.from({ length: 5 }, (_, i) => ({
-      id: `proposal-${i + 1}`,
-      parentId: i % 2 ? "t-3" : "t-1",
-      origin: "ticket" as const,
-      kind: i === 4 ? ("conversation" as const) : ("ticket" as const),
-      title: `Pending proposal ${i + 1}`,
-      body: TICKET_BODY,
-      blockedBy: i === 0 ? ["t-1"] : [],
-      blocks: i === 0 ? ["t-6"] : null,
-      overlaps: [],
-      at: "2026-09-29T10:05:00Z",
-    })),
+    pendingSpawns: [],
     // Enough Held spawns (issue #149) that the list scrolls under its head,
     // the first with a long body that scrolls once expanded, held for each
-    // reason issue #150 adds as well as the caps.
+    // reason issue #150 adds as well as the caps. Each is a faded card on
+    // the canvas with a dashed edge from its parent, the first to what it
+    // would block, and the fifth lands as a Conversation, so it joins the
+    // Conversations lane.
     heldSpawns: Array.from({ length: 10 }, (_, i) => ({
       id: `held-${i + 1}`,
       parentId: "t-1",
       origin: "ticket" as const,
-      kind: "ticket" as const,
+      kind: i === 4 ? ("conversation" as const) : ("ticket" as const),
       title: `Held proposal ${i + 1}`,
       body: TICKET_BODY,
-      blockedBy: [],
+      blockedBy: i === 0 ? ["t-1"] : [],
       blocks: i === 0 ? ("all" as const) : null,
       overlaps: i === 2 ? ["t-2", "proposal-1"] : [],
       unknownOverlaps: [],
@@ -415,8 +403,6 @@ const view = new ConsoleView({
   onSavePoolSettings: () => Promise.resolve(SETTINGS),
   onAdoptHeldSpawn: (id) => Promise.resolve({ id }),
   onDiscardHeldSpawn: (id) => Promise.resolve({ id }),
-  onHoldPendingSpawn: (id) => Promise.resolve({ id }),
-  onDiscardPendingSpawn: (id) => Promise.resolve({ id }),
   onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
@@ -480,8 +466,7 @@ const SCROLL_SELECTORS = [
   // The Reassign bulk dialog's row list (issue #126): its own scroll region
   // so the head and the form below it stay put however many tickets list.
   ".reassign-rows",
-  // The Spawns list, Pending over Held (issues #149, #150), and an
-  // expanded proposal's body.
+  // The Spawns list (issues #149, #150), and an expanded proposal's body.
   ".held-spawns-scroll",
   ".held-spawn-body",
 ];
@@ -604,11 +589,10 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     ["needs-input tray", ".needs-input-tray"],
     ["conversations tray", ".conversations-tray"],
     ["canvas viewport", ".canvas-viewport"],
-    // The faded cards (issue #150) keep their own keys across renders.
-    ["pending spawn card", '.node-card[data-node-id="spawn:proposal-1"]'],
     // The Steward's card and its note on the tray row (ADR-0030).
     ["steward card", `.node-card[data-node-id="conversation:${STEWARD}"]`],
     ["steward note", `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] .steward-note`],
+    // The faded cards (issue #150) keep their own keys across renders.
     ["held spawn card", '.node-card[data-node-id="spawn:held-3"]'],
     ["spawns list", ".held-spawns-pane"],
     // The Line's report (ADR-0037): moving an iframe reloads it, so its
@@ -1271,7 +1255,7 @@ async function main(): Promise<void> {
   // A faded card's Detail (issue #150): the proposal, its decisions, and a
   // long body that scrolls the panel.
   await runScenario("spawn detail", async () => {
-    session.select("spawn:proposal-1");
+    session.select("spawn:held-3");
   });
   // The Steward's Detail, reached the operator's way: the Conversations
   // tray's Steward box (ADR-0030).

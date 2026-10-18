@@ -26,7 +26,6 @@ import type {
   MergeQueueState,
   NoticeDelivery,
   Outcome,
-  PendingSpawnView,
   PoolConfig,
   QueuedAnswer,
   ResumeAction,
@@ -77,8 +76,6 @@ export type {
   MergeQueueState,
   NoticeDelivery,
   PanesResponse,
-  PendingSpawnResponse,
-  PendingSpawnView,
   PoolConfig,
   PoolSettingsView,
   QueuedAnswer,
@@ -1271,8 +1268,7 @@ export interface SpawnCardView {
   /** `spawn:<proposal id>`, never a ticket's or a Conversation's card id. */
   id: string;
   proposalId: string;
-  state: "pending" | "held";
-  /** "lands next Tick", or "held · <reason>". */
+  /** "held · <reason>". */
   label: string;
   title: string;
   /** The card the proposal came from: a ticket's or a Conversation's. */
@@ -1307,9 +1303,6 @@ export interface PoolView {
   spawnLine: SpawnLineView;
   /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
   lineStrip: string | null;
-  /** The Pending spawns the line's list shows first (issue #150), oldest
-   *  first. */
-  pendingSpawns: PendingSpawnRow[];
   /** The Held spawns list the line opens (issue #149), oldest first. */
   heldSpawns: HeldSpawnRow[];
   /** The Steward on duty (ADR-0030), which the header names; null when none is. */
@@ -1318,11 +1311,9 @@ export interface PoolView {
 
 /**
  * The Spawn caps line (issue #149): "Spawns 3/20 this run · 5 per attempt",
- * with "· N pending" while Pending spawns wait for the next Tick (issue #150)
- * and "· N held" while Held spawns wait for the operator. `warn` while the
+ * with "· N held" while Held spawns wait for the operator. `warn` while the
  * run is at or over its cap, or anything is held: either way the next
- * proposal, or one already made, needs the operator. A Pending spawn alone
- * does not warn: it lands on its own.
+ * proposal, or one already made, needs the operator.
  */
 export interface SpawnLineView {
   text: string;
@@ -1410,7 +1401,7 @@ function ticketDepth(
 function layoutPool(
   tickets: EnrichedTicketState[],
   conversations: ConversationView[] = [],
-  spawns: SpawnProposalView[] = [],
+  spawns: HeldSpawnView[] = [],
   startId: string = START_CARD_ID,
   reviewId: string = REVIEW_CARD_ID,
 ): Record<string, Point> {
@@ -1451,7 +1442,7 @@ function layoutPool(
     LAYOUT.startY + LAYOUT.rowH + (hasConversations ? LAYOUT.conversationLaneH : 0);
 
   const byDepth = new Map<number, EnrichedTicketState[]>();
-  const spawnsByDepth = new Map<number, SpawnProposalView[]>();
+  const spawnsByDepth = new Map<number, HeldSpawnView[]>();
   let maxDepth = -1;
   for (const ticket of tickets) {
     const depth = ticketDepth(ticket.id, tickets);
@@ -1519,7 +1510,7 @@ function projectPoolEdges(
  * wait for it. A parent or target not on the canvas draws no edge.
  */
 function projectSpawnEdges(
-  spawns: SpawnProposalView[],
+  spawns: HeldSpawnView[],
   tickets: EnrichedTicketState[],
   conversations: ConversationView[],
 ): TopologyEdge[] {
@@ -1542,7 +1533,7 @@ function projectSpawnEdges(
 }
 
 function spawnParentCardId(
-  spawn: SpawnProposalView,
+  spawn: HeldSpawnView,
   ticketIds: Set<string>,
   conversationIds: Set<string>,
 ): string | null {
@@ -1851,9 +1842,7 @@ export function projectPool(
 ): PoolView {
   const tickets = snapshot.state.tickets;
   const conversations = snapshot.state.conversations;
-  // The faded cards (issue #150): Pending spawns first, then Held ones,
-  // each in the engine's order.
-  const spawns: SpawnProposalView[] = [...snapshot.pendingSpawns, ...snapshot.heldSpawns];
+  const spawns = snapshot.heldSpawns;
   const positions = layoutPool(tickets, conversations, spawns);
   const ticketIds = new Set(tickets.map((t) => t.id));
   const conversationIds = new Set(conversations.map((c) => c.id));
@@ -1882,12 +1871,7 @@ export function projectPool(
         snapshot.stewardBudget,
       ),
     ),
-    ...snapshot.pendingSpawns.map((spawn) =>
-      projectSpawnCard(spawn, "pending", positions, ticketIds, conversationIds),
-    ),
-    ...snapshot.heldSpawns.map((spawn) =>
-      projectSpawnCard(spawn, "held", positions, ticketIds, conversationIds),
-    ),
+    ...spawns.map((spawn) => projectSpawnCard(spawn, positions, ticketIds, conversationIds)),
     projectUtility(REVIEW_CARD_ID, "review", snapshot.state, positions[REVIEW_CARD_ID]),
   ];
   return {
@@ -1903,15 +1887,13 @@ export function projectPool(
     mergeQueueLine: mergeQueueLine(snapshot, now),
     spawnLine: spawnLine(snapshot),
     lineStrip: lineStrip(snapshot.line),
-    pendingSpawns: projectPendingSpawns(snapshot.pendingSpawns, now),
     heldSpawns: projectHeldSpawns(snapshot.heldSpawns, now),
     steward: stewardOnDuty(conversations),
   };
 }
 
 function projectSpawnCard(
-  spawn: PendingSpawnView | HeldSpawnView,
-  state: "pending" | "held",
+  spawn: HeldSpawnView,
   positions: Record<string, Point>,
   ticketIds: Set<string>,
   conversationIds: Set<string>,
@@ -1922,15 +1904,7 @@ function projectSpawnCard(
     kind: "spawn",
     id,
     proposalId: spawn.id,
-    state,
-    label:
-      state === "pending"
-        ? "lands next Tick"
-        : `held · ${heldReasonCopy(
-            (spawn as HeldSpawnView).reason,
-            spawn.overlaps,
-            (spawn as HeldSpawnView).unknownOverlaps,
-          )}`,
+    label: `held · ${heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps)}`,
     title: spawn.title,
     parentCardId: spawnParentCardId(spawn, ticketIds, conversationIds) ?? START_CARD_ID,
     parentId: spawn.parentId,
@@ -1946,10 +1920,8 @@ function projectSpawnCard(
 
 function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
   const { spawnedThisRun, perAttempt, perRun } = snapshot.spawnUsage;
-  const pending = snapshot.pendingSpawns.length;
   const held = snapshot.heldSpawns.length;
   const parts = [`Spawns ${spawnedThisRun}/${perRun} this run`, `${perAttempt} per attempt`];
-  if (pending > 0) parts.push(`${pending} pending`);
   if (held > 0) parts.push(`${held} held`);
   return { text: parts.join(" · "), warn: spawnedThisRun >= perRun || held > 0 };
 }
@@ -1998,14 +1970,11 @@ export function lineStrip(line: LineView | undefined): string | null {
 // Held spawns (issue #149, ADR-0029)
 // ---------------------------------------------------------------------------
 
-/** A Pending or Held spawn as the wire carries it: the fields both share. */
-type SpawnProposalView = PendingSpawnView | HeldSpawnView;
-
 /** How the list, the faded card and the timeline name why a spawn is held:
  *  a cap, the proposing agent's overlaps mark (with what it named, and
- *  which of those the pool never knew), the operator's Hold, or a Pending
- *  spawn the Tick could not land (with why, where it is shown inline)
- *  (issue #150). */
+ *  which of those the pool never knew), the operator's Hold of an older
+ *  pool, or a Pending spawn the Tick could not land (with why, where it is
+ *  shown inline) (issue #150). */
 export function heldReasonCopy(
   reason: HeldSpawnReason,
   overlaps: string[] = [],
@@ -2031,8 +2000,8 @@ export function heldReasonCopy(
   }
 }
 
-/** The list's reason copy for a Pending spawn the Tick could not land:
- *  the row shows why beside its buttons. */
+/** The list's reason copy for a spawn the Tick could not land: the row
+ *  shows why beside its buttons. */
 export const REFUSED_AT_LANDING = heldReasonCopy("refused");
 
 const HELD_SPAWN_REASONS: readonly string[] = [
@@ -2048,8 +2017,8 @@ function isHeldSpawnReason(value: unknown): value is HeldSpawnReason {
   return typeof value === "string" && HELD_SPAWN_REASONS.includes(value);
 }
 
-/** The facts a Pending and a Held spawn's row share (issue #150). */
-interface SpawnRowBase {
+/** One Held spawn as the list shows it, in the engine's order, oldest first. */
+export interface HeldSpawnRow {
   id: string;
   title: string;
   /** What landing it starts. */
@@ -2068,13 +2037,6 @@ interface SpawnRowBase {
    *  null when it named nothing. */
   overlaps: string | null;
   body: string;
-}
-
-/** One Pending spawn as the list shows it (issue #150), oldest first. */
-export type PendingSpawnRow = SpawnRowBase;
-
-/** One Held spawn as the list shows it, in the engine's order, oldest first. */
-export interface HeldSpawnRow extends SpawnRowBase {
   /** "per-attempt cap", "per-run cap", "overlaps 02" or "held by operator". */
   reason: string;
   /** An Adopt is on its way to the next Tick: nothing more to decide. */
@@ -2084,41 +2046,33 @@ export interface HeldSpawnRow extends SpawnRowBase {
   adoptError: string | null;
 }
 
-function spawnRowBase(spawn: SpawnProposalView, now: number): SpawnRowBase {
-  const at = Date.parse(spawn.at);
-  return {
-    id: spawn.id,
-    title: spawn.title,
-    kind: spawn.kind,
-    parent:
-      spawn.origin === "conversation"
-        ? `from Conversation ${spawn.parentId}`
-        : `from ${spawn.parentId}`,
-    waited: Number.isNaN(at) ? "" : `${shortDurationCopy(now - at)} ago`,
-    at: spawn.at,
-    blockedBy: spawn.blockedBy.length > 0 ? `waits on ${spawn.blockedBy.join(", ")}` : null,
-    blocks:
-      spawn.blocks === "all"
-        ? "blocks every ticket not yet started"
-        : spawn.blocks && spawn.blocks.length > 0
-          ? `blocks ${spawn.blocks.join(", ")}`
-          : null,
-    overlaps: spawn.overlaps.length > 0 ? `overlaps ${spawn.overlaps.join(", ")}` : null,
-    body: spawn.body,
-  };
-}
-
-export function projectPendingSpawns(pending: PendingSpawnView[], now: number): PendingSpawnRow[] {
-  return pending.map((spawn) => spawnRowBase(spawn, now));
-}
-
 export function projectHeldSpawns(held: HeldSpawnView[], now: number): HeldSpawnRow[] {
-  return held.map((spawn) => ({
-    ...spawnRowBase(spawn, now),
-    reason: heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps),
-    adopting: spawn.adopting,
-    adoptError: spawn.adoptError ?? null,
-  }));
+  return held.map((spawn) => {
+    const at = Date.parse(spawn.at);
+    return {
+      id: spawn.id,
+      title: spawn.title,
+      kind: spawn.kind,
+      parent:
+        spawn.origin === "conversation"
+          ? `from Conversation ${spawn.parentId}`
+          : `from ${spawn.parentId}`,
+      waited: Number.isNaN(at) ? "" : `${shortDurationCopy(now - at)} ago`,
+      at: spawn.at,
+      blockedBy: spawn.blockedBy.length > 0 ? `waits on ${spawn.blockedBy.join(", ")}` : null,
+      blocks:
+        spawn.blocks === "all"
+          ? "blocks every ticket not yet started"
+          : spawn.blocks && spawn.blocks.length > 0
+            ? `blocks ${spawn.blocks.join(", ")}`
+            : null,
+      overlaps: spawn.overlaps.length > 0 ? `overlaps ${spawn.overlaps.join(", ")}` : null,
+      body: spawn.body,
+      reason: heldReasonCopy(spawn.reason, spawn.overlaps, spawn.unknownOverlaps),
+      adopting: spawn.adopting,
+      adoptError: spawn.adoptError ?? null,
+    };
+  });
 }
 
 /** How the header words a Merge queue state after the ticket ids. */
@@ -2857,15 +2811,14 @@ export interface ConversationDetailView {
 }
 
 /**
- * A Pending or Held spawn's Detail (issue #150): the proposal whole, and the
- * same decisions the Spawns list offers. No Peek, logs or Assignment: it is
- * not in the pool yet.
+ * A Held spawn's Detail (issue #150): the proposal whole, and the same
+ * decisions the Spawns list offers. No Peek, logs or Assignment: it is not in
+ * the pool yet.
  */
 export interface SpawnDetailView {
   kind: "spawn";
   proposalId: string;
-  state: "pending" | "held";
-  /** "lands next Tick", or "held · <reason>", as the card says. */
+  /** "held · <reason>", as the card says. */
   label: string;
   title: string;
   parentId: string;
@@ -2876,7 +2829,7 @@ export interface SpawnDetailView {
   overlaps: string[];
   /** The row the Spawns list shows for it, whose decisions the Detail
    *  offers too. */
-  row: PendingSpawnRow | HeldSpawnRow;
+  row: HeldSpawnRow;
 }
 
 export type DetailView =
@@ -2895,20 +2848,17 @@ export type DetailView =
 export function projectDetail(
   cards: PoolCardView[],
   cardId: string,
-  spawns: { pending: PendingSpawnRow[]; held: HeldSpawnRow[] } = { pending: [], held: [] },
+  spawns: HeldSpawnRow[] = [],
   line: LineView | null = null,
 ): DetailView | null {
   const card = cards.find((c) => c.id === cardId);
   if (!card) return null;
   if (card.kind === "spawn") {
-    const row = (card.state === "pending" ? spawns.pending : spawns.held).find(
-      (r) => r.id === card.proposalId,
-    );
+    const row = spawns.find((r) => r.id === card.proposalId);
     if (!row) return null;
     return {
       kind: "spawn",
       proposalId: card.proposalId,
-      state: card.state,
       label: card.label,
       title: card.title,
       parentId: card.parentId,

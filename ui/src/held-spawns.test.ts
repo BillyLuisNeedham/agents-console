@@ -7,8 +7,6 @@ import { useDom } from "./test-dom";
 import type {
   HeldSpawnResponse,
   HeldSpawnRow,
-  PendingSpawnResponse,
-  PendingSpawnRow,
   SpawnLineView,
 } from "./project";
 
@@ -49,22 +47,6 @@ function row(overrides: Partial<HeldSpawnRow> = {}): HeldSpawnRow {
   };
 }
 
-function pendingRow(overrides: Partial<PendingSpawnRow> = {}): PendingSpawnRow {
-  return {
-    id: "proposal-3",
-    title: "Write the migration guide",
-    kind: "ticket",
-    parent: "from 04",
-    waited: "1m ago",
-    at: "2026-09-29T10:10:00Z",
-    blockedBy: null,
-    blocks: null,
-    overlaps: null,
-    body: "Document every renamed flag.",
-    ...overrides,
-  };
-}
-
 const LINE: SpawnLineView = { text: "Spawns 20/20 this run · 5 per attempt · 1 held", warn: true };
 
 /** A store wired to hand-settled deferreds, so a test sees the request in
@@ -73,8 +55,6 @@ const LINE: SpawnLineView = { text: "Spawns 20/20 this run · 5 per attempt · 1
 function harness(onChange: () => void = () => {}) {
   const adopts: { id: string; deferred: Deferred<HeldSpawnResponse> }[] = [];
   const discards: { id: string; deferred: Deferred<HeldSpawnResponse> }[] = [];
-  const holds: { id: string; deferred: Deferred<PendingSpawnResponse> }[] = [];
-  const pendingDiscards: { id: string; deferred: Deferred<PendingSpawnResponse> }[] = [];
   const store = new HeldSpawnsStore({
     onAdopt: (id) => {
       const d = deferred<HeldSpawnResponse>();
@@ -86,32 +66,18 @@ function harness(onChange: () => void = () => {}) {
       discards.push({ id, deferred: d });
       return d.promise;
     },
-    onHold: (id) => {
-      const d = deferred<PendingSpawnResponse>();
-      holds.push({ id, deferred: d });
-      return d.promise;
-    },
-    onDiscardPending: (id) => {
-      const d = deferred<PendingSpawnResponse>();
-      pendingDiscards.push({ id, deferred: d });
-      return d.promise;
-    },
     onChange,
   });
-  return { store, adopts, discards, holds, pendingDiscards };
+  return { store, adopts, discards };
 }
 
-function mount(
-  store: HeldSpawnsStore,
-  rows: () => HeldSpawnRow[],
-  pending: () => PendingSpawnRow[] = () => [],
-) {
+function mount(store: HeldSpawnsStore, rows: () => HeldSpawnRow[]) {
   const root = document.createElement("div");
   document.body.appendChild(root);
   const paint = () =>
     commit(root, () => {
       const shell = document.createElement("div");
-      const pane = store.render(pending(), rows(), LINE);
+      const pane = store.render(rows(), LINE);
       if (pane) shell.appendChild(pane);
       return shell;
     });
@@ -125,7 +91,7 @@ function button(root: HTMLElement, id: string, cls: string): HTMLButtonElement |
 describe("HeldSpawnsStore", () => {
   it("renders nothing until the header line opens it, and toggles closed", () => {
     const { store } = harness();
-    expect(store.render([], [row()], LINE)).toBeNull();
+    expect(store.render([row()], LINE)).toBeNull();
     store.toggle();
     expect(store.isOpen).toBe(true);
     store.toggle();
@@ -249,64 +215,15 @@ describe("HeldSpawnsStore", () => {
     );
   });
 
-  it("says so when nothing is pending or held, and heads the list with the caps line", () => {
+  it("says so when nothing is held, and heads the list with the caps line", () => {
     const rig = harness();
     const { root, paint } = mount(rig.store, () => []);
     rig.store.open();
     paint();
     expect([...root.querySelectorAll(".held-spawns-empty")].map((el) => el.textContent)).toEqual([
-      "no pending spawns",
       "no held spawns",
     ]);
     expect(root.querySelector(".held-spawns-line")?.textContent).toBe(LINE.text);
-  });
-
-  // Issue #150: the Pending spawns come first, each with Hold and Discard.
-  it("lists the Pending spawns first, each with Hold and a confirmed Discard", async () => {
-    let paint = () => {};
-    const rig = harness(() => paint());
-    const mounted = mount(
-      rig.store,
-      () => [row()],
-      () => [pendingRow({ overlaps: "overlaps 02" })],
-    );
-    paint = mounted.paint;
-    rig.store.open();
-    const root = mounted.root;
-    expect([...root.querySelectorAll(".held-spawns-section-head")].map((el) => el.textContent))
-      .toEqual(["pending · 1", "held · 1"]);
-    const pending = root.querySelector('[data-key="pending-spawn-proposal-3"]')!;
-    expect(pending.querySelector(".held-spawn-meta")?.textContent).toContain("overlaps 02");
-    expect(pending.querySelector(".held-spawn-adopt")).toBeNull();
-
-    pending.querySelector<HTMLButtonElement>(".held-spawn-hold")!.click();
-    expect(rig.holds.map((h) => h.id)).toEqual(["proposal-3"]);
-    expect(
-      root.querySelector<HTMLButtonElement>('[data-key="pending-spawn-proposal-3"] .held-spawn-hold')!
-        .textContent,
-    ).toBe("holding…");
-    rig.holds[0]!.deferred.resolve({ id: "proposal-3" });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    root.querySelector<HTMLButtonElement>('[data-key="pending-spawn-proposal-3"] .held-spawn-discard')!.click();
-    root.querySelector<HTMLButtonElement>('[data-key="pending-spawn-proposal-3"] .held-spawn-confirm')!.click();
-    expect(rig.pendingDiscards.map((d) => d.id)).toEqual(["proposal-3"]);
-    expect(rig.discards).toEqual([]);
-  });
-
-  it("shows a refused Hold beside that pending spawn", async () => {
-    let paint = () => {};
-    const rig = harness(() => paint());
-    const mounted = mount(rig.store, () => [], () => [pendingRow()]);
-    paint = mounted.paint;
-    rig.store.open();
-    const hold = rig.store.hold("proposal-3");
-    rig.holds[0]!.deferred.reject(new Error("no pending spawn proposal-3: it has landed or been discarded"));
-    await hold;
-    expect(
-      mounted.root.querySelector('[data-key="pending-spawn-proposal-3"] .held-spawn-failure')?.textContent,
-    ).toBe("no pending spawn proposal-3: it has landed or been discarded");
   });
 
   // The Detail of a faded card offers the list's own decisions.
@@ -324,11 +241,13 @@ describe("HeldSpawnsStore", () => {
 
   it("draws one spawn's decisions for the Detail, sharing the list's state", () => {
     const rig = harness();
-    void rig.store.hold("proposal-3");
-    const decision = rig.store.renderDecision(pendingRow(), "pending");
-    expect(decision.querySelector<HTMLButtonElement>(".held-spawn-hold")!.disabled).toBe(true);
-    const held = rig.store.renderDecision(row(), "held");
-    expect(held.querySelector(".held-spawn-adopt")?.textContent).toBe("Adopt");
+    expect(rig.store.renderDecision(row()).querySelector(".held-spawn-adopt")?.textContent).toBe(
+      "Adopt",
+    );
+    void rig.store.adopt("held-1");
+    const busy = rig.store.renderDecision(row());
+    expect(busy.querySelector<HTMLButtonElement>(".held-spawn-adopt")!.disabled).toBe(true);
+    expect(busy.querySelector(".held-spawn-adopt")?.textContent).toBe("adopting…");
   });
 
   it("forgets the state of a spawn no longer held", async () => {

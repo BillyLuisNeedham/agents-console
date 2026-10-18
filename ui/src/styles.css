@@ -1198,9 +1198,9 @@ body {
   opacity: 0.8;
 }
 
-/* A Pending or Held spawn's faded card (issue #150): work on its way, not in
-   the pool, so it reads as a ghost of the ticket it will be. A held one
-   carries the warning colour on its label, as the header's line does. */
+/* A Held spawn's faded card (issue #150): work on its way, not in the pool,
+   so it reads as a ghost of the ticket it will be. It carries the warning
+   colour on its label, as the header's line does. */
 .spawn-card {
   background: var(--bg-panel-2);
   border-style: dashed;
@@ -3142,10 +3142,6 @@ textarea.conversations-field {
   flex-direction: column;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.held-spawn-pending {
-  border-style: dashed;
 }
 
 /* A faded spawn card's Detail (issue #150): the proposal and its decisions. */

@@ -182,8 +182,6 @@ const consoleView = new ConsoleView({
   onReassign: () => soon(() => ({ applied: [], skipped: [], snapshot: current }) as never),
   onAdoptHeldSpawn: (id) => soon(() => ({ id }) as never),
   onDiscardHeldSpawn: (id) => soon(() => ({ id }) as never),
-  onHoldPendingSpawn: (id) => soon(() => ({ id }) as never),
-  onDiscardPendingSpawn: (id) => soon(() => ({ id }) as never),
   onStart: () => soon(() => conversation("conv-new", 0, 0)),
   onEnd: () => soon(() => undefined),
 } as ConstructorParameters<typeof ConsoleView>[0]);
