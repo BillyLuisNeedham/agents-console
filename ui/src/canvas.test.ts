@@ -162,6 +162,7 @@ function mountCanvas(
     onFocusTerminal: async () => true,
     onEnlist: () => {},
     onOpenSettings: () => {},
+    onOpenPlans: () => {},
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
@@ -819,6 +820,7 @@ describe("the Steward on the canvas (ADR-0030)", () => {
       "|",
       "Enlist terminal",
       "Settings",
+      "Plans",
     ]);
   });
 });

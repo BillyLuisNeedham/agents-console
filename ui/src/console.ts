@@ -171,6 +171,12 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
         )
         .then(() => undefined),
     onStartLine: (grillId) => postStartLine(grillId),
+    onListPlans: () => socket.request("plans.list", {}),
+    onGetPlan: (slug) => socket.request("plans.get", { slug }),
+    onEditPlan: (plan, edits) => socket.request("plans.edit", { plan, edits }),
+    onSavePlan: (slug, plan) => socket.request("plans.save", { slug, plan }),
+    onDeletePlan: (slug) => socket.request("plans.delete", { slug }).then(() => undefined),
+    onBootPlan: (slug, work) => socket.request("plans.boot", { slug, work }),
   });
 
   const handlers: Handlers = {

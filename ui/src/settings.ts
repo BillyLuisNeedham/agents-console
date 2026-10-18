@@ -47,6 +47,8 @@ export interface SettingsOptions {
   /** Open the Reassign bulk dialog (issue #126). The pane offers the button
    *  and nothing more: the dialog is its own pane with its own store. */
   onOpenReassign: () => void;
+  /** Open the Plans view (slice 9), which closes this pane. */
+  onOpenPlans: () => void;
   /** Pane state changed outside a render: the composition re-renders. */
   onChange: () => void;
 }
@@ -384,6 +386,7 @@ export class SettingsStore {
   private readonly onSavePool: SavePoolHandler;
   private readonly onSaveMachine: SaveMachineHandler;
   private readonly onOpenReassign: () => void;
+  private readonly onOpenPlans: () => void;
   private readonly onChange: () => void;
 
   constructor(options: SettingsOptions) {
@@ -391,6 +394,7 @@ export class SettingsStore {
     this.onSavePool = options.onSavePool;
     this.onSaveMachine = options.onSaveMachine;
     this.onOpenReassign = options.onOpenReassign;
+    this.onOpenPlans = options.onOpenPlans;
     this.onChange = options.onChange;
   }
 
@@ -649,6 +653,7 @@ export class SettingsStore {
               { class: "settings-body", key: "settings-body" },
               this.renderPoolForm(this.data),
               this.renderReassignSection(),
+              this.renderPlansSection(),
               this.renderMachineForm(this.data),
             )
           : h("div", { class: "settings-empty" }, "no settings");
@@ -903,6 +908,32 @@ export class SettingsStore {
             onclick: () => this.onOpenReassign(),
           },
           "Reassign tickets…",
+        ),
+      ),
+    );
+  }
+
+  private renderPlansSection(): HTMLElement {
+    return h(
+      "section",
+      { class: "settings-section", key: "settings-plans" },
+      h(
+        "div",
+        { class: "settings-section-head" },
+        h("span", { class: "settings-section-title" }, "plans"),
+      ),
+      h(
+        "div",
+        { class: "settings-note dim" },
+        "the Presets and your Plan library: open one as a graph, save it under your own name, and boot a Line on it",
+      ),
+      h(
+        "div",
+        { class: "settings-save-row", key: "settings-plans-row" },
+        h(
+          "button",
+          { class: "btn settings-plans-open", type: "button", onclick: () => this.onOpenPlans() },
+          "Plans…",
         ),
       ),
     );

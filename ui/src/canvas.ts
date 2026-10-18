@@ -454,6 +454,7 @@ export class Canvas {
   private readonly onFocusTerminal: (ticketId: string) => Promise<boolean>;
   private readonly onEnlist: () => void;
   private readonly onOpenSettings: () => void;
+  private readonly onOpenPlans: () => void;
   private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string) => void;
@@ -483,6 +484,8 @@ export class Canvas {
     /** The header's "Settings" button (ADR-0026): opens the Settings pane.
      *  Always offered; a headless pool has settings too. */
     onOpenSettings: () => void;
+    /** The header's "Plans" button (slice 9): opens the Plans view. */
+    onOpenPlans: () => void;
     /** The header's Spawn caps line (issue #149): opens the Held spawns list. */
     onOpenHeldSpawns: () => void;
     /** The header's "reset layout" button, after the canvas has restored its
@@ -513,6 +516,7 @@ export class Canvas {
     this.onFocusTerminal = options.onFocusTerminal;
     this.onEnlist = options.onEnlist;
     this.onOpenSettings = options.onOpenSettings;
+    this.onOpenPlans = options.onOpenPlans;
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
     this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
@@ -1128,6 +1132,15 @@ export class Canvas {
             onclick: () => this.onOpenSettings(),
           },
           "Settings",
+        ),
+        h(
+          "button",
+          {
+            class: "btn canvas-plans",
+            title: "build, save and boot Plans",
+            onclick: () => this.onOpenPlans(),
+          },
+          "Plans",
         ),
         this.renderCloseTerminalsControl(model.closeTerminals),
         this.renderStopControl(model.stop),

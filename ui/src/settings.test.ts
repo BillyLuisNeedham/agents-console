@@ -94,6 +94,7 @@ function harness(onChange: () => void = () => {}) {
     onOpenReassign: () => {
       opens += 1;
     },
+    onOpenPlans: () => {},
     onChange: () => {
       changes += 1;
       onChange();

@@ -45,6 +45,7 @@ import {
   type SavePoolHandler,
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
+import { PlansStore, type PlansHandlers } from "./plans";
 import {
   HeldSpawnsStore,
   type HeldSpawnHandler,
@@ -212,7 +213,10 @@ export interface Handlers {
 }
 
 export type ConsoleViewOptions = NeedsInputOptions &
-  ConversationsOptions & {
+  ConversationsOptions &
+  /** The Plans view's reads and writes (slice 9): every one fetched when
+   *  the operator asks, never through the snapshot. */
+  PlansHandlers & {
     /** Run something in the next frame. Given, the page's first render
      *  leaves measuring the canvas's cards and drawing its edges to the frame
      *  after it, so it forces no layout of its own (issue #161). */
@@ -271,6 +275,7 @@ export class ConsoleView {
   private readonly settings: SettingsStore;
   private readonly reassign: ReassignStore;
   private readonly heldSpawns: HeldSpawnsStore;
+  private readonly plans: PlansStore;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   private readonly onChange: () => void;
   // The selection outlives any one render (snapshots never close the panel
@@ -313,11 +318,25 @@ export class ConsoleView {
       onDiscard: options.onDiscardHeldSpawn,
       onChange: options.onChange,
     });
+    this.plans = new PlansStore({
+      onListPlans: options.onListPlans,
+      onGetPlan: options.onGetPlan,
+      onEditPlan: options.onEditPlan,
+      onSavePlan: options.onSavePlan,
+      onDeletePlan: options.onDeletePlan,
+      onBootPlan: options.onBootPlan,
+      onChange: options.onChange,
+    });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,
       onSavePool: options.onSavePoolSettings,
       onSaveMachine: options.onSaveMachineDefaults,
       onOpenReassign: () => this.reassign.openDialog(),
+      // The Plans view covers the whole column, Settings with it.
+      onOpenPlans: () => {
+        this.settings.close();
+        void this.plans.open();
+      },
       onChange: options.onChange,
     });
     this.canvas = new Canvas({
@@ -330,6 +349,9 @@ export class ConsoleView {
         void this.enlist.openPicker();
       },
       onOpenSettings: () => this.settings.toggle(),
+      onOpenPlans: () => {
+        void this.plans.open();
+      },
       onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
       onEndConversation: (conversationId) => {
@@ -436,6 +458,7 @@ export class ConsoleView {
       model.spawnLine
         ? this.heldSpawns.render(model.heldSpawns, model.spawnLine)
         : null,
+      this.plans.render(),
     );
     const content = h(
       "div",
@@ -464,6 +487,7 @@ export class ConsoleView {
     } else {
       this.canvas.unbind();
     }
+    this.plans.bindCanvas(root);
   }
 
   private selectNode(nodeId: string): void {
