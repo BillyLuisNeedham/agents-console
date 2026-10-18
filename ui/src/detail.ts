@@ -983,16 +983,15 @@ export class Detail {
     return panel;
   }
 
-  // The report Decide wrote at the Line's Finish (ADR-0037), under the Finish
-  // checkpoint it is read beside, framed whole with a way out to a tab of
-  // its own. The Round rides the address so a later Round's report is
-  // fetched afresh rather than from the cache. Moving an iframe reloads it,
-  // so the frame and its section are keyed and nothing before the frame
-  // inside the section comes or goes; the panel above it only reshapes when
-  // the checkpoint is answered. The report is an agent's HTML: the frame is
-  // sandboxed, so it runs no script and is not of the Console's origin.
+  // The report a Decide pass wrote (ADR-0039), under its Ticket, framed whole
+  // with a way out to a tab of its own. The pass rides the address so a later
+  // pass's report is fetched afresh rather than from the cache. Moving an
+  // iframe reloads it, so the frame and its section are keyed and nothing
+  // before the frame inside the section comes or goes. The report is an
+  // agent's HTML: the frame is sandboxed, so it runs no script and is not of
+  // the Console's origin.
   private renderReport(report: LineReportView): HTMLElement {
-    const src = `/api/line/report?round=${report.round}`;
+    const src = `/api/line/report?node=${encodeURIComponent(report.node)}&pass=${report.pass}`;
     return h(
       "section",
       { class: "detail-report", key: "detail-report" },

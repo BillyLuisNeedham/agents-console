@@ -64,7 +64,7 @@ import {
   type EnrichedSnapshot,
   type EnrichedTicketState,
   type InterruptKind,
-  type LineView,
+  type LineGraphView,
   type NeedsInputRow,
   type QueuedAnswer,
   type TabOverride,
@@ -1215,8 +1215,8 @@ describe("projectDetailTabs", () => {
       },
       hasLiveAttempt: false,
       stewardBudget: null,
-      station: null,
-      report: null,
+      node: null,
+      report: null
     };
   }
 
@@ -4274,100 +4274,81 @@ describe("a Conversation whose Notices are not landing", () => {
   });
 });
 
-describe("the Line (#187, ADR-0037)", () => {
-  function line(overrides: Partial<LineView> = {}): LineView {
+describe("the Line (#187, ADR-0039)", () => {
+  function line(overrides: Partial<LineGraphView> = {}): LineGraphView {
     return {
-      round: 2,
-      station: "prove",
-      ticket: "r2-prove",
+      plan: {
+        horde: 1,
+        name: "Factory today",
+        nodes: [
+          { kind: "agent", id: "implement", title: "Implement", x: 0, y: 0 },
+          { kind: "decide", id: "decide", title: "Decide", x: 200, y: 0 },
+        ],
+        edges: [{ from: "implement", on: "done", to: "decide" }],
+      },
+      rev: 1,
       status: "running",
-      proveFails: 1,
-      proveFailsAllowed: 2,
-      finish: "draft-pr",
-      report: false,
-      halted: null,
+      waitingFor: [],
+      nodes: [],
+      edges: [],
       ...overrides,
     };
   }
 
-  it("reads the running Line in the header strip: Round, Station, fails and Finish", () => {
-    expect(lineStrip(line())).toBe("Round 2 · Prove · fails 1/2 · Finish: draft PR");
-    expect(lineStrip(line({ round: 1, station: "implement", proveFails: 0 }))).toBe(
-      "Round 1 · Implement · fails 0/2 · Finish: draft PR",
+  it("reads the running Line in the header strip: the Plan and its status", () => {
+    expect(lineStrip(line())).toBe("Factory today · running");
+    expect(lineStrip(line({ status: "acting", act: "finish-1-act" }))).toBe(
+      "Factory today · acting",
     );
   });
 
-  it("names the Finish: the PR acts as words, none as none, any other act as the Grill wrote it", () => {
-    expect(lineStrip(line({ finish: "pr" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: PR");
-    expect(lineStrip(line({ finish: "none" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: none");
-    expect(lineStrip(line({ finish: "post the report in #releases" }))).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: post the report in #releases",
+  it("lists what the Finish waits for while it refuses", () => {
+    expect(lineStrip(line({ status: "finishing", waitingFor: ["review-1", "side-quest"] }))).toBe(
+      "Factory today · finishing · Finish waiting for review-1, side-quest",
     );
+    expect(lineStrip(line({ status: "finishing" }))).toBe("Factory today · finishing");
   });
 
-  it("says the Line ended after its last Round once it is done or closed", () => {
-    expect(lineStrip(line({ status: "done", station: "finish", finish: "pr" }))).toBe(
-      "Line done after Round 2 · Finish: PR",
-    );
-    expect(lineStrip(line({ status: "closed", station: "finish" }))).toBe(
-      "Line closed after Round 2 · Finish: draft PR",
-    );
+  it("says the Line ended once it is done or closed", () => {
+    expect(lineStrip(line({ status: "done" }))).toBe("Factory today · Line done");
+    expect(lineStrip(line({ status: "closed" }))).toBe("Factory today · Line closed");
   });
 
-  it("marks a halted Line", () => {
-    expect(lineStrip(line({ halted: "r2-prove closed: flaky harness" }))).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: draft PR · halted",
-    );
-    expect(lineStrip(line({ status: "closed", halted: "closed" }))).toBe(
-      "Line closed after Round 2 · Finish: draft PR · halted",
-    );
-  });
-
-  it("has no strip before Start the Line, and the pool view carries the snapshot's", () => {
+  it("has no strip before a Line starts, and the pool view carries the snapshot's", () => {
     expect(lineStrip(undefined)).toBeNull();
     expect(projectPool(snapshot()).lineStrip).toBeNull();
-    expect(projectPool(snapshot({ line: line() })).lineStrip).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: draft PR",
-    );
+    expect(projectPool(snapshot({ line: line() })).lineStrip).toBe("Factory today · running");
   });
 
-  it("carries a Station Ticket's Station onto its card, and none onto any other", () => {
+  it("carries a Line Ticket's node onto its card, and none onto any other", () => {
     const cards = projectPool(
-      snapshot({ state: { tickets: [ticket("r1-review", { station: "review" }), ticket("A")] } }),
+      snapshot({ state: { tickets: [ticket("review-1", { node: "review" }), ticket("A")] } }),
     ).cards;
-    const station = (id: string) =>
-      (cards.find((c) => c.id === `ticket:${id}`) as TicketCardView).station;
-    expect(station("r1-review")).toBe("review");
-    expect(station("A")).toBeNull();
+    const node = (id: string) => (cards.find((c) => c.id === `ticket:${id}`) as TicketCardView).node;
+    expect(node("review-1")).toBe("review");
+    expect(node("A")).toBeNull();
   });
 
-  it("gives the Finish Ticket's Detail the report, at the Round it was written", () => {
+  it("gives a Decide Ticket's Detail the report of its pass, once the pass is done", () => {
     const snap = snapshot({
-      line: line({ status: "finish", station: "finish", ticket: "r2-finish", report: true }),
+      line: line(),
       state: {
         tickets: [
-          ticket("r2-decide", { status: "done", station: "decide" }),
-          ticket("r2-finish", { status: "checkpoint", station: "finish" }),
+          ticket("implement-1", { status: "done", node: "implement" }),
+          ticket("decide-2", { status: "done", node: "decide" }),
+          ticket("decide-3", { status: "in-progress", node: "decide" }),
         ],
       },
     });
     const cards = projectPool(snap).cards;
-    const finish = projectDetail(cards, "ticket:r2-finish", undefined, snap.line);
-    expect(finish?.kind === "ticket" && finish.report).toEqual({ written: true, round: 2 });
-    expect(finish?.kind === "ticket" && finish.station).toBe("finish");
-    const decide = projectDetail(cards, "ticket:r2-decide", undefined, snap.line);
-    expect(decide?.kind === "ticket" && decide.report).toBeNull();
-    // Without the Line there is no report to say anything of.
-    const bare = projectDetail(cards, "ticket:r2-finish");
-    expect(bare?.kind === "ticket" && bare.report).toBeNull();
-  });
-
-  it("says when Decide wrote no report", () => {
-    const snap = snapshot({
-      line: line({ status: "finish", station: "finish", report: false }),
-      state: { tickets: [ticket("r2-finish", { status: "checkpoint", station: "finish" })] },
-    });
-    const detail = projectDetail(projectPool(snap).cards, "ticket:r2-finish", undefined, snap.line);
-    expect(detail?.kind === "ticket" && detail.report).toEqual({ written: false, round: 2 });
+    const report = (id: string, view: LineGraphView | null = snap.line ?? null) => {
+      const detail = projectDetail(cards, `ticket:${id}`, undefined, view);
+      return detail?.kind === "ticket" ? detail.report : undefined;
+    };
+    expect(report("decide-2")).toEqual({ written: true, node: "decide", pass: 2 });
+    expect(report("decide-3")).toEqual({ written: false, node: "decide", pass: 3 });
+    expect(report("implement-1")).toBeNull();
+    // Without the Line there is no node kind to say anything of.
+    expect(report("decide-2", null)).toBeNull();
   });
 });

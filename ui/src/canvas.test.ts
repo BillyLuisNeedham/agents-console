@@ -211,7 +211,7 @@ describe("Canvas across a morphing render", () => {
         resolver: null,
         assignment: { harness: "claude", model: "opus", drivers: "tdd" },
         enlisted: false,
-        station: null,
+        node: null,
         reassign: {
           eligible: false,
           reason: "an Attempt is in flight",
@@ -595,7 +595,7 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
   ];
 
   it("shows the Line strip in the header, after the Spawn caps line, whole on hover", () => {
-    const strip = "Round 2 · Prove · fails 1/2 · Finish: draft PR";
+    const strip = "Factory today · finishing · Finish waiting for review-1";
     const { root, commit } = mountCanvas(
       model({
         cards,
@@ -616,7 +616,7 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
     expect(root.querySelector(".canvas-line-strip")).toBeNull();
   });
 
-  function stationPool(): CanvasModel {
+  function linePool(): CanvasModel {
     const snapshot: EnrichedSnapshot = {
       seq: 1,
       phase: "running",
@@ -630,14 +630,14 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
       state: {
         tickets: (
           [
-            ["r1-implement", "implement"],
-            ["r1-prove", "prove"],
-            ["r1-review", "review"],
-            ["r1-decide", "decide"],
-            ["r1-finish", "finish"],
+            ["implement-1", "implement"],
+            ["prove-1", "prove"],
+            ["review-1", "review"],
+            ["decide-1", "decide"],
+            ["finish-1-act", "finish"],
             ["side-quest", undefined],
           ] as const
-        ).map(([id, station]) => ({
+        ).map(([id, node]) => ({
           id,
           title: `ticket ${id}`,
           blockedBy: [],
@@ -653,7 +653,7 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
             verify: null,
             sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
           },
-          ...(station ? { station } : {}),
+          ...(node ? { node } : {}),
         })),
         conversations: [],
         log: [],
@@ -667,23 +667,23 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
     return model({ cards: projectPool(snapshot).cards });
   }
 
-  it("labels each Station Ticket's card with its Station in the head, beside the id", () => {
-    const { root, commit } = mountCanvas(stationPool());
+  it("labels each Line Ticket's card with its node in the head, beside the id", () => {
+    const { root, commit } = mountCanvas(linePool());
     commit();
     const label = (id: string) =>
-      root.querySelector(`[data-ticket-id="${id}"] .node-card-head .station-badge`);
-    expect(label("r1-implement")?.textContent).toBe("Implement");
-    expect(label("r1-prove")?.textContent).toBe("Prove");
-    expect(label("r1-review")?.textContent).toBe("Review");
-    expect(label("r1-decide")?.textContent).toBe("Decide");
-    expect(label("r1-finish")?.textContent).toBe("Finish");
-    expect(label("r1-prove")?.previousElementSibling?.classList.contains("node-card-id")).toBe(true);
+      root.querySelector(`[data-ticket-id="${id}"] .node-card-head .node-badge`);
+    expect(label("implement-1")?.textContent).toBe("implement");
+    expect(label("prove-1")?.textContent).toBe("prove");
+    expect(label("review-1")?.textContent).toBe("review");
+    expect(label("decide-1")?.textContent).toBe("decide");
+    expect(label("finish-1-act")?.textContent).toBe("finish");
+    expect(label("prove-1")?.previousElementSibling?.classList.contains("node-card-id")).toBe(true);
   });
 
   it("puts no label on a Ticket that is not on the Line", () => {
-    const { root, commit } = mountCanvas(stationPool());
+    const { root, commit } = mountCanvas(linePool());
     commit();
-    expect(root.querySelector('[data-ticket-id="side-quest"] .station-badge')).toBeNull();
+    expect(root.querySelector('[data-ticket-id="side-quest"] .node-badge')).toBeNull();
   });
 });
 

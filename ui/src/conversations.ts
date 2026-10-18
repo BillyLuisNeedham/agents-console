@@ -30,7 +30,7 @@ export function renderGrillBadge(): HTMLElement {
     "span",
     {
       class: "grill-badge",
-      title: "the Grill: the Factory Line's first Station; Start the Line hands its brief on",
+      title: "the Grill: the Line's entry Conversation; Start the Line hands its brief on",
     },
     "Grill",
   );

@@ -386,7 +386,7 @@ body {
   color: var(--status-running);
 }
 
-/* The Line strip (#187, ADR-0037): where a Factory pool's Line stands, after
+/* The Line strip (#187, ADR-0037): where a pool's Line stands, after
    the Spawn caps line in its type, present only once the Line has started. */
 .canvas-line-strip {
   min-width: 0;
@@ -3278,11 +3278,11 @@ textarea.conversations-field {
   border-left: 3px solid var(--accent-purple);
 }
 
-/* A Station Ticket's label (#187, ADR-0037): the Grill badge's chip in the
-   same hue, naming the Station the Ticket works on its card's head. It sits
+/* A Line Ticket's label (#187, ADR-0039): the Grill badge's chip in the
+   same hue, naming the Plan node the Ticket works on its card's head. It sits
    against the id rather than midway along the head, and the id beside it
    keeps to one line: a long state word wraps instead. */
-.station-badge {
+.node-badge {
   flex-shrink: 0;
   margin-right: auto;
   padding: 0 6px;
@@ -3295,11 +3295,11 @@ textarea.conversations-field {
   text-transform: uppercase;
 }
 
-.ticket-card-station .node-card-id {
+.ticket-card-node .node-card-id {
   white-space: nowrap;
 }
 
-.ticket-card-station .node-card-state {
+.ticket-card-node .node-card-state {
   text-align: right;
 }
 

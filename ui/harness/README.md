@@ -32,12 +32,12 @@ Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
 one is on screen at a time, one more the Detail of a Pending spawn's faded
 card (issue #150), whose card and a Held spawn's keep their nodes too, and one
 the Steward's Detail opened from the tray's Steward box (ADR-0030), whose
-card and the Steward note on a tray row keep theirs. One more opens the
-Finish checkpoint's Detail on a Factory Line (ADR-0037), whose report frame
+card and the Steward note on a tray row keep theirs. One more opens a
+Decide Ticket's Detail on a Line (ADR-0039), whose report frame
 must keep its node, since moving an iframe reloads it; a pass after it
 checks the frame reads at its height inside the Detail with Open in browser
 beside its heading, and the layout checks find the header's Line strip and
-each Station Ticket's labelled card head inside its card.
+each Line Ticket's labelled card head inside its card.
 
 ## Run it
 
