@@ -160,9 +160,10 @@ Each verb is a socket request with an HTTP twin, declared in `crates/protocol` a
 | `plans.list` | `GET /api/plans` | Presets, then library Plans, each with its problems |
 | `plans.get` | `GET /api/plans/<slug>` | one Plan's file |
 | `plans.validate` | `POST /api/plans/validate` | `PlanProblem[]` |
+| `plans.edit` | `POST /api/plans/edit` | `{plan, edits}` on a draft, valid or not: the draft after the edits with its problems, the edits' notes and each node's verdicts; refused for a draft it would have to drop or rewrite |
 | `plans.save` | `PUT /api/plans/<slug>` | refused for a Preset slug or an invalid Plan |
 | `plans.delete` | `DELETE /api/plans/<slug>` | refused for a Preset slug |
-| `plans.boot` | `POST /api/plans/boot` | runs Boot detached with `--plan`, `--work`, `--yes` |
+| `plans.boot` | `POST /api/plans/boot` | runs Boot detached with `--plan`, `--work`, `--yes` from the main worktree of the pool's repository, and answers its argv, cwd and log |
 | `line.plan.edit` | `POST /api/line/plan` | `{baseRev, edits}`, the new `rev` or 409 |
 | (Steward) | `POST /api/steward/plan` | the same, gated by `stewardEdits` |
 | (Boot) | `POST /api/line` | `{plan, work or brief}`, once per pool |
@@ -171,14 +172,14 @@ Each verb is a socket request with an HTTP twin, declared in `crates/protocol` a
 
 ### Console surfaces
 
-- **Plans view**, from Settings and the pool header. It lists Presets by author, each with its `source` and `note`, then library Plans. A Plan opens on the existing canvas and SVG edge layer, which gain drag-to-link, add and remove node, and an inspector for node, edge and Plan fields. Every change calls `plans.validate`, and each problem marks its node or edge. It saves, saves as, deletes, and boots a Line through `plans.boot`. Its only state is the draft Plan document.
+- **Plans view**, from Settings and the pool header. It lists Presets by author, each with its `source` and `note`, then library Plans. A Plan opens on the existing canvas and SVG edge layer, which gain drag-to-link, add and remove node, and an inspector for node, edge and Plan fields. Every change goes through `plans.edit`, which applies `PlanEdit`s in core (so Mergers stay in step and new nodes are named there) and answers the problems `plans.validate` would, and each problem marks its node or edge. It saves, saves as, deletes, and boots a Line through `plans.boot`. Its only state is the draft Plan document.
 - **Line view.** A pool running a Line draws its frozen Plan with live state from `LineGraphView`: copy dots coloured by their Tickets' status, "3 running, 2 queued", parked verdicts, holds, loop counts against caps, and "Finish waiting for ..." with the list. A copy dot opens its Ticket's card and Detail. Edits on a running Line send `line.plan.edit`, and "Save as" copies the frozen Plan into the library. It is a mode of the same canvas, morphed on node ids (ADR-0025).
 - **Settings** lose the Factory fields on both forms and gain `maxLive` (Pool settings, reloads; Machine defaults).
 - **Conversations tray and Detail.** Start the Line is gone. A refused End shows its problems inline and offers "End as closed". The report iframe reads `GET /api/line/report?node=&pass=`.
 
 ### Boot
 
-`agent-console boot --plan <slug>` replaces `--factory`, with `--work`, `--brief`, `--from`, `--line` and `--no-steward` as today. Without `--plan`, Line mode asks "start from which plan", listing Presets then library slugs, in the Setup picker's pattern, and `--yes` takes `factory-today`. Boot loads the Plan, cuts `line/<slug>` as today, writes `console.json`, starts the server and sends `POST /api/line`. The engine parses the Plan again, because its boundary is the one that counts.
+`agent-console boot --plan <slug>` replaces `--factory`, with `--work`, `--brief`, `--from`, `--line` and `--no-steward` as today. `--work` alone enters Line mode. Without `--plan`, Line mode asks "start from which plan", listing Presets then library slugs, in the Setup picker's pattern, and `--yes` takes `factory-today`. Boot loads the Plan, cuts `line/<slug>` as today, writes `console.json`, starts the server and sends `POST /api/line`. The engine parses the Plan again, because its boundary is the one that counts.
 
 ### Presets
 
