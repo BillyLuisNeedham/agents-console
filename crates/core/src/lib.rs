@@ -16,6 +16,7 @@ pub mod js;
 pub mod line;
 pub mod machine_defaults;
 mod marker_file;
+pub mod max_live;
 pub mod merge_hold;
 pub mod notices;
 pub mod outcome;

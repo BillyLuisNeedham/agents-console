@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use futures::FutureExt;
 use regex::Regex;
@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use ac_core::assignment::engine_ticket_build_id;
 use ac_core::events::{
     append_event, attempt_log_name, attempt_outcome_name, event_now, last_attempt, next_attempt,
-    ticket_seed_name,
+    read_events, ticket_seed_name,
 };
 use ac_core::js;
 use ac_core::machine_defaults::read_machine_defaults;
@@ -17,7 +17,7 @@ use ac_core::merge_hold::MergeHoldProbe;
 use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_core::prompt::{ResolverPromptParts, build_resolver_prompt};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
-use ac_protocol::{Interrupt, InterruptKind, TicketEventKind, TicketStatus};
+use ac_protocol::{Interrupt, InterruptKind, TicketEvent, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
 use crate::attempt_run::{
@@ -26,7 +26,7 @@ use crate::attempt_run::{
 };
 use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::interrupts::{interrupt, raise_interrupt, without};
-use crate::session::{EnlistedWork, PoolUpdate, Session};
+use crate::session::{EnlistedWork, PoolState, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::tickets::{attempt_env_of, close_attempt_tab, close_attempt_tabs};
 
@@ -514,6 +514,56 @@ pub fn record_failed_merge(
         &event_now(attempt, kind, payload),
     )?;
     Ok(())
+}
+
+/// How many other Tickets have started since a Ticket's merge-conflict Interrupt was raised: the
+/// distinct ones with a `scheduled` event after the Ticket's latest `merge-conflict` or
+/// `merge-blocked` event. A failed Resume appends a fresh one, so the baseline moves with the
+/// re-raised Interrupt. `None` while none has, or when the Ticket has no such event.
+fn started_since_conflict(
+    conflicted: &[Arc<TicketEvent>],
+    others: impl Iterator<Item = Vec<Arc<TicketEvent>>>,
+) -> Option<u64> {
+    let baseline = conflicted
+        .iter()
+        .rfind(|e| {
+            matches!(
+                e.kind,
+                TicketEventKind::MergeConflict | TicketEventKind::MergeBlocked
+            )
+        })?
+        .at
+        .as_str();
+    let started = others
+        .filter(|events| {
+            events
+                .iter()
+                .any(|e| e.kind == TicketEventKind::Scheduled && e.at.as_str() > baseline)
+        })
+        .count() as u64;
+    (started > 0).then_some(started)
+}
+
+/// The state a snapshot carries, with each Ticket merge-conflict Interrupt's copy saying how many
+/// other Tickets started since it was raised (ADR-0040). Derived from the Tickets' events at each
+/// build, never persisted, so it survives a restart; nothing is read while no such Interrupt waits.
+/// Engine-run ids (graders) and Conversations are not in the markers, so they never count.
+pub fn with_started_since(session: &Session, state: &mut PoolState) {
+    let runs = Path::new(&session.runs_dir);
+    for interrupt in &mut state.interrupts {
+        if interrupt.kind != InterruptKind::MergeConflict
+            || !session.markers.iter().any(|m| m.id == interrupt.ticket_id)
+        {
+            continue;
+        }
+        let own = read_events(runs, &interrupt.ticket_id);
+        let others = session
+            .markers
+            .iter()
+            .filter(|m| m.id != interrupt.ticket_id)
+            .map(|m| read_events(runs, &m.id));
+        interrupt.started_since = started_since_conflict(&own, others);
+    }
 }
 
 /// `mergedPayload`: the untracked pool copies the merge deleted because they matched the branch's
@@ -1089,6 +1139,57 @@ mod tests {
                 note: None
             }
         );
+    }
+
+    fn event_at(at: &str, kind: TicketEventKind) -> Arc<TicketEvent> {
+        Arc::new(TicketEvent {
+            at: at.to_owned(),
+            attempt: 1,
+            kind,
+            payload: Map::new(),
+        })
+    }
+
+    #[test]
+    fn counts_each_other_ticket_that_started_after_the_latest_conflict_once() {
+        let conflicted = vec![
+            event_at("2026-10-18T10:00:00.000Z", TicketEventKind::MergeConflict),
+            event_at("2026-10-18T10:05:00.000Z", TicketEventKind::MergeBlocked),
+        ];
+        let verify_round = vec![
+            event_at("2026-10-18T10:06:00.000Z", TicketEventKind::Scheduled),
+            event_at("2026-10-18T10:06:00.000Z", TicketEventKind::Scheduled),
+        ];
+        let before_the_conflict = vec![event_at(
+            "2026-10-18T10:04:00.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        let never_started = vec![event_at(
+            "2026-10-18T10:07:00.000Z",
+            TicketEventKind::Merged,
+        )];
+        let others = vec![verify_round, before_the_conflict, never_started];
+        assert_eq!(
+            started_since_conflict(&conflicted, others.into_iter()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_conflict_nobody_started_after_has_no_count() {
+        let conflicted = vec![event_at(
+            "2026-10-18T10:00:00.000Z",
+            TicketEventKind::MergeConflict,
+        )];
+        let earlier = vec![event_at(
+            "2026-10-18T09:00:00.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        assert_eq!(
+            started_since_conflict(&conflicted, vec![earlier].into_iter()),
+            None
+        );
+        assert_eq!(started_since_conflict(&[], std::iter::empty()), None);
     }
 
     #[test]

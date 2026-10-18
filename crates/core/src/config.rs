@@ -8,9 +8,10 @@
 //!
 //! - At boot it is console.json parsed in file order, with `roster` and `agents` deleted, or `{}` when
 //!   the file is absent or empty. The parse checks only `selection`, `terminal`, `spawnCaps`,
-//!   `steward` and `factory`; unknown keys and unchecked values (a null, a string port) pass through.
-//! - After a Config reload it is `{ ...previous, defaults, assign, resolver, spawnCaps, steward,
-//!   factory }`
+//!   `maxLive`, `steward` and `factory`; unknown keys and unchecked values (a null, a string port)
+//!   pass through.
+//! - After a Config reload it is `{ ...previous, defaults, assign, resolver, spawnCaps, maxLive,
+//!   steward, factory }`
 //!   (`reload_candidate`): existing keys keep their place, new ones go last, and a slice key the file
 //!   no longer has stays in its place as JavaScript's `undefined`, which no serialization writes.
 //! - The snapshot's `state.config` sends it verbatim: `PoolConfig` serializes as that object, its keys
@@ -29,6 +30,7 @@
 //! | `assignment::defaults_layer` | `config.defaults`, its four fields as `firstSet` reads them |
 //! | `assignment::assign_request` | `config.assign?.[id]`, the layer plus a raw `verify` |
 //! | `spawn_caps::spawn_caps_of` | `config.spawnCaps?.perAttempt ?? 5`, `?.perRun ?? 20` |
+//! | `max_live::max_live_of` | `config.maxLive`, absent falling to the Machine default (ADR-0040) |
 //! | `steward::steward_budget_of` | `config.steward?.budget ?? 5` |
 //! | `steward::steward_may_close_of` | `config.steward?.mayClose === true` |
 //! | `steward::steward_assign_of` | `config.steward?.assign` |
@@ -46,6 +48,7 @@ use serde_json::{Map, Value};
 use crate::harness::Harnesses;
 use crate::js;
 use crate::line::normalise_factory;
+use crate::max_live::check_max_live;
 use crate::spawn_caps::check_spawn_caps;
 use crate::steward::check_steward_config;
 
@@ -58,13 +61,14 @@ pub const CONSOLE_JSON: &str = "console.json";
 pub const RETIRED_CONFIG_KEYS: [&str; 2] = ["roster", "agents"];
 
 /// The keys the Config reload touches (ADR-0018): the assignment slice, and the Spawn caps (ADR-0029),
-/// the Steward entry (ADR-0030) and the Factory settings (issue #187) beside it. Everything else (selection, terminal, port) stays as it
+/// `maxLive` (ADR-0040), the Steward entry (ADR-0030) and the Factory settings (issue #187) beside it. Everything else (selection, terminal, port) stays as it
 /// was at boot for the life of the run.
-pub const CONFIG_SLICE_KEYS: [&str; 6] = [
+pub const CONFIG_SLICE_KEYS: [&str; 7] = [
     "defaults",
     "assign",
     "resolver",
     "spawnCaps",
+    "maxLive",
     "steward",
     "factory",
 ];
@@ -249,6 +253,7 @@ pub fn parse_config(raw: Option<&str>, pool_dir: &str) -> Result<PoolConfig, Con
         return Err(ConfigError::new(r#"pool config: terminal must be "herdr""#));
     }
     check_spawn_caps(parsed.get("spawnCaps"))?;
+    check_max_live(parsed.get("maxLive"))?;
     check_steward_config(parsed.get("steward"))?;
     check_factory_config(parsed.get("factory"))?;
     for key in RETIRED_CONFIG_KEYS {
@@ -276,6 +281,7 @@ pub struct ConfigSlice {
     pub assign: Option<Value>,
     pub resolver: Option<Value>,
     pub spawn_caps: Option<Value>,
+    pub max_live: Option<Value>,
     pub steward: Option<Value>,
     pub factory: Option<Value>,
 }
@@ -288,6 +294,7 @@ pub struct ConfigSlice {
 pub fn parse_config_slice(raw: &str, pool_dir: &str) -> Result<ConfigSlice, ConfigError> {
     let parsed = parse_object(raw, pool_dir)?;
     check_spawn_caps(parsed.get("spawnCaps"))?;
+    check_max_live(parsed.get("maxLive"))?;
     check_steward_config(parsed.get("steward"))?;
     check_factory_config(parsed.get("factory"))?;
     Ok(ConfigSlice {
@@ -295,13 +302,14 @@ pub fn parse_config_slice(raw: &str, pool_dir: &str) -> Result<ConfigSlice, Conf
         assign: parsed.get("assign").cloned(),
         resolver: parsed.get("resolver").cloned(),
         spawn_caps: parsed.get("spawnCaps").cloned(),
+        max_live: parsed.get("maxLive").cloned(),
         steward: parsed.get("steward").cloned(),
         factory: parsed.get("factory").cloned(),
     })
 }
 
-/// The config a reload would commit, `{ ...config, defaults, assign, resolver, spawnCaps, steward,
-/// factory }`: the slice's six keys taken from the file (one the file lacks set to undefined, keeping its place),
+/// The config a reload would commit, `{ ...config, defaults, assign, resolver, spawnCaps, maxLive,
+/// steward, factory }`: the slice's seven keys taken from the file (one the file lacks set to undefined, keeping its place),
 /// every other key exactly as it was at boot.
 pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig {
     let mut candidate = config.clone();
@@ -310,6 +318,7 @@ pub fn reload_candidate(config: &PoolConfig, slice: &ConfigSlice) -> PoolConfig 
         ("assign", &slice.assign),
         ("resolver", &slice.resolver),
         ("spawnCaps", &slice.spawn_caps),
+        ("maxLive", &slice.max_live),
         ("steward", &slice.steward),
         ("factory", &slice.factory),
     ] {
@@ -517,6 +526,22 @@ mod tests {
                 .factory,
             Some(json!({ "finish": "pr" }))
         );
+    }
+
+    #[test]
+    fn refuses_a_max_live_below_one_at_boot_and_in_the_reload_slice() {
+        let refused = "pool config: maxLive must be a whole number, 1 or more";
+        for bad in [json!(0), json!(-2), json!(1.5), json!("2"), json!(null)] {
+            assert_eq!(refusal(json!({ "maxLive": bad })), refused, "{bad}");
+            let text = json!({ "maxLive": bad }).to_string();
+            assert_eq!(parse_config_slice(&text, "/p").unwrap_err().0, refused);
+        }
+        let slice = parse_config_slice(r#"{"maxLive": 2}"#, "/p").unwrap();
+        assert_eq!(slice.max_live, Some(json!(2)));
+        let boot = parse(json!({ "port": 8787 })).unwrap();
+        let candidate = reload_candidate(&boot, &slice);
+        assert_eq!(candidate.get("maxLive"), Some(&json!(2)));
+        assert_eq!(changed_slice_keys(&boot, &candidate), ["maxLive"]);
     }
 
     #[test]

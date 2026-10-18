@@ -427,3 +427,43 @@ conformance("config", "a Spawn cap per attempt that is not a whole number of 0 o
   expect(done.spawnUsage.perAttempt).toBe(2);
   expect([modelOf(world, "02"), modelOf(world, "03")]).toEqual(["model-a", "model-a"]);
 });
+
+conformance("config", "maxLive reloads at the next Tick, and one below 1 is rejected whole, the bound kept", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01"), ticket("02"), ticket("03")],
+    config: { ...ON_A, maxLive: 1 },
+  });
+  for (const key of ["01", "02"]) world.stubs.script(key, { waitFor: holdFile(world, key) });
+  const server = await t.start(world);
+  await untilLaunched(world, "01");
+  expect(launchesOf(world, "02")).toEqual([]);
+
+  const raised = await server.http.put("/api/settings/pool", { config: { maxLive: 2 } });
+  expect(raised.status).toBe(200);
+  await untilLaunched(world, "02");
+  const reloaded = await snapshotOf(server);
+  expect(logLines(reloaded, "config reload")).toEqual(["config reloaded: maxLive"]);
+  expect(ticketOf(reloaded, "01").liveAttempt).not.toBeNull();
+  expect(launchesOf(world, "03")).toEqual([]);
+
+  writeConfig(world, { ...ON_A, maxLive: 0 });
+  release(world, "01");
+  release(world, "02");
+  const done = await approveReview(server);
+
+  expect(logLines(done, "config reload")).toEqual([
+    "config reloaded: maxLive",
+    "config reload rejected: pool config: maxLive must be a whole number, 1 or more",
+  ]);
+  expect(done.state.config.maxLive).toBe(2);
+  expect(launchesOf(world, "03")).toHaveLength(1);
+});
+
+conformance("config", "a maxLive that is not a whole number of 1 or more stops the pool at load", async (t) => {
+  for (const maxLive of [0, -1, 1.5]) {
+    const world = t.world({ tickets: [ticket("01")], config: { ...ON_A, maxLive } });
+    const { code, output } = await refusedAtLoad(world);
+    expect([maxLive, code === 0]).toEqual([maxLive, false]);
+    expect(output).toContain("pool config: maxLive must be a whole number, 1 or more");
+  }
+});

@@ -11,7 +11,8 @@ use ac_core::pool::{
 };
 use ac_core::spawn_caps::spawn_caps_of;
 use ac_core::spawn_ledger::{
-    LedgerEntry, SpawnLedgerInput, render_spawn_ledger, spawn_ledger_path, write_spawn_ledger,
+    LedgerEntry, SpawnLedgerInput, held_reason_text, render_spawn_ledger, spawn_ledger_path,
+    write_spawn_ledger,
 };
 use ac_core::spawn_proposals::{HeldSpawn, NewHeldSpawn, PendingSpawn, TakenProposal};
 use ac_protocol::{
@@ -255,6 +256,26 @@ fn spawn_proposal_problem(
     None
 }
 
+fn has_started(session: &Session, id: &str) -> bool {
+    matches!(
+        state_of(session, id),
+        Some(TicketStatus::InProgress | TicketStatus::Checkpoint)
+    )
+}
+
+// The Tickets a proposal's named `blocks` reach that have already started (ADR-0040): their
+// blocked-by is not the proposal's to rewrite, so it waits for the operator instead.
+fn started_blocks(session: &Session, proposal: &SpawnProposal) -> Vec<String> {
+    match &proposal.blocks {
+        Some(SpawnBlocks::Ids(named)) => named
+            .iter()
+            .filter(|id| has_started(session, id))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn apply_spawn_blocks(
     session: &mut Session,
     spawn_id: &str,
@@ -290,6 +311,12 @@ fn apply_spawn_blocks(
         if waits_on.contains(&target_id) {
             log.push(format!(
                 "ticket {spawn_id}: not blocking {target_id}, which it already waits on"
+            ));
+            continue;
+        }
+        if has_started(session, &target_id) {
+            log.push(format!(
+                "ticket {spawn_id}: not blocking {target_id}, which has started"
             ));
             continue;
         }
@@ -548,6 +575,9 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
     if let Some(unknown) = &held.unknown_overlaps {
         entry.insert("unknownOverlaps".into(), json!(unknown));
     }
+    if let Some(started) = &held.started_ids {
+        entry.insert("startedIds".into(), json!(started));
+    }
     if held.reason == HeldSpawnReason::Refused
         && let Some(error) = &held.adopt_error
     {
@@ -654,7 +684,35 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     let mut landing: Vec<(String, String)> = Vec::new();
     for entry in &pending {
         match spawn_proposal_problem(session, &entry.proposal, &known) {
-            None => landing.push((entry.id.clone(), mint(&entry.parent_id))),
+            None => {
+                let started = started_blocks(session, &entry.proposal);
+                if started.is_empty() {
+                    landing.push((entry.id.clone(), mint(&entry.parent_id)));
+                    continue;
+                }
+                let Some(held) =
+                    session
+                        .spawn_proposals
+                        .hold_started(&entry.id, &started, &js::now_iso())?
+                else {
+                    continue;
+                };
+                append(
+                    session,
+                    &entry.parent_id,
+                    &held.at,
+                    last_attempt(runs(session), &entry.parent_id),
+                    TicketEventKind::SpawnHeld,
+                    json!({ "held": [held_event_entry(&held)] }),
+                )?;
+                log.push(format!(
+                    "ticket {}: {} ('{}') held: it {}",
+                    entry.parent_id,
+                    entry.id,
+                    entry.proposal.title,
+                    held_reason_text(HeldSpawnReason::Started, &[], &[], &started, None)
+                ));
+            }
             Some(reason) => {
                 let Some(held) =
                     session
@@ -1235,6 +1293,7 @@ pub fn recover_truncated_spawns(session: &mut Session) -> anyhow::Result<()> {
                 at: event.at.clone(),
                 adopt_error: None,
                 unknown_overlaps: None,
+                started_ids: None,
             })
             .collect();
         let held = session.spawn_proposals.recover(&key, entries)?;

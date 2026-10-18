@@ -87,6 +87,8 @@ export interface PoolDraft {
   /** The Spawn caps (issue #149): empty means the engine's default. */
   spawnsPerAttempt: string;
   spawnsPerRun: string;
+  /** maxLive (ADR-0040): empty means the Machine default, and no bound there. */
+  maxLive: string;
   /** The Steward budget (ADR-0030): empty means the engine's 5. */
   stewardBudget: string;
   /** The Steward's Assignment: each empty field falls to the pool defaults. */
@@ -107,6 +109,8 @@ export interface MachineDraft {
   drivers: string;
   terminal: boolean;
   engine: string;
+  /** maxLive (ADR-0040): empty means no bound under a pool that sets none. */
+  maxLive: string;
 }
 
 export type PoolTextField = Exclude<
@@ -134,6 +138,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   checkpoint: "",
   spawnsPerAttempt: "",
   spawnsPerRun: "",
+  maxLive: "",
   stewardBudget: "",
   stewardHarness: "",
   stewardModel: "",
@@ -158,6 +163,7 @@ const EMPTY_MACHINE_DRAFT: MachineDraft = {
   drivers: "",
   terminal: false,
   engine: "",
+  maxLive: "",
 };
 
 /** The pool draft the file's config seeds, every absent key an empty field. */
@@ -190,6 +196,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     checkpoint: config.checkpoint ?? "",
     spawnsPerAttempt: capField(config.spawnCaps?.perAttempt),
     spawnsPerRun: capField(config.spawnCaps?.perRun),
+    maxLive: capField(config.maxLive),
     stewardBudget: capField(config.steward?.budget),
     stewardHarness: config.steward?.assign?.harness ?? "",
     stewardModel: config.steward?.assign?.model ?? "",
@@ -213,15 +220,26 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
     drivers: own.drivers ?? "",
     terminal: own.terminal === "herdr",
     engine: own.engine ?? "",
+    maxLive: capField(own.maxLive),
   };
+}
+
+/** What is wrong with a typed maxLive (ADR-0040), or null: empty, or a whole
+ *  number of 1 or more, since a bound of 0 would never launch anything. */
+function maxLiveProblem(value: string, empty: string): string | null {
+  const max = value.trim();
+  if (max && (!/^\d+$/.test(max) || Number(max) < 1)) {
+    return `max live must be a whole number of 1 or more, or empty for ${empty}`;
+  }
+  return null;
 }
 
 /**
  * What is wrong with a draft, or null when it is sendable. Only the fields
  * with a shape the operator can get wrong are checked here: a port that is
  * not a port, a Spawn cap that is not a whole number of 0 or more, and a
- * Steward budget that is not a whole number of 1 or more. Everything else is
- * free text the engine validates on its own terms.
+ * maxLive or Steward budget that is not a whole number of 1 or more.
+ * Everything else is free text the engine validates on its own terms.
  */
 export function validatePoolDraft(draft: PoolDraft): string | null {
   const port = draft.port.trim();
@@ -241,6 +259,8 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
       return `${label} must be a whole number of 0 or more, or empty for the default`;
     }
   }
+  const maxLive = maxLiveProblem(draft.maxLive, "the machine default");
+  if (maxLive) return maxLive;
   // The engine refuses a budget of 0: a Steward that may never answer is no
   // Steward, and ending it is how the operator takes over.
   const budget = draft.stewardBudget.trim();
@@ -295,6 +315,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     checkpoint: orNull(draft.checkpoint),
     title: orNull(draft.title),
     spawnCaps: { perAttempt: cap(draft.spawnsPerAttempt), perRun: cap(draft.spawnsPerRun) },
+    maxLive: cap(draft.maxLive),
     steward: {
       budget: cap(draft.stewardBudget),
       assign: {
@@ -311,6 +332,11 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
   };
 }
 
+/** What is wrong with a machine draft, or null when it is sendable. */
+export function validateMachineDraft(draft: MachineDraft): string | null {
+  return maxLiveProblem(draft.maxLive, "no bound");
+}
+
 /** The machine defaults a draft sends, every emptied field left out. */
 export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   const defaults: MachineDefaults = {};
@@ -325,6 +351,8 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   if (drivers) defaults.drivers = drivers;
   if (engine) defaults.engine = engine;
   if (draft.terminal) defaults.terminal = "herdr";
+  const maxLive = draft.maxLive.trim();
+  if (maxLive) defaults.maxLive = Number(maxLive);
   return defaults;
 }
 
@@ -622,7 +650,8 @@ export class SettingsStore {
   /** Save the machine defaults form. Same refusal and re-seed as the pool's. */
   async saveMachine(): Promise<void> {
     if (this.machineState === "saving") return;
-    const invalid = validateFactoryDraft(this.machineFactory);
+    const invalid =
+      validateMachineDraft(this.machineDraft) ?? validateFactoryDraft(this.machineFactory);
     if (invalid) {
       this.machineError = invalid;
       this.machineState = "idle";
@@ -877,6 +906,15 @@ export class SettingsStore {
         DEFAULT_SPAWN_CAPS.perRun,
         "counted since this Console boot; 0 holds every proposal for you",
       ),
+      // maxLive (ADR-0040) reloads at the next Tick too.
+      this.renderMaxLiveField(
+        "pool",
+        this.poolDraft.maxLive,
+        data.machine.defaults.maxLive === undefined
+          ? "unlimited"
+          : `${data.machine.defaults.maxLive} (machine default)`,
+        (value) => this.setPoolField("maxLive", value),
+      ),
       ...this.renderStewardFields(data),
       text("reviewer", "reviewer", { area: true }),
       text("checkpoint", "checkpoint", { area: true }),
@@ -1011,6 +1049,9 @@ export class SettingsStore {
         false,
       ),
       text("engine", "engine", merged.engine),
+      this.renderMaxLiveField("machine", this.machineDraft.maxLive, "unlimited", (value) =>
+        this.setMachineField("maxLive", value),
+      ),
       ...this.renderFactoryFields("machine", data),
       this.renderSaveRow(
         "machine",
@@ -1279,6 +1320,29 @@ export class SettingsStore {
       }),
       false,
       hint,
+    );
+  }
+
+  private renderMaxLiveField(
+    form: "pool" | "machine",
+    value: string,
+    placeholder: string,
+    onInput: (value: string) => void,
+  ): HTMLElement {
+    return this.renderField(
+      `${form}-maxLive`,
+      "max live",
+      h("input", {
+        class: "settings-input settings-number",
+        key: `${form}-maxLive-input`,
+        type: "number",
+        min: "1",
+        value,
+        placeholder,
+        oninput: (event: Event) => onInput((event.currentTarget as HTMLInputElement).value),
+      }),
+      false,
+      "Ticket Attempts run at once; a verify round needs room for each Candidate",
     );
   }
 
