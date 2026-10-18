@@ -224,7 +224,7 @@ pub fn merge_with_issue_aside(
         &ours,
         &theirs,
     )?;
-    js::write_file(&marker.file, &content)?;
+    js::write_through_rename(&marker.file, marker.file.with_extension("md.tmp"), &content)?;
     if conflicted {
         record_ticket_file_conflict(session, marker, branch)?;
     }

@@ -181,6 +181,55 @@ conformance(
   },
 );
 
+conformance(
+  "merges",
+  "answers every read of the Ticket with its body while its file steps aside for the merge",
+  async (t) => {
+    const world = trackedPool(t, {
+      "01": { workFile: "one.txt", ticketReplace: ["1. Do A", "1. [x] Do A"], hold: true },
+      "02": DEFAULT_02,
+    });
+    const server = await t.start(world, { pool: world.repo });
+    await until(
+      () => existsSync(join(world.stubs.dir, "edited-01")),
+      (edited) => edited,
+      { ms: 15_000, what: "01's agent to make its edits" },
+    );
+
+    const reads: { status: number; body: string; listed: boolean }[] = [];
+    let merging = true;
+    const polling = (async () => {
+      while (merging) {
+        const [ticket, state] = await Promise.all([
+          server.http.get("/api/ticket?id=01"),
+          server.http.get("/api/state"),
+        ]);
+        const snapshot = state.json<{ snapshot: { state: { tickets: { id: string }[] } } | null }>().snapshot;
+        reads.push({
+          status: ticket.status,
+          body: ticket.status === 200 ? ticket.json<{ body: string }>().body : ticket.text,
+          listed: snapshot === null || snapshot.state.tickets.some((card) => card.id === "01"),
+        });
+      }
+    })();
+    try {
+      writeFileSync(join(world.stubs.dir, "release-01"), "");
+      await runToDone(server);
+    } finally {
+      merging = false;
+      await polling;
+    }
+
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read.status).toBe(200);
+      expect(read.body).toStartWith("# Ticket");
+      expect(read.listed).toBe(true);
+    }
+    expect(existsSync(join(world.repo, "issues", "01-t.md.pool-aside"))).toBe(false);
+  },
+);
+
 conformance("merges", "keeps edits to different regions of both copies", async (t) => {
   const note = "\n## Notes\n\n- pool-side note\n";
   const world = trackedPool(t, {

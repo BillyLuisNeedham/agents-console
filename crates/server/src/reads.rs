@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use ac_core::events::{read_event_values, read_events};
 use ac_core::js;
-use ac_core::pool::{MARKER_RE, TicketMarker, read_marker};
+use ac_core::pool::{MARKER_RE, TicketMarker, read_marker, reading_pool_files};
 use ac_core::streamlog::{list_attempt_logs, reconstruct_attempts};
 use ac_protocol::{TicketBodyResponse, TicketEventKind, TicketGradeSummary};
 
@@ -289,8 +289,13 @@ pub fn strip_state_marker(text: &str) -> String {
 /// is the id, the one whose state line names the id, so `01-a.md` answers for 01 beside an adopted
 /// `01-spawn-1.md` whatever order the directory lists them in. A file with no readable state line is the
 /// last resort, the first by name. Scoped to what the issues directory lists, so an arbitrary id can never
-/// walk out of it.
+/// walk out of it. Read between two engine jobs, so a Ticket file a merge has stepped aside is never
+/// missing from the answer.
 pub fn ticket_body_file(issues_dir: &Path, ticket_id: &str) -> Option<PathBuf> {
+    reading_pool_files(|| find_body_file(issues_dir, ticket_id))
+}
+
+fn find_body_file(issues_dir: &Path, ticket_id: &str) -> Option<PathBuf> {
     let files = js::read_dir_names(issues_dir).ok()?;
     let mut markdown: Vec<&String> = files.iter().filter(|file| file.ends_with(".md")).collect();
     markdown.sort();
@@ -321,14 +326,16 @@ pub fn ticket_body(
     issues_dir: &Path,
     ticket_id: &str,
 ) -> Result<Option<TicketBodyResponse>, String> {
-    let Some(file) = ticket_body_file(issues_dir, ticket_id) else {
-        return Ok(None);
-    };
-    let text = js::read_text(&file).map_err(|err| err.to_string())?;
-    Ok(Some(TicketBodyResponse {
-        id: ticket_id.to_owned(),
-        body: strip_state_marker(&text),
-    }))
+    reading_pool_files(|| {
+        let Some(file) = find_body_file(issues_dir, ticket_id) else {
+            return Ok(None);
+        };
+        let text = js::read_text(&file).map_err(|err| err.to_string())?;
+        Ok(Some(TicketBodyResponse {
+            id: ticket_id.to_owned(),
+            body: strip_state_marker(&text),
+        }))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -473,6 +480,7 @@ pub const EVENTS_SUFFIX: &str = ".events.jsonl";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ac_core::pool::POOL_FILES;
     use std::io::Write;
 
     fn log_file(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
@@ -666,6 +674,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ticket_body_file(dir.path(), "01"), None);
+    }
+
+    #[test]
+    fn ticket_body_waits_out_a_job_that_has_the_ticket_file_stepped_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("01-a.md");
+        let aside = dir.path().join("01-a.md.pool-aside");
+        std::fs::write(
+            &file,
+            "<!-- state: id=01 blocked-by=none status=done -->\n\n# own\n",
+        )
+        .unwrap();
+
+        let job = POOL_FILES.write().unwrap();
+        std::fs::rename(&file, &aside).unwrap();
+        let (answer, reader) = std::sync::mpsc::channel();
+        let issues = dir.path().to_path_buf();
+        let reading = std::thread::spawn(move || {
+            answer.send(ticket_body(&issues, "01")).unwrap();
+        });
+        assert!(
+            reader
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the read answered while the file was aside"
+        );
+        std::fs::rename(&aside, &file).unwrap();
+        drop(job);
+
+        let body = reader
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(body.unwrap().unwrap().body, "# own\n");
+        reading.join().unwrap();
     }
 
     #[test]
