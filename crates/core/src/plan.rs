@@ -117,6 +117,13 @@ pub struct EdgeKey {
     pub to: NodeId,
 }
 
+/// `from.on -> to`, as refusals and Ticket texts name an edge.
+impl std::fmt::Display for EdgeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{} -> {}", self.from, self.on.as_str(), self.to)
+    }
+}
+
 // -------------------------------------------------------------------------------------------------
 // The Plan
 // -------------------------------------------------------------------------------------------------

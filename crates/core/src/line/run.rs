@@ -240,9 +240,12 @@ pub enum Blocker {
     Interrupt(String),
 }
 
+fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
 impl std::fmt::Display for Blocker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let plural = |n: usize, one: &str, many: &str| if n == 1 { one } else { many }.to_owned();
         match self {
             Blocker::Copy(t) => write!(f, "{t}"),
             Blocker::Queued { node, items } => {
@@ -350,8 +353,10 @@ pub enum Refusal {
     },
     StewardMayNotEdit,
     Invalid(Vec<PlanProblem>),
-    /// The edit would orphan live run state, or this build cannot apply it to a running Line.
+    /// The edit would orphan live run state.
     Live(String),
+    /// The Steward's edit would widen what the Steward may answer or do.
+    StewardPower(Vec<String>),
     LineEnded,
     FinishBlocked(Vec<Blocker>),
     NoRevise,
@@ -369,6 +374,11 @@ impl std::fmt::Display for Refusal {
                 write!(f, "the edited Plan is not valid: {}", messages.join("; "))
             }
             Refusal::Live(why) => f.write_str(why),
+            Refusal::StewardPower(powers) => write!(
+                f,
+                "the Steward may not give itself powers the operator did not: {}",
+                powers.join("; ")
+            ),
             Refusal::LineEnded => f.write_str("the Line has ended"),
             Refusal::FinishBlocked(blockers) => {
                 write!(f, "the Finish is waiting for: {}", blocker_list(blockers))
@@ -674,22 +684,42 @@ impl LineRun {
                 base_rev,
                 edits,
             } => {
-                if self.ended() {
-                    return Err(Refusal::LineEnded);
-                }
-                if by == Editor::Steward && !self.plan.meta().steward_edits {
-                    return Err(Refusal::StewardMayNotEdit);
-                }
-                if base_rev != self.rev {
-                    return Err(Refusal::StaleRev { now: self.rev });
-                }
-                self.plan.edit(&edits).map_err(Refusal::Invalid)?;
-                return Err(Refusal::Live(
-                    "editing a running Line's Plan is not in this build yet".to_owned(),
-                ));
+                self.edit(by, base_rev, &edits)?;
             }
         }
         Ok(())
+    }
+
+    /// Edit the frozen Plan of a running Line, answering what the edits moved on their own. Refused
+    /// when the Line has ended, when the Steward edits a Plan that does not let it, against a stale
+    /// rev, when the result is invalid, and by `check_edit`. Only a real change bumps the rev; parked
+    /// verdicts that now have an out edge flow on at once.
+    pub fn edit(
+        &mut self,
+        by: Editor,
+        base_rev: u64,
+        edits: &[PlanEdit],
+    ) -> Result<Vec<String>, Refusal> {
+        if self.ended() {
+            return Err(Refusal::LineEnded);
+        }
+        if by == Editor::Steward && !self.plan.meta().steward_edits {
+            return Err(Refusal::StewardMayNotEdit);
+        }
+        if base_rev != self.rev {
+            return Err(Refusal::StaleRev { now: self.rev });
+        }
+        let edited = self.plan.edit(edits).map_err(Refusal::Invalid)?;
+        self.check_edit(by, &edited.plan)?;
+        if edited.plan != self.plan {
+            self.plan = edited.plan;
+            self.rev += 1;
+            let plan = &self.plan;
+            self.edges
+                .retain(|key, _| plan.edges().iter().any(|e| e.key == *key));
+            self.flow_parked();
+        }
+        Ok(edited.notes)
     }
 
     /// observe/apply to a fixpoint, then the Finish, then the projection. The engine's one call.
@@ -1528,6 +1558,119 @@ impl LineRun {
         }
     }
 
+    /// Whether `next` can replace the frozen Plan under the run as it stands. A node ever handed
+    /// anything stays, since its Tickets keep its id and a node added back under it would collide
+    /// with them. An edge holding a loop hold stays, and so does every incoming edge and the join of
+    /// a Gate still collecting. A Merger is not placed or lifted under a live pass, which settling
+    /// consults, nor removed while a handoff from it is on its way. The Steward may not widen its own
+    /// powers.
+    fn check_edit(&self, by: Editor, next: &Plan) -> Result<(), Refusal> {
+        let live = |why: String| Err(Refusal::Live(why));
+        let dropped = |key: &EdgeKey| !next.edges().iter().any(|e| e.key == *key);
+        for (id, run) in &self.nodes {
+            if next.node(id).is_none() {
+                let parts = run.live_parts();
+                return live(if parts.is_empty() {
+                    format!(
+                        "{id} has run in this Line, so its Tickets keep its id: unlink it instead \
+                         of removing it"
+                    )
+                } else {
+                    format!(
+                        "{id} has {}: its work must end before the node is removed",
+                        parts.join(" and ")
+                    )
+                });
+            }
+            if !run.arrived.is_empty()
+                && (self.plan.incoming(id).any(|e| dropped(&e.key))
+                    || join(next, id) != join(&self.plan, id))
+            {
+                return live(format!(
+                    "the gate {id} is still collecting: its join and incoming edges stay until it \
+                     opens"
+                ));
+            }
+            if matches!(
+                run.current.as_ref().map(|p| &p.work),
+                Some(PassWork::Tickets { .. })
+            ) && self.plan.merger_of(id) != next.merger_of(id)
+            {
+                return live(format!(
+                    "{id}'s pass is live: its Merger cannot be placed or lifted until the pass ends"
+                ));
+            }
+        }
+        for (key, edge) in &self.edges {
+            if let Some((ticket, _)) = &edge.held
+                && dropped(key)
+            {
+                return live(format!(
+                    "the loop hold {ticket} waits on {key}: answer it before the edge goes"
+                ));
+            }
+        }
+        if let Some(from) = self
+            .handoffs()
+            .filter_map(|h| h.from.as_ref())
+            .find(|from| next.node(from).is_none())
+        {
+            return live(format!(
+                "a handoff from {from} is still on its way, so {from} stays until it is taken"
+            ));
+        }
+        if by == Editor::Steward {
+            let had = steward_powers(&self.plan);
+            let gained: Vec<String> = steward_powers(next)
+                .into_iter()
+                .filter(|power| !had.contains(power))
+                .collect();
+            if !gained.is_empty() {
+                return Err(Refusal::StewardPower(gained));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every handoff the run still holds: pass inputs, inboxes, parked verdicts, Gate arrivals and
+    /// loop holds.
+    fn handoffs(&self) -> impl Iterator<Item = &Handoff> {
+        let nodes = self.nodes.values().flat_map(|run| {
+            run.current
+                .iter()
+                .map(|p| &p.input)
+                .chain(&run.inbox)
+                .chain(run.parked.values())
+                .chain(run.arrived.values())
+        });
+        let held = self
+            .edges
+            .values()
+            .filter_map(|e| e.held.as_ref().map(|(_, h)| h));
+        nodes.chain(held)
+    }
+
+    /// After an edit, hand on every parked verdict that now has an out edge. A verdict parked before
+    /// its node gained a Merger leaves through the Merger, which holds every out edge.
+    fn flow_parked(&mut self) {
+        let ready: Vec<(NodeId, NodeId, Verdict)> = self
+            .nodes
+            .iter()
+            .flat_map(|(id, run)| {
+                let from = self.plan.merger_of(id).unwrap_or(id);
+                run.parked
+                    .keys()
+                    .map(move |v| (id.clone(), from.clone(), *v))
+            })
+            .filter(|(_, from, verdict)| self.plan.out(from, *verdict).next().is_some())
+            .collect();
+        for (node, from, verdict) in ready {
+            if let Some(handoff) = self.node_mut(&node).parked.shift_remove(&verdict) {
+                self.emit(&from, handoff);
+            }
+        }
+    }
+
     fn owner(&self, ticket: &TicketId) -> Option<Owner<'_>> {
         let id = ticket.as_str();
         let finish = self.plan.finish();
@@ -1572,6 +1715,45 @@ impl LineRun {
     }
 }
 
+impl NodeRun {
+    /// What of this node is still running or waiting to run, in words.
+    fn live_parts(&self) -> Vec<String> {
+        let count = |n: usize, one: &str, many: &str| format!("{n} {}", plural(n, one, many));
+        let mut parts = Vec::new();
+        match self.current.as_ref().map(|p| &p.work) {
+            Some(PassWork::Tickets { copies, queue, .. }) => {
+                let live = copies.iter().filter(|c| c.settled.is_none()).count();
+                if live > 0 {
+                    parts.push(count(live, "live copy", "live copies"));
+                }
+                if !queue.is_empty() {
+                    parts.push(count(queue.len(), "queued item", "queued items"));
+                }
+            }
+            Some(PassWork::Conversation { id }) => {
+                parts.push(format!("the open Conversation {id}"))
+            }
+            Some(PassWork::Hold { ticket }) => parts.push(format!("the hold {ticket}")),
+            Some(PassWork::Finish { .. }) | None => {}
+        }
+        if !self.inbox.is_empty() {
+            parts.push(count(
+                self.inbox.len(),
+                "handoff waiting",
+                "handoffs waiting",
+            ));
+        }
+        if !self.arrived.is_empty() {
+            parts.push(count(
+                self.arrived.len(),
+                "arrival collecting",
+                "arrivals collecting",
+            ));
+        }
+        parts
+    }
+}
+
 impl Handoff {
     fn start(items: Vec<Item>) -> Handoff {
         Handoff {
@@ -1603,6 +1785,46 @@ impl Handoff {
             halted: both(self.halted, other.halted),
         }
     }
+}
+
+fn join(plan: &Plan, node: &NodeId) -> Option<Join> {
+    match plan.node(node).map(|n| &n.body) {
+        Some(NodeBody::Gate(gate)) => Some(gate.join),
+        _ => None,
+    }
+}
+
+/// What a Plan lets the Steward answer or do beyond leaving and coaching, one entry per power, in
+/// words the refusal names.
+fn steward_powers(plan: &Plan) -> Vec<String> {
+    let mut powers = Vec::new();
+    for node in plan.nodes() {
+        match &node.body {
+            NodeBody::Gate(gate) if gate.open == Opener::Steward => {
+                powers.push(format!("the gate {} opening on steward", node.id));
+            }
+            NodeBody::Ticket(t) if t.checkpoint == CheckpointPolicy::Steward => {
+                powers.push(format!("{}'s checkpoints on steward", node.id));
+            }
+            _ => {}
+        }
+    }
+    // A loop leaving a Merger is its node's: placing or lifting the Merger moves the edge, not the
+    // power.
+    for edge in plan.edges() {
+        if edge.cap.as_ref().is_some_and(|cap| cap.steward_extra) {
+            let from = match plan.node(&edge.key.from).map(|n| &n.body) {
+                Some(NodeBody::Merger(merger)) => &merger.of,
+                _ => &edge.key.from,
+            };
+            powers.push(format!(
+                "stewardExtra on {from}.{} -> {}",
+                edge.key.on.as_str(),
+                edge.key.to
+            ));
+        }
+    }
+    powers
 }
 
 fn cap_allows(cap: Cap, live: usize) -> bool {
