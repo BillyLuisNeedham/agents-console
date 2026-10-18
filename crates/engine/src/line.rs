@@ -696,6 +696,31 @@ mod tests {
     }
 
     #[test]
+    fn a_mergers_resolver_harness_is_checked_at_line_start_like_a_nodes() {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let session = crate::testkit::bare_session(publisher);
+        let plan = |harness: &str| {
+            Plan::from_value(&json!({"horde": 1, "name": "p", "nodes": [
+                {"kind": "agent", "id": "build", "title": "B", "x": 0, "y": 0,
+                 "copies": {"perItem": 2}},
+                {"kind": "merger", "id": "m", "title": "M", "x": 0, "y": 0, "of": "build",
+                 "conflict": {"resolver": {"harness": harness}}},
+                {"kind": "finish", "id": "finish", "title": "F", "x": 0, "y": 0}
+            ], "edges": [
+                {"from": "build", "on": "done", "to": "m"},
+                {"from": "m", "on": "done", "to": "finish"}
+            ]}))
+            .unwrap()
+        };
+        assert_eq!(super::unknown_harness(&session, &plan("claude")), None);
+        let problem = super::unknown_harness(&session, &plan("nonesuch")).unwrap();
+        assert!(
+            problem.starts_with("node m names unknown harness 'nonesuch'"),
+            "{problem}"
+        );
+    }
+
+    #[test]
     fn a_done_outcome_whose_verdict_does_not_pass_is_the_no_verdict_checkpoint() {
         use ac_core::line::run::OutcomeCheck;
         use ac_protocol::OutcomeStatus;

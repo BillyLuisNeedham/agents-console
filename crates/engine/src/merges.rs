@@ -12,8 +12,10 @@ use ac_core::events::{
     read_events, ticket_seed_name,
 };
 use ac_core::js;
+use ac_core::line::run::TicketId;
 use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::merge_hold::MergeHoldProbe;
+use ac_core::plan::{Assign, Conflict};
 use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_core::prompt::{ResolverPromptParts, build_resolver_prompt};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
@@ -832,9 +834,9 @@ fn non_empty(text: Option<String>) -> Option<String> {
 }
 
 /// `resolveResolver`: console.json's resolver (a harness name, "none", or `{ harness, model, effort }`)
-/// over the pool defaults and the Machine defaults. `None` takes the manual path; an explicit resolver
-/// naming an unknown harness fails.
-pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec>> {
+/// over the pool defaults and the Machine defaults, with a Merger's own non-empty fields ahead of all
+/// of them. `None` takes the manual path; an explicit resolver naming an unknown harness fails.
+fn resolve_resolver(session: &Session, merger: &Assign) -> anyhow::Result<Option<ResolverSpec>> {
     let config = &session.state.config;
     let (harness, model, effort) = match config.resolver() {
         Some(Value::Object(_)) => {
@@ -848,6 +850,14 @@ pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec
         Some(Value::String(name)) => (Some(name.clone()), None, None),
         _ => (None, None, None),
     };
+    let ahead = |own: &Option<String>, config: Option<String>| {
+        non_empty(own.clone().filter(|t| !js::trim(t).is_empty())).or(config)
+    };
+    let (harness, model, effort) = (
+        ahead(&merger.harness, harness),
+        ahead(&merger.model, model),
+        ahead(&merger.effort, effort),
+    );
     let explicit = harness.as_deref().map(|h| js::trim(h).to_owned());
     if matches!(explicit.as_deref(), Some("" | "none")) {
         return Ok(None);
@@ -881,6 +891,35 @@ pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec
         model,
         effort,
     }))
+}
+
+/// What a conflicting merge does for one Ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// The Merger says wait: the operator's merge-conflict Interrupt, no resolver.
+    Wait,
+    Resolve(ResolverSpec),
+    /// No resolver is configured, so the manual path.
+    NoResolver,
+}
+
+/// The conflict policy for `ticket`, read from the frozen Plan at conflict time so it holds across a
+/// restart: its node's Merger when it has one, else the pool's own resolver.
+pub fn conflict_policy(session: &Session, ticket: &str) -> anyhow::Result<ConflictPolicy> {
+    let merger = session.line.as_ref().and_then(|line| {
+        let node = line.node_of(&TicketId::new(ticket))?;
+        line.plan().0.conflict_for(node)
+    });
+    let own = Assign::default();
+    let assign = match merger {
+        Some(Conflict::Wait) => return Ok(ConflictPolicy::Wait),
+        Some(Conflict::Resolver(assign)) => assign,
+        None => &own,
+    };
+    Ok(match resolve_resolver(session, assign)? {
+        Some(resolver) => ConflictPolicy::Resolve(resolver),
+        None => ConflictPolicy::NoResolver,
+    })
 }
 
 /// The resolver's result: whether it staged a resolution, and its note.
@@ -968,16 +1007,24 @@ async fn route_merge_conflict(
                     return Ok(Route::Done);
                 }
                 let worktree = ticket_worktree(s, &marker, None);
-                let Some(resolver) = resolve_resolver(s)? else {
-                    let manual = manual_merge_interrupt(
-                        s,
-                        &marker,
-                        &result,
-                        "no resolver harness available (set console.json resolver= or a \
-                         ~/.issue-runner default)",
-                    );
-                    raise_interrupt(s, manual);
-                    return Ok(Route::Done);
+                let resolver = match conflict_policy(s, &marker.id)? {
+                    ConflictPolicy::Wait => {
+                        let conflict = merge_conflict_interrupt(s, &marker, &result);
+                        raise_interrupt(s, conflict);
+                        return Ok(Route::Done);
+                    }
+                    ConflictPolicy::NoResolver => {
+                        let manual = manual_merge_interrupt(
+                            s,
+                            &marker,
+                            &result,
+                            "no resolver harness available (set console.json resolver= or a \
+                             ~/.issue-runner default)",
+                        );
+                        raise_interrupt(s, manual);
+                        return Ok(Route::Done);
+                    }
+                    ConflictPolicy::Resolve(resolver) => resolver,
                 };
                 // The head of the Merge queue is resolving from here, before the resolver is live.
                 s.merge_line.resolving(&marker.id);
@@ -1190,6 +1237,123 @@ mod tests {
             None
         );
         assert_eq!(started_since_conflict(&[], std::iter::empty()), None);
+    }
+
+    // A pool whose Line has opened `build` with two Items, so `build-1.1` and `build-1.2` are the
+    // Line's Tickets, under the given Merger conflict setting.
+    fn pool_with_line(conflict: Option<Value>, resolver: Value) -> Session {
+        use ac_core::line::run::{LineBrief, LinePlaces, LineRun, LineStart};
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.state.config = ac_core::config::PoolConfig::from_map(
+            serde_json::json!({
+                "resolver": resolver,
+                "defaults": {"harness": "claude", "model": "sonnet"}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let mut nodes = vec![
+            serde_json::json!({"kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0,
+                "copies": {"perItem": 2}}),
+            serde_json::json!({"kind": "agent", "id": "plain", "title": "Plain", "x": 0, "y": 0}),
+            serde_json::json!({"kind": "finish", "id": "finish", "title": "Finish", "x": 0, "y": 0}),
+        ];
+        let mut edges = vec![serde_json::json!({"from": "plain", "on": "done", "to": "finish"})];
+        match conflict {
+            Some(conflict) => {
+                nodes.push(
+                    serde_json::json!({"kind": "merger", "id": "build-merge", "title": "M",
+                    "x": 0, "y": 0, "of": "build", "conflict": conflict}),
+                );
+                edges.push(serde_json::json!({"from": "build", "on": "done", "to": "build-merge"}));
+                edges
+                    .push(serde_json::json!({"from": "build-merge", "on": "done", "to": "finish"}));
+            }
+            None => edges.push(serde_json::json!({"from": "build", "on": "done", "to": "finish"})),
+        }
+        let plan = ac_core::plan::Plan::from_value(
+            &serde_json::json!({"horde": 1, "name": "p", "nodes": nodes, "edges": edges}),
+        )
+        .unwrap();
+        let brief = LineBrief::parse(
+            r#"{"items": [{"title": "a", "body": "A"}, {"title": "b", "body": "B"}]}"#,
+        )
+        .unwrap();
+        session.line =
+            Some(LineRun::start(plan, LinePlaces::default(), LineStart::Brief(brief)).unwrap());
+        session
+    }
+
+    fn resolver(harness: &str, model: &str, effort: Option<&str>) -> ConflictPolicy {
+        ConflictPolicy::Resolve(ResolverSpec {
+            harness: harness.to_owned(),
+            model: model.to_owned(),
+            effort: effort.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_merger_set_to_wait_holds_its_copies_for_the_operator() {
+        let session = pool_with_line(Some(Value::from("wait")), Value::from("claude"));
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            ConflictPolicy::Wait
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.2").unwrap(),
+            ConflictPolicy::Wait
+        );
+    }
+
+    #[test]
+    fn a_mergers_resolver_fields_win_and_each_empty_one_falls_through_to_the_pool() {
+        let pool = serde_json::json!({"harness": "claude", "model": "sonnet", "effort": "low"});
+        let merger = |assign: Value| Some(serde_json::json!({"resolver": assign}));
+        let session = pool_with_line(
+            merger(serde_json::json!({"harness": "opencode", "model": "gpt-5"})),
+            pool.clone(),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("opencode", "gpt-5", Some("low"))
+        );
+        let session = pool_with_line(merger(serde_json::json!({"effort": "high"})), pool);
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("claude", "sonnet", Some("high"))
+        );
+    }
+
+    #[test]
+    fn a_merger_can_name_a_resolver_when_the_pool_has_none() {
+        let session = pool_with_line(
+            Some(serde_json::json!({"resolver": {"harness": "opencode", "model": "gpt-5"}})),
+            Value::from("none"),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("opencode", "gpt-5", None)
+        );
+    }
+
+    #[test]
+    fn a_ticket_with_no_merger_takes_the_pools_own_resolver() {
+        let pool = serde_json::json!({"harness": "claude", "model": "sonnet", "effort": "low"});
+        let session = pool_with_line(None, pool.clone());
+        for ticket in ["build-1.1", "plain-1", "01"] {
+            assert_eq!(
+                conflict_policy(&session, ticket).unwrap(),
+                resolver("claude", "sonnet", Some("low")),
+                "{ticket}"
+            );
+        }
+        let none = pool_with_line(None, Value::from("none"));
+        assert_eq!(
+            conflict_policy(&none, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
+        );
     }
 
     #[test]

@@ -14,8 +14,8 @@ use ac_protocol::Outcome;
 use indexmap::IndexMap;
 
 use crate::plan::{
-    Assign, Cap, CheckpointPolicy, Conflict, Copies, EdgeKey, FinishAct, FinishNode, Join,
-    NodeBody, NodeId, Opener, Plan, PlanEdit, TicketKind, Verdict, WhenSpent,
+    Assign, Cap, CheckpointPolicy, Copies, EdgeKey, FinishAct, FinishNode, Join, NodeBody, NodeId,
+    Opener, Plan, PlanEdit, TicketKind, Verdict, WhenSpent,
 };
 use ac_protocol::wire::PlanProblem;
 
@@ -423,7 +423,6 @@ pub struct NewTicket {
     pub skill: Option<String>,
     pub check: OutcomeCheck,
     pub checkpoint: CheckpointPolicy,
-    pub conflict: Option<Conflict>,
 }
 
 /// The check the attempt's exit applies to a Line Ticket's done Outcome.

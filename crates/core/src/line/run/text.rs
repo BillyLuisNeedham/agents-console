@@ -665,7 +665,6 @@ pub(super) fn copy_ticket(
         skill: t.skill.clone(),
         check,
         checkpoint: t.checkpoint,
-        conflict: run.plan.conflict_for(&node.id).cloned(),
     }
 }
 
@@ -1127,7 +1126,6 @@ pub(super) fn act_ticket(run: &LineRun, ticket: &TicketId) -> NewTicket {
         skill: None,
         check,
         checkpoint: CheckpointPolicy::Operator,
-        conflict: None,
     }
 }
 
