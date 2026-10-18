@@ -99,7 +99,7 @@ fn check(session: &Session, ticket_id: &str) -> Result<(TicketMarker, HeldPane),
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
     };
     if interrupt.kind != InterruptKind::Checkpoint
-        || session.state.tickets.get(ticket_id) != Some(&TicketStatus::Checkpoint)
+        || session.status_of(ticket_id) != Some(TicketStatus::Checkpoint)
         || session.adopted.contains_key(ticket_id)
     {
         return Err(refusal(ticket_id, "is not waiting at a checkpoint"));
@@ -381,7 +381,7 @@ fn claim_pane(
     let mut entry = LiveAttemptEntry::new(attempt, Some(held.pane_id.clone()), held.tab_id.clone());
     entry.started_at = at;
     crate::live_attempts::register(session, ticket_id, entry);
-    let _ = crate::persist::persist(session);
+    let _ = session.wake();
     Ok(attempt)
 }
 
