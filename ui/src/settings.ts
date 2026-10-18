@@ -10,25 +10,13 @@
  * what this pool runs with, and what a pool inherits when it says nothing.
  * Each has its own Save, its own dirty flag and its own inline status, so a
  * refused machine write never loses a pool edit. The assignment slice, the
- * Spawn caps, the Steward entry and the Factory settings take effect through
+ * Spawn caps and the Steward entry take effect through
  * the engine's Config reload at the next Tick; the boot-only keys carry a "restart to apply" badge
  * until the Restart in the footer hands off to Boot.
  */
 
 import { h } from "./dom";
 import { effortInput } from "./effort";
-import {
-  FACTORY_DEFAULTS,
-  FACTORY_STATIONS,
-  factoryDraftFrom,
-  factoryFrom,
-  factoryUnder,
-  sameFactoryDraft,
-  validateFactoryDraft,
-  type FactoryDraft,
-  type FactoryField,
-  type FactoryStation,
-} from "./factory-settings";
 import {
   projectRestartBadges,
   type BootOnlyKey,
@@ -87,6 +75,8 @@ export interface PoolDraft {
   /** The Spawn caps (issue #149): empty means the engine's default. */
   spawnsPerAttempt: string;
   spawnsPerRun: string;
+  /** maxLive (ADR-0040): empty means the Machine default, and no bound there. */
+  maxLive: string;
   /** The Steward budget (ADR-0030): empty means the engine's 5. */
   stewardBudget: string;
   /** The Steward's Assignment: each empty field falls to the pool defaults. */
@@ -107,6 +97,8 @@ export interface MachineDraft {
   drivers: string;
   terminal: boolean;
   engine: string;
+  /** maxLive (ADR-0040): empty means no bound under a pool that sets none. */
+  maxLive: string;
 }
 
 export type PoolTextField = Exclude<
@@ -134,6 +126,7 @@ const EMPTY_POOL_DRAFT: PoolDraft = {
   checkpoint: "",
   spawnsPerAttempt: "",
   spawnsPerRun: "",
+  maxLive: "",
   stewardBudget: "",
   stewardHarness: "",
   stewardModel: "",
@@ -158,6 +151,7 @@ const EMPTY_MACHINE_DRAFT: MachineDraft = {
   drivers: "",
   terminal: false,
   engine: "",
+  maxLive: "",
 };
 
 /** The pool draft the file's config seeds, every absent key an empty field. */
@@ -190,6 +184,7 @@ export function poolDraftFrom(config: PoolConfig): PoolDraft {
     checkpoint: config.checkpoint ?? "",
     spawnsPerAttempt: capField(config.spawnCaps?.perAttempt),
     spawnsPerRun: capField(config.spawnCaps?.perRun),
+    maxLive: capField(config.maxLive),
     stewardBudget: capField(config.steward?.budget),
     stewardHarness: config.steward?.assign?.harness ?? "",
     stewardModel: config.steward?.assign?.model ?? "",
@@ -213,15 +208,26 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
     drivers: own.drivers ?? "",
     terminal: own.terminal === "herdr",
     engine: own.engine ?? "",
+    maxLive: capField(own.maxLive),
   };
+}
+
+/** What is wrong with a typed maxLive (ADR-0040), or null: empty, or a whole
+ *  number of 1 or more, since a bound of 0 would never launch anything. */
+function maxLiveProblem(value: string, empty: string): string | null {
+  const max = value.trim();
+  if (max && (!/^\d+$/.test(max) || Number(max) < 1)) {
+    return `max live must be a whole number of 1 or more, or empty for ${empty}`;
+  }
+  return null;
 }
 
 /**
  * What is wrong with a draft, or null when it is sendable. Only the fields
  * with a shape the operator can get wrong are checked here: a port that is
  * not a port, a Spawn cap that is not a whole number of 0 or more, and a
- * Steward budget that is not a whole number of 1 or more. Everything else is
- * free text the engine validates on its own terms.
+ * maxLive or Steward budget that is not a whole number of 1 or more.
+ * Everything else is free text the engine validates on its own terms.
  */
 export function validatePoolDraft(draft: PoolDraft): string | null {
   const port = draft.port.trim();
@@ -241,6 +247,8 @@ export function validatePoolDraft(draft: PoolDraft): string | null {
       return `${label} must be a whole number of 0 or more, or empty for the default`;
     }
   }
+  const maxLive = maxLiveProblem(draft.maxLive, "the machine default");
+  if (maxLive) return maxLive;
   // The engine refuses a budget of 0: a Steward that may never answer is no
   // Steward, and ending it is how the operator takes over.
   const budget = draft.stewardBudget.trim();
@@ -295,6 +303,7 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
     checkpoint: orNull(draft.checkpoint),
     title: orNull(draft.title),
     spawnCaps: { perAttempt: cap(draft.spawnsPerAttempt), perRun: cap(draft.spawnsPerRun) },
+    maxLive: cap(draft.maxLive),
     steward: {
       budget: cap(draft.stewardBudget),
       assign: {
@@ -311,6 +320,11 @@ export function poolPatchFrom(draft: PoolDraft): PoolConfigPatch {
   };
 }
 
+/** What is wrong with a machine draft, or null when it is sendable. */
+export function validateMachineDraft(draft: MachineDraft): string | null {
+  return maxLiveProblem(draft.maxLive, "no bound");
+}
+
 /** The machine defaults a draft sends, every emptied field left out. */
 export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   const defaults: MachineDefaults = {};
@@ -325,6 +339,8 @@ export function machineDefaultsFrom(draft: MachineDraft): MachineDefaults {
   if (drivers) defaults.drivers = drivers;
   if (engine) defaults.engine = engine;
   if (draft.terminal) defaults.terminal = "herdr";
+  const maxLive = draft.maxLive.trim();
+  if (maxLive) defaults.maxLive = Number(maxLive);
   return defaults;
 }
 
@@ -358,13 +374,6 @@ export class SettingsStore {
   private poolBaseline: PoolDraft = { ...EMPTY_POOL_DRAFT };
   private poolState: SaveState = "idle";
   private poolError: string | null = null;
-
-  // The Factory settings (issue #187): each form's layer, a draft of its own
-  // beside the form's, saved with it.
-  private poolFactory: FactoryDraft = factoryDraftFrom(undefined);
-  private poolFactoryBaseline: FactoryDraft = factoryDraftFrom(undefined);
-  private machineFactory: FactoryDraft = factoryDraftFrom(undefined);
-  private machineFactoryBaseline: FactoryDraft = factoryDraftFrom(undefined);
 
   private machineDraft: MachineDraft = { ...EMPTY_MACHINE_DRAFT };
   private machineBaseline: MachineDraft = { ...EMPTY_MACHINE_DRAFT };
@@ -404,17 +413,11 @@ export class SettingsStore {
   }
 
   get poolDirty(): boolean {
-    return (
-      !sameDraft(this.poolDraft, this.poolBaseline) ||
-      !sameFactoryDraft(this.poolFactory, this.poolFactoryBaseline)
-    );
+    return !sameDraft(this.poolDraft, this.poolBaseline);
   }
 
   get machineDirty(): boolean {
-    return (
-      !sameDraft(this.machineDraft, this.machineBaseline) ||
-      !sameFactoryDraft(this.machineFactory, this.machineFactoryBaseline)
-    );
+    return !sameDraft(this.machineDraft, this.machineBaseline);
   }
 
   get poolSaveState(): SaveState {
@@ -439,11 +442,6 @@ export class SettingsStore {
 
   machineField(name: MachineTextField): string {
     return this.machineDraft[name];
-  }
-
-  /** One field of a form's Factory settings draft. */
-  factoryField(form: "pool" | "machine", field: FactoryField): string {
-    return (form === "pool" ? this.poolFactory : this.machineFactory)[field];
   }
 
   get poolTerminal(): boolean {
@@ -555,20 +553,6 @@ export class SettingsStore {
     this.onChange();
   }
 
-  setFactoryField(form: "pool" | "machine", field: FactoryField, value: string): void {
-    const draft = form === "pool" ? this.poolFactory : this.machineFactory;
-    if (draft[field] === value) return;
-    draft[field] = value;
-    if (form === "pool") {
-      if (this.poolState === "saved") this.poolState = "idle";
-      this.poolError = null;
-    } else {
-      if (this.machineState === "saved") this.machineState = "idle";
-      this.machineError = null;
-    }
-    this.onChange();
-  }
-
   setMachineField(name: MachineTextField, value: string): void {
     if (this.machineDraft[name] === value) return;
     this.machineDraft[name] = value;
@@ -594,8 +578,7 @@ export class SettingsStore {
    */
   async savePool(): Promise<void> {
     if (this.poolState === "saving") return;
-    const invalid =
-      validatePoolDraft(this.poolDraft) ?? validateFactoryDraft(this.poolFactory);
+    const invalid = validatePoolDraft(this.poolDraft);
     if (invalid) {
       this.poolError = invalid;
       this.poolState = "idle";
@@ -606,10 +589,7 @@ export class SettingsStore {
     this.poolError = null;
     this.onChange();
     try {
-      const response = await this.onSavePool({
-        ...poolPatchFrom(this.poolDraft),
-        factory: factoryFrom(this.poolFactory),
-      });
+      const response = await this.onSavePool(poolPatchFrom(this.poolDraft));
       this.apply(response);
       this.poolState = "saved";
     } catch (err) {
@@ -622,7 +602,7 @@ export class SettingsStore {
   /** Save the machine defaults form. Same refusal and re-seed as the pool's. */
   async saveMachine(): Promise<void> {
     if (this.machineState === "saving") return;
-    const invalid = validateFactoryDraft(this.machineFactory);
+    const invalid = validateMachineDraft(this.machineDraft);
     if (invalid) {
       this.machineError = invalid;
       this.machineState = "idle";
@@ -633,11 +613,7 @@ export class SettingsStore {
     this.machineError = null;
     this.onChange();
     try {
-      const factory = factoryFrom(this.machineFactory);
-      const response = await this.onSaveMachine({
-        ...machineDefaultsFrom(this.machineDraft),
-        ...(factory ? { factory } : {}),
-      });
+      const response = await this.onSaveMachine(machineDefaultsFrom(this.machineDraft));
       this.apply(response);
       this.machineState = "saved";
     } catch (err) {
@@ -654,10 +630,6 @@ export class SettingsStore {
     this.poolBaseline = { ...this.poolDraft };
     this.machineDraft = machineDraftFrom(response.machine.own);
     this.machineBaseline = { ...this.machineDraft };
-    this.poolFactory = factoryDraftFrom(response.pool.config.factory);
-    this.poolFactoryBaseline = { ...this.poolFactory };
-    this.machineFactory = factoryDraftFrom(response.machine.own.factory);
-    this.machineFactoryBaseline = { ...this.machineFactory };
   }
 
   // -------------------------------------------------------------------------
@@ -877,10 +849,18 @@ export class SettingsStore {
         DEFAULT_SPAWN_CAPS.perRun,
         "counted since this Console boot; 0 holds every proposal for you",
       ),
+      // maxLive (ADR-0040) reloads at the next Tick too.
+      this.renderMaxLiveField(
+        "pool",
+        this.poolDraft.maxLive,
+        data.machine.defaults.maxLive === undefined
+          ? "unlimited"
+          : `${data.machine.defaults.maxLive} (machine default)`,
+        (value) => this.setPoolField("maxLive", value),
+      ),
       ...this.renderStewardFields(data),
       text("reviewer", "reviewer", { area: true }),
       text("checkpoint", "checkpoint", { area: true }),
-      ...this.renderFactoryFields("pool", data),
       this.renderSaveRow(
         "pool",
         this.poolDirty,
@@ -1011,7 +991,9 @@ export class SettingsStore {
         false,
       ),
       text("engine", "engine", merged.engine),
-      ...this.renderFactoryFields("machine", data),
+      this.renderMaxLiveField("machine", this.machineDraft.maxLive, "unlimited", (value) =>
+        this.setMachineField("maxLive", value),
+      ),
       this.renderSaveRow(
         "machine",
         this.machineDirty,
@@ -1127,137 +1109,6 @@ export class SettingsStore {
     ];
   }
 
-  /**
-   * The Factory settings (issue #187, ADR-0037) of one form's layer: each
-   * Station's drivers, Assignment and note, whether Prove and Review run, the
-   * Line's two limits and the default Finish. Every empty field inherits, and
-   * its placeholder shows what it inherits: the pool's the machine's layer
-   * over the built-in settings, the machine's the built-in settings. They
-   * reload at the next Tick and reach the next Station Ticket written, so
-   * none carries a badge.
-   */
-  private renderFactoryFields(form: "pool" | "machine", data: SettingsResponse): HTMLElement[] {
-    const draft = form === "pool" ? this.poolFactory : this.machineFactory;
-    const under =
-      form === "pool"
-        ? factoryUnder(factoryDraftFrom(data.machine.defaults.factory), FACTORY_DEFAULTS)
-        : FACTORY_DEFAULTS;
-    const key = (field: string): string => `${form}-factory-${field}`;
-    const set = (field: FactoryField) => (value: string) =>
-      this.setFactoryField(form, field, value);
-    const input = (
-      field: FactoryField,
-      cls: string,
-      placeholder: string,
-      inputKey: string = key(field),
-    ): HTMLElement =>
-      h("input", {
-        class: `settings-input ${cls}`,
-        key: inputKey,
-        type: "text",
-        value: draft[field],
-        placeholder,
-        oninput: (event: Event) => set(field)((event.currentTarget as HTMLInputElement).value),
-      });
-    const number = (field: "proveFailsPerRound" | "extraRounds", label: string, hint: string) =>
-      this.renderField(
-        key(field),
-        label,
-        h("input", {
-          class: "settings-input settings-number",
-          key: key(`${field}-input`),
-          type: "number",
-          min: "0",
-          value: draft[field],
-          placeholder: `${under[field]} (${form === "pool" ? "inherited" : "default"})`,
-          oninput: (event: Event) => set(field)((event.currentTarget as HTMLInputElement).value),
-        }),
-        false,
-        hint,
-      );
-    const station = (name: FactoryStation): HTMLElement[] => {
-      const enabled =
-        name === "prove" || name === "review"
-          ? this.renderSelect(
-              key(`${name}.enabled`),
-              [
-                { value: "", label: `(${under[`${name}.enabled`]})` },
-                { value: "on", label: "on" },
-                { value: "off", label: "off" },
-              ],
-              draft[`${name}.enabled`],
-              set(`${name}.enabled`),
-            )
-          : null;
-      return [
-        this.renderField(
-          key(name),
-          `factory ${name}`,
-          h(
-            "div",
-            { class: "settings-pair settings-factory-station" },
-            enabled,
-            input(`${name}.drivers`, "settings-pair-model", `drivers (${under[`${name}.drivers`]})`),
-            this.renderHarnessSelect(
-              key(`${name}.harness`),
-              data.harnesses,
-              draft[`${name}.harness`],
-              `(${under[`${name}.harness`]})`,
-              null,
-              set(`${name}.harness`),
-            ),
-            input(`${name}.model`, "settings-pair-model", `model (${under[`${name}.model`]})`),
-            effortInput({
-              key: key(`${name}.effort`),
-              class: "settings-input settings-pair-effort",
-              harness: draft[`${name}.harness`] || under[`${name}.harness`],
-              value: draft[`${name}.effort`],
-              placeholder: `effort (${under[`${name}.effort`]})`,
-              onInput: set(`${name}.effort`),
-            }),
-          ),
-          false,
-          name === "prove" || name === "review"
-            ? "on or off, drivers and Assignment; off skips the Station"
-            : "drivers and Assignment",
-        ),
-        this.renderField(
-          key(`${name}-note`),
-          `${name} note`,
-          h("textarea", {
-            class: "settings-input settings-area",
-            key: key(`${name}.note`),
-            value: draft[`${name}.note`],
-            placeholder: under[`${name}.note`] || "(none)",
-            oninput: (event: Event) =>
-              set(`${name}.note`)((event.currentTarget as HTMLTextAreaElement).value),
-          }),
-          false,
-          "an extra instruction written into every Ticket of the Station",
-        ),
-      ];
-    };
-    return [
-      h(
-        "div",
-        { class: "settings-note dim", key: key("head") },
-        form === "pool"
-          ? "factory: this pool's layer over the machine's; empty fields inherit, and a Line brief may override any of them. Changes reach the next Station Ticket written"
-          : "factory: every pool's Factory settings unless the pool or a Line brief says otherwise",
-      ),
-      ...FACTORY_STATIONS.flatMap(station),
-      number("proveFailsPerRound", "prove fails per round", "Prove failures before the Line checkpoints"),
-      number("extraRounds", "extra rounds", "Rounds Decide may start after the first"),
-      this.renderField(
-        key("finish"),
-        "finish",
-        input("finish", "", under.finish, key("finish-input")),
-        false,
-        "none, draft-pr, pr, or an act Decide carries out",
-      ),
-    ];
-  }
-
   private renderCapField(
     name: "spawnsPerAttempt" | "spawnsPerRun",
     label: string,
@@ -1279,6 +1130,29 @@ export class SettingsStore {
       }),
       false,
       hint,
+    );
+  }
+
+  private renderMaxLiveField(
+    form: "pool" | "machine",
+    value: string,
+    placeholder: string,
+    onInput: (value: string) => void,
+  ): HTMLElement {
+    return this.renderField(
+      `${form}-maxLive`,
+      "max live",
+      h("input", {
+        class: "settings-input settings-number",
+        key: `${form}-maxLive-input`,
+        type: "number",
+        min: "1",
+        value,
+        placeholder,
+        oninput: (event: Event) => onInput((event.currentTarget as HTMLInputElement).value),
+      }),
+      false,
+      "Ticket Attempts run at once; a verify round needs room for each Candidate",
     );
   }
 

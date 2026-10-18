@@ -134,6 +134,15 @@ impl LiveAttempts {
         out
     }
 
+    /// How many live Attempts run in `role`.
+    pub fn count_of(&self, role: AttemptRole) -> usize {
+        self.live
+            .values()
+            .flat_map(|attempts| attempts.values())
+            .filter(|entry| entry.role == role)
+            .count()
+    }
+
     /// The live entry of one Attempt.
     pub fn entry(&self, id: &str, attempt: u64) -> Option<&LiveAttemptEntry> {
         self.live.get(id)?.get(&attempt)

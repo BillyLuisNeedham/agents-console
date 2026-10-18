@@ -913,7 +913,8 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
-            station: None,
+            node: None,
+            hold: false,
         }
     }
 
@@ -929,6 +930,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         });
         if held {
             session.held.insert(

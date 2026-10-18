@@ -463,7 +463,7 @@ conformance("protocol", "requests › refuses with the HTTP twin's status, for e
   expect(replies.map((frame) => (frame as { kind: string }).kind)).toEqual(["stop", "poolLog.read"]);
 });
 
-// Hold and Discard of a Pending spawn are retired (ADR-0041): their kinds are no request the socket knows,
+// Hold and Discard of a Pending spawn are retired (ADR-0042): their kinds are no request the socket knows,
 // so each frame is dropped unanswered as any other unknown frame is.
 conformance("protocol", "requests › drops the retired Pending spawn kinds as unknown requests", async (t) => {
   const world = poolWorld(t, ["01"], CLAUDE);

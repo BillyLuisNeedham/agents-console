@@ -213,6 +213,34 @@ conformance("config", "a Pool settings save refuses a Spawn cap that is not a wh
   expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, spawnCaps: { perRun: 20 } });
 });
 
+// ADR-0040: maxLive is a text field in the pane, like the Spawn caps, but 0 would never launch anything.
+conformance("config", "a Pool settings save takes maxLive as a number or typed digits, and an empty one removes it", async (t) => {
+  const { world, server } = await settledPool(t, DEFAULTS);
+  const maxLive = () => readConsoleJson(world.pool)!.maxLive;
+
+  await saved(server, world, { maxLive: 3 });
+  expect(maxLive()).toBe(3);
+
+  await saved(server, world, { maxLive: " 2 " });
+  expect(maxLive()).toBe(2);
+
+  await saved(server, world, { maxLive: "" });
+  expect(readConsoleJson(world.pool)).toEqual(DEFAULTS);
+
+  await saved(server, world, { maxLive: 4 });
+  await saved(server, world, { maxLive: null });
+  expect(readConsoleJson(world.pool)).toEqual(DEFAULTS);
+});
+
+conformance("config", "a Pool settings save refuses a maxLive that is not a whole number of 1 or more, naming the field", async (t) => {
+  const { world, server } = await settledPool(t, { ...DEFAULTS, maxLive: 2 });
+
+  for (const maxLive of [0, "0", -1, 1.5, "many", true, {}]) {
+    expect(await refused(server, world, { maxLive })).toBe("pool settings: maxLive must be a whole number, 1 or more");
+  }
+  expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, maxLive: 2 });
+});
+
 // engine/pool-settings.test.ts:211 pool settings › carries steward.mayClose beside the budget and assign, false leaving it out
 conformance("config", "a Pool settings save keeps Steward may Close beside the budget and the assign, and false leaves it out", async (t) => {
   const { world, server } = await settledPool(t, { ...DEFAULTS, steward: { budget: 3 } });
@@ -244,7 +272,7 @@ conformance("config", "a Pool settings save refuses a Steward may Close that is 
   expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, steward: { mayClose: true } });
 });
 
-// The Factory's steward.mayAdoptLineSpawns (issue #187, ADR-0037) is saved the way mayClose is.
+// The Line's steward.mayAdoptLineSpawns (issue #187, ADR-0037) is saved the way mayClose is.
 conformance("config", "a Pool settings save keeps Steward may adopt Line spawns when true, leaves it out when false, and refuses anything else", async (t) => {
   const { world, server } = await settledPool(t, { ...DEFAULTS, steward: { budget: 3 } });
   const steward = () => readConsoleJson(world.pool)!.steward;
@@ -335,13 +363,14 @@ conformance("config", "a Pool settings save on a pool with no console.json creat
 });
 
 // engine/pool-settings.test.ts:327 pool settings › names the boot-only keys as a subset of the pane's own
-conformance("config", "the boot-only keys are selection, terminal and port, each saved through the pane, and the Spawn caps are never stale", async (t) => {
+conformance("config", "the boot-only keys are selection, terminal and port, each saved through the pane, and the Spawn caps and maxLive are never stale", async (t) => {
   const { world, server } = await settledPool(t, DEFAULTS);
   expect(server.port).not.toBe(8790);
   expect((await settingsOf(server)).pool.bootOnly).toEqual(["selection", "terminal", "port"]);
 
   const steps: [Record<string, unknown>, string[]][] = [
     [{ spawnCaps: { perRun: 7 } }, []],
+    [{ maxLive: 2 }, []],
     [{ selection: "human" }, ["selection"]],
     [{ terminal: "herdr" }, ["selection", "terminal"]],
     [{ port: 8790 }, ["selection", "terminal", "port"]],
@@ -354,6 +383,7 @@ conformance("config", "the boot-only keys are selection, terminal and port, each
   expect(readConsoleJson(world.pool)).toEqual({
     ...DEFAULTS,
     spawnCaps: { perRun: 7 },
+    maxLive: 2,
     selection: "human",
     terminal: "herdr",
     port: 8790,
@@ -377,6 +407,7 @@ conformance("config", "Pool settings saves of different keys sent at once, and a
       { port: 8800 + round },
       { resolver: { harness: "claude", model: `r${round}` } },
       { spawnCaps: { perAttempt: round + 1, perRun: 10 + round } },
+      { maxLive: round + 1 },
       { steward: { budget: round + 1 } },
     ];
     const answers = await Promise.all([

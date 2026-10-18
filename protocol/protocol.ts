@@ -28,7 +28,7 @@ import type {
   Interrupt,
   KeepTalkingRequest,
   KeepTalkingResponse,
-  LineView,
+  LineGraphView,
   LogAttemptInfo,
   MachineDefaultsRequest,
   MergeQueueEntry,
@@ -69,7 +69,7 @@ import type {
  * in `hello`; a page that was built for another one reloads itself, which is
  * how a Restart that rebuilt the UI reaches a tab left open across it.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Where the socket is served. */
 export const WS_PATH = "/api/ws";
@@ -173,7 +173,7 @@ export interface SnapshotDelta {
     pendingSpawns?: PendingSpawnView[];
     heldSpawns?: HeldSpawnView[];
     stewardBudget?: StewardBudgetView;
-    line?: LineView;
+    line?: LineGraphView;
   };
   unset?: ("seq" | "phase" | "poolName" | "poolTitle" | "poolDir" | "finishedTerminals" | "spawnUsage" | "pendingSpawns" | "heldSpawns" | "stewardBudget" | "line")[];
   state?: {

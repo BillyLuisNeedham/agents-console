@@ -85,8 +85,8 @@ pub struct PoolSnapshot {
     pub held_spawns: Vec<HeldSpawnView>,
     /// The Steward budget (ADR-0030).
     pub steward_budget: StewardBudgetView,
-    /// The Factory's Line for the header strip (ADR-0037); `None` until it starts.
-    pub line: Option<ac_protocol::LineView>,
+    /// The pool's Line, its frozen Plan with live state (ADR-0039); `None` in a pool that runs none.
+    pub line: Option<ac_protocol::LineGraphView>,
 }
 
 /// `emitSnapshot`: the one emit point for every snapshot the run produces. The hold is derived fresh
@@ -132,7 +132,8 @@ fn build_snapshot(session: &mut Session, phase: RunPhase) -> PoolSnapshot {
             .records(|id| conversations.is_live(id))
     };
     let listing_finished = crate::held::finished_terminals_now(session);
-    let state = crate::steward_actions::with_steward_notes(session);
+    let mut state = crate::steward_actions::with_steward_notes(session);
+    crate::merges::with_started_since(session, &mut state);
     let assignments = session
         .assignments
         .iter()

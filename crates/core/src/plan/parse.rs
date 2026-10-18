@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use super::*;
 
-const RESERVED: [&str; 4] = ["plan", "line", "spawn", "grader"];
+const RESERVED: [&str; 5] = ["plan", "line", "spawn", "grader", "enlist"];
 
 const PLAN_FIELDS: [&str; 8] = [
     "horde",

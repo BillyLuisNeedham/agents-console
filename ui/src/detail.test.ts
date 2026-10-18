@@ -98,7 +98,7 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
     enlisted: false,
     hasLiveAttempt: false,
     stewardBudget: null,
-    station: null,
+    node: null,
     report: null,
     reassign: {
       eligible: true,
@@ -970,6 +970,22 @@ describe("Detail: the Steward (ADR-0030)", () => {
     expect(r.answers).toEqual([]);
   });
 
+  it("says how many Tickets started since a merge conflict was raised, and nothing when none has", () => {
+    const conflict = (startedSince?: number): TicketDetailView["interrupt"] => ({
+      ...interrupt()!,
+      kind: "merge-conflict",
+      stewardNote: undefined,
+      startedSince,
+    });
+    const line = (startedSince?: number) =>
+      paintProgress(
+        detailView({ status: "checkpoint", interrupt: conflict(startedSince) }),
+      ).root.querySelector(".interrupt-started-since")?.textContent ?? null;
+    expect(line(1)).toBe("1 Ticket has started since this conflict was raised.");
+    expect(line(3)).toBe("3 Tickets have started since this conflict was raised.");
+    expect(line(undefined)).toBeNull();
+  });
+
   it("says a queued Close is closing in the waiting line (issue #154)", () => {
     const closing = { ...interrupt(true)!, closing: true };
     const r = paintProgress(detailView({ status: "checkpoint", interrupt: closing }));
@@ -1531,7 +1547,7 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
   }
 
   const checkpoint: TicketDetailView["interrupt"] = {
-    ticketId: "r2-finish",
+    ticketId: "decide-2",
     kind: "checkpoint",
     body: "the Line is finished: read the report",
     form: {
@@ -1549,11 +1565,11 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
 
   const finish = (overrides: Partial<TicketDetailView> = {}): TicketDetailView =>
     detailView({
-      ticketId: "r2-finish",
+      ticketId: "decide-2",
       status: "checkpoint",
-      station: "finish",
+      node: "decide",
       interrupt: checkpoint,
-      report: { written: true, round: 2 },
+      report: { written: true, node: "decide", pass: 2 },
       ...overrides,
     });
 
@@ -1563,30 +1579,30 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
     expect(section.previousElementSibling?.classList.contains("interrupt-box")).toBe(true);
     expect(section.querySelector(".detail-report-title")?.textContent).toBe("Report");
     const frame = section.querySelector<HTMLIFrameElement>('iframe[data-key="detail-report-frame"]')!;
-    expect(frame.getAttribute("src")).toBe("/api/line/report?round=2");
+    expect(frame.getAttribute("src")).toBe("/api/line/report?node=decide&pass=2");
     // The report is an agent's HTML: no script, not of the Console's origin.
     expect(frame.getAttribute("sandbox")).not.toContain("allow-scripts");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
     const open = section.querySelector<HTMLAnchorElement>("a.detail-report-open")!;
     expect(open.textContent).toBe("Open in browser");
-    expect(open.getAttribute("href")).toBe("/api/line/report?round=2");
+    expect(open.getAttribute("href")).toBe("/api/line/report?node=decide&pass=2");
     expect(open.getAttribute("target")).toBe("_blank");
     expect(open.getAttribute("rel")).toBe("noopener");
   });
 
-  it("keeps the frame's node across a render, and fetches a later Round's report afresh", () => {
+  it("keeps the frame's node across a render, and fetches a later pass's report afresh", () => {
     const { root, paint } = progress(finish());
     const frame = root.querySelector("iframe.detail-report-frame");
     paint(finish({ title: "Finish the Line (renamed)" }));
     expect(root.querySelector("iframe.detail-report-frame")).toBe(frame);
-    paint(finish({ report: { written: true, round: 3 } }));
+    paint(finish({ report: { written: true, node: "decide", pass: 3 } }));
     expect(root.querySelector("iframe.detail-report-frame")?.getAttribute("src")).toBe(
-      "/api/line/report?round=3",
+      "/api/line/report?node=decide&pass=3",
     );
   });
 
   it("says Decide wrote no report, with nothing to open", () => {
-    const { root } = progress(finish({ report: { written: false, round: 2 } }));
+    const { root } = progress(finish({ report: { written: false, node: "decide", pass: 2 } }));
     const section = root.querySelector('[data-key="detail-report"]')!;
     expect(section.querySelector(".detail-report-none")?.textContent).toBe(
       "No report: Decide did not write one.",
@@ -1596,7 +1612,7 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
   });
 
   it("shows no report section on any other Ticket", () => {
-    const { root } = progress(detailView({ station: "decide", status: "in-progress" }));
+    const { root } = progress(detailView({ node: "implement", status: "in-progress" }));
     expect(root.querySelector(".detail-report")).toBeNull();
   });
 });

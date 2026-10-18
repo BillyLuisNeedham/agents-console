@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use ac_protocol::{SpawnAssignRequest, SpawnProposal, Station, TicketStatus};
+use ac_protocol::{SpawnAssignRequest, SpawnProposal, TicketStatus};
 use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde_json::Value;
@@ -64,9 +64,11 @@ pub struct TicketMarker {
     /// adopted it. It ranks under the operator's console.json assign entry for the id and over the
     /// parent's Assignment. The engine writes the field.
     pub spawn_assign: Option<SpawnAssignRequest>,
-    /// Set on a Line's Station Tickets (ADR-0037): which Station the Ticket is. The engine writes the
-    /// field when it routes the Line.
-    pub station: Option<Station>,
+    /// Set on a Line's Tickets (ADR-0039): the Plan node the Ticket belongs to. The engine writes the
+    /// field when it projects the Line.
+    pub node: Option<String>,
+    /// Set on a Line's hold Tickets, the bare word `hold`: answered, never run.
+    pub hold: bool,
 }
 
 impl AssignmentMarker for TicketMarker {
@@ -187,7 +189,8 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
             file.display()
         ));
     };
-    let fields = marker_fields(captures.get(1).map_or("", |m| m.as_str()));
+    let body = captures.get(1).map_or("", |m| m.as_str());
+    let fields = marker_fields(body);
     let Some(id) = field(&fields, "id").filter(|id| !id.is_empty()) else {
         return Err(anyhow!(
             "pool load: {}: marker is missing id=",
@@ -229,16 +232,8 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
         spawned_by: non_empty("spawned-by"),
         enlisted_from: non_empty("enlisted-from"),
         spawn_assign,
-        station: match field(&fields, "station").filter(|v| !v.is_empty()) {
-            None => None,
-            Some(raw) => Some(Station::parse(raw).ok_or_else(|| {
-                anyhow!(
-                    "pool load: {}: marker station must be one of implement|prove|review|decide|\
-                     finish, got '{raw}'",
-                    file.display()
-                )
-            })?),
-        },
+        node: non_empty("node"),
+        hold: js::words(body).any(|word| word == "hold"),
     })
 }
 
@@ -552,6 +547,27 @@ mod tests {
             fs::write(dir.path().join(name), contents).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn a_line_ticket_carries_its_node_and_a_hold_the_bare_word_hold() {
+        let dir = temp();
+        let hold = read_marker(&temp_file(
+            &dir,
+            "<!-- state: id=finish-1 blocked-by=decide-1 status=checkpoint node=finish hold -->\n\n# Hold\n",
+        ))
+        .unwrap();
+        assert_eq!(hold.node.as_deref(), Some("finish"));
+        assert!(hold.hold);
+        let copy = read_marker(&temp_file(
+            &dir,
+            "<!-- state: id=implement-1 blocked-by=none status=ready node=implement -->\n\n# Copy\n",
+        ))
+        .unwrap();
+        assert_eq!(copy.node.as_deref(), Some("implement"));
+        assert!(!copy.hold);
+        let plain = read_marker(&temp_file(&dir, &format!("{MARKER}\n\n# Plain\n"))).unwrap();
+        assert_eq!((plain.node, plain.hold), (None, false));
     }
 
     fn assign(

@@ -7,8 +7,8 @@ use ac_core::assignment::{
     resolve_unseen_assignments,
 };
 use ac_core::config::{
-    ConfigSlice, changed_slice_keys, check_factory_harnesses, check_steward_harness,
-    parse_config_slice, read_config_text, reload_candidate,
+    ConfigSlice, changed_slice_keys, check_steward_harness, parse_config_slice, read_config_text,
+    reload_candidate,
 };
 use ac_core::events::{append_event, event_now, last_attempt};
 use ac_core::harness::{effort_applies, pool_harness_mode};
@@ -94,8 +94,7 @@ pub fn reload_config(session: &mut Session) -> anyhow::Result<()> {
         &candidate,
         &session.harnesses,
     )
-    .and_then(|()| check_steward_harness(&candidate, &session.harnesses))
-    .and_then(|()| check_factory_harnesses(&candidate, &session.harnesses));
+    .and_then(|()| check_steward_harness(&candidate, &session.harnesses));
     if let Err(error) = dry_run {
         log_config_reload_rejected(session, &error.to_string());
         return Ok(());

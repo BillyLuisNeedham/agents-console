@@ -604,6 +604,7 @@ mod tests {
             body: body.to_owned(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         }
     }
 

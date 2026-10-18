@@ -370,8 +370,8 @@ conformance("verify", "falls back to the higher raw score when the head-to-head 
   expect(branchExists(world, attemptBranch(world, "01", 1))).toBe(false);
 });
 
-// engine.test.ts:3169
-conformance("verify", "closes a superseded head-to-head card left ready by an earlier round", async (t) => {
+// A card an older engine left ready never runs, so boot closes it with its round.
+conformance("verify", "closes at boot a head-to-head card an earlier run left ready", async (t) => {
   const world = t.world({
     tickets: [
       ready("01"),
@@ -391,9 +391,59 @@ conformance("verify", "closes a superseded head-to-head card left ready by an ea
   expect(readStateLine(world.pool, "01-head-to-head.md").status).toBe("done");
   expect(statuses(snap)["01-head-to-head"]).toBe("done");
   expect(snap.state.log).toContain(
-    "ticket 01: closed superseded head-to-head card 01-head-to-head (this round's selection did not need it)",
+    "ticket 01-head-to-head: head-to-head card was ready at boot; its round is over and the card closes done",
   );
 });
+
+/** Wait for the run to rest with a Review raised after `merged` merges of Ticket 01. */
+function settleOnReviewAfter(server: Parameters<typeof settleOn>[0], world: World, merged: number) {
+  return settle(
+    server,
+    (snap) =>
+      snap.state.interrupts.some((i) => i.ticketId === "REVIEW" && i.kind === "review") &&
+      attemptsOf(readEvents(world.pool, "01"), "merged").length === merged,
+    { what: `a Review after ${merged} merges of 01` },
+  );
+}
+
+// The card belongs to the round that wrote it: a reject, by cascade or by name, leaves it done.
+conformance("verify", "a Review reject never reopens the head-to-head card, and the re-round decided outright reaches the Review again", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(2) });
+  scriptRound(world, [9, 8], { winner: 1 });
+  for (const n of [3, 4]) world.stubs.script(`01.attempt-${n}`, { work: { file: `cand-${n}.txt`, message: `cand-${n}` } });
+  // The re-round's grades are 9 and 5, wide of the band.
+  world.stubs.launches("01-grader-1", [grade(9), grade(9)]);
+  world.stubs.launches("01-grader-2", [grade(8), grade(5)]);
+  const server = await t.start(world);
+  await settleOnReviewAfter(server, world, 1);
+  expect(headToHeadCalls(world)).toHaveLength(1);
+  const card = readEvents(world.pool, "01-head-to-head").map((e) => e.kind);
+
+  const unnamed = await resume(server, { ticketId: "REVIEW", action: "reject", note: "redo 01-head-to-head" });
+  expect(unnamed.status).toBe(400);
+  expect(unnamed.json<{ error: string }>().error).toBe(
+    "review reject: name at least one ticket in the note (known: 01-grader-1, 01-grader-2, 01)",
+  );
+
+  await answer(server, { ticketId: "REVIEW", action: "reject", note: "redo 01" });
+  const again = await settleOnReviewAfter(server, world, 2);
+
+  expect(again.state.log).toContain("review rejected: 01 back to ready; downstream 01-grader-1, 01-grader-2 also reset");
+  expect(readStateLine(world.pool, "01-head-to-head.md").line).toContain("id=01-head-to-head blocked-by=01 status=done");
+  expect(readEvents(world.pool, "01-head-to-head").map((e) => e.kind)).toEqual(card);
+  expect(headToHeadCalls(world)).toHaveLength(1);
+  const selected = readEvents(world.pool, "01").filter((e) => e.kind === "selected");
+  expect(selected.map((e) => [e.attempt, e.payload])).toEqual([
+    [1, { score: 9, margin: 1, rule: "head-to-head" }],
+    [3, { score: 9, margin: 4, rule: "outright" }],
+  ]);
+  expect(statuses(again)).toEqual({
+    "01": "done",
+    "01-grader-1": "done",
+    "01-grader-2": "done",
+    "01-head-to-head": "done",
+  });
+}, { timeoutMs: 90_000 });
 
 // engine.test.ts:3218
 conformance("verify", "keeps the absent key automatic: selection without any interrupt", async (t) => {

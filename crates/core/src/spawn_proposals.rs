@@ -43,6 +43,10 @@ pub struct HeldSpawn {
     /// kept so the operator sees the mark may be stale or mistaken. Absent when every id was known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_overlaps: Option<Vec<String>>,
+    /// Held for "started": the named `blocks` targets that had started when it was held, kept so the
+    /// ledger and the log say which. Adopting it lands it whether or not they still run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ids: Option<Vec<String>>,
 }
 
 /// A spawn to hold under a fresh id: a Held spawn before it has one.
@@ -55,6 +59,7 @@ pub struct NewHeldSpawn {
     pub at: String,
     pub adopt_error: Option<String>,
     pub unknown_overlaps: Option<Vec<String>>,
+    pub started_ids: Option<Vec<String>>,
 }
 
 impl NewHeldSpawn {
@@ -68,6 +73,7 @@ impl NewHeldSpawn {
             at: self.at,
             adopt_error: self.adopt_error,
             unknown_overlaps: self.unknown_overlaps,
+            started_ids: self.started_ids,
         }
     }
 }
@@ -235,6 +241,7 @@ impl SpawnProposals {
                     at: entry.at,
                     adopt_error: None,
                     unknown_overlaps: entry.unknown_overlaps.filter(|ids| !ids.is_empty()),
+                    started_ids: None,
                 }),
             }
         }
@@ -264,6 +271,7 @@ impl SpawnProposals {
         reason: HeldSpawnReason,
         at: &str,
         adopt_error: Option<String>,
+        started_ids: Option<Vec<String>>,
     ) -> Result<Option<HeldSpawn>, js::FsError> {
         let Some(index) = self.file.pending.iter().position(|p| p.id == id) else {
             return Ok(None);
@@ -279,6 +287,7 @@ impl SpawnProposals {
             at: at.to_owned(),
             adopt_error,
             unknown_overlaps: None,
+            started_ids,
         };
         self.file.held.push(held.clone());
         self.write()?;
@@ -291,7 +300,30 @@ impl SpawnProposals {
         reason: &str,
         at: &str,
     ) -> Result<Option<HeldSpawn>, js::FsError> {
-        self.move_to_held(id, HeldSpawnReason::Refused, at, Some(reason.to_owned()))
+        self.move_to_held(
+            id,
+            HeldSpawnReason::Refused,
+            at,
+            Some(reason.to_owned()),
+            None,
+        )
+    }
+
+    /// A Pending spawn whose named `blocks` reached Tickets that had started, held for the operator
+    /// under the same id: landing it would rewrite a running Ticket's blockers (ADR-0040).
+    pub fn hold_started(
+        &mut self,
+        id: &str,
+        started_ids: &[String],
+        at: &str,
+    ) -> Result<Option<HeldSpawn>, js::FsError> {
+        self.move_to_held(
+            id,
+            HeldSpawnReason::Started,
+            at,
+            None,
+            Some(started_ids.to_vec()),
+        )
     }
 
     pub fn mark_landing(&mut self, landing: &HashMap<String, String>) -> Result<(), js::FsError> {
@@ -520,6 +552,7 @@ mod tests {
             at: at.into(),
             adopt_error: None,
             unknown_overlaps: None,
+            started_ids: None,
         }
     }
 
@@ -913,6 +946,29 @@ mod tests {
             store.hold_refused("proposal-1", "again", "t3").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn holds_a_pending_spawn_for_blocking_started_tickets_and_keeps_which_across_a_restart() {
+        let dir = runs_dir();
+        let mut store = load_spawn_proposals(dir.path()).unwrap();
+        store.take(vec![taken("A", None)]).unwrap();
+        let held = store
+            .hold_started("proposal-1", &["02".to_owned()], "t2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (held.id.as_str(), held.reason, held.started_ids.clone()),
+            (
+                "proposal-1",
+                HeldSpawnReason::Started,
+                Some(vec!["02".to_owned()])
+            )
+        );
+        assert!(store.pending().is_empty());
+        let reloaded = load_spawn_proposals(dir.path()).unwrap();
+        assert_eq!(reloaded.held()[0].started_ids, Some(vec!["02".to_owned()]));
+        assert_eq!(reloaded.held_views()[0].reason, HeldSpawnReason::Started);
     }
 
     // A pool that held spawns before issue #150 has no pending list.

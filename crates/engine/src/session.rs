@@ -249,10 +249,8 @@ pub struct Session {
     /// The Steward budget used per Ticket; only Tickets with some used are kept.
     pub steward_used: IndexMap<String, u64>,
     pub steward_adopts: HashMap<String, String>,
-    /// The pool's Line (ADR-0037), as `line.json` holds it; `None` until Start the Line.
-    pub line: Option<ac_protocol::LineState>,
-    /// The Factory settings the Line runs on as last resolved, for the snapshot's Line view.
-    pub line_factory: Option<ac_core::line::ResolvedFactory>,
+    /// The pool's Line (ADR-0039), as `line.json` holds it; `None` in a pool that runs none.
+    pub line: Option<ac_core::line::run::LineRun>,
 }
 
 /// What a Session cannot be built without; every other field starts empty (see [`Session::new`]).
@@ -380,7 +378,6 @@ impl Session {
             steward_used: IndexMap::new(),
             steward_adopts: HashMap::new(),
             line: None,
-            line_factory: None,
         }
     }
 
@@ -525,6 +522,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         });
         apply_update(
             &mut state,

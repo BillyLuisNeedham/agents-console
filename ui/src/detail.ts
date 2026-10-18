@@ -313,7 +313,8 @@ export class Detail {
   // checkpoint offers one Adopt per finished Candidate (ADR-0035), scored
   // from the timeline's graded events when it has them, each sending the
   // note. A Steward note (ADR-0030) sits above the note field, with "Use as
-  // answer" to take it as the draft.
+  // answer" to take it as the draft. A waiting merge conflict says under its
+  // body how many Tickets started since it was raised (ADR-0040).
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -324,6 +325,9 @@ export class Detail {
       { class: interrupt.queued ? "interrupt-box interrupt-box-queued" : "interrupt-box" },
       h("span", { class: "interrupt-kind" }, interrupt.form.title),
       h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
+      interrupt.startedSince
+        ? h("div", { class: "interrupt-started-since" }, startedSinceLine(interrupt.startedSince))
+        : null,
     );
     // Answered-and-waiting: the answer is recorded and will be applied at the
     // next Tick, so the form steps aside for the waiting line.
@@ -979,16 +983,15 @@ export class Detail {
     return panel;
   }
 
-  // The report Decide wrote at the Line's Finish (ADR-0037), under the Finish
-  // checkpoint it is read beside, framed whole with a way out to a tab of
-  // its own. The Round rides the address so a later Round's report is
-  // fetched afresh rather than from the cache. Moving an iframe reloads it,
-  // so the frame and its section are keyed and nothing before the frame
-  // inside the section comes or goes; the panel above it only reshapes when
-  // the checkpoint is answered. The report is an agent's HTML: the frame is
-  // sandboxed, so it runs no script and is not of the Console's origin.
+  // The report a Decide pass wrote (ADR-0039), under its Ticket, framed whole
+  // with a way out to a tab of its own. The pass rides the address so a later
+  // pass's report is fetched afresh rather than from the cache. Moving an
+  // iframe reloads it, so the frame and its section are keyed and nothing
+  // before the frame inside the section comes or goes. The report is an
+  // agent's HTML: the frame is sandboxed, so it runs no script and is not of
+  // the Console's origin.
   private renderReport(report: LineReportView): HTMLElement {
-    const src = `/api/line/report?round=${report.round}`;
+    const src = `/api/line/report?node=${encodeURIComponent(report.node)}&pass=${report.pass}`;
     return h(
       "section",
       { class: "detail-report", key: "detail-report" },
@@ -1675,6 +1678,12 @@ export class Detail {
 
 function currentMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+}
+
+function startedSinceLine(count: number): string {
+  return count === 1
+    ? "1 Ticket has started since this conflict was raised."
+    : `${count} Tickets have started since this conflict was raised.`;
 }
 
 // The interrupt note's morph key, which is also how settleNoteFocus finds

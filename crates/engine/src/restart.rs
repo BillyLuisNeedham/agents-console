@@ -409,7 +409,10 @@ fn reconcile_marker(
             .interrupts
             .iter()
             .any(|i| i.ticket_id == id && i.kind == InterruptKind::Checkpoint);
-    if marker.status != TicketStatus::Ready && !mid_adoption {
+    // An engine-run ticket's orphan is never adopted, whatever its marker says: rehydrate closes a
+    // head-to-head card done rather than ready, and its dead judge's pane still needs releasing.
+    if marker.status != TicketStatus::Ready && !mid_adoption && engine_ticket_build_id(id).is_none()
+    {
         return Ok((MarkerStep::Done, log));
     }
     if !terminal_adoptable(session, id, orphan.attempt) {
@@ -991,8 +994,8 @@ pub fn record_adopted_exit(
     outcome_path: &str,
     what: &str,
 ) -> anyhow::Result<()> {
-    // A Line's Station ending here is checked for its verdict as a launched one is (ADR-0037).
-    let check = crate::line::verdict_check_for(session, marker);
+    // A Line Ticket ending here is checked for its verdict as a launched one is (ADR-0037).
+    let check = crate::line::outcome_check_for(session, marker);
     let checked_decision;
     let decision = match (&check, &decision.result) {
         (Some(check), Ok(valid)) => {

@@ -109,28 +109,18 @@ fn resolve_start_assignment(
     .map_err(|err| refused(err.0))
 }
 
-// A Grill takes the Grill Station's Assignment and skills from the resolved Factory settings
-// (ADR-0037), between the request and the pool defaults, as a Steward takes its own entry.
+// A Grill takes its Assignment and skill from the Line's entry Conversation node (ADR-0039), between
+// the request and the pool defaults, as a Steward takes its own entry.
 fn grill_layer(s: &Session, req: &StartConversationRequest) -> Option<AssignmentLayer> {
     if req.role != Some(ConversationRole::Grill) {
         return None;
     }
-    let factory = ac_core::line::resolve_factory(
-        &crate::line::factory_layers(s),
-        &ac_protocol::LineBrief {
-            spec: String::new(),
-            finish: None,
-            factory: None,
-            push_base: false,
-        },
-    );
-    let grill = &factory.grill;
-    let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+    let pass = s.line.as_ref()?.grill_pass()?;
     Some(AssignmentLayer::of_fields(
-        some(&grill.harness).as_deref(),
-        some(&grill.model).as_deref(),
-        some(&grill.effort).as_deref(),
-        some(&grill.drivers).as_deref(),
+        pass.assign.harness.as_deref(),
+        pass.assign.model.as_deref(),
+        pass.assign.effort.as_deref(),
+        pass.skill.as_deref(),
     ))
 }
 
@@ -152,11 +142,10 @@ fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), Engine
         return Err(refused("conversation start: title is required"));
     }
     if req.role == Some(ConversationRole::Grill) {
-        if let Some(line) = &s.line {
-            return Err(refused(format!(
-                "grill start: the Line has already started (Round {}, {})",
-                line.round, line.ticket
-            )));
+        if s.line.as_ref().and_then(|line| line.grill_pass()).is_none() {
+            return Err(refused(
+                "grill start: the pool's Line has no Conversation pass waiting for a Grill",
+            ));
         }
         if let Some(grill) = super::grill_id(s) {
             return Err(refused(format!(

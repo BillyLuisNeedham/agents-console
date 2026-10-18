@@ -10,7 +10,9 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use tokio::sync::watch;
 
-use ac_core::assignment::{Assignment, Assignments, DEFAULT_DRIVERS, resolve_unseen_assignments};
+use ac_core::assignment::{
+    Assignment, Assignments, DEFAULT_DRIVERS, parse_head_to_head_id, resolve_unseen_assignments,
+};
 use ac_core::checkpoints::{CheckpointStore, SqliteCheckpointStore};
 use ac_core::config::{canonical_dir, read_config, read_config_text};
 use ac_core::conversation_record::load_conversations;
@@ -358,6 +360,24 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
         .collect();
     for index in 0..session.markers.len() {
         let marker = session.markers[index].clone();
+        // A head-to-head card belongs to the selection round that wrote it, and no round outlives the
+        // engine. The build ticket re-enters selection and writes a fresh card if it needs one; a card
+        // left ready by an older engine never runs, so it closes the same way.
+        if parse_head_to_head_id(&marker.id).is_some() {
+            if !is_finished(Some(marker.status)) {
+                let orphans = crate::restart::headless_orphans(session, &marker.id);
+                session.orphans.extend(orphans);
+                write_marker_status(&marker.file, TicketStatus::Done)?;
+                session.markers[index].status = TicketStatus::Done;
+                log.push(format!(
+                    "ticket {}: head-to-head card was {} at boot; its round is over and the card \
+                     closes done",
+                    marker.id,
+                    marker.status.as_str()
+                ));
+            }
+            continue;
+        }
         if marker.status != TicketStatus::InProgress || interrupted.contains(&marker.id) {
             continue;
         }
@@ -414,9 +434,9 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
         tickets: Some(tickets),
         ..PoolUpdate::default()
     });
-    // An approval only stands while every marker on disk is finished. A Factory pool raises no
-    // run-wide Review (ADR-0037), so one a pool kept from before it became one goes.
-    let factory = crate::line::is_factory_pool(session);
+    // An approval only stands while every marker on disk is finished. A Line pool raises no
+    // run-wide Review (ADR-0039), so one a pool kept from before its Line began goes.
+    let factory = session.line.is_some();
     let reviewing = session
         .state
         .interrupts
@@ -439,8 +459,8 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
             ..PoolUpdate::default()
         });
         log.push(if factory {
-            "review gate cleared: a Factory pool raises no run-wide Review; its Finish checkpoint \
-             is the Review"
+            "review gate cleared: a Line pool raises no run-wide Review; its Finish hold is the \
+             Review"
                 .into()
         } else {
             "review gate cleared: markers on disk are not all done, so a fresh Review will be raised \

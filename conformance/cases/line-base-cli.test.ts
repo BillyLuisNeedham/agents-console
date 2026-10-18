@@ -1,11 +1,12 @@
 /**
- * The Line base at Boot (issue #193), run as a process: Boot's Factory mode
+ * The Line base at Boot (issue #193), run as a process: Boot's Line mode
  * cuts `line/<slug>` from the branch the checkout has out, or from the
  * branch `--from` names (a local branch, else origin's as written, else
  * origin's by its name there), never from another remote's branch, a
  * symbolic HEAD, a tag or a commit, and never from a detached HEAD. The Line's branch never tracks its base. Boot says what it
  * cut from and at which commit, writes both into console.json as
- * `lineBase`, and the Grill's first Turn names them.
+ * `lineBase`, the Line copies them into line.json as it begins, and the
+ * Grill's first Turn names them.
  *
  * The remote-tracking cases push to a throwaway bare `origin` beside the
  * checkout (harness/cli.ts); nothing here reaches a real remote.
@@ -20,7 +21,7 @@ import { startHerdr } from "../harness/herdr.ts";
 import { until } from "../harness/pool-files.ts";
 
 const MACHINE = { harness: "claude", model: "m", drivers: "implement" };
-const SPEC = "# Start a Factory anywhere (issue #193)\n\nThe spec.\n";
+const SPEC = "# Start a Line anywhere (issue #193)\n\nThe spec.\n";
 const BRIEF = { spec: "pilots/193.md", finish: "draft-pr" };
 const BOOT = ["--no-steward", "--no-open", "--port", "0"];
 
@@ -53,7 +54,7 @@ function expectNoTracking(w: CliWorld, repo: string, branch: string): void {
   expect(git(w, repo, ["config", `branch.${branch}.merge`])).toEqual({ code: 1, out: "" });
 }
 
-conformance("cli", "Boot --factory --from cuts the Line from a local branch checked out in another worktree, writes lineBase, tracks nothing and tells the Grill", async (t) => {
+conformance("cli", "Boot --plan --from cuts the Line from a local branch checked out in another worktree, writes lineBase, tracks nothing and tells the Grill", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   // A repository with no main: the operator is on develop, and experiment/x is out in a worktree of its own.
   const repo = w.repo("repo", { branch: "develop" });
@@ -69,7 +70,7 @@ conformance("cli", "Boot --factory --from cuts the Line from a local branch chec
   t.defer(() => herdr.stop());
   symlinkSync(herdr.socketPath, w.path("no-herdr.sock"));
 
-  const run = await w.run("boot", ["--factory", "--from", "experiment/x", "--work", "#193", "--yes", ...BOOT], {
+  const run = await w.run("boot", ["--plan", "factory-today", "--from", "experiment/x", "--work", "#193", "--yes", ...BOOT], {
     cwd: repo,
     timeoutMs: 60_000,
   });
@@ -86,12 +87,11 @@ conformance("cli", "Boot --factory --from cuts the Line from a local branch chec
   expectNoTracking(w, repo, "line/193");
 
   const pool = poolOf(repo, "193");
-  expect(readJson(join(pool, "console.json"))).toMatchObject({
-    factoryPool: true,
-    lineBase: { ref: "experiment/x", commit: base },
-  });
-  // The Line has not started: the base waits in console.json for Start the Line.
-  expect(existsSync(join(pool, "line.json"))).toBe(false);
+  const lineBase = { ref: "experiment/x", commit: base };
+  expect(readJson(join(pool, "console.json"))).toMatchObject({ lineBase });
+  expect(readJson(join(pool, "console.json"))).not.toHaveProperty("factoryPool");
+  expect(run.stdout).toContain('line: begun on the Plan factory-today ("Factory today")\n');
+  expect(readJson(join(pool, "line.json"))).toMatchObject({ places: { branch: "line/193", base: lineBase } });
 
   const typed = await until(
     () => herdr.control<string[]>("submitted"),
@@ -144,16 +144,15 @@ conformance("cli", "Boot --from takes a remote-tracking branch as written, or by
     expectNoTracking(w, repo, `line/${slug}`);
     const pool = poolOf(repo, slug);
     const lineBase = { ref: "origin/experiment/x", commit: base };
-    expect(readJson(join(pool, "console.json"))).toMatchObject({ factoryPool: true, lineBase });
-    // --brief starts the Line at once: line.json carries the base it was cut from.
-    expect(readJson(join(pool, "line.json"))).toMatchObject({ branch: `line/${slug}`, base: lineBase });
+    expect(readJson(join(pool, "console.json"))).toMatchObject({ lineBase });
+    expect(readJson(join(pool, "line.json"))).toMatchObject({ places: { branch: `line/${slug}`, base: lineBase } });
   }
   // Boot made no local branch of the base.
   expect(git(w, repo, ["show-ref", "--verify", "--quiet", "refs/heads/experiment/x"]).code).toBe(1);
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("develop");
 });
 
-conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, and --from without --factory, before cutting anything", async (t) => {
+conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, and --from without --plan, before cutting anything", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = w.repo("repo", { branch: "develop" });
   gitIn(w, repo, ["tag", "v1.0"]);
@@ -163,7 +162,7 @@ conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, an
     "--from takes a branch (local or origin's), never a tag or a commit\n";
 
   for (const name of ["v1.0", sha, "nope"]) {
-    const run = await w.run("boot", ["--factory", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
+    const run = await w.run("boot", ["--plan", "factory-today", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
       cwd: repo,
     });
     expect(run.code).toBe(1);
@@ -172,7 +171,7 @@ conformance("cli", "Boot --from refuses a tag, a commit and a missing branch, an
 
   const plain = await w.run("boot", ["--from", "develop", "--yes", "--no-open"], { cwd: repo });
   expect(plain.code).toBe(1);
-  expect(plain.stderr.split("\n", 1)[0]).toBe("--from is for Factory mode: add --factory");
+  expect(plain.stderr.split("\n", 1)[0]).toBe("--from is for Line mode: add --plan <slug>");
 
   expect(existsSync(join(repo, ".scratch"))).toBe(false);
   expect(gitIn(w, repo, ["branch", "--list", "line/*"])).toBe("");
@@ -211,7 +210,7 @@ conformance("cli", "Boot --from refuses another remote's branch, origin's HEAD, 
     ],
   ];
   for (const [name, message] of refusals) {
-    const run = await w.run("boot", ["--factory", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
+    const run = await w.run("boot", ["--plan", "factory-today", "--from", name, "--work", "tidy the header", "--yes", "--no-open"], {
       cwd: repo,
     });
     expect(run.code, `--from ${name}: ${run.stdout}`).toBe(1);
@@ -240,7 +239,7 @@ conformance("cli", "Boot cuts the Line from the current branch in a repository w
 
   // A detached HEAD has no current branch to cut from.
   gitIn(w, trunk, ["checkout", "-q", "--detach", "trunk~1"]);
-  const detached = await w.run("boot", ["--factory", "--work", "tidy the header", "--yes", "--no-open"], { cwd: trunk });
+  const detached = await w.run("boot", ["--plan", "factory-today", "--work", "tidy the header", "--yes", "--no-open"], { cwd: trunk });
   expect(detached.code).toBe(1);
   expect(detached.stderr).toBe(
     `${trunk} has a detached HEAD, so there is no current branch to cut the Line from: check out a branch, or pass --from <branch>\n`,

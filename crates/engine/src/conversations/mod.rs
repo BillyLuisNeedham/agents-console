@@ -547,7 +547,7 @@ pub fn steward_id(s: &Session) -> Option<String> {
         .map(|rec| rec.id)
 }
 
-/// The live Grill's id (ADR-0037); `None` when the pool has none.
+/// The live Grill's id (ADR-0037, ADR-0039); `None` when the pool has none.
 pub fn grill_id(s: &Session) -> Option<String> {
     load(s)
         .into_iter()
@@ -717,9 +717,11 @@ pub(crate) fn teaching_for(
         if role != Some(ConversationRole::Grill) {
             return teaching;
         }
-        let line = ac_core::line::line_name_of(&crate::merges::merge_target_branch(s));
-        let grill = ac_core::line::grill_teaching(&line, own.drivers.as_deref().unwrap_or(""));
-        return format!("{teaching}\n\n{grill}");
+        // The Grill is taught the Line's entry Conversation pass it stands in for (ADR-0039).
+        return match s.line.as_ref().and_then(|line| line.grill_pass()) {
+            Some(pass) => format!("{teaching}\n\n{}", pass.opening),
+            None => teaching,
+        };
     }
     stewards::steward_teaching(s, id, &spawn_path, &own, &defaults, per_file, &ledger)
 }
@@ -784,7 +786,7 @@ pub(crate) mod stewards {
             command: &command,
             budget: steward_budget_of(&s.state.config),
             may_close: steward_may_close_of(&s.state.config),
-            factory: crate::line::is_factory_pool(s),
+            line: s.line.as_ref(),
             may_adopt_line_spawns: ac_core::steward::steward_may_adopt_line_spawns_of(
                 &s.state.config,
             ),
@@ -940,6 +942,7 @@ pub(crate) fn marker_of_conversation(id: &str, file: &Path) -> TicketMarker {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
-        station: None,
+        node: None,
+        hold: false,
     }
 }

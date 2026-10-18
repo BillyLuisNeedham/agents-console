@@ -24,7 +24,7 @@ import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 export const WS_PATH = "/api/ws";
 
 /** The protocol version a client says in its hello. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** How many of the pool log's last lines a pushed snapshot carries. */
 export const POOL_LOG_WINDOW = 500;

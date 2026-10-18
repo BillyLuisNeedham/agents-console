@@ -40,4 +40,4 @@ Issue #150 (https://github.com/BillyLuisNeedham/agents-console/issues/150) found
 
 **Amended by ADR-0040**: every "next boundary" above is the next tick of the rolling scheduler. "A ticket already running is never interrupted: blocked-by gates its next attempt" is replaced: a named `blocks` target that is no longer ready when the proposal lands holds the proposal, with the reason `started`, for the operator to Adopt or Discard.
 
-**Amended by ADR-0041**: a Pending spawn lands at the Tick its own exit wakes, so the operator's Hold and Discard of a Pending spawn, and the Console's Pending section, header count and faded "lands next boundary" cards, are retired. Pending stays as the write-ahead record, in the Spawn ledger and in the Steward's state read. Held spawns are unchanged.
+**Amended by ADR-0042**: a Pending spawn lands at the Tick its own exit wakes, so the operator's Hold and Discard of a Pending spawn, and the Console's Pending section, header count and faded "lands next boundary" cards, are retired. Pending stays as the write-ahead record, in the Spawn ledger and in the Steward's state read. Held spawns are unchanged.

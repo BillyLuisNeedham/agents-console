@@ -48,6 +48,10 @@ wire_enum! {
         Deadlock = "deadlock",
         DeadlockCleared = "deadlock-cleared",
         Answered = "answered",
+        /// A queued answer on a Line hold the Line refused as it drained (ADR-0039):
+        /// the Finish gained a blocker since it was accepted. Its reason; the
+        /// Interrupt stays.
+        AnswerRefused = "answer-refused",
         ReviewReject = "review-reject",
         SpawnAdopted = "spawn-adopted",
         SpawnRejected = "spawn-rejected",
@@ -139,8 +143,8 @@ wire_enum! {
 
 wire_enum! {
     /// The roles a Conversation may carry. Absent is an ordinary Conversation.
-    /// The Grill (ADR-0037) is the Factory Line's first Station, the one
-    /// Start the Line hands off from.
+    /// The Grill is a Line's entry Conversation pass (ADR-0039), the one Start
+    /// the Line ends on its brief.
     pub enum ConversationRole {
         Steward = "steward",
         Grill = "grill",
@@ -303,6 +307,11 @@ wire_struct! {
         /// Never persisted with the Interrupt; steward.ts's store keeps it.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_note: Option<StewardNote>,
+        /// A Ticket's merge-conflict Interrupt, on the snapshot's copy only: how
+        /// many other Tickets have started since it was raised (ADR-0040),
+        /// derived from their events and absent while none has.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub started_since: Option<u64>,
     }
 }
 
@@ -337,9 +346,9 @@ wire_struct! {
         /// well-formed proposals riding to a Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn: Option<Vec<SpawnProposal>>,
-        /// A Station Ticket's typed verdict on a Line (ADR-0037), kept as the
-        /// agent wrote it: Prove's ProveVerdict, Review's ReviewVerdict or
-        /// Decide's DecideVerdict. Absent when the Outcome carried none.
+        /// A Line Ticket's typed verdict (ADR-0037, ADR-0039), kept as the agent
+        /// wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
+        /// choice, or the Finish Ticket's PR url. Absent when the Outcome carried none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub verdict: Option<Value>,
     }
@@ -482,6 +491,11 @@ wire_struct! {
         /// attempt and 20 per run.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn_caps: Option<SpawnCapsConfig>,
+        /// How many Ticket Attempts the engine runs at once (ADR-0040), a whole
+        /// number of 1 or more; absent falls back to the Machine default, and
+        /// absent there means no bound.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_live: Option<u64>,
         /// Who picks the winner of a verify fan-out: the engine's arithmetic rule
         /// (default) or the human, via a selection interrupt carrying the grades.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -507,19 +521,9 @@ wire_struct! {
         /// Steward's Assignment, ahead of the pool defaults.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward: Option<StewardConfig>,
-        /// The Factory settings (issue #187, ADR-0037): this pool's layer, over the
-        /// Machine defaults' and under a Line brief's, each field falling through
-        /// on its own. Reloaded at a Tick.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub factory: Option<Box<FactorySettings>>,
-        /// Boot's Factory mode marks the pool it makes (ADR-0037): a Factory pool
-        /// raises no run-wide Review, before its Line starts as after. A pool whose
-        /// Line has started is a Factory pool without it.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub factory_pool: Option<bool>,
-        /// The Line base (issue #193): the branch Boot's Factory mode cut the
-        /// Line from and the commit it was cut at. Start the Line copies it into
-        /// the Line's state.
+        /// The Line base (issue #193): the branch Boot's Line mode cut the Line
+        /// from and the commit it was cut at. The Line copies it into its places
+        /// when it begins.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub line_base: Option<LineBase>,
     }
@@ -694,7 +698,9 @@ wire_enum! {
     /// spawn.json's, own; or the run's), the proposing agent's own `overlaps`
     /// mark (the ids ride on the proposal), a Pending spawn a Tick refused to
     /// land because the pool moved after it was taken (the reason rides as
-    /// `adoptError`), or an older pool's operator Hold of a Pending spawn.
+    /// `adoptError`), a Pending spawn whose named `blocks` reached a Ticket
+    /// that had already started (ADR-0040), or an older pool's operator Hold
+    /// of a Pending spawn.
     pub enum HeldSpawnReason {
         PerAttempt = "per-attempt",
         PerRun = "per-run",
@@ -704,6 +710,7 @@ wire_enum! {
         /// Proposed from inside a Line (ADR-0037): anything that lands merges
         /// into the Line's branch, so only the operator lands it.
         Line = "line",
+        Started = "started",
     }
 }
 
@@ -1228,10 +1235,9 @@ wire_struct! {
         /// Terminal backing every new pool starts with; the only legal value is "herdr".
         #[serde(skip_serializing_if = "Option::is_none")]
         pub terminal: Option<TerminalKind>,
-        /// The machine's layer of the Factory settings (issue #187), under every
-        /// pool's; the engine reads it afresh at each Tick.
+        /// The machine's maxLive, under every pool's own; read afresh at each Tick.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub factory: Option<Box<FactorySettings>>,
+        pub max_live: Option<u64>,
     }
 }
 
@@ -1459,10 +1465,10 @@ wire_struct! {
         /// at once rather than at the next Tick; an in-flight ticket keeps
         /// the engine's frozen record.
         pub reassign: TicketReassignView,
-        /// The Station of a Line's Ticket (ADR-0037), from the marker's durable
-        /// `station` field; absent on every other Ticket.
+        /// The Plan node a Line's Ticket belongs to (ADR-0039), from the marker's
+        /// durable `node` field; absent on every other Ticket.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub station: Option<Station>,
+        pub node: Option<String>,
     }
 }
 
@@ -1507,10 +1513,10 @@ wire_struct! {
         /// written before the Steward still types.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
-        /// The Factory's Line (ADR-0037) for the header strip, absent until the
-        /// pool's Line starts.
+        /// The pool's Line (ADR-0039): its frozen Plan with live state, absent in
+        /// a pool that runs no Line.
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub line: Option<LineView>,
+        pub line: Option<LineGraphView>,
         pub state: SnapshotState,
     }
 }
@@ -1743,21 +1749,8 @@ wire_struct! {
 }
 
 // ---------------------------------------------------------------------------
-// The Factory's Line (issue #187, ADR-0037): POST /api/line/start, GET /api/line, line.json
+// A Line's verdicts and its verbs (ADR-0037, ADR-0039): POST /api/line, POST /api/line/start, GET /api/line
 // ---------------------------------------------------------------------------
-
-wire_enum! {
-    /// The kind of work a Station Ticket does on a Line. `finish` tags the Finish
-    /// checkpoint: an engine-written Ticket no agent runs, which waits for the
-    /// operator's approval at the end of the Line.
-    pub enum Station {
-        Implement = "implement",
-        Prove = "prove",
-        Review = "review",
-        Decide = "decide",
-        Finish = "finish",
-    }
-}
 
 wire_enum! {
     /// Prove's verdict: the merged work runs end to end, or it does not.
@@ -1768,7 +1761,7 @@ wire_enum! {
 }
 
 wire_struct! {
-    /// The `verdict` a Prove Station's Outcome carries.
+    /// The `verdict` a Prove Ticket's Outcome carries.
     pub struct ProveVerdict {
         pub prove: ProveResult,
         /// Where the evidence is: a path the operator can open.
@@ -1795,247 +1788,54 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// The `verdict` a Review Station's Outcome carries: its findings, possibly none.
+    /// The `verdict` a Review Ticket's Outcome carries: its findings, possibly none.
     pub struct ReviewVerdict {
         pub findings: Vec<ReviewFinding>,
     }
 }
 
-wire_enum! {
-    /// Decide's choice: another Round, or the Finish.
-    pub enum DecideChoice {
-        Round = "round",
-        Finish = "finish",
-    }
-}
-
 wire_struct! {
-    /// One finding Decide fixes in the next Round or drops, and why.
+    /// One finding Decide fixes in another round or drops, and why.
     pub struct DecideItem {
         pub title: String,
         pub reason: String,
     }
 }
 
-wire_struct! {
-    /// The `verdict` a Decide Station's Outcome carries. Every must finding is in
-    /// `fixes` (only on a Round) or in `dropped`.
-    pub struct DecideVerdict {
-        pub decide: DecideChoice,
-        #[serde(default)]
-        pub fixes: Vec<DecideItem>,
-        #[serde(default)]
-        pub dropped: Vec<DecideItem>,
+wire_union! {
+    /// The Plan a Line runs, as `POST /api/line` names it: a Preset or library slug, or a Plan file.
+    #[serde(untagged)]
+    pub enum LinePlanSource {
+        Slug(String),
+        File(Unchecked<PlanFile>),
     }
 }
 
 wire_struct! {
-    @inline
-    /// A Station's Assignment fields, each optional.
-    #[serde(deny_unknown_fields)]
-    pub struct StationAssign {
+    /// POST /api/line's body, sent once by Boot: the Plan to freeze and exactly one of the Line's
+    /// work or the path of a Line brief in the pool checkout. Answers 202 with the Line, or the 409
+    /// `reason` envelope when the Plan is invalid or not runnable yet, or a Line exists.
+    pub struct LineBeginRequest {
+        pub plan: LinePlanSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub harness: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub effort: Option<String>,
-    }
-}
-
-wire_struct! {
-    /// One Station's settings, each field optional and falling through on its own.
-    #[serde(deny_unknown_fields)]
-    pub struct StationSettings {
-        /// Only Prove and Review may be switched off.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub enabled: Option<bool>,
-        /// The Station's skills: the driver first.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub drivers: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub assign: Option<StationAssign>,
-        /// An extra instruction the engine writes into every Ticket of the Station.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub note: Option<String>,
-    }
-}
-
-wire_struct! {
-    /// The settings of each Station.
-    #[serde(deny_unknown_fields)]
-    pub struct FactoryStations {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub implement: Option<StationSettings>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub prove: Option<StationSettings>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub review: Option<StationSettings>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub decide: Option<StationSettings>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub grill: Option<StationSettings>,
-    }
-}
-
-wire_struct! {
-    /// The Line's two limits.
-    #[serde(deny_unknown_fields)]
-    pub struct FactoryLimits {
-        /// Prove failures a Round takes before the Line checkpoints (default 2).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub prove_fails_per_round: Option<u64>,
-        /// Rounds Decide may start after the first (default 1).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub extra_rounds: Option<u64>,
-    }
-}
-
-wire_struct! {
-    /// The Factory settings, a layer of them: every field optional.
-    #[serde(deny_unknown_fields)]
-    pub struct FactorySettings {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub stations: Option<FactoryStations>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub limits: Option<FactoryLimits>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub finish: Option<String>,
-    }
-}
-
-wire_struct! {
-    /// The Line brief: the spec's path in the pool checkout, the Finish, and the
-    /// settings this Line overrides.
-    #[serde(deny_unknown_fields)]
-    pub struct LineBrief {
-        pub spec: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub finish: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub factory: Option<FactorySettings>,
-        /// Whether the Finish may push the Line base to origin, only to create
-        /// or fast-forward it, never forcing (issue #193). False when absent.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        pub push_base: bool,
-    }
-}
-
-wire_enum! {
-    /// Where a Line stands: running its Stations, waiting at the Finish
-    /// checkpoint, approved, or closed at its Finish checkpoint.
-    pub enum LineStatus {
-        Running = "running",
-        Finish = "finish",
-        Done = "done",
-        Closed = "closed",
-    }
-}
-
-wire_struct! {
-    /// One Prove run of a Round.
-    pub struct LineProve {
-        pub ticket: String,
-        pub prove: ProveResult,
-        pub evidence: String,
-    }
-}
-
-wire_struct! {
-    /// What one Round did, kept for the Decide Station and the report.
-    pub struct LineRound {
-        pub round: u64,
-        pub proves: Vec<LineProve>,
-        pub findings: Vec<ReviewFinding>,
-        pub decide: Option<DecideVerdict>,
-    }
-}
-
-wire_struct! {
-    /// The Line's state (`line.json` in the pool directory): what the engine
-    /// routes from, re-read at every boot.
-    pub struct LineState {
-        pub brief: LineBrief,
-        /// Where the brief was read from, relative to the pool checkout.
-        pub brief_path: String,
-        pub status: LineStatus,
-        pub round: u64,
-        /// The current Station and its Ticket.
-        pub station: Station,
-        pub ticket: String,
-        /// Prove failures in this Round.
-        pub prove_fails: u64,
-        /// Fixes past the Prove limit that Resume bought in this Round.
-        pub fixes_bought: u64,
-        /// The current Ticket is a fix the Prove limit checkpointed.
-        pub gated: bool,
-        /// Rounds Decide has started past the first.
-        pub extra_rounds: u64,
-        /// Why the Line halted (a Close of a Station Ticket); null while it runs.
-        pub halted: Option<String>,
-        pub rounds: Vec<LineRound>,
-        /// The Line's branch, the pool's target branch as the Line started: a
-        /// Finish that opens a PR opens it from this branch.
-        #[serde(default)]
-        pub branch: String,
-        /// The Line base, copied from console.json's `lineBase` as the Line
-        /// started (issue #193). Absent for a Line with none, which reads as
-        /// cut from `main` at no known commit.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub base: Option<LineBase>,
-        /// The report Decide writes at the Finish, `runs/<line>-report.html` in
-        /// the pool directory, as an absolute path.
-        #[serde(default)]
-        pub report: String,
-    }
-}
-
-wire_struct! {
-    /// The Line as the Console's header strip and cards read it (ADR-0037), on
-    /// the snapshot from Start the Line on: "Round 2 · Prove · fails 1/2 ·
-    /// Finish: draft PR".
-    pub struct LineView {
-        pub round: u64,
-        /// The current Station and its Ticket.
-        pub station: Station,
-        pub ticket: String,
-        pub status: LineStatus,
-        /// Prove failures in this Round.
-        pub prove_fails: u64,
-        /// The failures this Round takes before the Line checkpoints: the
-        /// `proveFailsPerRound` in force plus the fixes Resume bought.
-        pub prove_fails_allowed: u64,
-        /// The Finish in force: none, draft-pr, pr, or the act it names.
-        pub finish: String,
-        /// Decide has written the report: GET /api/line/report serves it.
-        pub report: bool,
-        /// Why the Line halted (a Close of a Station Ticket); null while it runs.
-        pub halted: Option<String>,
-    }
-}
-
-wire_struct! {
-    /// POST /api/line/start's body: start the Line from its brief. `brief` is the
-    /// brief's path in the pool checkout; absent, the one `docs/specs/*.brief.json`
-    /// there. Answers 202 with the first Ticket, or the 409 `reason` envelope when
-    /// the brief is missing or invalid or the Line has already started.
-    pub struct LineStartRequest {
+        pub work: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub brief: Option<String>,
     }
 }
 
 wire_struct! {
-    /// The Line just started: its first Ticket.
-    pub struct LineStartResponse {
-        pub ticket_id: String,
+    /// POST /api/line/start's body: end the Line's live Grill on the brief committed on its
+    /// branch, merging that branch first. Answers 202 with the Line, or the 409 `reason` envelope.
+    pub struct LineStartRequest {
+        pub grill: String,
     }
 }
 
 wire_struct! {
-    /// GET /api/line: the pool's Line, null when none has started.
+    /// GET /api/line: the pool's Line as the engine runs it, null when the pool has none.
     pub struct LineResponse {
-        pub line: Option<LineState>,
+        pub line: Option<LineGraphView>,
     }
 }
 
@@ -2480,5 +2280,279 @@ wire_struct! {
     pub struct PlanSaveResponse {
         pub slug: String,
         pub plan: PlanFile,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A Line running a Plan (ADR-0039): line.json and the live graph
+// ---------------------------------------------------------------------------
+
+wire_struct! {
+    /// `line.json` in the pool directory: the frozen Plan, its rev, where the Line lives, and what
+    /// the run has absorbed. `ac_core::line::run` is the only reader that decides whether one is
+    /// valid; a file without `horde` is from before Plans and is refused.
+    pub struct LineFile {
+        /// The format tag, 1.
+        pub horde: u32,
+        pub plan: PlanFile,
+        /// Bumped by every applied plan edit.
+        pub rev: u64,
+        pub places: LinePlacesFile,
+        pub run: LineRunFile,
+    }
+}
+
+wire_struct! {
+    /// Where a Line lives: its branch, the Line base it was cut from, the spec and `pushBase` the
+    /// Line brief set, and the work Boot was given.
+    pub struct LinePlacesFile {
+        pub branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub base: Option<LineBase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub spec: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub push_base: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub work: Option<String>,
+    }
+}
+
+wire_enum! {
+    /// Where a running Line stands. `acting` means the Finish was approved and its Finish Ticket is
+    /// owed or running.
+    pub enum LineRunStatus {
+        Running = "running",
+        Finishing = "finishing",
+        Acting = "acting",
+        Done = "done",
+        Closed = "closed",
+    }
+}
+
+wire_struct! {
+    /// The run state a Line has absorbed. Ticket statuses and merged-ness are never stored here.
+    pub struct LineRunFile {
+        pub status: LineRunStatus,
+        /// The Finish Ticket while `acting`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub act: Option<String>,
+        pub nodes: Vec<LineNodeRunFile>,
+        pub edges: Vec<LineEdgeRunFile>,
+        /// Every done Ticket the run absorbed, in the order it settled.
+        pub settled: Vec<String>,
+    }
+}
+
+wire_struct! {
+    /// One item of work: from an Outcome's `items` or a Line brief's.
+    pub struct LineItem {
+        pub title: String,
+        pub body: String,
+    }
+}
+
+wire_struct! {
+    /// What travels along an edge.
+    pub struct LineHandoffFile {
+        /// Absent for what the Line started with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub from: Option<String>,
+        pub verdict: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub items: Vec<LineItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub notes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub halted: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// An edge named by its unique `(from, on, to)`.
+    pub struct LineEdgeKey {
+        pub from: String,
+        pub on: String,
+        pub to: String,
+    }
+}
+
+wire_struct! {
+    /// A `join: all` Gate's arrival on one incoming edge.
+    pub struct LineArrivalFile {
+        pub edge: LineEdgeKey,
+        pub handoff: LineHandoffFile,
+    }
+}
+
+wire_struct! {
+    /// One node's run state.
+    pub struct LineNodeRunFile {
+        pub id: String,
+        pub passes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub current: Option<LinePassFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub inbox: Vec<LineHandoffFile>,
+        /// Handoffs on verdicts with no out edge, one per verdict.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub parked: Vec<LineHandoffFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub arrived: Vec<LineArrivalFile>,
+    }
+}
+
+wire_struct! {
+    /// A node's live pass.
+    pub struct LinePassFile {
+        pub n: u32,
+        pub input: LineHandoffFile,
+        pub work: LinePassWorkFile,
+        /// A Decide pass's Prove and Review Tickets, fixed when the pass started.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub reads: Vec<String>,
+    }
+}
+
+wire_union! {
+    /// What a pass runs, told apart by `kind`.
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub enum LinePassWorkFile {
+        Tickets(LineTicketsWork),
+        Conversation(LineConversationWork),
+        Hold(LineHoldWork),
+        Finish(LineFinishWork),
+    }
+}
+
+wire_struct! {
+    @inline
+    /// A Ticket node's copies, and the items queued past its cap.
+    pub struct LineTicketsWork {
+        pub copies: Vec<LineCopyFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub queue: Vec<LineItem>,
+        pub cap: PlanCap,
+        pub next_seq: u32,
+    }
+}
+
+wire_struct! {
+    @inline
+    pub struct LineConversationWork {
+        pub id: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// An operator or Steward Gate's unanswered hold.
+    pub struct LineHoldWork {
+        pub ticket: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// The Finish has its handoff; `hold` once the Finish hold is written.
+    pub struct LineFinishWork {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One copy of a pass.
+    pub struct LineCopyFile {
+        pub ticket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub item: Option<LineItem>,
+        pub freed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub settled: Option<LineSettledFile>,
+    }
+}
+
+wire_struct! {
+    /// A copy's verdict, once it is done and merged or closed.
+    pub struct LineSettledFile {
+        pub verdict: String,
+        pub done: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub items: Vec<LineItem>,
+    }
+}
+
+wire_struct! {
+    /// One loop edge's counts. `traversals` never resets, so a loop hold's id is never reused.
+    pub struct LineEdgeRunFile {
+        pub edge: LineEdgeKey,
+        pub count: u32,
+        pub traversals: u32,
+        pub bought: u32,
+        pub steward_used: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub held: Option<LineHeldFile>,
+    }
+}
+
+wire_struct! {
+    /// A spent loop's handoff, waiting on its hold Ticket.
+    pub struct LineHeldFile {
+        pub ticket: String,
+        pub handoff: LineHandoffFile,
+    }
+}
+
+wire_struct! {
+    /// The Console's live Line graph (`Snapshot.line`, GET /api/line): the frozen Plan with what
+    /// the run holds on each node and loop edge. Ticket statuses join from the snapshot's tickets.
+    pub struct LineGraphView {
+        pub plan: PlanFile,
+        pub rev: u64,
+        pub status: LineRunStatus,
+        /// What the Finish waits for, as the refusal names it.
+        pub waiting_for: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub act: Option<String>,
+        pub nodes: Vec<LineNodeView>,
+        pub edges: Vec<LineEdgeView>,
+    }
+}
+
+wire_struct! {
+    /// One node of the live graph, every Plan node listed.
+    pub struct LineNodeView {
+        pub id: String,
+        pub passes: u32,
+        /// The live pass, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub pass: Option<u32>,
+        /// The live pass's copies, or its Conversation.
+        pub tickets: Vec<String>,
+        pub queued: u32,
+        pub inbox: u32,
+        /// Verdicts with no out edge, waiting for one.
+        pub parked: Vec<String>,
+        /// A `join: all` Gate's arrivals so far.
+        pub arrived: Vec<LineEdgeKey>,
+        /// A Gate's or the Finish's hold Ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
+    }
+}
+
+wire_struct! {
+    /// One capped loop edge of the live graph.
+    pub struct LineEdgeView {
+        pub edge: LineEdgeKey,
+        pub count: u32,
+        pub max: u32,
+        pub bought: u32,
+        /// The spent loop's hold Ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub hold: Option<String>,
     }
 }

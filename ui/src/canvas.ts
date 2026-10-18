@@ -14,7 +14,6 @@
 import {
   checkpointNotice,
   conversationTurnLabel,
-  stationLabel,
   statusLabel,
   UNASSIGNED_LABEL,
   VITALS_MAX_SAMPLES,
@@ -25,7 +24,6 @@ import {
   type SpawnCardView,
   type RunPhase,
   type SpawnLineView,
-  type Station,
   type TicketCardView,
   type UtilityCardView,
   type VitalsView,
@@ -217,14 +215,10 @@ function interruptDot(interrupt: InterruptView): HTMLElement {
   });
 }
 
-// A Station Ticket's label (ADR-0037), in its card's head beside the id:
-// the Grill badge's chip, naming the Station the Ticket works on the Line.
-function stationBadge(station: Station): HTMLElement {
-  return h(
-    "span",
-    { class: "station-badge", title: `the Line's ${stationLabel(station)} Station` },
-    stationLabel(station),
-  );
+// A Line Ticket's label (ADR-0039), in its card's head beside the id: the
+// Grill badge's chip, naming the Plan node the Ticket works.
+function nodeBadge(node: string): HTMLElement {
+  return h("span", { class: "node-badge", title: `the Line's ${node} node` }, node);
 }
 
 type Drag =
@@ -708,7 +702,7 @@ export class Canvas {
       "div",
       { class: "node-card-head" },
       h("span", { class: "node-card-id" }, card.ticketId),
-      card.station ? stationBadge(card.station) : null,
+      card.node ? nodeBadge(card.node) : null,
       h(
         "span",
         {
@@ -742,7 +736,7 @@ export class Canvas {
         class:
           `node-card ticket-card ticket-card-${card.status}` +
           (card.mergeState ? ` ticket-card-merge-${card.mergeState}` : "") +
-          (card.station ? " ticket-card-station" : "") +
+          (card.node ? " ticket-card-node" : "") +
           (card.interrupt
             ? card.interrupt.queued
               ? " ticket-card-queued"

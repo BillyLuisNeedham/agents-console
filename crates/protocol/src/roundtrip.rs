@@ -246,7 +246,7 @@ fn settings() {
 #[test]
 fn pool_config_as_console_json_writes_it() {
     let config: PoolConfig = round_trip(
-        r#"{"defaults":{"harness":"claude","model":"opus","effort":"high","drivers":"implement"},"assign":{"01":{"model":"sonnet","verify":2}},"resolver":{"harness":"codex","model":"gpt-5"},"port":8787,"spawnCaps":{"perRun":10},"selection":"human","terminal":"herdr","reviewer":"Be strict.","checkpoint":"Ask early.","title":"Pool A","steward":{"budget":5,"assign":{"model":"haiku"},"mayClose":false}}"#,
+        r#"{"defaults":{"harness":"claude","model":"opus","effort":"high","drivers":"implement"},"assign":{"01":{"model":"sonnet","verify":2}},"resolver":{"harness":"codex","model":"gpt-5"},"port":8787,"spawnCaps":{"perRun":10},"maxLive":2,"selection":"human","terminal":"herdr","reviewer":"Be strict.","checkpoint":"Ask early.","title":"Pool A","steward":{"budget":5,"assign":{"model":"haiku"},"mayClose":false}}"#,
     );
     assert_eq!(
         config.resolver,
@@ -256,6 +256,7 @@ fn pool_config_as_console_json_writes_it() {
             effort: None,
         }))
     );
+    assert_eq!(config.max_live, Some(2));
     round_trip::<PoolConfig>(r#"{"resolver":"none"}"#);
     round_trip::<PoolConfig>(r#"{}"#);
 }
@@ -337,7 +338,7 @@ fn every_string_union_reads_its_own_strings() {
             Value::String(kind.as_str().to_string())
         );
     }
-    assert_eq!(TicketEventKind::ALL.len(), 35);
+    assert_eq!(TicketEventKind::ALL.len(), 36);
     assert_eq!(
         TicketStatus::parse("in-progress"),
         Some(TicketStatus::InProgress)

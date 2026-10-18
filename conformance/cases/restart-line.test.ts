@@ -1,0 +1,104 @@
+/**
+ * A Line across a restart (ADR-0039), seen from outside the server: nothing of the Line is rebuilt
+ * but line.json, and the first tick re-reads every fact from the pool and writes only what is
+ * missing, under the same ids and the same bytes. A done Ticket whose merge has not landed hands
+ * nothing on until it does; a deleted hold the Line still names is written again as it was; and
+ * the Finish Ticket owed by an approval is written once.
+ */
+
+import { expect } from "bun:test";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { EnrichedSnapshot, LineFile } from "../../protocol/wire.ts";
+import { readStateLine, until } from "../harness/pool-files.ts";
+import { answer, settle, snapshot, statuses } from "../harness/pool-run.ts";
+import { PASS, approveFinish, atCheckpoint, begun, launches, lineWorld, passPath, verdict } from "./line-support.ts";
+import { poolLog, restartCase, startLeg, untilState } from "./restart-support.ts";
+
+const issuePath = (pool: string, id: string): string => join(pool, "issues", `${id}.md`);
+const wrote = (log: string[], id: string): number => log.filter((l) => l === `line: wrote ${id}`).length;
+const mergeBlocked = (s: EnrichedSnapshot): boolean =>
+  s.state.interrupts.some((i) => i.ticketId === "prove-1" && i.kind === "merge-conflict");
+
+restartCase("a stop while prove-1 is done but its merge has not landed writes review-1 once, after the merge", async (t) => {
+  const world = lineWorld(t);
+  passPath(world);
+  world.stubs.script("prove-1", {
+    ...PASS,
+    run: "printf '%s\\n' fresh > proof.txt; git add proof.txt; git commit -qm 'prove-1 evidence note'",
+  });
+  writeFileSync(join(world.repo, "proof.txt"), "stale\n");
+  const first = await startLeg(t, world, 0);
+  await begun(first);
+
+  const blocked = await untilState(first, "prove-1's merge to be blocked", mergeBlocked);
+  expect(statuses(blocked)).toEqual({ "implement-1": "done", "prove-1": "done" });
+  expect(existsSync(issuePath(world.pool, "review-1"))).toBe(false);
+  expect(blocked.line?.nodes.find((n) => n.id === "prove")?.tickets).toEqual(["prove-1"]);
+  await first.stop();
+
+  rmSync(join(world.repo, "proof.txt"));
+  const second = await startLeg(t, world, 1);
+  const restored = await untilState(second, "prove-1's blocked merge after the restart", mergeBlocked);
+  expect(statuses(restored)["prove-1"]).toBe("done");
+  expect(existsSync(issuePath(world.pool, "review-1"))).toBe(false);
+
+  await answer(second, { ticketId: "prove-1" });
+  await atCheckpoint(second, "finish-1");
+  expect(readFileSync(join(world.repo, "proof.txt"), "utf8")).toBe("fresh\n");
+  const log = await poolLog(second);
+  const merged = log.indexOf("interrupt answered for prove-1 (merge-conflict): merge landed");
+  expect(merged).toBeGreaterThan(-1);
+  expect(log.findIndex((l) => l === "line: wrote review-1")).toBeGreaterThan(merged);
+  expect(wrote(log, "review-1")).toBe(1);
+  expect(launches(world).filter((k) => k === "review-1")).toEqual(["review-1"]);
+  expect(readStateLine(world.pool, "review-1.md").line).toContain("blocked-by=prove-1 status=done node=review");
+});
+
+restartCase("a deleted hold the Line still names is written again byte for byte at the next boot", async (t) => {
+  const world = lineWorld(t);
+  passPath(world);
+  const first = await startLeg(t, world, 0);
+  await begun(first);
+  await atCheckpoint(first, "finish-1");
+  const bytes = readFileSync(issuePath(world.pool, "finish-1"), "utf8");
+  await first.stop();
+
+  rmSync(issuePath(world.pool, "finish-1"));
+  const second = await startLeg(t, world, 1);
+  const again = await atCheckpoint(second, "finish-1");
+  expect(readFileSync(issuePath(world.pool, "finish-1"), "utf8")).toBe(bytes);
+  expect(again.state.interrupts.map((i) => i.ticketId)).toEqual(["finish-1"]);
+  expect(launches(world)).toEqual(["implement-1", "prove-1", "review-1", "decide-1"]);
+  const done = await approveFinish(second, "finish-1");
+  expect(done.line?.status).toBe("done");
+});
+
+restartCase("a stop after the Finish is approved and before finish-1-act ends writes finish-1-act once", async (t) => {
+  const world = lineWorld(t, { spec: "docs/specs/line.md", finish: "draft-pr" });
+  world.git(["checkout", "-q", "-b", "line/x"]);
+  passPath(world);
+  const act = world.stubs.hold("finish-1-act", verdict({ url: "https://github.com/o/r/pull/7" }));
+  const first = await startLeg(t, world, 0);
+  await begun(first);
+  await atCheckpoint(first, "finish-1");
+  await answer(first, { ticketId: "finish-1", note: "approved" });
+  await until(
+    () => readStateLine(world.pool, "finish-1-act.md").line,
+    (line) => line.includes("status=in-progress"),
+    { what: "finish-1-act to launch" },
+  );
+  const bytes = readFileSync(issuePath(world.pool, "finish-1-act"), "utf8").split("\n").slice(1).join("\n");
+  await first.stop();
+  const saved = JSON.parse(readFileSync(join(world.pool, "line.json"), "utf8")) as LineFile;
+  expect(saved.run).toMatchObject({ status: "acting", act: "finish-1-act" });
+
+  const second = await startLeg(t, world, 1);
+  expect((await snapshot(second)).line).toMatchObject({ status: "acting", act: "finish-1-act" });
+  await act.release(30_000);
+  const done = await settle(second, (s) => s.phase === "done", { what: "the run to be done" });
+  expect(done.line?.status).toBe("done");
+  expect(statuses(done)["finish-1-act"]).toBe("done");
+  expect(readFileSync(issuePath(world.pool, "finish-1-act"), "utf8").split("\n").slice(1).join("\n")).toStartWith(bytes);
+  expect(wrote(await poolLog(second), "finish-1-act")).toBe(1);
+});

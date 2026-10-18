@@ -7,9 +7,11 @@ use tokio::sync::oneshot;
 
 use ac_core::assignment::{Assignment, engine_ticket_build_id};
 use ac_core::events::{append_event, attempt_log_name, event_now, last_attempt, next_attempt};
+use ac_core::machine_defaults::read_machine_defaults;
+use ac_core::max_live::max_live_of;
 use ac_core::pool::{TicketMarker, is_finished, write_marker_status};
 use ac_io::git;
-use ac_protocol::{InterruptKind, RunPhase, SpawnKind, TicketEventKind, TicketStatus};
+use ac_protocol::{AttemptRole, InterruptKind, RunPhase, SpawnKind, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
 use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
@@ -147,6 +149,7 @@ pub enum WaitWhy {
     Live,
     BlockerNotDone(String),
     BlockerNotMerged(String),
+    PoolFull { live: u64, max: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +164,9 @@ pub trait PoolFacts {
     fn is_live(&self, id: &str) -> bool;
     fn in_git(&self) -> bool;
     fn landed(&mut self, id: &str) -> bool;
+    fn live_count(&self) -> u64;
+    fn max_live(&mut self) -> Option<u64>;
+    fn need(&self, marker: &TicketMarker) -> u64;
     fn missing_assignment(&self, id: &str) -> Option<&'static str>;
     fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String>;
 }
@@ -196,6 +202,13 @@ pub fn eligibility(facts: &mut impl PoolFacts, marker: &TicketMarker) -> Eligibi
     if let Some(blocker) = marker.blocked_by.iter().find(|b| !merged(facts, b)) {
         return Eligibility::Wait(WaitWhy::BlockerNotMerged(blocker.clone()));
     }
+    // With nothing live a Ticket always starts, so a verify round wider than the bound still runs.
+    if let Some(max) = facts.max_live() {
+        let live = facts.live_count();
+        if live > 0 && live + facts.need(marker) > max {
+            return Eligibility::Wait(WaitWhy::PoolFull { live, max });
+        }
+    }
     if let Some(missing) = facts.missing_assignment(id) {
         return Eligibility::Checkpoint(CheckpointWhy::MissingAssignment(missing));
     }
@@ -208,6 +221,7 @@ pub fn eligibility(facts: &mut impl PoolFacts, marker: &TicketMarker) -> Eligibi
 struct SessionFacts<'a> {
     session: &'a mut Session,
     unlanded: &'a mut Option<Vec<String>>,
+    max_live: &'a mut Option<Option<u64>>,
 }
 
 impl PoolFacts for SessionFacts<'_> {
@@ -216,9 +230,7 @@ impl PoolFacts for SessionFacts<'_> {
     }
 
     fn is_hold(&self, id: &str) -> bool {
-        self.session
-            .marker(id)
-            .is_some_and(|m| m.station == Some(ac_protocol::Station::Finish))
+        self.session.marker(id).is_some_and(|m| m.hold)
     }
 
     fn is_live(&self, id: &str) -> bool {
@@ -240,6 +252,21 @@ impl PoolFacts for SessionFacts<'_> {
             .any(|held| held == id)
     }
 
+    fn live_count(&self) -> u64 {
+        live_ticket_attempts(self.session)
+    }
+
+    fn max_live(&mut self) -> Option<u64> {
+        let session = &*self.session;
+        *self
+            .max_live
+            .get_or_insert_with(|| max_live_in_force(session))
+    }
+
+    fn need(&self, marker: &TicketMarker) -> u64 {
+        verify_of(self.session, marker).unwrap_or(1)
+    }
+
     fn missing_assignment(&self, id: &str) -> Option<&'static str> {
         let assignment = self.session.assignments.get(id);
         if assignment.is_none_or(|a| a.harness.is_empty()) {
@@ -254,6 +281,32 @@ impl PoolFacts for SessionFacts<'_> {
     fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String> {
         held_branch_directory(self.session, marker)
     }
+}
+
+/// The Ticket Attempts `maxLive` counts (ADR-0040): every Candidate and plain Attempt from its launch
+/// to its exit, every resolver, and every Continued or boot-adopted Attempt. Conversations, enlisted
+/// panes, graders and head-to-head judges are not counted.
+pub fn live_ticket_attempts(session: &Session) -> u64 {
+    let enlisted = |id: &String| {
+        session
+            .marker(id)
+            .is_some_and(|m| m.enlisted_from.is_some())
+    };
+    let launched = session.launched.iter().filter(|id| !enlisted(id)).count();
+    let resolvers = session.live_attempts.count_of(AttemptRole::Resolver);
+    let continued = session.continued.keys().filter(|id| !enlisted(id)).count();
+    let adopted = session
+        .adopted
+        .keys()
+        .filter(|id| !enlisted(id) && !session.continued.contains_key(*id))
+        .count();
+    (launched + resolvers + continued + adopted) as u64
+}
+
+/// The pool's `maxLive`, else the Machine default's, read afresh each Tick.
+fn max_live_in_force(session: &Session) -> Option<u64> {
+    max_live_of(&session.state.config)
+        .or_else(|| read_machine_defaults(&session.machine_defaults).max_live)
 }
 
 fn verify_of(session: &Session, marker: &TicketMarker) -> Option<u64> {
@@ -444,7 +497,7 @@ const TICK_STEPS: [fn(&mut Session) -> anyhow::Result<()>; 6] = [
     crate::config_reload::reload_config,
     crate::answers::drain_answers,
     crate::interrupts::reconcile_deadlocks,
-    crate::line::route_line,
+    crate::line::advance_line,
     crate::spawns::adopt_spawn_proposals,
     start_owed_grading,
 ];
@@ -454,6 +507,7 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         anyhow::bail!(failure);
     }
     let before = serde_json::to_value(&session.state)?;
+    let line_before = session.line.clone();
     for step in TICK_STEPS {
         step(session)?;
     }
@@ -471,7 +525,9 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
         && session.continued_grades.is_empty()
         && !spawns_await_tick(session)
         && merge_hold(session).is_empty();
-    let stirred = state != before || !launches.is_empty() || !close;
+    // line.json is saved by its step; a change to the run alone still persists and emits.
+    let line_moved = session.line != line_before;
+    let stirred = state != before || line_moved || !launches.is_empty() || !close;
     if stirred {
         emit_snapshot(session, RunPhase::Running);
     }
@@ -480,12 +536,13 @@ pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     Ok(Tick {
         launches,
         next: if close { Next::Close } else { Next::Wait },
-        changed: !held && session.persisted.as_ref() != Some(&state),
+        changed: !held && (line_moved || session.persisted.as_ref() != Some(&state)),
     })
 }
 
 fn launch_eligible(session: &mut Session) -> anyhow::Result<Vec<Launch>> {
     let mut unlanded = None;
+    let mut max_live = None;
     let mut launches = Vec::new();
     for index in 0..session.markers.len() {
         let marker = session.markers[index].clone();
@@ -493,6 +550,7 @@ fn launch_eligible(session: &mut Session) -> anyhow::Result<Vec<Launch>> {
             &mut SessionFacts {
                 session,
                 unlanded: &mut unlanded,
+                max_live: &mut max_live,
             },
             &marker,
         );
@@ -954,7 +1012,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 .collect();
             let merging = s.merge_line.unsettled();
             let raised = pending.is_empty()
-                && !crate::line::is_factory_pool(s)
+                && s.line.is_none()
                 && s.state.interrupts.is_empty()
                 && !s.state.review_approved
                 && merging.is_empty();
@@ -972,9 +1030,8 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 }
             }
             let interrupts = !s.state.interrupts.is_empty();
-            // A Factory pool is done only when its Line is: before Start the Line, and while it
-            // routes, an empty or finished pool waits on it.
-            let line_waits = crate::line::is_factory_pool(s) && !crate::line::line_ended(s);
+            // A Line pool is done only when its Line is: while it runs, a finished pool waits on it.
+            let line_waits = s.line.is_some() && !crate::line::line_ended(s);
             let phase = if interrupts
                 || !outside.is_empty()
                 || !s.continued_grades.is_empty()
@@ -1005,11 +1062,7 @@ pub async fn close_drive(engine: &Engine) -> anyhow::Result<()> {
                 RunPhase::Quiescent => format!(
                     "pool quiescent: waiting on {}",
                     if line_waits && pending.is_empty() && outside.is_empty() {
-                        if s.line.is_some() {
-                            "the Line".to_owned()
-                        } else {
-                            "Start the Line".to_owned()
-                        }
+                        "the Line".to_owned()
                     } else if !outside.is_empty() {
                         outside
                             .iter()
@@ -1073,6 +1126,9 @@ mod tests {
         live: Vec<String>,
         git: bool,
         unlanded: Vec<String>,
+        live_count: u64,
+        max_live: Option<u64>,
+        need: HashMap<String, u64>,
         missing: HashMap<String, &'static str>,
         held_at: HashMap<String, String>,
     }
@@ -1093,6 +1149,15 @@ mod tests {
         fn landed(&mut self, id: &str) -> bool {
             !self.unlanded.iter().any(|u| u == id)
         }
+        fn live_count(&self) -> u64 {
+            self.live_count
+        }
+        fn max_live(&mut self) -> Option<u64> {
+            self.max_live
+        }
+        fn need(&self, marker: &TicketMarker) -> u64 {
+            self.need.get(&marker.id).copied().unwrap_or(1)
+        }
         fn missing_assignment(&self, id: &str) -> Option<&'static str> {
             self.missing.get(id).copied()
         }
@@ -1112,7 +1177,8 @@ mod tests {
             spawned_by: None,
             enlisted_from: None,
             spawn_assign: None,
-            station: None,
+            node: None,
+            hold: false,
         }
     }
 
@@ -1213,6 +1279,89 @@ mod tests {
                 Eligibility::Start,
             ),
             (
+                "a full pool waits, naming what is live and the bound",
+                Facts {
+                    live_count: 2,
+                    max_live: Some(2),
+                    ..facts(&[("03", Ready)])
+                },
+                marker("03", &[]),
+                Eligibility::Wait(WaitWhy::PoolFull { live: 2, max: 2 }),
+            ),
+            (
+                "a blocker not merged is named before a full pool",
+                Facts {
+                    unlanded: vec!["01".into()],
+                    live_count: 2,
+                    max_live: Some(2),
+                    ..facts(&[("02", Ready), ("01", Done)])
+                },
+                marker("02", &["01"]),
+                Eligibility::Wait(WaitWhy::BlockerNotMerged("01".into())),
+            ),
+            (
+                "a full pool waits before a missing Assignment is raised",
+                Facts {
+                    live_count: 1,
+                    max_live: Some(1),
+                    missing: HashMap::from([("02".to_owned(), "harness")]),
+                    ..facts(&[("02", Ready)])
+                },
+                marker("02", &[]),
+                Eligibility::Wait(WaitWhy::PoolFull { live: 1, max: 1 }),
+            ),
+            (
+                "a pool with room starts",
+                Facts {
+                    live_count: 1,
+                    max_live: Some(2),
+                    ..facts(&[("02", Ready)])
+                },
+                marker("02", &[]),
+                Eligibility::Start,
+            ),
+            (
+                "with nothing live a verify round wider than the bound starts",
+                Facts {
+                    max_live: Some(1),
+                    need: HashMap::from([("01".to_owned(), 2)]),
+                    ..facts(&[("01", Ready)])
+                },
+                marker("01", &[]),
+                Eligibility::Start,
+            ),
+            (
+                "no bound never waits",
+                Facts {
+                    live_count: 40,
+                    ..facts(&[("41", Ready)])
+                },
+                marker("41", &[]),
+                Eligibility::Start,
+            ),
+            (
+                "a verify round that does not fit waits",
+                Facts {
+                    live_count: 2,
+                    max_live: Some(3),
+                    need: HashMap::from([("v".to_owned(), 2)]),
+                    ..facts(&[("v", Ready), ("p", Ready)])
+                },
+                marker("v", &[]),
+                Eligibility::Wait(WaitWhy::PoolFull { live: 2, max: 3 }),
+            ),
+            (
+                "a plain Ticket fits where that verify round did not",
+                Facts {
+                    live_count: 2,
+                    max_live: Some(3),
+                    need: HashMap::from([("v".to_owned(), 2)]),
+                    ..facts(&[("v", Ready), ("p", Ready)])
+                },
+                marker("p", &[]),
+                Eligibility::Start,
+            ),
+            (
                 "a missing Assignment field",
                 Facts {
                     missing: HashMap::from([("01".to_owned(), "model")]),
@@ -1240,6 +1389,86 @@ mod tests {
         for (row, mut facts, marker, expected) in rows {
             assert_eq!(eligibility(&mut facts, &marker), expected, "{row}");
         }
+    }
+
+    #[test]
+    fn counts_each_live_ticket_attempt_once_and_nothing_the_engine_runs_beside_them() {
+        use crate::continued::ContinuedRelease;
+        use crate::held::HeldPane;
+        use crate::keep_talking::ContinuedAttempt;
+        use crate::live_attempts::LiveAttemptEntry;
+        use crate::session::AdoptedAttempt;
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        let enlisted = |id: &str| TicketMarker {
+            enlisted_from: Some("/checkout".into()),
+            ..marker(id, &[])
+        };
+        session.markers = vec![
+            marker("01", &[]),
+            marker("v", &[]),
+            marker("m", &[]),
+            marker("a", &[]),
+            marker("c", &[]),
+            enlisted("e"),
+            enlisted("f"),
+            enlisted("g"),
+        ];
+        session.launched = ["01", "v", "v", "e"].map(String::from).to_vec();
+        session
+            .live_attempts
+            .register("01", LiveAttemptEntry::new(1, None, None));
+        session.live_attempts.register(
+            "m",
+            LiveAttemptEntry {
+                role: AttemptRole::Resolver,
+                ..LiveAttemptEntry::new(2, None, None)
+            },
+        );
+        session
+            .live_attempts
+            .register("01-grader-1", LiveAttemptEntry::new(1, None, None));
+        session
+            .live_attempts
+            .register("conv-1", LiveAttemptEntry::new(1, None, None));
+        let adopted = || AdoptedAttempt {
+            pane_id: "p".into(),
+            attempt: 1,
+            abandoned: false,
+        };
+        session.adopted.insert("a".into(), adopted());
+        session.adopted.insert("f".into(), adopted());
+        session
+            .live_attempts
+            .register("a", LiveAttemptEntry::new(1, Some("p".into()), None));
+        let continued = || ContinuedAttempt {
+            attempt: 2,
+            work: HeldPane {
+                attempt: 1,
+                pane_id: "p".into(),
+                tab_id: None,
+                terminal_id: None,
+                cwd: "/w".into(),
+                branch: None,
+                harness: "claude".into(),
+                model: "m".into(),
+                effort: None,
+                work_attempt: 1,
+                numbered: false,
+                stream: None,
+                spawned_at: String::new(),
+                wrapped: true,
+            },
+            release: ContinuedRelease::detached(),
+            log_path: String::new(),
+            outcome_path: String::new(),
+        };
+        // A Continued attempt re-adopted at boot is both adopted and continued.
+        session.adopted.insert("c".into(), adopted());
+        session.continued.insert("c".into(), continued());
+        session.continued.insert("g".into(), continued());
+        // 01 once, both of v's Candidates, m's resolver, a's adopted Attempt and c's Continued one.
+        assert_eq!(live_ticket_attempts(&session), 6);
     }
 
     #[test]

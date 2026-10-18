@@ -11,7 +11,8 @@ use ac_core::pool::{
 };
 use ac_core::spawn_caps::spawn_caps_of;
 use ac_core::spawn_ledger::{
-    LedgerEntry, SpawnLedgerInput, render_spawn_ledger, spawn_ledger_path, write_spawn_ledger,
+    LedgerEntry, SpawnLedgerInput, held_reason_text, render_spawn_ledger, spawn_ledger_path,
+    write_spawn_ledger,
 };
 use ac_core::spawn_proposals::{HeldSpawn, NewHeldSpawn, PendingSpawn, TakenProposal};
 use ac_protocol::{
@@ -255,6 +256,26 @@ fn spawn_proposal_problem(
     None
 }
 
+fn has_started(session: &Session, id: &str) -> bool {
+    matches!(
+        state_of(session, id),
+        Some(TicketStatus::InProgress | TicketStatus::Checkpoint)
+    )
+}
+
+// The Tickets a proposal's named `blocks` reach that have already started (ADR-0040): their
+// blocked-by is not the proposal's to rewrite, so it waits for the operator instead.
+fn started_blocks(session: &Session, proposal: &SpawnProposal) -> Vec<String> {
+    match &proposal.blocks {
+        Some(SpawnBlocks::Ids(named)) => named
+            .iter()
+            .filter(|id| has_started(session, id))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn apply_spawn_blocks(
     session: &mut Session,
     spawn_id: &str,
@@ -290,6 +311,12 @@ fn apply_spawn_blocks(
         if waits_on.contains(&target_id) {
             log.push(format!(
                 "ticket {spawn_id}: not blocking {target_id}, which it already waits on"
+            ));
+            continue;
+        }
+        if has_started(session, &target_id) {
+            log.push(format!(
+                "ticket {spawn_id}: not blocking {target_id}, which has started"
             ));
             continue;
         }
@@ -359,11 +386,8 @@ pub fn take_spawn_proposals(
     let attempt = last_attempt(runs(session), parent_id);
     let mut log: Vec<String> = Vec::new();
     let mut taken: Vec<TakenProposal> = Vec::new();
-    // A Station Ticket or the Grill: both are inside the Line (ADR-0037).
-    let line_station = session
-        .marker(parent_id)
-        .is_some_and(|m| m.station.is_some())
-        || crate::conversations::grill_id(session).as_deref() == Some(parent_id);
+    // A Line Ticket or the Grill: both are inside the Line (ADR-0037).
+    let inside_line = crate::line::holds_spawns(session, parent_id);
     // Room is counted in signed numbers, which a cap fits: `spawn_caps_of` holds one at `i64::MAX`.
     let mut attempt_room = caps.per_attempt as i64;
     // `None` is a Conversation's unbounded run room.
@@ -407,9 +431,10 @@ pub fn take_spawn_proposals(
             held,
             unknown_overlaps: unknown,
         };
-        if line_station {
-            // Anything a Station proposes merges into the Line's branch once it lands, so only the
-            // operator lands it (ADR-0037); it uses none of the caps' room.
+        if inside_line {
+            // Anything a Line Ticket proposes merges into the Line's branch once it lands, so only
+            // the operator lands it (ADR-0037) unless its node says `spawns: land`; it uses none of
+            // the caps' room.
             taken.push(entry(Some(HeldSpawnReason::Line), None));
         } else if !proposal.overlaps.as_deref().unwrap_or_default().is_empty() {
             taken.push(entry(
@@ -548,6 +573,9 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
     if let Some(unknown) = &held.unknown_overlaps {
         entry.insert("unknownOverlaps".into(), json!(unknown));
     }
+    if let Some(started) = &held.started_ids {
+        entry.insert("startedIds".into(), json!(started));
+    }
     if held.reason == HeldSpawnReason::Refused
         && let Some(error) = &held.adopt_error
     {
@@ -654,7 +682,35 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     let mut landing: Vec<(String, String)> = Vec::new();
     for entry in &pending {
         match spawn_proposal_problem(session, &entry.proposal, &known) {
-            None => landing.push((entry.id.clone(), mint(&entry.parent_id))),
+            None => {
+                let started = started_blocks(session, &entry.proposal);
+                if started.is_empty() {
+                    landing.push((entry.id.clone(), mint(&entry.parent_id)));
+                    continue;
+                }
+                let Some(held) =
+                    session
+                        .spawn_proposals
+                        .hold_started(&entry.id, &started, &js::now_iso())?
+                else {
+                    continue;
+                };
+                append(
+                    session,
+                    &entry.parent_id,
+                    &held.at,
+                    last_attempt(runs(session), &entry.parent_id),
+                    TicketEventKind::SpawnHeld,
+                    json!({ "held": [held_event_entry(&held)] }),
+                )?;
+                log.push(format!(
+                    "ticket {}: {} ('{}') held: it {}",
+                    entry.parent_id,
+                    entry.id,
+                    entry.proposal.title,
+                    held_reason_text(HeldSpawnReason::Started, &[], &[], &started, None)
+                ));
+            }
             Some(reason) => {
                 let Some(held) =
                     session
@@ -971,9 +1027,12 @@ pub fn ledger_path(session: &Session) -> String {
     js::path_text(&spawn_ledger_path(runs(session)))
 }
 
-fn emit_current(session: &mut Session) {
+// An operator's or Steward's answer on a spawn: shown at once, and the drive woken, since the
+// Line's Finish waits on every Held and Pending spawn.
+fn emit_and_wake(session: &mut Session) {
     let phase = session.current_phase();
     emit_snapshot(session, phase);
+    session.wake();
 }
 
 pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
@@ -998,9 +1057,7 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
         .spawn_proposals
         .begin_adopt(id)
         .map_err(|e| refused(e.to_string()))?;
-    let phase = session.current_phase();
-    emit_snapshot(session, phase);
-    session.wake();
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1046,7 +1103,7 @@ pub fn discard_held_spawn(
             }
         ),
     );
-    emit_current(session);
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1170,6 +1227,7 @@ pub fn recover_truncated_spawns(session: &mut Session) -> anyhow::Result<()> {
                 at: event.at.clone(),
                 adopt_error: None,
                 unknown_overlaps: None,
+                started_ids: None,
             })
             .collect();
         let held = session.spawn_proposals.recover(&key, entries)?;

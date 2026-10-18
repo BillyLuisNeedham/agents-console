@@ -236,7 +236,7 @@ A Spawn proposal a cap had no room for, one the proposing agent marked as overla
 _Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the scheduler)
 
 **Pending spawn**:
-A Spawn proposal within the caps, taken and waiting for the next Tick to land, which follows at once. Kept across restarts, so a proposal taken just before a restart lands at the first Tick after it, and listed in the Spawn ledger. It has no operator verbs: it lands before anyone could act on it, and an operator who wants to review follow-ups first sets a Spawn cap to 0, which makes each one a Held spawn. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150; its Hold and Discard retired by ADR-0041 (`docs/adr/0041-a-pending-spawn-lands-before-anyone-can-act-on-it.md`).
+A Spawn proposal within the caps, taken and waiting for the next Tick to land, which follows at once. Kept across restarts, so a proposal taken just before a restart lands at the first Tick after it, and listed in the Spawn ledger. It has no operator verbs: it lands before anyone could act on it, and an operator who wants to review follow-ups first sets a Spawn cap to 0, which makes each one a Held spawn. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150; its Hold and Discard retired by ADR-0042 (`docs/adr/0042-a-pending-spawn-lands-before-anyone-can-act-on-it.md`).
 _Avoid_: queued spawn (too close to the Merge queue), proposed spawn (a Held spawn is proposed too), draft ticket
 
 **Spawn ledger**:

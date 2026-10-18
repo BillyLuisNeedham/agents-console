@@ -300,6 +300,8 @@ fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
     std::fs::create_dir_all(&runs).unwrap();
     let (publisher, _) = tokio::sync::watch::channel(None);
     let mut session = crate::testkit::bare_session(publisher);
+    // As mid-run: a wake rings the running drive rather than starting one.
+    session.driving = true;
     session.pool_dir = dir.to_string_lossy().into_owned();
     session.issues_dir = dir.join("issues").to_string_lossy().into_owned();
     session.runs_dir = runs.to_string_lossy().into_owned();
@@ -317,7 +319,8 @@ fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
-        station: None,
+        node: None,
+        hold: false,
     });
     session
         .state
@@ -337,6 +340,25 @@ fn parent_events(dir: &std::path::Path, kind: TicketEventKind) -> Vec<Value> {
         .filter(|event| event.kind == kind)
         .map(|event| Value::Object(event.payload.clone()))
         .collect()
+}
+
+#[test]
+fn discarding_a_held_spawn_wakes_the_drive_since_the_lines_finish_waits_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({ "perRun": 0 }));
+    let proposals = vec![serde_json::from_value(proposal("Over the cap", json!({}))).unwrap()];
+    let (_, held) = crate::spawns::take_spawn_proposals(
+        &mut session,
+        "01",
+        proposals,
+        ac_protocol::SpawnKind::Ticket,
+    )
+    .unwrap();
+    assert_eq!(held[0].reason, HeldSpawnReason::PerRun);
+
+    session.wakes.see_all();
+    crate::spawns::discard_held_spawn(&mut session, &held[0].id, None).unwrap();
+    assert!(session.wakes.any_unseen(), "a held discard wakes the drive");
 }
 
 #[test]
