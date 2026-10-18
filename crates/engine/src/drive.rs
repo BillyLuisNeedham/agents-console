@@ -435,17 +435,23 @@ fn persistence_pending(session: &Session) -> bool {
         .any(|i| i.kind == InterruptKind::Persistence)
 }
 
+const TICK_STEPS: [fn(&mut Session) -> anyhow::Result<()>; 6] = [
+    crate::config_reload::reload_config,
+    crate::answers::drain_answers,
+    crate::interrupts::reconcile_deadlocks,
+    crate::line::route_line,
+    crate::spawns::adopt_spawn_proposals,
+    start_owed_grading,
+];
+
 pub fn tick(session: &mut Session) -> anyhow::Result<Tick> {
     if let Some(failure) = session.drive_failure.take() {
         anyhow::bail!(failure);
     }
     let before = serde_json::to_value(&session.state)?;
-    crate::config_reload::reload_config(session)?;
-    crate::answers::drain_answers(session)?;
-    crate::interrupts::reconcile_deadlocks(session)?;
-    crate::line::route_line(session)?;
-    crate::spawns::adopt_spawn_proposals(session)?;
-    start_owed_grading(session)?;
+    for step in TICK_STEPS {
+        step(session)?;
+    }
     let held = persistence_pending(session);
     let launches = if held {
         Vec::new()
