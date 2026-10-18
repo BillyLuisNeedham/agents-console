@@ -26,6 +26,7 @@ import type {
   TicketLogResponse,
 } from "../src/project";
 import type { LogPush } from "../../protocol/protocol.ts";
+import type { PlanDraftResponse, PlanEditFile, PlanFile } from "../../protocol/wire.ts";
 import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -345,6 +346,86 @@ const TICKET_BODY =
 // Mount: the app's bootstrap, minus the network and the timers.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The Plans view's server side, faked: one Preset, and a plans.edit that
+// applies the moves, links and node edits it is sent to the document it is
+// sent with, as core would, and can be held to look at the page mid-reply.
+// ---------------------------------------------------------------------------
+
+const PLAN_VERDICTS: Record<string, string[]> = {
+  conversation: ["done", "closed"],
+  agent: ["done", "closed"],
+  prove: ["pass", "fail", "closed"],
+  review: ["clean", "findings", "closed"],
+  decide: ["ship", "another-round", "closed"],
+  gate: ["open", "revise", "closed"],
+  finish: ["revise"],
+};
+
+const ticketNode = (kind: "agent" | "prove" | "review" | "decide", id: string, title: string, x: number, skill: string) =>
+  ({ kind, id, title, x, y: 60, skill, assign: { harness: "claude", model: "opus", effort: "high" }, copies: "one", checkpoint: "steward", spawns: "hold" }) as const;
+
+const FACTORY_TODAY: PlanFile = {
+  horde: 1,
+  name: "Factory today",
+  author: "Agent Console",
+  source: "docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md",
+  note: "ADR-0037's fixed Line as a Plan.",
+  nodes: [
+    { kind: "conversation", id: "grill", title: "Grill", x: 40, y: 60, skill: "my-grill-with-docs", assign: { harness: "claude", model: "opus", effort: "high" } },
+    ticketNode("agent", "implement", "Implement", 340, "tdd"),
+    ticketNode("prove", "prove", "Prove", 640, "my-verify"),
+    ticketNode("review", "review", "Review", 940, "code-review"),
+    ticketNode("decide", "decide", "Decide", 1240, "html"),
+    { kind: "finish", id: "finish", title: "Finish", x: 1540, y: 60, act: "none" },
+  ],
+  edges: [
+    { from: "grill", on: "done", to: "implement" },
+    { from: "implement", on: "done", to: "prove" },
+    { from: "prove", on: "pass", to: "review" },
+    { from: "prove", on: "fail", to: "implement", cap: { max: 2, stewardExtra: true, whenSpent: "hold" } },
+    { from: "review", on: "clean", to: "decide" },
+    { from: "review", on: "findings", to: "decide" },
+    { from: "decide", on: "ship", to: "finish" },
+    { from: "decide", on: "another-round", to: "implement", cap: { max: 1, whenSpent: { to: "finish" } } },
+    { from: "finish", on: "revise", to: "implement" },
+    { from: "implement", on: "closed", to: "decide" },
+    { from: "prove", on: "closed", to: "decide" },
+    { from: "review", on: "closed", to: "decide" },
+  ],
+};
+
+/** Every plans.edit batch the page sent, in order. */
+const planEdits: PlanEditFile[][] = [];
+/** Set, plans.edit replies wait here until released. */
+let heldEdits: (() => void)[] | null = null;
+
+function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
+  planEdits.push(edits);
+  const doc = JSON.parse(JSON.stringify(plan)) as PlanFile;
+  for (const edit of edits) {
+    if (edit.edit === "move") {
+      const node = doc.nodes.find((n) => n.id === edit.id);
+      if (node) Object.assign(node, { x: edit.x, y: edit.y });
+    } else if (edit.edit === "link") {
+      doc.edges.push(edit.edge);
+    } else if (edit.edit === "setNode") {
+      doc.nodes = doc.nodes.map((n) => (n.id === edit.node.id ? { ...edit.node, x: n.x, y: n.y } : n));
+    }
+  }
+  const reply: PlanDraftResponse = {
+    plan: doc,
+    problems: [],
+    notes: [],
+    verdicts: doc.nodes.map((n) => ({ id: n.id, verdicts: PLAN_VERDICTS[n.kind] ?? [] })),
+  };
+  if (heldEdits) {
+    const held = heldEdits;
+    return new Promise((resolve) => held.push(() => resolve(reply)));
+  }
+  return Promise.resolve(reply);
+}
+
 const root = document.getElementById("app") as HTMLElement;
 let current = snapshot(0, null);
 
@@ -417,6 +498,26 @@ const view = new ConsoleView({
   onStart: () => Promise.resolve(conversation("c-new")),
   onEnd: () => Promise.resolve(),
   onStartLine: () => Promise.resolve(),
+  onListPlans: () =>
+    Promise.resolve({
+      plans: [
+        {
+          slug: "factory-today",
+          preset: true,
+          name: FACTORY_TODAY.name,
+          author: FACTORY_TODAY.author,
+          source: FACTORY_TODAY.source,
+          note: FACTORY_TODAY.note,
+          problems: [],
+        },
+      ],
+    }),
+  onGetPlan: (slug) => Promise.resolve({ slug, preset: true, plan: FACTORY_TODAY, problems: [] }),
+  onEditPlan: fakeEdit,
+  onSavePlan: (slug, plan) => Promise.resolve({ slug, plan }),
+  onDeletePlan: () => Promise.resolve(),
+  onBootPlan: (slug, work) =>
+    Promise.resolve({ argv: ["--plan", slug, "--work", work, "--yes"], cwd: "/tmp/harness-repo", log: "/tmp/harness-pool/runs/boot.log" }),
 });
 
 const handlers: Handlers = {
@@ -1029,6 +1130,7 @@ async function layoutMain(): Promise<void> {
   });
   await settleAll();
   layoutChecks(`layout ${width}, no steward`);
+  await plansLayoutChecks(`layout ${width}, plans view`);
   publish("done");
 }
 
@@ -1224,6 +1326,235 @@ function fadedCardsClear(): void {
   });
 }
 
+
+/** The middle of an element, in client coordinates. */
+function middle(el: Element): { x: number; y: number } {
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+const planCard = (id: string) => q<HTMLElement>(`.plans-pane .plan-node[data-node="${id}"]`);
+const planEdge = (key: string) => q<SVGGElement>(`.plans-pane .plan-edges [data-key="edge:${key}"]`);
+
+/** Open the Plans view from the header and factory-today from its list. */
+async function openFactoryToday(): Promise<void> {
+  if (!q(".plans-pane")) q<HTMLButtonElement>(".canvas-plans")?.click();
+  await settleAll();
+  q<HTMLButtonElement>('.plans-item[data-key="plan:factory-today"]')?.click();
+  await settleAll();
+}
+
+/**
+ * The Plans view (slice 9), the gestures only a laid-out page can drive: a
+ * card dragged across a snapshot render lands once, where the pointer let
+ * go, and holds there while core's reply is out; a verdict port dragged
+ * onto a card sends one link and draws it; a drop on blank sends nothing;
+ * an inspector field keeps its node, focus and caret across renders.
+ */
+async function plansChecks(): Promise<void> {
+  const name = "plans view";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openFactoryToday();
+  const viewport = q<HTMLElement>(".plans-pane .plan-viewport");
+  const world = q<HTMLElement>(".plans-pane .plan-world");
+  const cards = root.querySelectorAll(".plans-pane .plan-node").length;
+  const edges = root.querySelectorAll(".plans-pane .plan-edges .plan-edge").length;
+  push(
+    "a Preset opens as its graph",
+    viewport && world && cards === 6 && edges === 12 ? null : `${cards} cards, ${edges} edges, viewport ${!!viewport}`,
+    `${cards} cards, ${edges} edges`,
+  );
+  if (!viewport || !world) return;
+  const zoom = parsePan(world.style.transform).zoom;
+
+  // A node drag with a snapshot render mid-drag, core's reply held.
+  stage = `${name}: node drag`;
+  const prove = planCard("prove");
+  const head = prove?.querySelector(".plan-node-head");
+  if (prove && head) {
+    const routeBefore = planEdge("implement.done>prove")?.querySelector("path")?.getAttribute("d");
+    const r = head.getBoundingClientRect();
+    const x = r.left + 20;
+    const y = r.top + 10;
+    const before = planEdits.length;
+    heldEdits = [];
+    pointer("pointerdown", head, x, y);
+    pointer("pointermove", viewport, x + 60, y + 20);
+    session.setSnapshot(snapshot(1, null));
+    render();
+    pointer("pointermove", viewport, x + 120, y + 40);
+    pointer("pointerup", viewport, x + 120, y + 40);
+    await settle();
+    const want = { x: Math.round(640 + 120 / zoom), y: Math.round(60 + 40 / zoom) };
+    const sent = planEdits.slice(before);
+    const move = sent.length === 1 && sent[0]!.length === 1 ? sent[0]![0] : null;
+    push(
+      "plan node drag sends one move",
+      move && move.edit === "move" && move.id === "prove" && move.x === want.x && move.y === want.y
+        ? null
+        : `sent ${JSON.stringify(sent)}, expected one move of prove to ${want.x},${want.y}`,
+      `one move of prove to ${want.x},${want.y} at zoom ${zoom.toFixed(3)}`,
+    );
+    const at = (el: HTMLElement | null) => `${parseFloat(el?.style.left ?? "NaN")},${parseFloat(el?.style.top ?? "NaN")}`;
+    const heldAt = at(planCard("prove"));
+    for (const release of heldEdits ?? []) release();
+    heldEdits = null;
+    await settleAll();
+    const landed = planCard("prove");
+    const routeAfter = planEdge("implement.done>prove")?.querySelector("path")?.getAttribute("d");
+    push(
+      "plan drag survives a render mid-drag",
+      landed !== prove
+        ? "the card was replaced"
+        : heldAt !== `${want.x},${want.y}` || at(landed) !== `${want.x},${want.y}`
+          ? `at ${heldAt} while the reply was out and ${at(landed)} after, expected ${want.x},${want.y}`
+          : routeAfter === routeBefore
+            ? "the edge into prove was not re-routed"
+            : null,
+      `same card at ${want.x},${want.y} while the reply was out and after it, its edges re-routed`,
+    );
+  }
+
+  // Drag a verdict port onto a card.
+  stage = `${name}: drag to link`;
+  const port = q<HTMLElement>('.plans-pane .plan-node[data-node="grill"] .plan-port[data-on="closed"]');
+  const finish = planCard("finish");
+  if (port && finish) {
+    const from = middle(port);
+    const to = middle(finish);
+    const before = planEdits.length;
+    pointer("pointerdown", port, from.x, from.y);
+    pointer("pointermove", viewport, (from.x + to.x) / 2, (from.y + to.y) / 2);
+    pointer("pointermove", viewport, to.x, to.y);
+    render();
+    const marked = planCard("finish")?.classList.contains("plan-node-drop") ?? false;
+    const ghost = !!q(".plans-pane .plan-ghost");
+    pointer("pointerup", viewport, to.x, to.y);
+    await settleAll();
+    const sent = planEdits.slice(before);
+    const link = sent.length === 1 && sent[0]!.length === 1 ? sent[0]![0] : null;
+    push(
+      "drag to link marks the drop card",
+      marked && ghost ? null : `drop mark ${marked}, ghost edge ${ghost}, across a render`,
+      "finish marked and the ghost edge drawn across a render",
+    );
+    push(
+      "drag to link sends one link",
+      link && link.edit === "link" && link.edge.from === "grill" && link.edge.on === "closed" && link.edge.to === "finish"
+        ? planEdge("grill.closed>finish") && !q(".plans-pane .plan-ghost")
+          ? null
+          : "the link was sent but its edge is not drawn, or the ghost stayed"
+        : `sent ${JSON.stringify(sent)}`,
+      "one link grill.closed → finish, drawn keyed grill.closed>finish",
+    );
+    const vr = viewport.getBoundingClientRect();
+    const blank = { x: vr.left + 8, y: vr.bottom - 8 };
+    const again = planEdits.length;
+    const port2 = q<HTMLElement>('.plans-pane .plan-node[data-node="grill"] .plan-port[data-on="done"]');
+    if (port2) {
+      const p = middle(port2);
+      pointer("pointerdown", port2, p.x, p.y);
+      pointer("pointermove", viewport, blank.x, blank.y);
+      pointer("pointerup", viewport, blank.x, blank.y);
+      await settleAll();
+    }
+    push(
+      "a link dropped on blank sends nothing",
+      planEdits.length === again && !q(".plans-pane .plan-ghost") && !q(".plans-pane .plan-node-drop")
+        ? null
+        : `${planEdits.length - again} batches sent, ghost ${!!q(".plans-pane .plan-ghost")}`,
+      "nothing sent, no ghost left",
+    );
+  }
+
+  // Type into the inspector across snapshot renders.
+  stage = `${name}: inspector typing`;
+  const decideHead = planCard("decide")?.querySelector(".plan-node-head");
+  if (decideHead) {
+    const p = middle(decideHead);
+    pointer("pointerdown", decideHead, p.x, p.y);
+    pointer("pointerup", viewport, p.x, p.y);
+    await settleAll();
+  }
+  const selector = '.plans-pane [data-key="input:node:decide:title"]';
+  const input = q<HTMLInputElement>(selector);
+  if (!input) {
+    push("inspector typing keeps focus and caret", "no title field for decide", "");
+    return;
+  }
+  const pan = world.style.transform;
+  input.focus();
+  input.setSelectionRange(2, 2);
+  let failure: string | null = null;
+  for (const key of "-x") {
+    const at = input.selectionStart ?? 0;
+    input.value = input.value.slice(0, at) + key + input.value.slice(at);
+    input.setSelectionRange(at + 1, at + 1);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    for (let i = 0; i < 3; i++) {
+      session.setSnapshot(snapshot(2 + i, null));
+      render();
+    }
+    if (q(selector) !== input) failure ??= `after "${key}": the field was replaced`;
+    else if (document.activeElement !== input) failure ??= `after "${key}": activeElement is ${describe(document.activeElement)}`;
+    else if (input.selectionStart !== at + 1) failure ??= `after "${key}": caret at ${input.selectionStart}, expected ${at + 1}`;
+  }
+  push("inspector typing keeps focus and caret", failure, `caret held at 4 in "${input.value}" over 6 snapshot renders`);
+  push("plans canvas pan survives renders", world.style.transform === pan ? null : `${pan} became ${world.style.transform}`, `held ${pan}`);
+  const before = planEdits.length;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.blur();
+  await settleAll();
+  const sent = planEdits.slice(before).flat();
+  const set = sent.length === 1 && sent[0]!.edit === "setNode" ? sent[0]!.node : null;
+  push(
+    "a committed field sends one setNode",
+    set && set.id === "decide" && set.title === "De-xcide" && q<HTMLInputElement>(selector)?.value === "De-xcide"
+      ? null
+      : `sent ${JSON.stringify(sent)}, field reads ${q<HTMLInputElement>(selector)?.value}`,
+    'one setNode titling decide "De-xcide", which the field shows after the reply',
+  );
+}
+
+/** The Plans view's toolbar and inspector hold their width in the narrow window. */
+async function plansLayoutChecks(name: string): Promise<void> {
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  await openFactoryToday();
+  const implement = planCard("implement")?.querySelector(".plan-node-head");
+  const viewport = q<HTMLElement>(".plans-pane .plan-viewport");
+  if (implement && viewport) {
+    const p = middle(implement);
+    pointer("pointerdown", implement, p.x, p.y);
+    pointer("pointerup", viewport, p.x, p.y);
+    await settleAll();
+  }
+  const head = q<HTMLElement>(".plans-head");
+  const pane = q<HTMLElement>(".plans-pane");
+  if (head && pane) {
+    const tools = [...head.querySelectorAll<HTMLElement>(".btn")];
+    const line = Math.min(...tools.map((t) => t.getBoundingClientRect().height));
+    const off = tools.filter((t) => overflowOf(t, head) !== null || t.getBoundingClientRect().height > line * 1.5);
+    push(
+      "plans toolbar on one line",
+      tools.length < 3 ? `${tools.length} tools` : off.length ? `off the line: ${off.map((t) => t.textContent).join(", ")}` : overflowOf(head, pane),
+      `${tools.length} tools in ${head.clientWidth}px`,
+    );
+  }
+  const side = q<HTMLElement>(".plans-side");
+  const fields = [...root.querySelectorAll<HTMLElement>(".plans-side .plan-field, .plans-side .plan-link-row, .plans-side .plan-check")];
+  const spilled = side ? fields.filter((f) => overflowOf(f, side) !== null) : [];
+  push(
+    "plans inspector fields hold its width",
+    !side || fields.length < 5 ? `${fields.length} fields` : spilled.length ? `spilled: ${spilled.map((f) => f.dataset.key).join(", ")}` : null,
+    `${fields.length} fields inside a ${side?.clientWidth}px column`,
+  );
+}
+
 async function main(): Promise<void> {
   stage = "mount";
   session.setSnapshot(current);
@@ -1288,6 +1619,7 @@ async function main(): Promise<void> {
   await stewardChecks();
   await closeSelectedChecks();
   await settingsTyping();
+  await plansChecks();
 
   for (const selector of DEAD_SELECTORS) {
     report.push({ scenario: "-", assertion: `scroll ${selector}`, pass: null, detail: "selector in styles.css but no live module renders it" });
