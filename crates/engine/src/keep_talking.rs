@@ -381,7 +381,7 @@ fn claim_pane(
     let mut entry = LiveAttemptEntry::new(attempt, Some(held.pane_id.clone()), held.tab_id.clone());
     entry.started_at = at;
     crate::live_attempts::register(session, ticket_id, entry);
-    let _ = session.wake();
+    session.wake();
     Ok(attempt)
 }
 

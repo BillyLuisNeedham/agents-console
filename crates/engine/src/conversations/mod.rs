@@ -205,11 +205,6 @@ impl Conversations {
     pub fn reserved_ids(&self) -> Vec<String> {
         self.reserved.iter().cloned().collect()
     }
-
-    /// Reserve an id for a start about to be fired (idempotent). The start releases it when it ends.
-    pub fn reserve(&mut self, id: &str) {
-        self.reserved.insert(id.to_owned());
-    }
 }
 
 // ---------------------------------------------------------------------------
