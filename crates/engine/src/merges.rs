@@ -411,9 +411,11 @@ pub fn chain_link(
     work: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     let previous = session.merge_chain.clone();
+    let engine = session.engine();
     let link = async move {
         previous.await;
         work.await;
+        crate::persist::persist_after_flow(&engine).await;
     }
     .boxed()
     .shared();

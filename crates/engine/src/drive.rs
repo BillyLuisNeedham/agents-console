@@ -588,6 +588,7 @@ async fn run_launch(engine: Engine, launch: Launch) {
                 .await
                 .map_err(|error| error.to_string());
             let _ = engine.call(move |s| on_exit(s, &id, result)).await;
+            crate::persist::persist_after_flow(engine).await;
         }
     });
     join_all(runs).await;
@@ -762,6 +763,7 @@ async fn verify_grade_flow(
             grading_ended(s, outcome);
         })
         .await;
+    crate::persist::persist_after_flow(&engine).await;
 }
 
 async fn decide_round(
@@ -848,6 +850,7 @@ async fn continued_grade_flow(engine: Engine, owed: crate::keep_talking::Continu
     }
     .await;
     let _ = engine.call(move |s| grading_ended(s, outcome)).await;
+    crate::persist::persist_after_flow(&engine).await;
 }
 
 pub fn rebuild_verify_group(session: &mut Session, marker: &TicketMarker) -> bool {

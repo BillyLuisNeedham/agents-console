@@ -23,7 +23,12 @@ pub fn write_markers(session: &mut Session) -> anyhow::Result<()> {
 pub fn persist(session: &mut Session) -> anyhow::Result<()> {
     write_markers(session)?;
     let state = serde_json::to_value(&session.state)?;
-    session.store.write(&state)?;
+    if !session.store_failing && session.persisted.as_ref() == Some(&state) {
+        return Ok(());
+    }
+    let written = session.store.write(&state);
+    session.store_failing = written.is_err();
+    written?;
     session.persisted = Some(state);
     Ok(())
 }
@@ -43,6 +48,16 @@ pub async fn persist_with_retry(engine: &Engine) -> anyhow::Result<bool> {
         };
         tokio::time::sleep(Duration::from_millis(*ms)).await;
     }
+}
+
+pub async fn persist_after_flow(engine: &Engine) {
+    let _ = engine
+        .call(|s| {
+            if s.store_open && !s.store_failing {
+                let _ = persist(s);
+            }
+        })
+        .await;
 }
 
 /// The run-level persistence Interrupt: answering it retries persistence and continues the run.

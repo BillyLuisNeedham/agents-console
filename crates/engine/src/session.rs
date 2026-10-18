@@ -151,6 +151,7 @@ pub struct Session {
     pub snapshot_history: Option<usize>,
     /// The count of every emit so far, kept or not: the next emit's seq.
     pub emitted: u64,
+    pub store_failing: bool,
     pub store: Box<dyn CheckpointStore>,
     pub store_open: bool,
     pub answers: QueuedAnswerStore,
@@ -317,6 +318,7 @@ impl Session {
             snapshots: VecDeque::new(),
             snapshot_history: None,
             emitted: 0,
+            store_failing: false,
             store: base.store,
             store_open: true,
             driving: false,
