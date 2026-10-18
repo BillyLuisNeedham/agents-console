@@ -24,6 +24,7 @@ import { snapshot } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
 import { BODY, proposeSpawns } from "./conversations-support.ts";
 import { atCheckpoint, begun, interruptOn, lineOf, reason } from "./line-support.ts";
+import { edge, node, plan as planOf } from "./plans-support.ts";
 
 /** Every known harness's ready pattern and claude's idle prompt. */
 const READY_FRAME = "Claude Code v · Ask anything\n❯ ";
@@ -243,6 +244,40 @@ conformance("line", "a valid brief's End merges the Conversation's branch, and o
 
   const again = await end(server, { id: "grill-1" });
   expect(again.status).toBe(404);
+});
+
+conformance("line", "a brief's items reach a per-item node, which writes a copy per item up to its cap once the pass merges", async (t) => {
+  const world = grillWorld(t);
+  const talk = planOf(
+    [node.conversation("grill"), node.agent("build", { copies: { perItem: 2 } }), node.merger("build-merge", "build"), node.finish()],
+    [edge("grill", "done", "build"), edge("build", "done", "build-merge"), edge("build-merge", "done", "finish")],
+    "Grill then build",
+  );
+  const { server } = await serve(t, world, talk);
+  const grill = await opened(server);
+  const items = [
+    { title: "Parse the flag", body: "Read --work as an issue number." },
+    { title: "Print the base", body: "Name the base the Line was cut from." },
+    { title: "Log the cut", body: "" },
+  ];
+  grillWrites(world, grill, { [SPEC]: "# Fix it\n\nThe spec.\n", [BRIEF]: JSON.stringify({ spec: SPEC, finish: "none", items }) });
+
+  expect((await end(server, { id: "grill-1" })).status).toBe(202);
+  for (const id of ["build-1.1", "build-1.2"]) {
+    await until(() => readStateLine(world.pool, `${id}.md`).line, (state) => state.includes(`id=${id} `), { what: `${id} to be written` });
+  }
+  // The panes of the first two copies stay open, so the cap of 2 holds the third Item in the queue.
+  expect(existsSync(join(world.pool, "issues", "build-1.md"))).toBe(false);
+  expect(existsSync(join(world.pool, "issues", "build-1.3.md"))).toBe(false);
+  expect((await lineOf(server))?.nodes.find((n) => n.id === "build")).toMatchObject({ tickets: ["build-1.1", "build-1.2"], queued: 1 });
+  items.slice(0, 2).forEach((item, i) => {
+    const copy = readFileSync(join(world.pool, "issues", `build-1.${i + 1}.md`), "utf8");
+    expect(copy).toContain(`## Your item\n\n### ${item.title}\n\n${item.body}`);
+    expect(copy).toContain("node=build");
+  });
+  expect(readStateLine(world.pool, "build-1.1.md").blockedBy).toEqual([]);
+  expect(world.git(["show", `main:${BRIEF}`])).toContain("Parse the flag");
+  expect((await snapshot(server)).state.log.filter((l) => l === "line: grill-1 hands on its brief")).toHaveLength(1);
 });
 
 conformance("line", "End as closed merges nothing, keeps the branch, and hands on closed, which reaches the Finish", async (t) => {

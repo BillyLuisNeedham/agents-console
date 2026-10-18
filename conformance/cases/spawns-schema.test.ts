@@ -2,7 +2,10 @@
  * The Spawn proposal schema in Outcomes, and the reserved '-spawn-'
  * namespace at pool start (ADR-0010, ADR-0036): what an attempt's Outcome
  * may propose, the reason each malformed proposal is rejected with, and
- * which hand-written Ticket files refuse to boot.
+ * which hand-written Ticket files refuse to boot. An Outcome's `items`
+ * (ADR-0040) are checked the same way: each entry outside the bounds is
+ * dropped with an `item-rejected` event naming its index and why, and the
+ * attempt still ends done.
  */
 
 import { expect } from "bun:test";
@@ -14,6 +17,7 @@ import { readStateLine } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 import {
   CONFIG,
+  eventKinds,
   eventsOf,
   GOOD_BODY,
   hasTicket,
@@ -37,6 +41,16 @@ function ids(n: number): string[] {
 /** The payloads of a Ticket's spawn-rejected events, in order. */
 function rejections(world: World, id: string): unknown[] {
   return eventsOf(world, id, "spawn-rejected").map((event) => event.payload);
+}
+
+/** The payloads of a Ticket's item-rejected events, in order. */
+function itemRejections(world: World, id: string): unknown[] {
+  return eventsOf(world, id, "item-rejected").map((event) => event.payload);
+}
+
+/** A done Outcome carrying `extra` beside its status and summary. */
+function outcomeWith(extra: Record<string, unknown>): { outcomeRaw: string } {
+  return { outcomeRaw: JSON.stringify({ status: "done", summary: "summary-01", commitSha: null, ...extra }) };
 }
 
 /** Start a server that must refuse to boot; its error carries the log tail. */
@@ -375,4 +389,109 @@ conformance("spawns", "still rejects that same ticket when the Conversation id i
 
   expect(message).toContain("exited 1 before its boot line");
   expect(message).toContain("spawned-by 'conv-1' names no ticket or known Conversation in the pool");
+});
+
+const GOOD_ITEM = { title: "Parse the flag", body: "Read --work as an issue number." };
+
+conformance("spawns", "keeps well-formed items, trimming each title and keeping each body as written, and records no rejection", async (t) => {
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ items: [GOOD_ITEM, { title: "  Print the base  ", body: "" }, { title: "T".repeat(200), body: "B".repeat(16 * 1024) }] }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  expect(snap.state.outcomes["01"]?.items).toEqual([
+    GOOD_ITEM,
+    { title: "Print the base", body: "" },
+    { title: "T".repeat(200), body: "B".repeat(16 * 1024) },
+  ]);
+  expect(itemRejections(world, "01")).toEqual([]);
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+});
+
+conformance("spawns", "keeps an empty items array without rejections, and an Outcome with no items key stores none", async (t) => {
+  const world = t.world({ tickets: [ticket("01"), ticket("02")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ items: [] }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  expect(snap.state.outcomes["01"]?.items).toEqual([]);
+  expect(snap.state.outcomes["02"]).toEqual({ status: "done", summary: "summary-02", commitSha: null });
+  expect("items" in (snap.state.outcomes["02"] ?? {})).toBe(false);
+  expect(itemRejections(world, "01")).toEqual([]);
+  expect(itemRejections(world, "02")).toEqual([]);
+});
+
+conformance("spawns", "rejects an items key that is not an array, with no index, and the Ticket still ends done", async (t) => {
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ items: "all of them" }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+  expect(snap.state.outcomes["01"]?.items).toEqual([]);
+  expect(itemRejections(world, "01")).toEqual([{ reason: "items is not an array" }]);
+});
+
+conformance("spawns", "drops each item outside the bounds with its index and reason, keeping the entries around it", async (t) => {
+  const entries: unknown[] = [
+    42,
+    GOOD_ITEM,
+    { title: "Extra", body: "b", priority: 1 },
+    { title: "   ", body: "b" },
+    { title: 7, body: "b" },
+    { title: "T".repeat(201), body: "b" },
+    { title: "No body" },
+    { title: "Null body", body: null },
+    { title: "Big body", body: "B".repeat(16 * 1024 + 1) },
+    { title: "Last", body: "kept" },
+  ];
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ items: entries }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  expect(itemRejections(world, "01")).toEqual([
+    { index: 0, reason: "item is not an object" },
+    { index: 2, reason: "item has a key other than title and body" },
+    { index: 3, reason: "item has no title" },
+    { index: 4, reason: "item has no title" },
+    { index: 5, reason: "item's title is over 200 characters" },
+    { index: 6, reason: "item has no body string" },
+    { index: 7, reason: "item has no body string" },
+    { index: 8, reason: "item's body is over 16384 bytes" },
+  ]);
+  expect(snap.state.outcomes["01"]?.items).toEqual([GOOD_ITEM, { title: "Last", body: "kept" }]);
+  expectSameBytes(readStateLine(world.pool, "01-t.md").line, "<!-- state: id=01 blocked-by=none status=done -->", "01's state line");
+  expect(eventsOf(world, "01", "exited").map((event) => event.payload)).toEqual([
+    { code: 0, status: "done", logTail: [], outcomeExists: true },
+  ]);
+});
+
+conformance("spawns", "takes only the first 64 items, naming each one past them", async (t) => {
+  const items = Array.from({ length: 66 }, (_, i) => ({ title: `Item ${i + 1}`, body: `Do item ${i + 1}.` }));
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ items }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  expect(snap.state.outcomes["01"]?.items).toEqual(items.slice(0, 64));
+  expect(itemRejections(world, "01")).toEqual([
+    { index: 64, reason: "item is past the first 64 a Line takes" },
+    { index: 65, reason: "item is past the first 64 a Line takes" },
+  ]);
+});
+
+conformance("spawns", "records item-rejected after spawn-rejected and before exited, each batch checked on its own", async (t) => {
+  const world = t.world({ tickets: [ticket("01")], config: CONFIG });
+  world.stubs.script("01", outcomeWith({ spawn: [{ title: "Thin" }], items: [GOOD_ITEM, { title: "No body" }] }));
+  const server = await t.start(world);
+  const snap = await runAndApprove(server);
+
+  const kinds = eventKinds(world, "01");
+  const at = kinds.indexOf("spawn-rejected");
+  expect(kinds.slice(at, at + 3)).toEqual(["spawn-rejected", "item-rejected", "exited"]);
+  expect(rejections(world, "01")).toEqual([{ index: 0, reason: THIN }]);
+  expect(itemRejections(world, "01")).toEqual([{ index: 1, reason: "item has no body string" }]);
+  expect(snap.state.outcomes["01"]?.spawn).toEqual([]);
+  expect(snap.state.outcomes["01"]?.items).toEqual([GOOD_ITEM]);
 });

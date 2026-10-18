@@ -2,9 +2,9 @@
  * Beginning the Line (ADR-0039), seen from outside the server: POST /api/line freezes a Plan, by
  * slug or as a file, into line.json with the Line brief or the work it is given, writes no Ticket
  * itself, and the first tick writes the entry node's Ticket with its node and Assignment on the
- * state line. It refuses with the reason, writing nothing, a Plan that is invalid or that this
- * build cannot run, a harness the machine lacks, a missing or invalid brief, and a second Line. A
- * Conversation node anywhere in the Plan begins.
+ * state line. It refuses with the reason, writing nothing, a Plan that is invalid, a harness the
+ * machine lacks (a node's, or a Merger's resolver), a missing or invalid brief, and a second Line.
+ * A Conversation node anywhere in the Plan begins, and so does a per-item node with its Merger.
  *
  * The stubs on PATH play the Ticket nodes.
  */
@@ -31,7 +31,7 @@ function buildThenFinish(build: Record<string, unknown> = {}): PlanFile {
   } as PlanFile;
 }
 
-conformance("line", "POST /api/line refuses a bad body, an invalid or unrunnable Plan, an unknown harness and a missing or invalid brief, and writes nothing", async (t) => {
+conformance("line", "POST /api/line refuses a bad body, an invalid Plan, an unknown harness and a missing or invalid brief, and writes nothing", async (t) => {
   const world = lineWorld(t, null);
   const server = await t.start(world);
   const brief = join(world.repo, BRIEF);
@@ -54,10 +54,6 @@ conformance("line", "POST /api/line refuses a bad body, an invalid or unrunnable
   const invalid = await beginLine(server, { plan: { ...noFinish, nodes: noFinish.nodes.slice(0, 1), edges: [] }, work: "#1" });
   expect(invalid.status).toBe(409);
   expect(reason(invalid)).toStartWith("the Line cannot begin: its Plan is not valid: ");
-  const perItem = await beginLine(server, { plan: buildThenFinish({ copies: { perItem: 2 } }), work: "#1" });
-  expect(reason(perItem)).toBe(
-    "the Line cannot begin: node build makes one copy per item, which this build cannot run yet",
-  );
   const harness = await beginLine(server, { plan: buildThenFinish({ assign: { harness: "nope" } }), work: "#1" });
   expect(reason(harness)).toStartWith("the Line cannot begin: node build names unknown harness 'nope'. Known: ");
 
@@ -184,4 +180,47 @@ conformance("line", "a Conversation node after the start of a Plan begins, and a
   );
   expect(snap.state.log).toContain("line: talk-1 hands on closed");
   expect(snap.state.conversations.find((c) => c.id === "talk-1")).toMatchObject({ status: "crashed", node: "talk" });
+});
+
+/** build (per-item) -> build-merge -> Finish, with the Merger's `conflict` as given. */
+function buildThenMerge(conflict?: unknown): PlanFile {
+  return {
+    horde: 1,
+    name: "Build then merge",
+    nodes: [
+      { kind: "agent", id: "build", title: "Build", x: 0, y: 0, copies: { perItem: 2 } },
+      { kind: "merger", id: "build-merge", title: "Merge", x: 0, y: 0, of: "build", ...(conflict === undefined ? {} : { conflict }) },
+      { kind: "finish", id: "finish", title: "Finish", x: 0, y: 0, act: "none" },
+    ],
+    edges: [
+      { from: "build", on: "done", to: "build-merge" },
+      { from: "build-merge", on: "done", to: "finish" },
+    ],
+  } as PlanFile;
+}
+
+conformance("line", "a per-item node with a Merger begins, and a Merger whose resolver names a harness the machine lacks is refused naming it", async (t) => {
+  const world = lineWorld(t, null);
+  const hold = world.stubs.hold("build-1");
+  const server = await t.start(world);
+
+  const bad = await beginLine(server, { plan: buildThenMerge({ resolver: { harness: "nope", model: "m" } }), work: "#1" });
+  expect(bad.status).toBe(409);
+  expect(reason(bad)).toStartWith("the Line cannot begin: node build-merge names unknown harness 'nope'. Known: ");
+  expect(await lineOf(server)).toBeNull();
+  expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+  expect(existsSync(join(world.pool, "issues", "build-1.md"))).toBe(false);
+
+  const line = await begun(server, { plan: buildThenMerge({ resolver: { harness: "opencode" } }), work: "#1" });
+  expect(line.plan.nodes.find((n) => n.id === "build")).toMatchObject({ copies: { perItem: 2 } });
+  expect(line.plan.nodes.find((n) => n.id === "build-merge")).toMatchObject({ kind: "merger", of: "build" });
+  await until(
+    () => readStateLine(world.pool, "build-1.md").line,
+    (state) => state.includes("status=in-progress"),
+    { what: "build-1 to launch" },
+  );
+  expect(readStateLine(world.pool, "build-1.md").line).toBe(
+    "<!-- state: id=build-1 blocked-by=none status=in-progress node=build -->",
+  );
+  await hold.release();
 });
