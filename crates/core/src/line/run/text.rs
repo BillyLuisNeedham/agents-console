@@ -273,10 +273,19 @@ fn spec_section(places: &LinePlaces) -> Option<String> {
 }
 
 fn work_section(places: &LinePlaces) -> Option<String> {
-    places
-        .work
-        .as_ref()
-        .map(|work| format!("## The Line's work\n\n{}", js::trim(work)))
+    let work = places.work.as_deref()?;
+    Some(format!("## The Line's work\n\n{}", work_asked(work)))
+}
+
+// The work as the operator gave it, an issue number spelled out as the issue to read.
+fn work_asked(work: &str) -> String {
+    let work = js::trim(work);
+    match issue_number(work) {
+        Some(number) => format!(
+            "The piece of work for this Line is issue #{number}. Read it (gh issue view {number})."
+        ),
+        None => work.to_owned(),
+    }
 }
 
 fn sections(parts: impl IntoIterator<Item = Option<String>>) -> String {
@@ -675,17 +684,10 @@ impl LineRun {
     }
 }
 
-// What a Conversation pass opens on: the work as the operator gave it, an issue number spelled out,
-// and the Line base it was cut from.
+// What a Conversation pass opens on: the work, as a Ticket node reads it, and the Line base it was
+// cut from.
 fn talk_work_section(places: &LinePlaces) -> Option<String> {
-    let work = js::trim(places.work.as_deref()?);
-    let asked = match issue_number(work) {
-        Some(number) => format!(
-            "The piece of work for this Line is issue #{number}. Read it (gh issue view {number}) \
-             and grill me on it."
-        ),
-        None => work.to_owned(),
-    };
+    let asked = work_asked(places.work.as_deref()?);
     let cut = places.base.as_ref().map(|base| {
         format!(
             "This Line was cut from `{}` at `{}`.",

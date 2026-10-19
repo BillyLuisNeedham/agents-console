@@ -138,7 +138,7 @@ conformance("line", "the engine opens grill-1 on the Conversation node's skill a
     '"pushBase": true (the Finish may push the Line base to origin, only to create it or fast-forward it, never forcing)',
   );
   expect(typed).toContain(
-    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on it.",
+    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186).",
   );
   expect((await lineOf(server))?.nodes.find((n) => n.id === "grill")).toMatchObject({ pass: 1, tickets: ["grill-1"] });
 

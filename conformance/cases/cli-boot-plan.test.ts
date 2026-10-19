@@ -167,8 +167,8 @@ conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it o
   const first = typed.find((text) => text.includes("(`grill-1`)"))!;
   expect(first).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0040)");
   expect(first).toContain(
-    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on " +
-      `it.\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,
+    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186)." +
+      `\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,
   );
   expect(first).toContain("write the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.grill-1.brief.json`");
 });

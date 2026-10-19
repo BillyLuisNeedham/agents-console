@@ -831,6 +831,17 @@ fn gated(open: &str) -> Plan {
 }
 
 #[test]
+fn an_entry_ticket_reads_an_issue_number_as_the_issue_a_conversation_reads() {
+    let mut run =
+        LineRun::start(gated("operator"), places(), LineStart::Work("37".into())).unwrap();
+    let first = tick(&mut run, &mut Pool::default());
+    assert!(ticket(&first, "draft-1").body.contains(
+        "## The Line's work\n\nThe piece of work for this Line is issue #37. Read it (gh issue \
+         view 37)."
+    ));
+}
+
+#[test]
 fn an_operator_gate_holds_and_its_answers_open_revise_or_close() {
     let (mut run, mut pool) = work_run(gated("operator"));
     let first = tick(&mut run, &mut pool);
@@ -1117,7 +1128,7 @@ fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
     );
     assert!(grill.opening.contains(
         "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue \
-         view 186) and grill me on it.\n\nThis Line was cut from `main` at `abc123`."
+         view 186).\n\nThis Line was cut from `main` at `abc123`."
     ));
     assert_eq!(run.live_conversation(&node("grill")), Some(&id("grill-1")));
     assert_eq!(

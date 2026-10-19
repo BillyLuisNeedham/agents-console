@@ -99,8 +99,8 @@ conformance("cli", "Boot --plan --from cuts the Line from a local branch checked
     { what: "grill-1's first Turn" },
   );
   expect(typed[0]).toContain(
-    "## The Line's work\n\nThe piece of work for this Line is issue #193. Read it (gh issue view 193) and grill me on " +
-      `it.\n\nThis Line was cut from \`experiment/x\` at \`${base.slice(0, 7)}\`.`,
+    "## The Line's work\n\nThe piece of work for this Line is issue #193. Read it (gh issue view 193)." +
+      `\n\nThis Line was cut from \`experiment/x\` at \`${base.slice(0, 7)}\`.`,
   );
   // grill-1 is taught the brief's pushBase grant.
   expect(typed[0]).toContain('"pushBase": true');
