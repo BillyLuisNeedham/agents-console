@@ -23,8 +23,7 @@ use ac_protocol::{
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
     LinePlanEditRequest, LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest,
     PlanDraftResponse, PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse,
-    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction,
-    StartConversationRequest,
+    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};

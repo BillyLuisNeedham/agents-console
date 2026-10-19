@@ -843,7 +843,12 @@ async fn accepts_a_stop_while_the_pool_runs_and_before_it_starts() {
     .await;
     publish(
         &running.engine(),
-        snapshot(1, RunPhase::Running, &[("02", TicketStatus::InProgress)], &[]),
+        snapshot(
+            1,
+            RunPhase::Running,
+            &[("02", TicketStatus::InProgress)],
+            &[],
+        ),
     )
     .await;
     assert_eq!(
