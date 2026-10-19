@@ -5,6 +5,7 @@ import { CARD_W, KIND_LABEL, type DrawnNode } from "./plan-projection";
 const TONE_TEXT: Record<LiveCopy["tone"], string> = {
   pending: "pending",
   running: "running",
+  interrupted: "needs input",
   checkpoint: "at a checkpoint",
   done: "done",
   closed: "closed",
@@ -48,7 +49,8 @@ export interface CopyRow {
   more: { count: number; next: LiveCopy } | null;
 }
 
-const needsOperator = (copy: LiveCopy): boolean => copy.tone === "checkpoint" || copy.tone === "closed";
+const needsOperator = (copy: LiveCopy): boolean =>
+  copy.tone === "interrupted" || copy.tone === "checkpoint" || copy.tone === "closed";
 
 function wearRank(copy: LiveCopy): number {
   if (copy.selected) return 0;

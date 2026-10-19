@@ -59,7 +59,7 @@ const conversation = (
 
 describe("projectLine's node state", () => {
   const state = (view: Parameters<typeof line>[0], tickets: ReturnType<typeof ticket>[] = [], overrides: Partial<LineGraphView> = {}) => {
-    const live = projectLine(line(view, overrides), tickets, [], null);
+    const live = projectLine(line(view, overrides), tickets, [], [], null);
     return live.nodes.get(view.id)!;
   };
 
@@ -112,6 +112,20 @@ describe("projectLine's node state", () => {
     expect(node.state).toEqual({ tone: "needs", text: "needs you" });
   });
 
+  it("draws a copy whose Ticket has an open Interrupt as waiting on you, not running", () => {
+    const live = projectLine(
+      line({ id: "build", pass: 1, tickets: ["b-1", "b-2", "b-3"], queued: 1 }),
+      [ticket("b-1", "in-progress"), ticket("b-2", "in-progress"), ticket("b-3", "checkpoint")],
+      [],
+      [{ ticketId: "b-2" }, { ticketId: "b-3" }],
+      null,
+    );
+    const node = live.nodes.get("build")!;
+    expect(node.copies.map((c) => c.tone)).toEqual(["running", "interrupted", "checkpoint"]);
+    expect(node.state).toEqual({ tone: "needs", text: "needs you" });
+    expect(node.summary).toEqual(["pass 1 · 1 running · 1 queued", "1 running · 1 queued"]);
+  });
+
   it("waits on you at a Gate that holds", () => {
     const node = state({ id: "ok", hold: "ok-1", passes: 0 }, [ticket("ok-1", "checkpoint")]);
     expect(node.state).toEqual({ tone: "needs", text: "waiting on you" });
@@ -144,7 +158,7 @@ describe("projectLine's node state", () => {
 
   it("marks the node a spent loop leaves", () => {
     const spent: LineEdgeView = { edge: plan.edges[2]!, count: 2, max: 2, bought: 0, hold: "hold-1" };
-    const live = projectLine(line({ id: "review", passes: 2 }, {}, [spent]), [ticket("hold-1", "checkpoint")], [], null);
+    const live = projectLine(line({ id: "review", passes: 2 }, {}, [spent]), [ticket("hold-1", "checkpoint")], [], [], null);
     expect(live.nodes.get("review")!.state).toEqual({ tone: "needs", text: "loop spent" });
     expect(live.nodes.get("review")!.hold?.card).toBe("ticket:hold-1");
   });
@@ -162,12 +176,13 @@ describe("projectLine's node state", () => {
       line({ id: "grill", pass: 1, tickets: ["grill-1"] }),
       [ticket("grill-1", "done")],
       [conversation("grill-1", "live", "waiting")],
+      [],
       "conversation:grill-1",
     );
     const node = live.nodes.get("grill")!;
     expect(node.copies).toEqual([{ id: "grill-1", card: "conversation:grill-1", tone: "checkpoint", selected: true }]);
     expect(node.state.text).toBe("needs you");
-    const ended = projectLine(line({ id: "grill", passes: 1 }), [], [conversation("grill-1", "ended")], null);
+    const ended = projectLine(line({ id: "grill", passes: 1 }), [], [conversation("grill-1", "ended")], [], null);
     expect(ended.nodes.get("grill")!.state.text).toBe("done · 1 pass");
   });
 
@@ -175,6 +190,7 @@ describe("projectLine's node state", () => {
     const live = projectLine(
       line({ id: "build", pass: 1, tickets: ["b-1", "b-2"] }),
       [ticket("b-1", "in-progress"), ticket("b-2", "in-progress")],
+      [],
       [],
       "ticket:b-2",
     );
@@ -184,7 +200,7 @@ describe("projectLine's node state", () => {
 
 describe("projectLine's Finish", () => {
   const finish = (view: Partial<LineNodeView>, overrides: Partial<LineGraphView>) =>
-    projectLine(line({ id: "finish", ...view }, overrides), [ticket("fin-1", "checkpoint")], [], null);
+    projectLine(line({ id: "finish", ...view }, overrides), [ticket("fin-1", "checkpoint")], [], [], null);
 
   it("lists what it waits for and counts it while the Line is finishing", () => {
     const live = finish({}, { status: "finishing", waitingFor: ["build-1", "build-2", "review-1"] });
@@ -212,7 +228,7 @@ describe("projectLine's edges and headline", () => {
 
   it("labels a capped edge with its count against the cap, what was bought and the Steward mark", () => {
     const view = (count: number, bought: number): LineEdgeView => ({ edge: capped, count, max: 2, bought });
-    const label = (e: LineEdgeView) => projectLine(line({ id: "build" }, {}, [e]), [], [], null).edges.get(capKey)!;
+    const label = (e: LineEdgeView) => projectLine(line({ id: "build" }, {}, [e]), [], [], [], null).edges.get(capKey)!;
     expect(label(view(1, 0))).toEqual({ label: "findings · 1/2 · S", spent: false, hold: null });
     expect(label(view(2, 1)).label).toBe("findings · 2/2 +1 · S");
   });
@@ -223,28 +239,28 @@ describe("projectLine's edges and headline", () => {
       edges: [{ ...capped, cap: { max: 2 } }],
     };
     const g = { ...line({ id: "build" }, {}, [{ edge: capped, count: 0, max: 2, bought: 0 }]), plan: noSteward };
-    expect(projectLine(g, [], [], null).edges.get(capKey)!.label).toBe("findings · 0/2");
+    expect(projectLine(g, [], [], [], null).edges.get(capKey)!.label).toBe("findings · 0/2");
   });
 
   it("keeps the plain verdict on an uncapped edge", () => {
-    const live = projectLine(line({ id: "build" }), [], [], null);
+    const live = projectLine(line({ id: "build" }), [], [], [], null);
     expect(live.edges.get("grill.done>build")).toEqual({ label: "done", spent: false, hold: null });
   });
 
   it("marks a spent loop and its hold Ticket", () => {
     const spent: LineEdgeView = { edge: capped, count: 2, max: 2, bought: 0, hold: "hold-1" };
-    const edge = projectLine(line({ id: "build" }, {}, [spent]), [ticket("hold-1", "checkpoint")], [], null).edges.get(capKey)!;
+    const edge = projectLine(line({ id: "build" }, {}, [spent]), [ticket("hold-1", "checkpoint")], [], [], null).edges.get(capKey)!;
     expect(edge.spent).toBe(true);
     expect(edge.hold).toEqual({ id: "hold-1", card: "ticket:hold-1", tone: "checkpoint", selected: false });
   });
 
   it("reads the Plan and its status as the headline, and carries the rev and the verdicts", () => {
-    const live = projectLine(line({ id: "build", verdicts: ["done", "closed"] }, { status: "acting" }), [], [], null);
+    const live = projectLine(line({ id: "build", verdicts: ["done", "closed"] }, { status: "acting" }), [], [], [], null);
     expect(live.headline).toBe("Factory today · acting");
     expect(live.rev).toBe(3);
     expect(live.verdicts.get("build")).toEqual(["done", "closed"]);
     for (const status of ["running", "finishing", "done", "closed"] as const) {
-      expect(projectLine(line({ id: "build" }, { status }), [], [], null).headline).toBe(`Factory today · ${status}`);
+      expect(projectLine(line({ id: "build" }, { status }), [], [], [], null).headline).toBe(`Factory today · ${status}`);
     }
   });
 });

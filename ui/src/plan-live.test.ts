@@ -75,6 +75,12 @@ describe("copyRow", () => {
     expect(row.more!.next.id).toBe("build-1.42");
   });
 
+  it("keeps an interrupted copy of 64 running ones in view", () => {
+    const all = copies(64);
+    all[50] = copy(51, "interrupted");
+    expect(ids(copyRow(all, 0, 14).dots)).toContain("build-1.51");
+  });
+
   it("opens the first hidden copy when nothing is selected, and wraps past the last", () => {
     const all = copies(64);
     const row = copyRow(all, 0, 14);

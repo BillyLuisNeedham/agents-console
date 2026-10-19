@@ -4110,6 +4110,7 @@ button.plan-dot::after {
   background: var(--status-done);
 }
 
+.plan-dot-interrupted,
 .plan-dot-checkpoint,
 .plan-dot-closed {
   background: var(--interrupt);

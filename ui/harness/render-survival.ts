@@ -1684,6 +1684,18 @@ function lineMovedOn(snap: EnrichedSnapshot): EnrichedSnapshot {
   };
 }
 
+/** The same pass once a copy's pane never got its prompt: the engine raised a crash Interrupt for it. */
+function lineCopyStuck(snap: EnrichedSnapshot, ticketId: string): EnrichedSnapshot {
+  return {
+    ...snap,
+    seq: snap.seq + 1,
+    state: {
+      ...snap.state,
+      interrupts: [...snap.state.interrupts, { ticketId, kind: "crash", body: "prompt never landed" }],
+    },
+  };
+}
+
 /** A tap as the browser sends it: the pointer pair, then the click it makes. */
 function tap(el: Element): void {
   const p = middle(el);
@@ -1780,6 +1792,27 @@ async function lineChecks(): Promise<void> {
             : null,
     'implement-2 turned done in the same node, implement-4 appeared, 2 queued, "2 running · 2 queued", pan held',
   );
+
+  stage = `${name}: stuck copy`;
+  session.setSnapshot(lineCopyStuck(next, "implement-4"));
+  render();
+  await settle();
+  const stuck = lineDot("implement-4");
+  const stuckColour = stuck ? getComputedStyle(stuck).backgroundColor : null;
+  const runningColour = getComputedStyle(lineDot("implement-3")!).backgroundColor;
+  const stuckText = lineCard("implement")?.querySelector(".plan-node-state")?.textContent;
+  push(
+    "a running copy whose Ticket has an open Interrupt draws as waiting on the operator",
+    stuck !== fresh
+      ? "the stuck copy's dot was replaced"
+      : !stuck?.classList.contains("plan-dot-interrupted") || stuckColour === runningColour || stuckText !== "needs you"
+        ? `dot ${stuck?.className} in ${stuckColour} beside running ${runningColour}, state "${stuckText}"`
+        : null,
+    `implement-4 turned interrupted in the same node, ${stuckColour} not running ${runningColour}, "needs you"`,
+  );
+  session.setSnapshot(next);
+  render();
+  await settle();
 
   stage = `${name}: copy click-through`;
   const target = lineDot("implement-3");
