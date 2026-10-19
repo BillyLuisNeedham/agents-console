@@ -1172,8 +1172,31 @@ wire_struct! {
         pub merge_queue: Vec<StewardStateMerge>,
         pub pending_spawns: Vec<StewardStatePending>,
         pub held_spawns: Vec<StewardStateHeld>,
+        /// The Line's Plan rev and parked verdicts, in a pool running a Line, for `plan <rev> <edits>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub line: Option<StewardStateLine>,
         /// The Spawn ledger, for the whole pool's state in one file.
         pub ledger: String,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// The running Line in the Steward's state read: what `GET /api/line` carries that an edit needs.
+    pub struct StewardStateLine {
+        /// The Plan's rev, which an edit must name.
+        pub rev: u64,
+        /// Every node holding a verdict with no out edge, waiting to be linked onward.
+        pub parked: Vec<StewardStateParked>,
+    }
+}
+
+wire_struct! {
+    @inline
+    /// One node's parked verdicts in the Steward's state read.
+    pub struct StewardStateParked {
+        pub node: String,
+        pub verdicts: Vec<String>,
     }
 }
 

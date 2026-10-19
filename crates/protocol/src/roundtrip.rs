@@ -306,7 +306,7 @@ fn the_steward() {
         r#"{"conversation":"conv-1","ticketId":"02","note":"yours"}"#,
     );
     round_trip::<StewardStateResponse>(
-        r#"{"steward":"conv-1","budget":5,"mayClose":false,"mayAdoptLineSpawns":false,"phase":"running","interrupts":[{"ticketId":"02","title":"","kind":"checkpoint","answerable":true,"keepTalking":true,"queued":false,"note":null,"used":1,"remaining":4},{"ticketId":"conv-2","title":null,"kind":"merge-approval","answerable":false,"keepTalking":false,"queued":true,"note":"wait","used":0,"remaining":5}],"mergeQueue":[{"ticketId":"03","state":"queued"}],"pendingSpawns":[{"id":"01-spawn-2","parentId":"01","title":"Tidy up"}],"heldSpawns":[{"id":"01-spawn-3","parentId":"01","title":"Follow up","reason":"per-run"}],"ledger":"/p/runs/spawn-ledger.md"}"#,
+        r#"{"steward":"conv-1","budget":5,"mayClose":false,"mayAdoptLineSpawns":false,"phase":"running","interrupts":[{"ticketId":"02","title":"","kind":"checkpoint","answerable":true,"keepTalking":true,"queued":false,"note":null,"used":1,"remaining":4},{"ticketId":"conv-2","title":null,"kind":"merge-approval","answerable":false,"keepTalking":false,"queued":true,"note":"wait","used":0,"remaining":5}],"mergeQueue":[{"ticketId":"03","state":"queued"}],"pendingSpawns":[{"id":"01-spawn-2","parentId":"01","title":"Tidy up"}],"heldSpawns":[{"id":"01-spawn-3","parentId":"01","title":"Follow up","reason":"per-run"}],"line":{"rev":3,"parked":[{"node":"test","verdicts":["fail"]}]},"ledger":"/p/runs/spawn-ledger.md"}"#,
     );
     round_trip::<StewardConfig>(r#"{"budget":0}"#);
 }

@@ -539,10 +539,10 @@ fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
         format!("You may answer {}.", yours.join("; "))
     };
     let edits = if plan.meta().steward_edits {
-        "This Plan lets you edit it with plan <rev> <edits>: rev is the `rev` GET /api/line on the \
-         Console answers, and edits a JSON array of Plan edits, or \"-\" to read it from standard \
-         input. Edit it only when your orders call for it, such as linking a parked verdict onward; \
-         the engine refuses a stale rev (read it again), an edit that would orphan live run state, \
+        "This Plan lets you edit it with plan <rev> <edits>: rev is the one state prints on its Line \
+         Plan line, beside each node's parked verdicts, and edits a JSON array of Plan edits, or \
+         \"-\" to read it from standard input. Edit it only when your orders call for it, such as \
+         linking a parked verdict onward; the engine refuses a stale rev (run state again), an edit that would orphan live run state, \
          and any edit that gives you a power the operator did not."
     } else {
         "This Plan does not let you edit it."
