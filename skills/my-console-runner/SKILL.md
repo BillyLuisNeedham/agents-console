@@ -108,7 +108,7 @@ does not stop for it.
 
 ## How a Console run works
 
-One server process per pool. A rolling scheduler runs it in Ticks (ADR-0040). A Tick runs whenever
+One server process per pool. A rolling scheduler runs it in Ticks (ADR-0041). A Tick runs whenever
 something could change what may start, never on a clock, and launches every ticket whose blockers
 are each `done` and merged, without waiting for any other ticket to end. Each ticket runs in its own
 git worktree, cut from the target's tip at its launch, on the harness and model `console.json`
@@ -169,7 +169,7 @@ Leave these alone rather than rediscovering them:
   the directory and never deletes the branch. The Console drives all of this from its own surface.
 - Per-ticket logs land in the pool's `runs/` directory.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
-  Tick (ADR-0040): an edit lands on any ticket with no Attempt in flight at the next Tick, no
+  Tick (ADR-0041): an edit lands on any ticket with no Attempt in flight at the next Tick, no
   restart needed. `selection`, `terminal` and `port` stay exactly as they were
   at boot; an edit to any of those takes effect on a Restart, which the
   Console offers and which hands back to `agent-console --relaunch`. A restart is otherwise
