@@ -561,16 +561,7 @@ impl Server {
                         _ => break,
                     }
                 }
-                let rows = self.reassign_rows(inner, &raw);
-                let title = self.title_now(inner);
-                inner.latest = Some(Arc::new(enrich(
-                    &raw,
-                    &inner.meta,
-                    &self.0.pool_name,
-                    &self.0.pool_dir,
-                    &rows,
-                    title,
-                )));
+                inner.latest = Some(Arc::new(self.enriched(inner, &raw)));
                 inner.enriched_from = Some(raw);
                 inner.dirty = false;
             }
@@ -582,6 +573,33 @@ impl Server {
     pub fn snapshot(&self) -> Option<Arc<EnrichedSnapshot>> {
         let mut inner = self.lock();
         self.current(&mut inner)
+    }
+
+    /// One engine emit enriched, even when a later one has been published since.
+    pub(crate) fn snapshot_of(&self, raw: &Arc<PoolSnapshot>) -> Arc<EnrichedSnapshot> {
+        let mut inner = self.lock();
+        let built = inner
+            .enriched_from
+            .as_ref()
+            .is_some_and(|from| Arc::ptr_eq(from, raw));
+        if let Some(latest) = inner.latest.clone().filter(|_| built && !inner.dirty) {
+            return latest;
+        }
+        self.refresh_meta(&mut inner, Some(raw));
+        Arc::new(self.enriched(&mut inner, raw))
+    }
+
+    fn enriched(&self, inner: &mut Inner, raw: &PoolSnapshot) -> EnrichedSnapshot {
+        let rows = self.reassign_rows(inner, raw);
+        let title = self.title_now(inner);
+        enrich(
+            raw,
+            &inner.meta,
+            &self.0.pool_name,
+            &self.0.pool_dir,
+            &rows,
+            title,
+        )
     }
 
     /// Rebuild the enriched snapshot from the last engine snapshot and the config file as it is now,
