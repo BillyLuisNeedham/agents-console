@@ -235,23 +235,17 @@ conformance("line", "a Conversation node after the start of a Plan begins, and a
 
   await begun(server, { plan, work: "issue #186" });
   // A headless pool cannot give the pass a pane: it is recorded crashed with why, and the Line goes on.
-  const record = join(world.pool, "conversations", "talk-1.md");
-  await until(() => existsSync(record), Boolean, { what: "talk-1's record" });
-  expect(readFileSync(record, "utf8").split("\n", 1)[0]).toBe(
-    "<!-- conversation: id=talk-1 status=crashed spawned-by=none harness= model= drivers= node=talk -->",
-  );
-  const finish = await until(
-    () => readStateLine(world.pool, "finish-1.md").line,
-    (state) => state.includes("status=checkpoint"),
-    { what: "the Finish to hold" },
-  );
-  expect(finish).toContain("node=finish hold");
-  const snap = await snapshot(server);
+  const snap = await atCheckpoint(server, "finish-1");
   expect(snap.state.log).toContain(
     'line: talk-1 did not open: conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")',
   );
   expect(snap.state.log).toContain("line: talk-1 hands on closed");
   expect(snap.state.conversations.find((c) => c.id === "talk-1")).toMatchObject({ status: "crashed", node: "talk" });
+  // The engine publishes a snapshot only after the job that wrote its files, never before.
+  expect(readFileSync(join(world.pool, "conversations", "talk-1.md"), "utf8").split("\n", 1)[0]).toBe(
+    "<!-- conversation: id=talk-1 status=crashed spawned-by=none harness= model= drivers= node=talk -->",
+  );
+  expect(readStateLine(world.pool, "finish-1.md").line).toContain("status=checkpoint node=finish hold");
 });
 
 /** build (per-item) -> build-merge -> Finish, with the Merger's `conflict` as given. */
