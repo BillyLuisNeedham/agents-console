@@ -194,7 +194,7 @@ A Line from an issue, with the operator in the room:
 5. You answer only what the Plan hands you. A Ticket node that ends without a
    valid verdict raises a "no verdict" checkpoint, which you can Resume or reach
    with Keep talking. A loop whose cap is spent holds the Line (in
-   `factory-today`, Prove failing twice in a Round holds as
+   `factory-today`, Prove failing twice holds as
    `prove-fail-implement-3`). Resume buys one more crossing of the loop, and
    Close halts it. An operator Gate holds as a Ticket you Resume to open, Resume
    with notes to send the notes on, or Close.

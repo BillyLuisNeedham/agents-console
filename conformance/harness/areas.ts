@@ -13,7 +13,7 @@ export const AREAS = {
   attempts: "Attempts and harness launch, headless or terminal-backed: argv, env, cwd, the ticket prompt, spawned and exited facts, fallbacks, the Attempt's end",
   steward: "the Steward: its console.json entry, what it is told, its answers and their limits, its notes, routes and teaching",
   conversations: "Conversations: storage, start and launch, ending, Turn state, Notices, spawn.json adoption, the teaching Turn, Seeded Pools, the conversation routes",
-  scheduling: "the drive loop: Ticks and launches, the ready set, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
+  scheduling: "the drive loop: Ticks and launches, eligibility, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
   spawns: "Spawns: proposals in Outcomes, adoption at the next Tick, Pending and Held spawns, caps, the spawn routes",
   verify: "verify and Jev: the verify: N fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head, human selection, Adopt, the grades endpoint",
   merges: "pool worktrees and branches, merges, waiting on a blocker's merge and the Merge queue, the resolver, Ticket file reconcile",

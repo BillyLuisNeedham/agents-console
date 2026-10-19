@@ -807,18 +807,17 @@ Behaviour of the TypeScript server the cases pin as it is today, each worth a lo
 
 - A spawned Ticket's Notice repeats its id inside the title, `Ticket conv-1-spawn-1 ("conv-1-spawn-1: Checkpointing
   child") ended: checkpoint.`, since the title is the file's heading.
-- A lone spawned Ticket runs in the pool checkout, on no branch of its own, yet its checkpoint Notice names
-  `Branch: pool/<key>/<id>`, a branch that does not exist, and `(no changes)` as its diff, because git cannot
-  compute one against a missing branch.
+- Retired by ADR-0040: a lone spawned Ticket no longer runs in the pool checkout. Every Ticket has its own worktree
+  and branch, so its checkpoint Notice names a branch that exists and a diff that can be computed. The row
+  described the TypeScript server, where a lone Ticket ran in the pool checkout on no branch and its Notice named
+  `Branch: pool/<key>/<id>` with `(no changes)`.
 
 Observed while writing these, not pinned:
 
-- **A lone spawned Ticket that finishes done tells its parent nothing.** It ran in the pool checkout, so nothing
-  merges, and only the merge paths call `ticketEnded` (`engine/engine.ts`). No Notice is queued, typed or dropped:
-  a run with the parent waiting saw none in twelve seconds after the Ticket's done. The teaching tells the agent a
-  spawned Ticket reports back once it ends, done included. Intended behaviour (inference): a done Notice whose
-  diff is the range the Attempt added to the working branch. Rust unit test, once decided: *a spawned Ticket that
-  ends done in the pool checkout queues a ticket-ended Notice to its parent.*
+- **Retired by ADR-0040: a lone spawned Ticket that finished done told its parent nothing.** It ran in the pool
+  checkout, so nothing merged, and only the merge paths call `ticketEnded` (`engine/engine.ts`). Every Ticket now
+  runs in its own worktree and merges, so its done Notice goes out at the merge like any other's. The Rust unit
+  test the row implied is not needed.
 - **The third drop reason**, `parent conversation is ending`, needs a child's Notice raised after its parent's End
   began and before it finished, and an End with nothing to merge takes no time a case can hold open from outside.
   Rust unit test: *Notice queue: a Notice for a parent whose End is under way is dropped at once, logged on the
@@ -965,9 +964,9 @@ left out, and no harness or fixture changed.
   server; HTTP reaches it only while the first End's claim awaits its listing, which the second request almost always
   lands in. Rust unit test: *Conversation claims: two Ends, or an End and the boot's adoption pass, racing on a live
   record with no runtime build one runtime, and the ending is recorded once.*
-- **`keep-talking.test.ts:832`**: the first server boots on 02's orphan written by hand in its worktree, as the engine
-  test does, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arises only from a
-  restart; the stop and start that follow are real.
+- **`keep-talking.test.ts:832`** (retired by ADR-0040): the first server booted on 02's orphan written by hand in its
+  worktree, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arose only from a
+  restart. No Ticket runs in the pool checkout any more, and every Ticket has its own worktree.
 - **`keep-talking.test.ts:889`**: the Conversation runs on opencode and the Ticket it proposes names claude in its
   `assign`. Once `_claude` is scripted the stub keys every claude launch `_claude`, so a Conversation on claude could
   not be told apart from the Tickets' launches.

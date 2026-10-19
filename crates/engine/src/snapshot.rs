@@ -73,7 +73,7 @@ pub struct PoolSnapshot {
     pub held_panes: IndexMap<String, HeldPaneRecord>,
     /// How many Finished terminals the pool has (issue #139).
     pub finished_terminals: u64,
-    /// The Merge hold (ADR-0014): the done-but-unmerged ticket ids, derived fresh at every emit.
+    /// The unlanded list (ADR-0014): the done-but-unmerged ticket ids, derived fresh at every emit.
     pub merge_hold: Vec<String>,
     /// The Merge queue (issue #129): the same ids in the order the engine works through them.
     pub merge_queue: Vec<MergeQueueEntry>,

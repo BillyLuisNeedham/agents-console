@@ -232,7 +232,7 @@ conformance("attempts", "a resolver run streams beside its resolver log", async 
   );
   const server = await t.start(world);
 
-  // The merge hold keeps the drive running, so the wait is on the Interrupt alone.
+  // A waiting merge approval does not pause the drive, so the wait is on the Interrupt alone.
   await until(
     () => snapshot(server),
     (s) => s.state.interrupts.some((i) => i.ticketId === "01" && i.kind === "merge-approval"),

@@ -33,7 +33,7 @@ use crate::snapshot::emit_snapshot;
 use crate::tickets::{attempt_env_of, close_attempt_tab, close_attempt_tabs};
 
 // ---------------------------------------------------------------------------------------------------
-// The Merge hold (ADR-0014)
+// The unlanded list and the Merge queue (ADR-0014)
 // ---------------------------------------------------------------------------------------------------
 
 /// The engine's git probe (merge-hold.ts `gitMergeHoldProbe`, with engine.ts's overrides): the
@@ -780,7 +780,7 @@ pub fn approve_merge(
 }
 
 /// `rejectMerge`: the staged resolution is discarded and the ticket reopens (ADR-0014), which lifts
-/// the merge hold.
+/// the unlanded list.
 pub fn reject_merge(
     session: &mut Session,
     marker: &TicketMarker,

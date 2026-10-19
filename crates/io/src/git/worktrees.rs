@@ -1,6 +1,6 @@
 //! Pool worktrees and branches (engine/worktrees.ts): the pool key, the names of a Ticket's branch and
 //! worktree, preparing, reusing, removing and discarding them, the engine's merge checkout, and the ref
-//! stamp behind the Merge hold memo.
+//! stamp behind the unlanded list memo.
 
 use std::collections::HashMap;
 use std::fs;

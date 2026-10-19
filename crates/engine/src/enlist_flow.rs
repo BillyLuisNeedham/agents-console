@@ -777,7 +777,7 @@ fn write_enlisted_ticket(
             verify: None,
         },
     );
-    // The found work, for the merge hold and the merge paths: an enlisted ticket has no
+    // The found work, for the unlanded list and the merge paths: an enlisted ticket has no
     // `pool/<pool>/<id>` branch, so they read this instead.
     s.enlisted_work.insert(
         id.to_owned(),

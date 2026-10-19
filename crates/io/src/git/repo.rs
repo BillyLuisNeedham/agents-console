@@ -64,7 +64,7 @@ pub fn merge_base(cwd: impl AsRef<Path>, a: &str, b: &str) -> Option<String> {
     probe.ok.then_some(probe.out)
 }
 
-/// Whether `branch` has landed in `target` (`git merge-base --is-ancestor`): the Merge hold's test.
+/// Whether `branch` has landed in `target` (`git merge-base --is-ancestor`): the unlanded list's test.
 pub fn is_ancestor(repo_root: impl AsRef<Path>, branch: &str, target: &str) -> bool {
     git(repo_root, ["merge-base", "--is-ancestor", branch, target]).ok
 }

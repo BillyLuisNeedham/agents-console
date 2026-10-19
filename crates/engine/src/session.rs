@@ -169,7 +169,7 @@ pub struct Session {
     pub settled_phase: Option<RunPhase>,
     pub settle_waiters: Vec<SettleWaiter>,
     pub answer_waiters: HashMap<u64, Vec<AnswerWaiter>>,
-    /// Fired once when the boot's drive first waits on something real (an attempt, a merge hold, the
+    /// Fired once when the boot's drive first waits on something real (an attempt, a waiting merge, the
     /// boot reconcile) or settles: start_pool returns then, as the TypeScript's start returns before
     /// any I/O but after every microtask the drive runs first.
     pub first_turn: Option<oneshot::Sender<()>>,
@@ -210,11 +210,11 @@ pub struct Session {
     pub conversations: Conversations,
     /// The Live attempts registry: every Attempt between its launch and its ending.
     pub live_attempts: LiveAttempts,
-    /// The Merge hold watch: re-derives the hold while the last emitted set is non-empty.
+    /// The unlanded-list watch: re-derives the list while the last emitted set is non-empty.
     pub hold_watch: MergeHoldWatch,
     /// The running watch timer's generation; a timer whose generation is no longer this one stops.
     pub hold_watch_timer: u64,
-    /// The Merge hold's derivation behind its memo (issue #157).
+    /// The unlanded list's derivation behind its memo (issue #157).
     pub derive_hold: MergeHoldMemo,
     pub enlisted: EnlistedAttempts,
     /// The pane read register (issue #122).

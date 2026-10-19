@@ -1,4 +1,4 @@
-//! The Merge hold (ADR-0014, engine/merge-hold.ts): the one derivation of the done-but-unmerged ticket
+//! The unlanded list (ADR-0014, engine/merge-hold.ts): the one derivation of the done-but-unmerged ticket
 //! set, its memo, the watch's bookkeeping, and the Merge queue's line. Only the pure parts live here;
 //! the git probe, the watch's timer and the wait-and-recompute loop are the engine's.
 //!

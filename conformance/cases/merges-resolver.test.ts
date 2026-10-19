@@ -293,7 +293,7 @@ conformance("merges", "a conflict runs the resolver in the parked worktree, hold
   const server = await t.start(world);
   const held = await untilInterrupt(server, "merge-approval");
 
-  // One Interrupt, the approval, whole; 03 waits behind the merge hold.
+  // One Interrupt, the approval, whole; 03 waits on its blocker's merge.
   expect(held.state.interrupts).toEqual([
     { ticketId: "02", kind: "merge-approval", body: approvalBody(world, "kept both lines") },
   ]);
