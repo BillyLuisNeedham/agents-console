@@ -109,6 +109,7 @@ export function readCheckpoints(pool: string): Checkpoint[] {
   const path = join(pool, "console.db");
   if (!existsSync(path)) return [];
   const db = new Database(path, { readonly: true });
+  db.run("PRAGMA busy_timeout = 10000");
   try {
     const rows = db.query("SELECT seq, at, state FROM checkpoints ORDER BY seq").all() as {
       seq: number;
