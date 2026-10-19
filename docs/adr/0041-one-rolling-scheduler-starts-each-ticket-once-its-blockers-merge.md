@@ -1,6 +1,6 @@
 # One rolling scheduler starts each Ticket once its own blockers have merged
 
-Amends ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), and changes the "at the boundary" wording of ADR-0004, ADR-0010, ADR-0018 (Assignments) and ADR-0029. The scheduler ran in super-steps: plan every ready Ticket, run them all, and do nothing new until the last one ends. No ADR chose that. It came from the TypeScript engine's Pregel vocabulary, and every later rule that waits for "the boundary" inherited it. Under a Plan (ADR-0039) it costs most where it matters: one slow copy holds back the next wave of a per-item node, and every other branch of the graph with it. The operator's call was that Tickets "should run as quickly as they can".
+Amends ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), and changes the "at the boundary" wording of ADR-0004, ADR-0010, ADR-0018 (Assignments) and ADR-0029. The scheduler ran in super-steps: plan every ready Ticket, run them all, and do nothing new until the last one ends. No ADR chose that. It came from the TypeScript engine's Pregel vocabulary, and every later rule that waits for "the boundary" inherited it. Under a Plan (ADR-0040) it costs most where it matters: one slow copy holds back the next wave of a per-item node, and every other branch of the graph with it. The operator's call was that Tickets "should run as quickly as they can".
 
 **One scheduler, rolling, for every pool.** The drive is a loop of ticks. A tick is one actor job that reloads the config if it changed, drains Queued answers, reconciles deadlocks, advances the Line, lands Pending spawns, starts owed grading, and launches every eligible Ticket. It then waits for a wake, which every exit, merge landing, answer, settings save, Conversation end, plan edit, grading end, Adopt, Enlist and Reassign sends. A Ticket starts the moment it is eligible, not when its siblings end. There is no super-step mode left for plain pools: two schedulers would be two merge rules and two sets of conformance cases forever.
 
@@ -8,7 +8,7 @@ Amends ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), 
 
 Merged has three rules, applied in this order. A hold Ticket and an engine-run Ticket (grader, head-to-head) count as merged by rule, because neither has a branch; the engine never infers this from a missing branch. A pool outside git counts every Done Ticket as merged. Otherwise the branch must be an ancestor of the target. ADR-0014's missing-branch reading still covers a branch the operator merged or deleted by hand. The Merge queue stays as ADR-0014's amendments describe it, derived and never persisted.
 
-**Every Ticket runs in its own worktree.** The lone ready Ticket no longer runs in the pool checkout: with rolling starts there is no "lone" Ticket, and a Ticket in the checkout would share the tree that merges write to. The pool checkout is written only by merges, and they pass no gate (ADR-0041).
+**Every Ticket runs in its own worktree.** The lone ready Ticket no longer runs in the pool checkout: with rolling starts there is no "lone" Ticket, and a Ticket in the checkout would share the tree that merges write to. The pool checkout is written only by merges, and they pass no gate (ADR-0042).
 
 **What replaces each boundary duty.**
 

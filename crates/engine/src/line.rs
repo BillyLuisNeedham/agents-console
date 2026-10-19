@@ -1,4 +1,4 @@
-//! The pool's Line (ADR-0039): the shell around `ac_core::line::run`. The tick's Line step reads the
+//! The pool's Line (ADR-0040): the shell around `ac_core::line::run`. The tick's Line step reads the
 //! pool into `LineFacts`, advances the run, saves `line.json` and only then writes what the run
 //! projects, each file create-if-absent by its id, and opens each Conversation pass it names. Line
 //! start, the Outcome check at an attempt's exit and the answer check on a Line Ticket all come
@@ -450,7 +450,7 @@ pub fn answer_refusal(
 }
 
 /// Whether the Steward may answer this Ticket's Interrupt: anything outside the Line, and on the
-/// Line only what its frozen Plan gives the Steward (ADR-0039).
+/// Line only what its frozen Plan gives the Steward (ADR-0040).
 pub fn steward_may_answer(session: &Session, ticket_id: &str) -> bool {
     let Some(run) = &session.line else {
         return true;
@@ -461,7 +461,7 @@ pub fn steward_may_answer(session: &Session, ticket_id: &str) -> bool {
 
 /// Why the Steward is never told of this Ticket and never acts on it, when that is so: the Finish
 /// hold and the Finish Ticket are the operator's, and nothing of the Line's is the Steward's once the
-/// Line has ended (ADR-0039).
+/// Line has ended (ADR-0040).
 pub fn steward_kept_from(session: &Session, ticket_id: &str) -> Option<String> {
     let run = session.line.as_ref()?;
     let node = run.node_of(&TicketId::new(ticket_id))?;
@@ -576,7 +576,7 @@ pub fn begin_line(
     Ok(view)
 }
 
-/// `line.plan.edit` and the Steward's `POST /api/steward/plan` (ADR-0039): the edit is made on a
+/// `line.plan.edit` and the Steward's `POST /api/steward/plan` (ADR-0040): the edit is made on a
 /// copy of the run and saved before it replaces the live one, so a refusal or an unwritable
 /// `line.json` leaves the Line as it was. The next tick writes what the edit handed on.
 pub fn edit_plan(

@@ -17,7 +17,7 @@ import { plansPool } from "./plans-support.ts";
 
 /** The spec's Presets table, in its order. */
 const PRESETS: [slug: string, author: string, source: string][] = [
-  ["factory-today", "Agent Console", "docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md"],
+  ["factory-today", "Agent Console", "docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md"],
   ["matt-pocock-main", "Matt Pocock", "skills/engineering/ask-matt/SKILL.md"],
   ["matt-pocock-quick", "Matt Pocock", "skills/engineering/implement/SKILL.md"],
   ["matt-pocock-bug", "Matt Pocock", "skills/engineering/diagnosing-bugs/SKILL.md"],

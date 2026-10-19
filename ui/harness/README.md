@@ -33,12 +33,12 @@ one is on screen at a time, one more the Detail of a Held spawn's faded
 card (issue #150), whose card keeps its node too, and one
 the Steward's Detail opened from the tray's Steward box (ADR-0030), whose
 card and the Steward note on a tray row keep theirs. One more opens a
-Decide Ticket's Detail on a Line (ADR-0039), whose report frame
+Decide Ticket's Detail on a Line (ADR-0040), whose report frame
 must keep its node, since moving an iframe reloads it; a pass after it
 checks the frame reads at its height inside the Detail with Open in browser
 beside its heading, and the layout checks find the header's Line button and
 each Line Ticket's labelled card head inside its card.
-The Line view (ADR-0039) has its own scenario. The fixture's Line has a
+The Line view (ADR-0040) has its own scenario. The fixture's Line has a
 per-item Implement node with a done copy, two running and three queued, a
 capped loop edge at 1 of 2, a parked verdict on Review and a Finish that
 refuses while two copies run, and its copy Tickets are in the pool. The

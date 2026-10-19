@@ -64,7 +64,7 @@ pub struct TicketMarker {
     /// adopted it. It ranks under the operator's console.json assign entry for the id and over the
     /// parent's Assignment. The engine writes the field.
     pub spawn_assign: Option<SpawnAssignRequest>,
-    /// Set on a Line's Tickets (ADR-0039): the Plan node the Ticket belongs to. The engine writes the
+    /// Set on a Line's Tickets (ADR-0040): the Plan node the Ticket belongs to. The engine writes the
     /// field when it projects the Line.
     pub node: Option<String>,
     /// Set on a Line's hold Tickets, the bare word `hold`: answered, never run.

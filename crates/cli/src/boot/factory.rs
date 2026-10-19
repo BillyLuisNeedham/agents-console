@@ -1,4 +1,4 @@
-//! Boot's Line mode (issue #187, ADR-0037, ADR-0038, ADR-0039): a Line pool runs one Line on a branch
+//! Boot's Line mode (issue #187, ADR-0037, ADR-0038, ADR-0040): a Line pool runs one Line on a branch
 //! of its own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s)
 //! before there is any pool, and the pool lives inside that branch's checkout. The base goes into the
 //! pool's console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
@@ -151,7 +151,7 @@ pub fn derived_title(work: &LineWork, slug: &str) -> Option<String> {
     }
 }
 
-/// The standing orders of the Steward a Line pool starts with (ADR-0037, ADR-0039).
+/// The standing orders of the Steward a Line pool starts with (ADR-0037, ADR-0040).
 pub const STEWARD_ORDERS: &str = "Steward this pool's Line while the operator is away: keep its \
 Plan moving through the checkpoints and holds your teaching says are yours to answer. The Finish \
 and its act are the operator's: when the Line waits there, say in your pane where the Line stands \

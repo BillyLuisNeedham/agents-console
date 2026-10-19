@@ -166,7 +166,7 @@ describe("poolDraftFrom", () => {
     expect(EMPTY.spawnsPerRun).toBe("");
   });
 
-  it("seeds maxLive the file sets, and none as an empty field (ADR-0040)", () => {
+  it("seeds maxLive the file sets, and none as an empty field (ADR-0041)", () => {
     expect(poolDraftFrom({ maxLive: 3 }).maxLive).toBe("3");
     expect(EMPTY.maxLive).toBe("");
   });
@@ -228,7 +228,7 @@ describe("poolPatchFrom", () => {
     expect(poolPatchFrom(EMPTY).spawnCaps).toEqual({ perAttempt: null, perRun: null });
   });
 
-  it("sends maxLive as a number, and an emptied one as null for the machine default (ADR-0040)", () => {
+  it("sends maxLive as a number, and an emptied one as null for the machine default (ADR-0041)", () => {
     expect(poolPatchFrom({ ...EMPTY, maxLive: " 2 " }).maxLive).toBe(2);
     expect(poolPatchFrom(EMPTY).maxLive).toBeNull();
   });
@@ -267,7 +267,7 @@ describe("validatePoolDraft", () => {
     });
   });
 
-  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0040)", () => {
+  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0041)", () => {
     for (const bad of ["0", "1.5", "-1", "lots"]) {
       expect(validatePoolDraft({ ...EMPTY, maxLive: bad })).toBe(
         "max live must be a whole number of 1 or more, or empty for the machine default",
@@ -313,7 +313,7 @@ describe("machineDefaultsFrom", () => {
     });
   });
 
-  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0040)", () => {
+  it("refuses a maxLive that is not a whole number of 1 or more (ADR-0041)", () => {
     const draft = {
       harness: "",
       model: "",
@@ -703,7 +703,7 @@ describe("SettingsStore.render", () => {
     expect(root.querySelector('[data-key="pool-spawnsPerRun"] .settings-badge')).toBeNull();
   });
 
-  it("offers maxLive in both forms, the pool's placeholder the machine's bound (ADR-0040)", async () => {
+  it("offers maxLive in both forms, the pool's placeholder the machine's bound (ADR-0041)", async () => {
     const unbound = await opened();
     const first = mount(unbound.store);
     first.paint();

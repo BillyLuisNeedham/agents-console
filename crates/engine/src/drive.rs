@@ -283,7 +283,7 @@ impl PoolFacts for SessionFacts<'_> {
     }
 }
 
-/// The Ticket Attempts `maxLive` counts (ADR-0040): every Candidate and plain Attempt from its launch
+/// The Ticket Attempts `maxLive` counts (ADR-0041): every Candidate and plain Attempt from its launch
 /// to its exit, every resolver, and every Continued or boot-adopted Attempt. Conversations, enlisted
 /// panes, graders and head-to-head judges are not counted.
 pub fn live_ticket_attempts(session: &Session) -> u64 {

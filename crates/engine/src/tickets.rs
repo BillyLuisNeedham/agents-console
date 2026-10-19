@@ -60,7 +60,7 @@ pub struct TicketPlan {
     /// True when the attempt is one candidate of a verify fan-out: it runs on its own attempt branch
     /// and its exit never writes the ticket's status.
     pub verify: bool,
-    /// A Line Ticket's Outcome check (ADR-0037, ADR-0039), fixed at the plan: its done Outcome
+    /// A Line Ticket's Outcome check (ADR-0037, ADR-0040), fixed at the plan: its done Outcome
     /// without a valid verdict is the no-verdict checkpoint.
     pub verdict: Option<ac_core::line::run::OutcomeCheck>,
 }

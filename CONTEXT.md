@@ -14,7 +14,7 @@ _Avoid_: context window, conversation history (those may live *in* state, they a
 
 **Node**:
 A place in a Plan where work runs or waits: a Conversation node, a Ticket node, a Merger, a Gate or the Finish. Each pass of a node takes one handoff and hands on a typed verdict, which the Plan's edges route to the next nodes.
-_Avoid_: agent (a node may *run* an agent; it is not itself the agent), step, stage, Station (the fixed recipe's word, retired by ADR-0039)
+_Avoid_: agent (a node may *run* an agent; it is not itself the agent), step, stage, Station (the fixed recipe's word, retired by ADR-0040)
 
 **Edge**:
 A routing rule in a Plan: one verdict of one node, sent on to the next node. A verdict goes along every edge that matches it. An edge that closes a cycle is a loop edge, and either carries a Loop cap or leaves a person.
@@ -28,8 +28,8 @@ _Avoid_: field, property (too generic)
 The function `(current, update) => value` that merges one channel.
 
 **Tick**:
-One pass of the rolling scheduler, which runs every Pool: the Config reload, the Queued answer drain, the deadlock reconcile, the Line's advance and Spawn landing, then the launch of every Ticket that may start. A Ticket may start once each of its blockers is done and merged, and it runs in its own worktree cut at that moment. A Tick runs whenever something could change what may start, never on a clock, and a Ticket starts without waiting for any other to end. Introduced by ADR-0040 (`docs/adr/0040-one-rolling-scheduler-starts-each-ticket-once-its-blockers-merge.md`).
-_Avoid_: super-step and super-step boundary (retired by ADR-0040: nothing waits for a whole round to end), boundary, between-step, poll
+One pass of the rolling scheduler, which runs every Pool: the Config reload, the Queued answer drain, the deadlock reconcile, the Line's advance and Spawn landing, then the launch of every Ticket that may start. A Ticket may start once each of its blockers is done and merged, and it runs in its own worktree cut at that moment. A Tick runs whenever something could change what may start, never on a clock, and a Ticket starts without waiting for any other to end. Introduced by ADR-0041 (`docs/adr/0041-one-rolling-scheduler-starts-each-ticket-once-its-blockers-merge.md`).
+_Avoid_: super-step and super-step boundary (retired by ADR-0041: nothing waits for a whole round to end), boundary, between-step, poll
 
 **Checkpoint**:
 A saved snapshot of the run's state after each change the engine makes. Makes a run pausable and resumable.
@@ -192,8 +192,8 @@ An Attempt whose engine stopped while it ran. A headless orphan is stopped by th
 _Avoid_: zombie (a zombie is dead; an orphan is alive and working), leaked process, stray agent
 
 **Merge queue**:
-The ordered line of done-but-unmerged tickets, in the order the engine takes their merges on. Only a ticket that names one of them as a blocker waits for it; nothing else does. The ticket at the head is the one whose merge is moving: being merged, being resolved by a resolver Attempt, or waiting on the operator at a merge-approval or merge-conflict interrupt. A ticket left waiting on the operator keeps its place while the engine moves on to the next, so more than one ticket can be waiting on the operator at once. Every ticket behind the head is queued, with nothing running on its behalf. A head with no resolver running and no interrupt raised is stalled, which the Console names rather than hides. Derived by the engine, never persisted. Every ticket in it says on its card which of these it is, and the pool header names the head and the tickets behind it while the line is not empty. A merge-conflict Interrupt says how many tickets have started since the conflict was found, which on a resolver's path is before the resolver ran; a grader or judge the engine runs is not a ticket started. Amends ADR-0014, closing issue #129; per-ticket waiting by ADR-0040.
-_Avoid_: merge pending (it hid which of these a ticket was), backlog, Merge hold (retired by ADR-0040: no merge pauses the whole Pool any more)
+The ordered line of done-but-unmerged tickets, in the order the engine takes their merges on. Only a ticket that names one of them as a blocker waits for it; nothing else does. The ticket at the head is the one whose merge is moving: being merged, being resolved by a resolver Attempt, or waiting on the operator at a merge-approval or merge-conflict interrupt. A ticket left waiting on the operator keeps its place while the engine moves on to the next, so more than one ticket can be waiting on the operator at once. Every ticket behind the head is queued, with nothing running on its behalf. A head with no resolver running and no interrupt raised is stalled, which the Console names rather than hides. Derived by the engine, never persisted. Every ticket in it says on its card which of these it is, and the pool header names the head and the tickets behind it while the line is not empty. A merge-conflict Interrupt says how many tickets have started since the conflict was found, which on a resolver's path is before the resolver ran; a grader or judge the engine runs is not a ticket started. Amends ADR-0014, closing issue #129; per-ticket waiting by ADR-0041.
+_Avoid_: merge pending (it hid which of these a ticket was), backlog, Merge hold (retired by ADR-0041: no merge pauses the whole Pool any more)
 
 **Ticket log**:
 The complete record of a ticket's work — every attempt's log plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail. Since ADR-0012 the per-attempt log is derived live from the attempt's Stream file, not raw harness bytes.
@@ -236,7 +236,7 @@ A Spawn proposal a cap had no room for, one the proposing agent marked as overla
 _Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the scheduler)
 
 **Pending spawn**:
-A Spawn proposal within the caps, taken and waiting for the next Tick to land, which follows at once. Kept across restarts, so a proposal taken just before a restart lands at the first Tick after it, and listed in the Spawn ledger. It has no operator verbs: it lands before anyone could act on it, and an operator who wants to review follow-ups first sets a Spawn cap to 0, which makes each one a Held spawn. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150; its Hold and Discard retired by ADR-0042 (`docs/adr/0042-a-pending-spawn-lands-before-anyone-can-act-on-it.md`).
+A Spawn proposal within the caps, taken and waiting for the next Tick to land, which follows at once. Kept across restarts, so a proposal taken just before a restart lands at the first Tick after it, and listed in the Spawn ledger. It has no operator verbs: it lands before anyone could act on it, and an operator who wants to review follow-ups first sets a Spawn cap to 0, which makes each one a Held spawn. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150; its Hold and Discard retired by ADR-0043 (`docs/adr/0043-a-pending-spawn-lands-before-anyone-can-act-on-it.md`).
 _Avoid_: queued spawn (too close to the Merge queue), proposed spawn (a Held spawn is proposed too), draft ticket
 
 **Spawn ledger**:
@@ -337,7 +337,7 @@ _Avoid_: verdict (that's head-to-head grading), guess, prediction, score (say Je
 ## Factory
 
 **Factory**:
-The engine running a Line from a Plan: it reads each node's typed verdict, keeps the loop counts and writes the next Tickets, Conversations and Hold Tickets itself, so agents never choose what runs next. Introduced as a fixed recipe by ADR-0037; a Plan the operator builds since ADR-0039 (`docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md`).
+The engine running a Line from a Plan: it reads each node's typed verdict, keeps the loop counts and writes the next Tickets, Conversations and Hold Tickets itself, so agents never choose what runs next. Introduced as a fixed recipe by ADR-0037; a Plan the operator builds since ADR-0040 (`docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md`).
 _Avoid_: pipeline, workflow, chain (all too generic), recipe (the fixed run it replaced)
 
 **Plan**:
@@ -390,7 +390,7 @@ _Avoid_: approval, checkpoint (an Attempt's pause), barrier
 
 **Hold Ticket**:
 A Ticket no agent runs, written so a person can answer a Gate, a spent loop or the Finish the way any Interrupt is answered: Resume opens it, Resume with notes sends the notes on, Close closes it. It has no branch and never launches.
-_Avoid_: wait ticket, Finish checkpoint (its name before ADR-0039), placeholder
+_Avoid_: wait ticket, Finish checkpoint (its name before ADR-0040), placeholder
 
 **Loop cap**:
 How many times a loop edge may be crossed before the Line stops to ask the operator, or sends the work elsewhere when the Plan says so. Crossing an enclosing loop resets it, so a Prove limit counts per round of the loop around it. Each Resume of its Hold Ticket buys exactly one more crossing; the Steward may give one itself only on a loop marked for it.

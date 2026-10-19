@@ -310,7 +310,7 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
 }
 
 // An answer on a Line hold is checked again as it drains: the Finish may have gained a blocker since
-// it was accepted (ADR-0039).
+// it was accepted (ADR-0040).
 fn line_refusal_at_drain(session: &mut Session, record: &QueuedAnswer) -> Option<String> {
     if record.kind != InterruptKind::Checkpoint {
         return None;
@@ -433,7 +433,7 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
     session.held.shift_remove(&record.ticket_id);
     // The note lands before the status moves: a Line hold's Done state line is the fact the run reads
-    // its answer from, the note and its heading included (ADR-0039).
+    // its answer from, the note and its heading included (ADR-0040).
     let note = note.map(js::trim).filter(|n| !n.is_empty());
     let by_steward = record.by == Some(AnswerBy::Steward);
     // The Steward's note is marked as its own (ADR-0030). On a hold its heading is written even with

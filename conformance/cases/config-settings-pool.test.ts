@@ -213,7 +213,7 @@ conformance("config", "a Pool settings save refuses a Spawn cap that is not a wh
   expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, spawnCaps: { perRun: 20 } });
 });
 
-// ADR-0040: maxLive is a text field in the pane, like the Spawn caps, but 0 would never launch anything.
+// ADR-0041: maxLive is a text field in the pane, like the Spawn caps, but 0 would never launch anything.
 conformance("config", "a Pool settings save takes maxLive as a number or typed digits, and an empty one removes it", async (t) => {
   const { world, server } = await settledPool(t, DEFAULTS);
   const maxLive = () => readConsoleJson(world.pool)!.maxLive;

@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::config::{ConfigError, PoolConfig};
 use crate::js;
 
-/// The pool's own `maxLive` (ADR-0040), `None` when it sets none and the Machine default applies.
+/// The pool's own `maxLive` (ADR-0041), `None` when it sets none and the Machine default applies.
 pub fn max_live_of(config: &PoolConfig) -> Option<u64> {
     max_live_value(config.get("maxLive"))
 }

@@ -1841,7 +1841,7 @@ describe("projectTimeline", () => {
     ]);
   });
 
-  it("words a spawn held for blocking a started Ticket, with the ids when the event has them (ADR-0040)", () => {
+  it("words a spawn held for blocking a started Ticket, with the ids when the event has them (ADR-0041)", () => {
     const view = projectTimeline(
       response([
         event(1, "spawn-held", {
@@ -4274,7 +4274,7 @@ describe("a Conversation whose Notices are not landing", () => {
   });
 });
 
-describe("the Line (#187, ADR-0039)", () => {
+describe("the Line (#187, ADR-0040)", () => {
   function line(overrides: Partial<LineGraphView> = {}): LineGraphView {
     return {
       plan: {

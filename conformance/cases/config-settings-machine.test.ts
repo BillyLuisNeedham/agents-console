@@ -109,7 +109,7 @@ conformance("config", "a Machine defaults save refuses a terminal other than her
   expect(JSON.parse(readFileSync(defaultsFile(world), "utf8"))).toEqual({ harness: "claude" });
 });
 
-// ADR-0040: the machine's maxLive, under every pool's own.
+// ADR-0041: the machine's maxLive, under every pool's own.
 conformance("config", "a Machine defaults save writes maxLive in the whole file, and refuses one below 1, fractional or text, writing nothing", async (t) => {
   const { world, server } = await settledPool(t);
 

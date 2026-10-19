@@ -47,7 +47,7 @@ export type TicketEventKind =
   | "deadlock-cleared"
   | "answered"
   /**
-   * A queued answer on a Line hold the Line refused as it drained (ADR-0039):
+   * A queued answer on a Line hold the Line refused as it drained (ADR-0040):
    * the Finish gained a blocker since it was accepted. Its reason; the
    * Interrupt stays.
    */
@@ -193,7 +193,7 @@ export interface ConversationView {
   /** The Steward (ADR-0030): present only on a Conversation in that role. */
   role?: ConversationRole;
   /**
-   * The Line's Conversation node this is a pass of (ADR-0039), its id the
+   * The Line's Conversation node this is a pass of (ADR-0040), its id the
    * pass's (`grill-1`): present only on a Conversation the Line opened.
    */
   node?: string;
@@ -289,7 +289,7 @@ export interface Interrupt {
   stewardNote?: StewardNote;
   /**
    * A Ticket's merge-conflict Interrupt, on the snapshot's copy only: how
-   * many other Tickets have started since it was raised (ADR-0040),
+   * many other Tickets have started since it was raised (ADR-0041),
    * derived from their events and absent while none has.
    */
   startedSince?: number;
@@ -331,7 +331,7 @@ export interface Outcome {
    */
   items?: LineItem[];
   /**
-   * A Line Ticket's typed verdict (ADR-0037, ADR-0039), kept as the agent
+   * A Line Ticket's typed verdict (ADR-0037, ADR-0040), kept as the agent
    * wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
    * choice, or the Finish Ticket's PR url. Absent when the Outcome carried none.
    */
@@ -437,7 +437,7 @@ export interface PoolConfig {
    */
   spawnCaps?: SpawnCapsConfig;
   /**
-   * How many Ticket Attempts the engine runs at once (ADR-0040), a whole
+   * How many Ticket Attempts the engine runs at once (ADR-0041), a whole
    * number of 1 or more; absent falls back to the Machine default, and
    * absent there means no bound.
    */
@@ -569,7 +569,7 @@ export interface HeldPaneRecord {
  * mark (the ids ride on the proposal), a Pending spawn a Tick refused to
  * land because the pool moved after it was taken (the reason rides as
  * `adoptError`), a Pending spawn whose named `blocks` reached a Ticket
- * that had already started (ADR-0040), or an older pool's operator Hold
+ * that had already started (ADR-0041), or an older pool's operator Hold
  * of a Pending spawn.
  */
 export type HeldSpawnReason =
@@ -1706,7 +1706,7 @@ export interface EnrichedTicketState {
    */
   reassign: TicketReassignView;
   /**
-   * The Plan node a Line's Ticket belongs to (ADR-0039), from the marker's
+   * The Plan node a Line's Ticket belongs to (ADR-0040), from the marker's
    * durable `node` field; absent on every other Ticket.
    */
   node?: string;
@@ -1766,7 +1766,7 @@ export interface EnrichedSnapshot {
    */
   stewardBudget?: StewardBudgetView;
   /**
-   * The pool's Line (ADR-0039): its frozen Plan with live state, absent in
+   * The pool's Line (ADR-0040): its frozen Plan with live state, absent in
    * a pool that runs no Line.
    */
   line?: LineGraphView;

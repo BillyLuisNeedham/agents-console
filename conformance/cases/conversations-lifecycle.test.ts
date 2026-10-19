@@ -358,7 +358,7 @@ conformance("conversations", "a start on a headless pool is refused with a 409 a
 conformance("conversations", "a start with an unknown role or a blank title is refused with a 400", async (t) => {
   const { server } = await startTerminal(t, terminalWorld(t));
 
-  // A Line's Conversations are the engine's to open (ADR-0039), so grill is no role a start takes.
+  // A Line's Conversations are the engine's to open (ADR-0040), so grill is no role a start takes.
   for (const role of ["admin", "grill"]) {
     const refused = await server.http.post("/api/conversations", { title: "Talk", role });
     expect(refused.status).toBe(400);

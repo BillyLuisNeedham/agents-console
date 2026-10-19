@@ -264,7 +264,7 @@ fn has_started(session: &Session, id: &str) -> bool {
         .any(|event| event.kind == TicketEventKind::Scheduled)
 }
 
-// The Tickets a proposal's named `blocks` reach that have already started (ADR-0040): their
+// The Tickets a proposal's named `blocks` reach that have already started (ADR-0041): their
 // blocked-by is not the proposal's to rewrite, so it waits for the operator instead.
 fn started_blocks(session: &Session, proposal: &SpawnProposal) -> Vec<String> {
     match &proposal.blocks {

@@ -20,7 +20,7 @@ use super::{
 use crate::plan::{Cap, EdgeKey, HORDE_VERSION, NodeId, Plan, Verdict};
 
 /// The refusal for a `line.json` written before Plans.
-pub const OLD_LINE_FILE: &str = "line.json is from before Plans (ADR-0039); start a new Line";
+pub const OLD_LINE_FILE: &str = "line.json is from before Plans (ADR-0040); start a new Line";
 
 fn item_file(item: &Item) -> LineItem {
     LineItem {

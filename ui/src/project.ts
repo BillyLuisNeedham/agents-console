@@ -1106,7 +1106,7 @@ export interface TicketCardView {
   /** The ticket was enlisted from a live herdr pane (issue #101): the badge
    *  reads "as found" where a spawned ticket names a model. */
   enlisted: boolean;
-  /** The Plan node a Line's Ticket works (ADR-0039), which its card labels;
+  /** The Plan node a Line's Ticket works (ADR-0040), which its card labels;
    *  null for a Ticket that is not on a Line. */
   node: string | null;
   /**
@@ -1231,7 +1231,7 @@ export interface ConversationCardView {
   enlisted: boolean;
   /** It is the Steward (ADR-0030): the card is marked as such. */
   steward: boolean;
-  /** The Plan node of the Line this Conversation is a pass of (ADR-0039):
+  /** The Plan node of the Line this Conversation is a pass of (ADR-0040):
    *  the card is marked with it and, once an End is refused, offers End as
    *  closed. */
   node: string | null;
@@ -1915,7 +1915,7 @@ function spawnLine(snapshot: EnrichedSnapshot): SpawnLineView {
  *  which of those the pool never knew), the operator's Hold of an older
  *  pool, a Pending spawn the Tick could not land (with why, where it is
  *  shown inline) (issue #150), or a Pending spawn whose `blocks` named
- *  Tickets that had started (ADR-0040). */
+ *  Tickets that had started (ADR-0041). */
 export function heldReasonCopy(
   reason: HeldSpawnReason,
   overlaps: string[] = [],
@@ -2076,7 +2076,7 @@ export interface ConversationTrayRow {
   idleAge: string | null;
   /** It is the Steward (ADR-0030): the row is marked as such. */
   steward: boolean;
-  /** The Plan node of the Line it is a pass of (ADR-0039): the row is marked with it. */
+  /** The Plan node of the Line it is a pass of (ADR-0040): the row is marked with it. */
   node: string | null;
   /** Notices are not reaching its pane; null while they land. */
   delivery: DeliveryWarningView | null;
@@ -2335,7 +2335,7 @@ export interface PoolConfigPatch {
   /** The Spawn caps (issue #149), replaced whole: a null field goes back to
    *  the engine's default, and both null removes the key. */
   spawnCaps?: { perAttempt: number | null; perRun: number | null };
-  /** maxLive (ADR-0040): null removes the key, and the Machine default
+  /** maxLive (ADR-0041): null removes the key, and the Machine default
    *  applies. */
   maxLive?: number | null;
   /** The Steward entry (ADR-0030), replaced whole like `defaults`: a null
@@ -2715,7 +2715,7 @@ export interface TicketDetailView {
   /** Mirrors the card's: the Steward budget used and left on this ticket,
    *  null until the Steward has answered it (ADR-0030). */
   stewardBudget: StewardBudgetLine | null;
-  /** Mirrors the card's: the Plan node a Line's Ticket works (ADR-0039). */
+  /** Mirrors the card's: the Plan node a Line's Ticket works (ADR-0040). */
   node: string | null;
   /** The report a Decide pass writes, on a Decide Ticket's Detail only;
    *  null on every other Ticket. */
@@ -2723,7 +2723,7 @@ export interface TicketDetailView {
 }
 
 /**
- * A Decide pass's report as its Ticket's Detail shows it (ADR-0039): whether
+ * A Decide pass's report as its Ticket's Detail shows it (ADR-0040): whether
  * the pass wrote one, and the node and pass the report's address names. A
  * done Decide Ticket always wrote its report, since the engine checkpoints
  * a Decide without one.
@@ -2810,7 +2810,7 @@ export type DetailView =
  * The Detail for a selected card, read off the pool's already-projected
  * cards: the caller derives the cards once per cycle and passes them in, so
  * the Detail and the canvas never disagree about the same snapshot. The
- * Line (ADR-0039) is the snapshot's, for a Decide Ticket's report. Null
+ * Line (ADR-0040) is the snapshot's, for a Decide Ticket's report. Null
  * when the card is not in the pool.
  */
 export function projectDetail(

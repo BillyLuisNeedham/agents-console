@@ -1,5 +1,5 @@
 /**
- * maxLive (ADR-0040), seen from outside the server: a pool-wide bound on the
+ * maxLive (ADR-0041), seen from outside the server: a pool-wide bound on the
  * Ticket Attempts the engine runs at once. A launch waits while the bound is
  * reached, a verify Ticket needs room for every Candidate unless nothing is
  * live, and a resolver counts but is never withheld. Every order here is read

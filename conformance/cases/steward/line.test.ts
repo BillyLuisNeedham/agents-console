@@ -1,5 +1,5 @@
 /**
- * The Steward in a Line pool (ADR-0039), seen from outside the server: it is taught the Plan and
+ * The Steward in a Line pool (ADR-0040), seen from outside the server: it is taught the Plan and
  * which of the Line's checkpoints and holds are its, it answers a Ticket's no-verdict checkpoint
  * and a spent `stewardExtra` loop's hold once until that loop resets, it is never told of the
  * Finish hold or the Finish Ticket and its answer or reassign there is refused, nor of the Line once
@@ -84,7 +84,7 @@ conformance(
     const [notice] = await untilNotices(sw.herdr, 1);
     expect(notice).toContain("prove-1");
     const teaching = turnsInto(sw.herdr, STEWARD_PANE).join("\n");
-    expect(teaching).toContain('This pool runs one Line on the Plan "Factory today" (ADR-0039)');
+    expect(teaching).toContain('This pool runs one Line on the Plan "Factory today" (ADR-0040)');
     expect(teaching).toContain(
       'You may answer a checkpoint on a Ticket of implement, prove, review, decide (a "no verdict" one: resume, asking it to record its Outcome again with a valid verdict); the hold of a spent loop on prove --fail--> implement, once until that loop resets',
     );

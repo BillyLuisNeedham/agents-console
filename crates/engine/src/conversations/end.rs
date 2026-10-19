@@ -459,7 +459,7 @@ pub(crate) async fn end_with(
 }
 
 // A Line Conversation pass ends only on the Line brief its committed branch holds at the path its
-// pass names, valid for the Plan and with its spec beside it (ADR-0039); anything less refuses the
+// pass names, valid for the Plan and with its spec beside it (ADR-0040); anything less refuses the
 // End before anything moves. Ended as closed it merges nothing, so it needs none, and an End already
 // asked for (a second End, a boot finishing one) was checked when it was asked.
 fn brief_refusal(s: &Session, id: &str) -> Option<String> {

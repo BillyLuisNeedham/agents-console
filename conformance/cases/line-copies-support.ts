@@ -1,5 +1,5 @@
 /**
- * What the per-item cases share (ADR-0039, ADR-0040): a Plan whose `tasks` node makes Items, a
+ * What the per-item cases share (ADR-0040, ADR-0041): a Plan whose `tasks` node makes Items, a
  * per-item `build` node on a cap with or without a Merger, and `check` after it, the stub Outcomes
  * that carry Items, and the reads of the copies from outside the server.
  */

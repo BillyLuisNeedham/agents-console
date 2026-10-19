@@ -549,7 +549,7 @@ fn started_since_conflict(
 }
 
 /// The state a snapshot carries, with each Ticket merge-conflict Interrupt's copy saying how many
-/// other Tickets started since it was raised (ADR-0040). Derived from the Tickets' events at each
+/// other Tickets started since it was raised (ADR-0041). Derived from the Tickets' events at each
 /// build, never persisted, so it survives a restart; nothing is read while no such Interrupt waits.
 /// Engine-run Tickets (graders and judges) are in the markers but were never started by the
 /// scheduler, and Conversations are not in the markers, so neither counts.

@@ -166,7 +166,7 @@ impl Engine {
             .await;
     }
 
-    /// `POST /api/line` (ADR-0039): the Line begins on its Plan, or the refusal's reason.
+    /// `POST /api/line` (ADR-0040): the Line begins on its Plan, or the refusal's reason.
     pub async fn begin_line(
         &self,
         plan: serde_json::Value,
@@ -176,7 +176,7 @@ impl Engine {
             .await?
     }
 
-    /// `line.plan.edit` (ADR-0039): the operator's edit to the running Line's Plan.
+    /// `line.plan.edit` (ADR-0040): the operator's edit to the running Line's Plan.
     pub async fn edit_line_plan(
         &self,
         base_rev: u64,

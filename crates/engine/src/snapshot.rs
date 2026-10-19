@@ -85,7 +85,7 @@ pub struct PoolSnapshot {
     pub held_spawns: Vec<HeldSpawnView>,
     /// The Steward budget (ADR-0030).
     pub steward_budget: StewardBudgetView,
-    /// The pool's Line, its frozen Plan with live state (ADR-0039); `None` in a pool that runs none.
+    /// The pool's Line, its frozen Plan with live state (ADR-0040); `None` in a pool that runs none.
     pub line: Option<ac_protocol::LineGraphView>,
 }
 

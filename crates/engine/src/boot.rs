@@ -435,7 +435,7 @@ pub fn rehydrate(session: &mut Session) -> anyhow::Result<()> {
         ..PoolUpdate::default()
     });
     // An approval only stands while every marker on disk is finished. A Line pool raises no
-    // run-wide Review (ADR-0039), so one a pool kept from before its Line began goes.
+    // run-wide Review (ADR-0040), so one a pool kept from before its Line began goes.
     let factory = session.line.is_some();
     let reviewing = session
         .state

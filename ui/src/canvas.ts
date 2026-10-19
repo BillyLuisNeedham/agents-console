@@ -365,7 +365,7 @@ export interface CanvasModel {
   /** The Spawn caps line (issue #149), beside the Merge queue line; a
    *  button that opens the Held spawns list. Null before the first snapshot. */
   spawnLine: SpawnLineView | null;
-  /** The Line button (ADR-0039), after the Spawn caps line: where the
+  /** The Line button (ADR-0040), after the Spawn caps line: where the
    *  pool's Line stands, opening the Line view. Null in a pool that runs no Line. */
   line: { headline: string } | null;
   /** The header's "Close N finished terminals" control (issue #139). */
@@ -820,7 +820,7 @@ export class Canvas {
   // (waiting on you / agent working), the last line said, idle age, status
   // once ended or crashed, the same read-only terminal peek ticket cards
   // carry, and an End button; a Line's Conversation whose End was refused
-  // offers End as closed beside it (ADR-0039). No blockers, no grade, no
+  // offers End as closed beside it (ADR-0040). No blockers, no grade, no
   // Vitals: a Conversation is not a Ticket and holds no attempt.
   private renderConversationCard(
     card: ConversationCardView,

@@ -1,5 +1,5 @@
 /**
- * A Line's Conversation nodes (ADR-0039), seen from outside the server: once the Line has begun on a
+ * A Line's Conversation nodes (ADR-0040), seen from outside the server: once the Line has begun on a
  * Plan whose entry is a Conversation node, the engine opens that node's first pass, `grill-1`, as a
  * Conversation of its own on the node's skill and Assignment, its record naming the node and its
  * first Turn the Line's work and the pass's teaching. Ending it reads the Line brief at the pass's
@@ -132,7 +132,7 @@ conformance("line", "the engine opens grill-1 on the Conversation node's skill a
   expect(launch?.argv).toEqual(expect.arrayContaining(["opus"]));
 
   const typed = (await submitted(herdr))[0]!;
-  expect(typed).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)");
+  expect(typed).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0040)");
   expect(typed).toContain(`write the spec at \`docs/specs/main.md\` and the Line brief at \`${BRIEF}\``);
   expect(typed).toContain(
     '"pushBase": true (the Finish may push the Line base to origin, only to create it or fast-forward it, never forcing)',

@@ -1,5 +1,5 @@
 /**
- * A Line across a restart (ADR-0039), seen from outside the server: nothing of the Line is rebuilt
+ * A Line across a restart (ADR-0040), seen from outside the server: nothing of the Line is rebuilt
  * but line.json, and the first tick re-reads every fact from the pool and writes only what is
  * missing, under the same ids and the same bytes. A done Ticket whose merge has not landed hands
  * nothing on until it does; a deleted hold the Line still names is written again as it was; and
@@ -174,6 +174,6 @@ conformance("restart", "a line.json from before Plans is refused at boot with th
 
   const refused = await refusedAtLoad(world);
   expect(refused.code).not.toBe(0);
-  expect(refused.output).toContain("line.json is from before Plans (ADR-0039); start a new Line");
+  expect(refused.output).toContain("line.json is from before Plans (ADR-0040); start a new Line");
   expect(readFileSync(file, "utf8")).toBe(old);
 });

@@ -140,7 +140,7 @@ conformance("http", "unknown paths › an unknown route, a GET of a POST route a
     const res = await server.http.get(path);
     expect([path, res.status]).toEqual([path, 500]);
   }
-  // Start the Line went with Conversation nodes (ADR-0039): its route is an unknown one.
+  // Start the Line went with Conversation nodes (ADR-0040): its route is an unknown one.
   const startLine = await server.http.post("/api/line/start", { grill: "conv-1" });
   expect(startLine.status).toBe(500);
   expect((await server.http.get("/api/state")).status).toBe(200);

@@ -362,7 +362,7 @@ pub struct StewardTeaching<'a> {
     pub command: &'a str,
     pub budget: u64,
     pub may_close: bool,
-    /// The pool's Line (ADR-0039): the Steward is taught its Plan and which of its checkpoints and
+    /// The pool's Line (ADR-0040): the Steward is taught its Plan and which of its checkpoints and
     /// holds are its.
     pub line: Option<&'a crate::line::run::LineRun>,
     /// `steward.mayAdoptLineSpawns`: whether it may decide Held spawns proposed from inside the Line.
@@ -556,7 +556,7 @@ fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
          engine refuses you. Leave them held."
     };
     format!(
-        "This pool runs one Line on the Plan \"{}\" (ADR-0039): the engine writes its Tickets and \
+        "This pool runs one Line on the Plan \"{}\" (ADR-0040): the engine writes its Tickets and \
          holds from the Plan and routes each verdict. {yours} {edits} Nothing else of the Line is \
          yours: the Finish hold and the Finish Ticket are the operator's, so you are not told of \
          them and the engine refuses your answer. Never propose a node's work yourself. {spawns}\n\n",

@@ -22,7 +22,7 @@ export interface LinePaneOptions {
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * The Line view (ADR-0039): an overlay of the canvas column that draws the
+ * The Line view (ADR-0040): an overlay of the canvas column that draws the
  * running Line's frozen Plan with its live state, on the Plans view's canvas
  * and inspector. Whether it is open is this view's own state; it opens from
  * the canvas header's Line button and closes back to the Ticket canvas, and a

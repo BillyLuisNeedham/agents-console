@@ -1,4 +1,4 @@
-//! A Line running its frozen Plan (ADR-0039). Pure: no I/O, no clock, no git.
+//! A Line running its frozen Plan (ADR-0040). Pure: no I/O, no clock, no git.
 //!
 //! Run state records structure and what it has absorbed; every status is a fact read from the pool.
 //! A copy's status belongs to its Ticket's state line and merged-ness belongs to git, so neither is

@@ -310,7 +310,7 @@ impl SpawnProposals {
     }
 
     /// A Pending spawn whose named `blocks` reached Tickets that had started, held for the operator
-    /// under the same id: landing it would rewrite a running Ticket's blockers (ADR-0040).
+    /// under the same id: landing it would rewrite a running Ticket's blockers (ADR-0041).
     pub fn hold_started(
         &mut self,
         id: &str,

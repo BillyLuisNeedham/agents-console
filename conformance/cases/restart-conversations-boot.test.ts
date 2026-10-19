@@ -285,7 +285,7 @@ conformance("restart", "an enlisted Conversation whose pane herdr no longer list
 });
 
 // ---------------------------------------------------------------------------
-// A Line Conversation pass whose End the stop cut short (ADR-0039)
+// A Line Conversation pass whose End the stop cut short (ADR-0040)
 // ---------------------------------------------------------------------------
 
 restartCase("a stop after a Line Conversation's End and before its merge still hands the Line on once, after the merge", async (t) => {

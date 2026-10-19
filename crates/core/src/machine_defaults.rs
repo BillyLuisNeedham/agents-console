@@ -1,6 +1,6 @@
 //! Machine defaults (issue #121; machine-defaults.ts): the per-machine harness, model, effort, drivers,
 //! terminal and engine path a new Pool inherits when nothing more specific says otherwise, and the
-//! `maxLive` under every pool's own (ADR-0040). One JSON
+//! `maxLive` under every pool's own (ADR-0041). One JSON
 //! file under `~/.agent-graphs/`, edited from the Console's Settings pane and read by Boot and by the
 //! engine's resolver fallback.
 //!

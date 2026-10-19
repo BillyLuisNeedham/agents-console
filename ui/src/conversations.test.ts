@@ -486,7 +486,7 @@ describe("ConversationsTray: Notices not landing", () => {
   });
 });
 
-describe("ConversationsTray: a Line Conversation's row (ADR-0039)", () => {
+describe("ConversationsTray: a Line Conversation's row (ADR-0040)", () => {
   useDom();
   it("names the node on the Line Conversation's tray row", () => {
     const { tray } = trayHarness();

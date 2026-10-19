@@ -1,4 +1,4 @@
-//! The Line's helpers the run and Boot share (ADR-0037, ADR-0038, ADR-0039): where a Line keeps its
+//! The Line's helpers the run and Boot share (ADR-0037, ADR-0038, ADR-0040): where a Line keeps its
 //! files, the verdicts a Prove or Review Ticket writes, approval, the Line base, and `line.json`.
 //! The run itself, a frozen Plan advanced over the pool's facts, is [`run`].
 

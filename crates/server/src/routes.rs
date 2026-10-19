@@ -706,7 +706,7 @@ pub async fn enlist_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// POST /api/line (ADR-0039), sent once by Boot: `plan` is a Preset or library slug or a Plan file,
+/// POST /api/line (ADR-0040), sent once by Boot: `plan` is a Preset or library slug or a Plan file,
 /// with exactly one of `work` or `brief` (a Line brief's path in the pool checkout). 202 with the
 /// Line; an unknown slug, an invalid or not-yet-runnable Plan, a bad brief or a second Line is the
 /// 409 `reason` envelope.
@@ -772,7 +772,7 @@ pub fn read_plan_edit(body: Value) -> Result<(u64, Vec<PlanEdit>), String> {
     Ok((request.base_rev, edits))
 }
 
-/// POST /api/line/plan (`line.plan.edit`, ADR-0039): the operator's typed edits to the running
+/// POST /api/line/plan (`line.plan.edit`, ADR-0040): the operator's typed edits to the running
 /// Line's frozen Plan. 200 with the new rev; a body or an edit that cannot be read is a 400, and a
 /// refusal of the Line's (no Line, a stale rev, an invalid Plan, live run state) the 409 `reason`
 /// envelope.

@@ -108,7 +108,7 @@ asks only for what is left, starts the server and opens the browser. It takes
 ### Line mode
 
 `agent-console --plan <slug>` boots a pool that runs one Line on a Plan
-(`docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md`). A Plan is a
+(`docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md`). A Plan is a
 graph of nodes and edges saved as a file. The engine reads each node's verdict
 and starts whatever the Plan's edges name next. Agents never choose what runs
 next.

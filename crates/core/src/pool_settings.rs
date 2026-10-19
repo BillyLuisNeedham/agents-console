@@ -282,7 +282,7 @@ fn normalise_spawn_caps(value: &Value) -> Result<Option<Value>, ConfigError> {
     Ok(non_empty(out))
 }
 
-// maxLive (ADR-0040) is a text input, so digits typed as text are its number; empty clears it back to
+// maxLive (ADR-0041) is a text input, so digits typed as text are its number; empty clears it back to
 // the Machine default.
 fn normalise_max_live(value: &Value) -> Result<Option<Value>, ConfigError> {
     let Some(max) = text_number(value) else {

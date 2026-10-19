@@ -207,7 +207,7 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
                 .collect()
         })
         .unwrap_or_default();
-    // The Steward hears only of the Line's Interrupts its Plan gives it (ADR-0039): never the Finish.
+    // The Steward hears only of the Line's Interrupts its Plan gives it (ADR-0040): never the Finish.
     let interrupts: Vec<Interrupt> = session
         .state
         .interrupts

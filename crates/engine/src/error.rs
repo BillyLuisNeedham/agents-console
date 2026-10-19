@@ -7,7 +7,7 @@ pub enum EngineError {
     /// queued-answers.ts `AnswerQueuedConflict`: a different answer is already queued (409).
     #[error("{0}")]
     AnswerQueuedConflict(String),
-    /// The Line refuses this answer now (ADR-0039): an approval of the Finish while something
+    /// The Line refuses this answer now (ADR-0040): an approval of the Finish while something
     /// blocks it, or notes on a Finish with no revise edge (409).
     #[error("{0}")]
     LineRefusal(String),

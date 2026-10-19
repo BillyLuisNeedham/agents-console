@@ -249,7 +249,7 @@ pub struct Session {
     /// The Steward budget used per Ticket; only Tickets with some used are kept.
     pub steward_used: IndexMap<String, u64>,
     pub steward_adopts: HashMap<String, String>,
-    /// The pool's Line (ADR-0039), as `line.json` holds it; `None` in a pool that runs none.
+    /// The pool's Line (ADR-0040), as `line.json` holds it; `None` in a pool that runs none.
     pub line: Option<ac_core::line::run::LineRun>,
 }
 

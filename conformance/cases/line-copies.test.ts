@@ -1,5 +1,5 @@
 /**
- * A per-item node's copies (ADR-0039), seen from outside the server: `tasks` makes Items in its
+ * A per-item node's copies (ADR-0040), seen from outside the server: `tasks` makes Items in its
  * Outcome, and `build` starts one harness per Item under its cap, each Ticket `build-<pass>.<n>`
  * with its Item in the body. A copy keeps its slot until it ends, a checkpointed one included. With
  * a Merger the next node's Ticket is written once, when every copy has settled and merged, blocked

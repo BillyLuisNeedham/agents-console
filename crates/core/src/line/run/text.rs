@@ -559,7 +559,7 @@ fn decide_choice(run: &LineRun, node: &NodeId, pass: &Pass) -> String {
 
 fn header(node: &Node, kind: &str, n: u32, spawns: SpawnPolicy) -> String {
     format!(
-        "**Node** `{}` ({kind}) of this pool's Line, pass {n} (ADR-0039): the engine wrote this \
+        "**Node** `{}` ({kind}) of this pool's Line, pass {n} (ADR-0040): the engine wrote this \
          Ticket from the Line's Plan and the work handed to it, and routes its Outcome along the \
          Plan's edges. Never propose the next node yourself; {}.",
         node.id,
@@ -713,7 +713,7 @@ pub(super) fn conversation(
     let [halted, notes] = handoff_sections(&pass.input);
     let opening = sections([
         Some(format!(
-            "You are the {} Conversation (`{id}`) of this pool's Line (ADR-0039): you sharpen \
+            "You are the {} Conversation (`{id}`) of this pool's Line (ADR-0040): you sharpen \
              the work with the operator before the next node runs. When the operator agrees the \
              plan, write the spec at `{BRIEF_DIR}/{line}.md` and the Line brief at `{}`, and \
              commit both on your branch. The brief is JSON, {{\"spec\": \"{BRIEF_DIR}/{line}.md\"}}, \
@@ -793,7 +793,7 @@ pub(super) fn gate_hold(run: &LineRun, node: &Node, pass: &Pass, ticket: &Ticket
         &node.id,
         format!("{}, pass {}", node.title, pass.n),
         format!(
-            "**Gate** `{}` of this pool's Line, pass {} (ADR-0039). No agent runs this Ticket: it \
+            "**Gate** `{}` of this pool's Line, pass {} (ADR-0040). No agent runs this Ticket: it \
              waits for {who}.",
             node.id, pass.n
         ),
@@ -842,7 +842,7 @@ pub(super) fn loop_hold(
         &key.from,
         format!("Loop {} -> {} spent", key.from, key.to),
         format!(
-            "**Loop hold** on `{}.{} -> {}` of this pool's Line (ADR-0039){}. No agent runs this \
+            "**Loop hold** on `{}.{} -> {}` of this pool's Line (ADR-0040){}. No agent runs this \
              Ticket: it waits for the operator.",
             key.from,
             key.on.as_str(),
@@ -918,7 +918,7 @@ pub(super) fn finish_hold(
         format!("{}, pass {}", node.title, pass.n),
         sections([
             Some(format!(
-                "**Finish** `{}` of this pool's Line (ADR-0039). No agent runs this Ticket: it is \
+                "**Finish** `{}` of this pool's Line (ADR-0040). No agent runs this Ticket: it is \
                  where the operator approves the Line. Finish: `{}`.",
                 node.id,
                 act_word(act)
@@ -1101,7 +1101,7 @@ pub(super) fn act_ticket(run: &LineRun, ticket: &TicketId) -> NewTicket {
     };
     let body = sections([
         Some(format!(
-            "**Finish** `{finish}` of this pool's Line (ADR-0039): the operator approved the Line \
+            "**Finish** `{finish}` of this pool's Line (ADR-0040): the operator approved the Line \
              at `{hold}`, and this Ticket carries out its act. It is safe to run again: before \
              each step, check whether it is already done (an open PR from the Line's branch is the \
              result, a push origin already has changes nothing, a deleted spec stays deleted)."

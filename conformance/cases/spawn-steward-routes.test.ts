@@ -206,7 +206,7 @@ conformance("spawns", "pending spawns on the snapshot › lands every Pending sp
   expect(after.state.tickets.map((ticket) => ticket.id)).toEqual(expect.arrayContaining(["01-spawn-1", "01-spawn-2"]));
 });
 
-// Hold and Discard of a Pending spawn are retired (ADR-0042): a Tick lands a proposal as soon as its
+// Hold and Discard of a Pending spawn are retired (ADR-0043): a Tick lands a proposal as soon as its
 // Attempt exits, so no request could reach one in time. Both routes answer as any path no route matches.
 conformance("spawns", "POST /api/spawns/pending/hold and /discard › answer as an unknown path does", async (t) => {
   const server = await startLandedRig(t);

@@ -1,5 +1,5 @@
 /**
- * Boot's Line mode on a Plan (ADR-0037, ADR-0038, ADR-0039), run as a process: `--plan <slug>` loads
+ * Boot's Line mode on a Plan (ADR-0037, ADR-0038, ADR-0040), run as a process: `--plan <slug>` loads
  * a Preset or a library Plan, Boot cuts `line/<slug>` from its Line base (issue #193: the branch
  * the operator's checkout has out, unless --from names another) into a worktree of its own under
  * `.scratch/lines/`, leaving that checkout's branch alone, makes the pool inside that worktree and
@@ -165,7 +165,7 @@ conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it o
     { what: "grill-1's first Turn" },
   );
   const first = typed.find((text) => text.includes("(`grill-1`)"))!;
-  expect(first).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)");
+  expect(first).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0040)");
   expect(first).toContain(
     "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on " +
       `it.\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,

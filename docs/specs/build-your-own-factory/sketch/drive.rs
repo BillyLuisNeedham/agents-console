@@ -14,7 +14,7 @@
 //!                          merge landed ---+     |       +-- answer / settings / plan edit / end
 //!                                   grading flow ended
 //!
-//! ADR-0014's whole-pool Merge hold becomes per-blocker gating (ADR-0040): a Ticket is eligible
+//! ADR-0014's whole-pool Merge hold becomes per-blocker gating (ADR-0041): a Ticket is eligible
 //! once each blocker is Done and merged into the target, and its worktree is cut from the target's
 //! tip at launch, which by then holds every blocker. Every Ticket runs in its own worktree; the pool
 //! checkout is written only by merges, through the checkout gate (ADR-0027).

@@ -1,6 +1,6 @@
 /**
  * The Spawns list (CONTEXT.md: Held spawn; issues #149 and #150, ADR-0029,
- * ADR-0042): what the canvas header's Spawn caps line opens. It lists the
+ * ADR-0043): what the canvas header's Spawn caps line opens. It lists the
  * Held spawns, each waiting for the operator's Adopt or Discard. One module
  * owns the whole session state: whether the list is open, which bodies are
  * expanded, which Discard is asking to be confirmed, the request in flight

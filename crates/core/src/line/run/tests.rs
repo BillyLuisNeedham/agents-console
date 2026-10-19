@@ -1112,7 +1112,7 @@ fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
     assert_eq!(grill.assign.model.as_deref(), Some("opus"));
     assert!(
         grill.opening.starts_with(
-            "You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0039)"
+            "You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0040)"
         )
     );
     assert!(grill.opening.contains(

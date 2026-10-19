@@ -1,5 +1,5 @@
 /**
- * Closing a Line Ticket (ADR-0039), seen from outside the server: `closed` is a verdict the Plan
+ * Closing a Line Ticket (ADR-0040), seen from outside the server: `closed` is a verdict the Plan
  * routes like any other. In Factory today `implement.closed -> decide` runs Decide with the halt,
  * and a `closed` with no edge of its own goes to the Finish carrying the reason. A Closed Ticket
  * is never a blocker, so what follows it waits on nothing. A closed loop hold's id is never raised

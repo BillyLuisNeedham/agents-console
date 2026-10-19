@@ -30,7 +30,7 @@
 //! | `assignment::defaults_layer` | `config.defaults`, its four fields as `firstSet` reads them |
 //! | `assignment::assign_request` | `config.assign?.[id]`, the layer plus a raw `verify` |
 //! | `spawn_caps::spawn_caps_of` | `config.spawnCaps?.perAttempt ?? 5`, `?.perRun ?? 20` |
-//! | `max_live::max_live_of` | `config.maxLive`, absent falling to the Machine default (ADR-0040) |
+//! | `max_live::max_live_of` | `config.maxLive`, absent falling to the Machine default (ADR-0041) |
 //! | `steward::steward_budget_of` | `config.steward?.budget ?? 5` |
 //! | `steward::steward_may_close_of` | `config.steward?.mayClose === true` |
 //! | `steward::steward_assign_of` | `config.steward?.assign` |
@@ -60,7 +60,7 @@ pub const CONSOLE_JSON: &str = "console.json";
 pub const RETIRED_CONFIG_KEYS: [&str; 2] = ["roster", "agents"];
 
 /// The keys the Config reload touches (ADR-0018): the assignment slice, and the Spawn caps (ADR-0029),
-/// `maxLive` (ADR-0040) and the Steward entry (ADR-0030) beside it. Everything else (selection,
+/// `maxLive` (ADR-0041) and the Steward entry (ADR-0030) beside it. Everything else (selection,
 /// terminal, port) stays as it was at boot for the life of the run.
 pub const CONFIG_SLICE_KEYS: [&str; 6] = [
     "defaults",

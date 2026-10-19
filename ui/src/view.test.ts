@@ -435,7 +435,7 @@ describe("ConsoleView: Notices not landing", () => {
   });
 });
 
-describe("ConsoleView: the Line view (ADR-0039)", () => {
+describe("ConsoleView: the Line view (ADR-0040)", () => {
   const LINE_SNAPSHOT: EnrichedSnapshot = {
     ...SNAPSHOT,
     line: {

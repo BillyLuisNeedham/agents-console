@@ -55,14 +55,14 @@ const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textar
 const STEWARD = "steward-1";
 const STEWARD_NOTE =
   "Recommend resume with: keep the old endpoint behind the flag until the migration lands, then delete it in a follow-up ticket.";
-/** A Line's Tickets (ADR-0039), the Line at its Finish with Decide's pass 1
+/** A Line's Tickets (ADR-0040), the Line at its Finish with Decide's pass 1
  *  report written: the header's Line button, the cards' node labels and the
  *  report's frame in the Decide Ticket's Detail. */
 const FINISH_TICKET = "finish-1";
 const DECIDE_TICKET = "decide-1";
 const LINE_NODES = ["implement", "prove", "review", "decide", "finish"] as const;
 /**
- * The Line's live graph (ADR-0039): Implement is a per-item node on its
+ * The Line's live graph (ADR-0040): Implement is a per-item node on its
  * second pass with a done copy, two running and three queued behind the cap,
  * Prove's fail loop has been taken once of two, Review parked its findings
  * with no edge to take them, and the Finish refuses while two copies run.
@@ -115,7 +115,7 @@ function liveLine(): LineGraphView {
   };
 }
 
-/** A Line's Conversation pass (ADR-0039) whose End the engine refuses with a
+/** A Line's Conversation pass (ADR-0040) whose End the engine refuses with a
  *  reason as long as a real one, so the card and the Detail offer End as closed. */
 const GRILL = "grill-1";
 const GRILL_REFUSAL = `${GRILL}'s committed branch pool/harness/${GRILL} has no Line brief at docs/specs/main.${GRILL}.brief.json`;
@@ -417,7 +417,7 @@ const FACTORY_TODAY: PlanFile = {
   horde: 1,
   name: "Factory today",
   author: "Agent Console",
-  source: "docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md",
+  source: "docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md",
   note: "ADR-0037's fixed Line as a Plan.",
   nodes: [
     { kind: "conversation", id: "grill", title: "Grill", x: 40, y: 60, skill: "my-grill-with-docs", assign: { harness: "claude", model: "opus", effort: "high" } },
@@ -1242,7 +1242,7 @@ function publish(outcome: string): void {
 }
 
 /**
- * A refused End on a Line's Conversation (ADR-0039): End from the card, the
+ * A refused End on a Line's Conversation (ADR-0040): End from the card, the
  * engine's reason stands inside the card with End as closed beside End, and
  * the Detail's End box offers the same inside the panel. An ordinary
  * Conversation's card offers neither.
@@ -1378,7 +1378,7 @@ async function closeSelectedChecks(): Promise<void> {
 }
 
 /**
- * A Decide pass's report on its Ticket's Detail (ADR-0039): framed on
+ * A Decide pass's report on its Ticket's Detail (ADR-0040): framed on
  * Progress at a height that reads, inside the Detail's width, with Open in
  * browser beside its heading.
  */
@@ -2256,7 +2256,7 @@ async function main(): Promise<void> {
     q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
-  // A Decide Ticket's Detail (ADR-0039): its pass's report framed, which
+  // A Decide Ticket's Detail (ADR-0040): its pass's report framed, which
   // must keep its frame across every render.
   await runScenario("decide report detail", async () => {
     session.select(card(DECIDE_TICKET));

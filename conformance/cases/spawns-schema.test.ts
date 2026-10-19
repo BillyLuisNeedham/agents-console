@@ -3,7 +3,7 @@
  * namespace at pool start (ADR-0010, ADR-0036): what an attempt's Outcome
  * may propose, the reason each malformed proposal is rejected with, and
  * which hand-written Ticket files refuse to boot. An Outcome's `items`
- * (ADR-0040) are checked the same way: each entry outside the bounds is
+ * (ADR-0041) are checked the same way: each entry outside the bounds is
  * dropped with an `item-rejected` event naming its index and why, and the
  * attempt still ends done.
  */

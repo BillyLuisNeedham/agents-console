@@ -596,7 +596,7 @@ How the cases come by a listing, which binds the Rust server:
 Where the cases reach a row differently from its wording:
 
 - `finished-terminals.test.ts:52`: the case waits for the Attempts of 01, 04 and 05 to end, while the Live
-  attempt stays open, rather than for their crash Interrupts, which are raised at each exit (ADR-0040).
+  attempt stays open, rather than for their crash Interrupts, which are raised at each exit (ADR-0041).
 - `held-panes.test.ts:78`: the headless attempt, the resolver attempt and the attempt never spawned are
   booted from events written by hand, since a terminal-backed pool runs nothing headless but a fallback and a
   resolver never checkpoints its Ticket. The fallback is a real run with `tab.create` refused.
@@ -790,7 +790,7 @@ Where the cases reach a row differently from its wording:
   <target>...<branch>` no longer exists and git refuses the diff.
 - **`notices.test.ts:44`, `:130`**: the case spawns two at once and pauses the second. Its done and checkpoint
   Notices are each matched whole, in either order: the pause is told at the second's exit and the done at the
-  first's merge, whichever comes first (ADR-0040).
+  first's merge, whichever comes first (ADR-0041).
 - **`notices.test.ts:86`** and every other spawned Ticket's Notice: the title is the heading the server writes into
   a spawned Ticket's file, which leads with its id (`conv-1-spawn-2: Old idea`), not the proposal's title alone.
 - **`notices.test.ts:668`, `:744`, `:813`**: the spawned Ticket runs in a pane on the claude TUI stand-in like its
@@ -807,14 +807,14 @@ Behaviour of the TypeScript server the cases pin as it is today, each worth a lo
 
 - A spawned Ticket's Notice repeats its id inside the title, `Ticket conv-1-spawn-1 ("conv-1-spawn-1: Checkpointing
   child") ended: checkpoint.`, since the title is the file's heading.
-- Retired by ADR-0040: a lone spawned Ticket no longer runs in the pool checkout. Every Ticket has its own worktree
+- Retired by ADR-0041: a lone spawned Ticket no longer runs in the pool checkout. Every Ticket has its own worktree
   and branch, so its checkpoint Notice names a branch that exists and a diff that can be computed. The row
   described the TypeScript server, where a lone Ticket ran in the pool checkout on no branch and its Notice named
   `Branch: pool/<key>/<id>` with `(no changes)`.
 
 Observed while writing these, not pinned:
 
-- **Retired by ADR-0040: a lone spawned Ticket that finished done told its parent nothing.** It ran in the pool
+- **Retired by ADR-0041: a lone spawned Ticket that finished done told its parent nothing.** It ran in the pool
   checkout, so nothing merged, and only the merge paths call `ticketEnded` (`engine/engine.ts`). Every Ticket now
   runs in its own worktree and merges, so its done Notice goes out at the merge like any other's. The Rust unit
   test the row implied is not needed.
@@ -964,7 +964,7 @@ left out, and no harness or fixture changed.
   server; HTTP reaches it only while the first End's claim awaits its listing, which the second request almost always
   lands in. Rust unit test: *Conversation claims: two Ends, or an End and the boot's adoption pass, racing on a live
   record with no runtime build one runtime, and the ending is recorded once.*
-- **`keep-talking.test.ts:832`** (retired by ADR-0040): the first server booted on 02's orphan written by hand in its
+- **`keep-talking.test.ts:832`** (retired by ADR-0041): the first server booted on 02's orphan written by hand in its
   worktree, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arose only from a
   restart. No Ticket runs in the pool checkout any more, and every Ticket has its own worktree.
 - **`keep-talking.test.ts:889`**: the Conversation runs on opencode and the Ticket it proposes names claude in its

@@ -212,7 +212,7 @@ pub(crate) fn prepare(
     prepared
 }
 
-/// Prepare a Line Conversation pass's start (ADR-0039): the id the Line named, used verbatim, on its
+/// Prepare a Line Conversation pass's start (ADR-0040): the id the Line named, used verbatim, on its
 /// node's Assignment and skill ahead of the pool defaults, its opening Turn the pass's.
 pub(crate) fn prepare_pass(
     s: &mut Session,

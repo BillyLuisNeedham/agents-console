@@ -1,5 +1,5 @@
 /**
- * What the Line cases share (ADR-0039): a pool whose checkout holds a spec and a Line brief, the
+ * What the Line cases share (ADR-0040): a pool whose checkout holds a spec and a Line brief, the
  * Line begun on a Plan through POST /api/line, the stub Outcomes each Ticket node writes, and the
  * reads of the Line from outside the server.
  */

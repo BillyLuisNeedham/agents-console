@@ -1,6 +1,6 @@
 # Build your own Factory (Horde Plan Mode)
 
-Branch `feature/build-your-own-factory`. The type sketch is in `docs/specs/build-your-own-factory/sketch/` (`plan.rs`, `run.rs`, `drive.rs`): types, signatures and invariants with `todo!()` bodies, never compiled. Where it and this spec disagree, this spec wins and the sketch gets fixed. The decisions are ADR-0039 (the Factory runs a Plan) and ADR-0040 (one rolling scheduler). The words are in `CONTEXT.md`. This spec and its sketch are deleted in the last commit before the PR.
+Branch `feature/build-your-own-factory`. The type sketch is in `docs/specs/build-your-own-factory/sketch/` (`plan.rs`, `run.rs`, `drive.rs`): types, signatures and invariants with `todo!()` bodies, never compiled. Where it and this spec disagree, this spec wins and the sketch gets fixed. The decisions are ADR-0040 (the Factory runs a Plan) and ADR-0041 (one rolling scheduler). The words are in `CONTEXT.md`. This spec and its sketch are deleted in the last commit before the PR.
 
 ## Goal
 
@@ -18,7 +18,7 @@ The Factory's fixed Stations (ADR-0037) become a Plan the operator builds: a gra
 
 These are closed. The design below carries each one.
 
-- The Plan replaces the fixed recipe (ADR-0039). "Factory today" is a Preset.
+- The Plan replaces the fixed recipe (ADR-0040). "Factory today" is a Preset.
 - Presets are compiled in and read-only; the operator's Plans live in `~/.agent-graphs/plans/<slug>.json`; a Line freezes its Plan into `line.json` at start.
 - Nodes are Conversation nodes, Ticket nodes, Mergers, Gates and the Finish. The Grill is a Conversation node. A Line starts at Boot, Start the Line is gone, and `--brief` takes the entry Conversation node as answered.
 - Items are a typed `items: [{title, body}]` in an Outcome or a Line brief. Copies are per item under a cap or `all`, never best-of-N.
@@ -28,7 +28,7 @@ These are closed. The design below carries each one.
 - The Finish cannot complete while anything runs, queues or waits; approving its hold refuses with the blockers.
 - Steward powers are opt-in (`stewardEdits`, `stewardExtra`), and the Steward never answers the Finish.
 - A traversed loop edge resets the loops nested inside it. Resuming a spent loop buys one traversal. `checkpoint: rest` and `continue` are dropped: the engine never answers a checkpoint by itself.
-- One rolling scheduler runs every pool (ADR-0040): a Ticket starts once each blocker is Done and merged, in its own worktree cut at launch, under a pool-wide `maxLive` (unlimited by default).
+- One rolling scheduler runs every pool (ADR-0041): a Ticket starts once each blocker is Done and merged, in its own worktree cut at launch, under a pool-wide `maxLive` (unlimited by default).
 - A merge conflict pauses only its Ticket's dependents, and its Interrupt counts the Tickets started since.
 - A Spawn whose `blocks` names a started Ticket is Held as `started`.
 
@@ -187,7 +187,7 @@ JSON files under `crates/core/src/plan/presets/`, ported from the prototype's `P
 
 | Slug | Author | Source |
 |---|---|---|
-| `factory-today` | Agent Console | `docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md` |
+| `factory-today` | Agent Console | `docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md` |
 | `matt-pocock-main` | Matt Pocock | `skills/engineering/ask-matt/SKILL.md` |
 | `matt-pocock-quick` | Matt Pocock | `skills/engineering/implement/SKILL.md` |
 | `matt-pocock-bug` | Matt Pocock | `skills/engineering/diagnosing-bugs/SKILL.md` |

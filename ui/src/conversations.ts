@@ -24,7 +24,7 @@ import { effortInput } from "./effort";
 import { renderStewardBadge } from "./steward";
 
 /** The badge naming the Plan node a Line's Conversation or Ticket works
- *  (ADR-0039): on a card, in a Detail and on a tray row, the Steward badge's
+ *  (ADR-0040): on a card, in a Detail and on a tray row, the Steward badge's
  *  way. */
 /** A Line Conversation whose End was refused can still be ended as closed. */
 export function offersEndAsClosed(view: {

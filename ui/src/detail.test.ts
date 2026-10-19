@@ -1381,7 +1381,7 @@ describe("Detail: a closed ticket (issue #154)", () => {
   });
 });
 
-describe("Detail: a Line's Conversation (ADR-0039)", () => {
+describe("Detail: a Line's Conversation (ADR-0040)", () => {
   function lineConversation(
     overrides: Partial<ConversationDetailView> = {},
   ): ConversationDetailView {

@@ -16,4 +16,4 @@ The propose-via-Outcome shape was chosen because it deletes the bad-write class 
 
 **Amendment (2026-10-03, issue #116)**: a proposal may carry an Assignment request, `assign` with harness, model, effort and drivers, never `verify`, which stays the operator's call and is ignored with a log line. The request is persisted on the child's line-1 marker as `spawn-assign`, so a reload or a restart resolves it the same way, and it ranks field by field under the operator's `console.json` `assign` entry for the child and over the parent's Assignment.
 
-**Amended by ADR-0040**: "at the super-step boundary" is now the next tick of the rolling scheduler. A proposal whose `blocks` names a ticket that has already started is held with the reason `started` instead of being added under running work.
+**Amended by ADR-0041**: "at the super-step boundary" is now the next tick of the rolling scheduler. A proposal whose `blocks` names a ticket that has already started is held with the reason `started` instead of being added under running work.

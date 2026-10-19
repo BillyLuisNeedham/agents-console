@@ -427,7 +427,7 @@ conformance("restart", "answering the adoption checkpoint closes the re-adopted 
   expectSameBytes(readTicketFile(world.pool, "01-a.md"), `${stateLine("01", "done")}\n\n${BODY}\n`);
 });
 
-// ADR-0040: a re-adopted Attempt is a live Ticket Attempt, and its ending frees the slot.
+// ADR-0041: a re-adopted Attempt is a live Ticket Attempt, and its ending frees the slot.
 conformance("restart", "under maxLive 1 a re-adopted Attempt holds a Ready Ticket back until its pane ends", async (t) => {
   const world = t.world({
     tickets: [ticket("01", "a", { status: "in-progress", body: BODY }), ticket("02", "b")],

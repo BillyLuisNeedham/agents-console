@@ -48,7 +48,7 @@ wire_enum! {
         Deadlock = "deadlock",
         DeadlockCleared = "deadlock-cleared",
         Answered = "answered",
-        /// A queued answer on a Line hold the Line refused as it drained (ADR-0039):
+        /// A queued answer on a Line hold the Line refused as it drained (ADR-0040):
         /// the Finish gained a blocker since it was accepted. Its reason; the
         /// Interrupt stays.
         AnswerRefused = "answer-refused",
@@ -175,7 +175,7 @@ wire_struct! {
         /// The Steward (ADR-0030): present only on a Conversation in that role.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub role: Option<ConversationRole>,
-        /// The Line's Conversation node this is a pass of (ADR-0039), its id the
+        /// The Line's Conversation node this is a pass of (ADR-0040), its id the
         /// pass's (`grill-1`): present only on a Conversation the Line opened.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub node: Option<String>,
@@ -313,7 +313,7 @@ wire_struct! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_note: Option<StewardNote>,
         /// A Ticket's merge-conflict Interrupt, on the snapshot's copy only: how
-        /// many other Tickets have started since it was raised (ADR-0040),
+        /// many other Tickets have started since it was raised (ADR-0041),
         /// derived from their events and absent while none has.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub started_since: Option<u64>,
@@ -356,7 +356,7 @@ wire_struct! {
         /// they do for `spawn`; entries outside the bounds were dropped.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub items: Option<Vec<LineItem>>,
-        /// A Line Ticket's typed verdict (ADR-0037, ADR-0039), kept as the agent
+        /// A Line Ticket's typed verdict (ADR-0037, ADR-0040), kept as the agent
         /// wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
         /// choice, or the Finish Ticket's PR url. Absent when the Outcome carried none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -501,7 +501,7 @@ wire_struct! {
         /// attempt and 20 per run.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub spawn_caps: Option<SpawnCapsConfig>,
-        /// How many Ticket Attempts the engine runs at once (ADR-0040), a whole
+        /// How many Ticket Attempts the engine runs at once (ADR-0041), a whole
         /// number of 1 or more; absent falls back to the Machine default, and
         /// absent there means no bound.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -709,7 +709,7 @@ wire_enum! {
     /// mark (the ids ride on the proposal), a Pending spawn a Tick refused to
     /// land because the pool moved after it was taken (the reason rides as
     /// `adoptError`), a Pending spawn whose named `blocks` reached a Ticket
-    /// that had already started (ADR-0040), or an older pool's operator Hold
+    /// that had already started (ADR-0041), or an older pool's operator Hold
     /// of a Pending spawn.
     pub enum HeldSpawnReason {
         PerAttempt = "per-attempt",
@@ -1501,7 +1501,7 @@ wire_struct! {
         /// at once rather than at the next Tick; an in-flight ticket keeps
         /// the engine's frozen record.
         pub reassign: TicketReassignView,
-        /// The Plan node a Line's Ticket belongs to (ADR-0039), from the marker's
+        /// The Plan node a Line's Ticket belongs to (ADR-0040), from the marker's
         /// durable `node` field; absent on every other Ticket.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub node: Option<String>,
@@ -1549,7 +1549,7 @@ wire_struct! {
         /// written before the Steward still types.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
-        /// The pool's Line (ADR-0039): its frozen Plan with live state, absent in
+        /// The pool's Line (ADR-0040): its frozen Plan with live state, absent in
         /// a pool that runs no Line.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub line: Option<LineGraphView>,
@@ -1785,7 +1785,7 @@ wire_struct! {
 }
 
 // ---------------------------------------------------------------------------
-// A Line's verdicts and its verbs (ADR-0037, ADR-0039): POST /api/line, POST /api/line/plan, GET /api/line
+// A Line's verdicts and its verbs (ADR-0037, ADR-0040): POST /api/line, POST /api/line/plan, GET /api/line
 // ---------------------------------------------------------------------------
 
 wire_enum! {
@@ -1886,7 +1886,7 @@ wire_struct! {
 }
 
 // ---------------------------------------------------------------------------
-// Plans (ADR-0039)
+// Plans (ADR-0040)
 // ---------------------------------------------------------------------------
 
 wire_struct! {
@@ -2494,7 +2494,7 @@ wire_struct! {
 }
 
 // ---------------------------------------------------------------------------
-// A Line running a Plan (ADR-0039): line.json and the live graph
+// A Line running a Plan (ADR-0040): line.json and the live graph
 // ---------------------------------------------------------------------------
 
 wire_struct! {

@@ -51,7 +51,7 @@ pub const USAGE: &str = "usage: agent-console [pool-dir] [--yes] [--relaunch] [-
 
 /// What `--help` prints: the usage, then what Line mode's flags do.
 pub const LINE_HELP: &str = "
-Line mode (ADR-0037, ADR-0039) cuts line/<slug> from the branch this checkout has out (or
+Line mode (ADR-0037, ADR-0040) cuts line/<slug> from the branch this checkout has out (or
 from --from's) into a worktree of its own at .scratch/lines/<slug>, leaving this checkout's
 branch alone, and boots a pool inside it at <worktree>/.scratch/<name>, its target branch
 the Line's, that runs one Line on a Plan. The Line's branch never tracks the branch it was
@@ -91,7 +91,7 @@ pub struct BootArgs {
     pub port: Option<u16>,
     pub setup: Option<String>,
     pub open: bool,
-    /// Line mode (ADR-0039): cut a Line branch and boot a pool on it that runs this Plan.
+    /// Line mode (ADR-0040): cut a Line branch and boot a pool on it that runs this Plan.
     pub plan: Option<String>,
     /// The piece of work: an issue number or free text.
     pub work: Option<String>,
@@ -1159,7 +1159,7 @@ fn report_console(url: &str, pool_dir: &str, args: &BootArgs, io: &mut dyn BootI
 /// typed.
 const STEWARD_START_TIMEOUT_MS: u64 = 180_000;
 
-/// Boot's Line mode (ADR-0037, ADR-0038, ADR-0039; see [`factory`]): the Plan, the work, the Line
+/// Boot's Line mode (ADR-0037, ADR-0038, ADR-0040; see [`factory`]): the Plan, the work, the Line
 /// branch and its worktree, the pool inside it, the server, the Line begun on the Plan, then the
 /// Steward.
 fn run_line_boot(

@@ -1,5 +1,5 @@
 /**
- * A Line running Factory today (ADR-0039), seen from outside the server: a stub harness plays each
+ * A Line running Factory today (ADR-0040), seen from outside the server: a stub harness plays each
  * Ticket node, writing its typed verdict in the Outcome, and the engine writes the next node's
  * Ticket under its `{node}-{pass}` id along the Plan's edges. The cases walk the pass path to the
  * Finish hold, a Prove fail round the capped loop, the spent loop's hold buying one traversal

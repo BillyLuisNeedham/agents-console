@@ -1,5 +1,5 @@
 /**
- * Edits to a running Line's Plan (ADR-0039), seen from outside the server: POST /api/line/plan and
+ * Edits to a running Line's Plan (ADR-0040), seen from outside the server: POST /api/line/plan and
  * the socket's `line.plan.edit` take typed edits made against the Plan's rev and answer the new
  * rev, which GET /api/line and line.json show. A stale rev, and an edit that would orphan live run
  * state, are refused with nothing changed. Linking a parked verdict hands it on, so the next tick

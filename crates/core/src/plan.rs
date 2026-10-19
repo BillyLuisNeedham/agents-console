@@ -1,4 +1,4 @@
-//! The Plan (ADR-0039): the graph of nodes and edges a Line runs, its file format, its validation, its
+//! The Plan (ADR-0040): the graph of nodes and edges a Line runs, its file format, its validation, its
 //! typed edits, the compiled-in Presets and the machine's Plan library.
 //!
 //! Nothing outside this module builds a `Plan`. `Plan::parse` (a file, a request body, a Line's frozen

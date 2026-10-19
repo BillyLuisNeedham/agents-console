@@ -838,7 +838,7 @@ describe("the Steward on the canvas (ADR-0030)", () => {
 });
 
 
-describe("a Line's Conversation on the canvas (ADR-0039)", () => {
+describe("a Line's Conversation on the canvas (ADR-0040)", () => {
   function conversationPool(
     extra: { node?: string; role?: "steward"; ending?: boolean } = {},
     end: { ending: boolean; failure: string | null } = { ending: false, failure: null },

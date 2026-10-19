@@ -143,7 +143,7 @@ export interface AppModel {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
   spawnLine: SpawnLineView | null;
-  /** The running Line's live graph (ADR-0039), which the header's Line button
+  /** The running Line's live graph (ADR-0040), which the header's Line button
    *  and the Line view read; null in a pool that runs no Line. */
   line: LineLive | null;
   /** The Held spawns list the Spawn caps line opens (issue #149). */
@@ -243,7 +243,7 @@ export type ConsoleViewOptions = NeedsInputOptions &
      *  both are optimistic (issue #161). */
     onAdoptHeldSpawn: HeldSpawnHandler;
     onDiscardHeldSpawn: HeldSpawnHandler;
-    /** An edit to the running Line's Plan (ADR-0039). The snapshot carrying
+    /** An edit to the running Line's Plan (ADR-0040). The snapshot carrying
      *  the new rev redraws the Line view; the reply only names that rev. */
     onEditLine: EditLineHandler;
   };

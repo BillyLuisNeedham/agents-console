@@ -20,7 +20,7 @@ const DEFAULT_CHECKPOINT = "a device, an external write, an undecided decision, 
 const SAVE_SETUP = "save this Setup as (blank to skip)";
 
 /**
- * Boot's usage lines: the pool form, then Line mode's (ADR-0039). How
+ * Boot's usage lines: the pool form, then Line mode's (ADR-0040). How
  * they name the command is the build's (the shim's `agent-console`, or the
  * binary's `agent-console boot`); the flags are not.
  */
@@ -322,7 +322,7 @@ conformance("cli", "Boot prints its usage on --help and refuses bad flags and ar
   expect(help.stdout.endsWith("\n")).toBe(true);
   expectUsage(help.stdout.split("\n").slice(0, 2));
   expect(help.stdout).toContain(
-    "\nLine mode (ADR-0037, ADR-0039) cuts line/<slug> from the branch this checkout has out (or\nfrom --from's)",
+    "\nLine mode (ADR-0037, ADR-0040) cuts line/<slug> from the branch this checkout has out (or\nfrom --from's)",
   );
   expect(help.stdout).toContain("\n  --from <branch>        the Line base: the branch to cut the Line from");
   expect(help.stdout).toContain("\n  --plan <slug>          Line mode on this Plan: a Preset (factory-today, ...) or a Plan in");

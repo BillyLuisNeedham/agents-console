@@ -1,5 +1,5 @@
 /**
- * A per-item node's Merger (ADR-0039, ADR-0040), seen from outside the server. Without one every
+ * A per-item node's Merger (ADR-0040, ADR-0041), seen from outside the server. Without one every
  * copy hands on alone, a Ticket per settled copy. With one the Line writes the next Ticket when the
  * whole pass has merged, and a merge conflict on a copy is decided by the Merger's `conflict`
  * policy when it happens: `wait` raises the plain merge-conflict Interrupt and runs no resolver, so

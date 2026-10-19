@@ -3271,14 +3271,14 @@ textarea.conversations-field {
   border-left: 3px solid var(--steward);
 }
 
-/* A Line's Conversation pass (ADR-0039): the Steward's stripe in the
+/* A Line's Conversation pass (ADR-0040): the Steward's stripe in the
    Factory's hue, so a pass the Line hands on from is told from an ordinary
    one. Its node badge is the Ticket's, below. */
 .conversation-card-node {
   border-left: 3px solid var(--accent-purple);
 }
 
-/* A Line node's label (#187, ADR-0039): a chip in the Factory's hue,
+/* A Line node's label (#187, ADR-0040): a chip in the Factory's hue,
    naming the Plan node a Ticket or Conversation works on its card's head. It sits
    against the id rather than midway along the head, and the id beside it
    keeps to one line: a long state word wraps instead. */
@@ -3984,7 +3984,7 @@ textarea.steward-orders {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 
-/* The Line view (ADR-0039): the same canvas, editable, with the run's state
+/* The Line view (ADR-0040): the same canvas, editable, with the run's state
    on each card. A tone colours the card's border and its state word. */
 .plan-node-live .plan-node-head {
   gap: 4px;

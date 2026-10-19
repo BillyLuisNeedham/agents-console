@@ -4,8 +4,8 @@
  * drives. A card with no Attempt yet, then a window on each Attempt as it
  * starts; a Conversation's card; the 64 KiB window and appends and the
  * 256 KiB gap past which a card gets a fresh window; the grades a hidden
- * tab is still sent; and the live Line graph a snapshot carries (ADR-0039,
- * ADR-0040): a per-item pass's running copies, its queued Items and what the
+ * tab is still sent; and the live Line graph a snapshot carries (ADR-0040,
+ * ADR-0041): a per-item pass's running copies, its queued Items and what the
  * Finish waits for, with each node's verdicts.
  */
 

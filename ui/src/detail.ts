@@ -312,7 +312,7 @@ export class Detail {
   // from the timeline's graded events when it has them, each sending the
   // note. A Steward note (ADR-0030) sits above the note field, with "Use as
   // answer" to take it as the draft. A waiting merge conflict says under its
-  // body how many Tickets started since it was raised (ADR-0040).
+  // body how many Tickets started since it was raised (ADR-0041).
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -981,7 +981,7 @@ export class Detail {
     return panel;
   }
 
-  // The report a Decide pass wrote (ADR-0039), under its Ticket, framed whole
+  // The report a Decide pass wrote (ADR-0040), under its Ticket, framed whole
   // with a way out to a tab of its own. The pass rides the address so a later
   // pass's report is fetched afresh rather than from the cache. Moving an
   // iframe reloads it, so the frame and its section are keyed and nothing

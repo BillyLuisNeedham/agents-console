@@ -72,7 +72,7 @@ function reply(plan: PlanFile, extra: Partial<PlanDraftResponse> = {}): PlanDraf
 }
 
 const LIST: PlanSummary[] = [
-  { slug: "factory-today", preset: true, name: "Factory today", author: "Agent Console", source: "docs/adr/0039.md", note: "the fixed Line", problems: [] },
+  { slug: "factory-today", preset: true, name: "Factory today", author: "Agent Console", source: "docs/adr/0040.md", note: "the fixed Line", problems: [] },
   { slug: "addy-commands", preset: true, name: "Addy · Commands", author: "Addy Osmani", problems: [] },
   { slug: "mine", preset: false, name: "Mine", problems: [] },
   { slug: "broken", preset: false, name: "Broken", problems: [{ at: { kind: "plan" }, message: "no Finish" }] },
@@ -154,7 +154,7 @@ describe("PlansStore: opening", () => {
     const groups = [...t.root.querySelectorAll(".plans-group-author")].map((el) => el.textContent);
     expect(groups).toEqual(["Agent Console", "Addy Osmani"]);
     const factory = t.$('.plans-item[data-key="plan:factory-today"]')!;
-    expect(factory.querySelector(".plans-item-source")?.textContent).toBe("docs/adr/0039.md");
+    expect(factory.querySelector(".plans-item-source")?.textContent).toBe("docs/adr/0040.md");
     expect(factory.querySelector(".plans-item-note")?.textContent).toBe("the fixed Line");
     expect(t.$('.plans-item[data-key="plan:broken"]')!.classList.contains("plans-item-broken")).toBe(true);
     expect(t.$('.plans-item[data-key="plan:mine"]')!.classList.contains("plans-item-broken")).toBe(false);

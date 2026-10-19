@@ -10,4 +10,4 @@ A file watcher was rejected: the repo already chose polling over `fs.watch` for 
 
 **Amended by ADR-0029 (issue #149)**: the Spawn caps (`spawnCaps`) reload with the assignment slice. A Pool settings save on a pool with no drive in flight runs the reload at once, since an idle pool reaches no boundary.
 
-**Amended by ADR-0040**: "the super-step boundary that plans the Attempt" is now the tick that launches it, and the assignment slice reloads at every tick whose `console.json` stamp moved. An Attempt in flight still never changes. `maxLive` reloads with the slice.
+**Amended by ADR-0041**: "the super-step boundary that plans the Attempt" is now the tick that launches it, and the assignment slice reloads at every tick whose `console.json` stamp moved. An Attempt in flight still never changes. `maxLive` reloads with the slice.

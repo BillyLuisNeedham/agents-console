@@ -1,5 +1,5 @@
 /**
- * Keep talking on a Line Ticket (ADR-0037, ADR-0039, ADR-0027), seen from
+ * Keep talking on a Line Ticket (ADR-0037, ADR-0040, ADR-0027), seen from
  * outside the server: a Ticket whose done Outcome carries no valid verdict
  * for its node is the no-verdict checkpoint, its pane held while it waits like
  * any checkpointed Attempt's; Keep talking continues it there, and the

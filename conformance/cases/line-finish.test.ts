@@ -1,5 +1,5 @@
 /**
- * The Line's Finish (ADR-0039), seen from outside the server: Prove keeps its evidence in the
+ * The Line's Finish (ADR-0040), seen from outside the server: Prove keeps its evidence in the
  * pool's runs directory, Decide writes the report for its pass, the Finish hold links the latest
  * one and GET /api/line/report serves it. Approval is the operator's, refused while anything in the
  * pool still runs, and only then does the Finish Ticket `finish-1-act` carry out the act: nothing

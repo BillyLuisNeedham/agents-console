@@ -49,7 +49,7 @@ pub struct ConversationRecord {
     /// The role it was started or Enlisted in (ADR-0030): a Steward. Absent for an ordinary
     /// Conversation, and fixed for its life.
     pub role: Option<ConversationRole>,
-    /// The Line's Conversation node it is a pass of (ADR-0039), its id the pass's (`grill-1`).
+    /// The Line's Conversation node it is a pass of (ADR-0040), its id the pass's (`grill-1`).
     /// Absent for every Conversation the Line did not open.
     pub node: Option<String>,
 }

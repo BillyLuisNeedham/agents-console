@@ -1,5 +1,5 @@
 /**
- * Beginning the Line (ADR-0039), seen from outside the server: POST /api/line freezes a Plan, by
+ * Beginning the Line (ADR-0040), seen from outside the server: POST /api/line freezes a Plan, by
  * slug or as a file, into line.json with the Line brief or the work it is given, writes no Ticket
  * itself, and the first tick writes the entry node's Ticket with its node and Assignment on the
  * state line. It refuses with the reason, writing nothing, a Plan that is invalid, a harness the

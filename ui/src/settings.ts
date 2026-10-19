@@ -76,7 +76,7 @@ export interface PoolDraft {
   /** The Spawn caps (issue #149): empty means the engine's default. */
   spawnsPerAttempt: string;
   spawnsPerRun: string;
-  /** maxLive (ADR-0040): empty means the Machine default, and no bound there. */
+  /** maxLive (ADR-0041): empty means the Machine default, and no bound there. */
   maxLive: string;
   /** The Steward budget (ADR-0030): empty means the engine's 5. */
   stewardBudget: string;
@@ -98,7 +98,7 @@ export interface MachineDraft {
   drivers: string;
   terminal: boolean;
   engine: string;
-  /** maxLive (ADR-0040): empty means no bound under a pool that sets none. */
+  /** maxLive (ADR-0041): empty means no bound under a pool that sets none. */
   maxLive: string;
 }
 
@@ -213,7 +213,7 @@ export function machineDraftFrom(own: MachineDefaults): MachineDraft {
   };
 }
 
-/** What is wrong with a typed maxLive (ADR-0040), or null: empty, or a whole
+/** What is wrong with a typed maxLive (ADR-0041), or null: empty, or a whole
  *  number of 1 or more, since a bound of 0 would never launch anything. */
 function maxLiveProblem(value: string, empty: string): string | null {
   const max = value.trim();
@@ -853,7 +853,7 @@ export class SettingsStore {
         DEFAULT_SPAWN_CAPS.perRun,
         "counted since this Console boot; 0 holds every proposal for you",
       ),
-      // maxLive (ADR-0040) reloads at the next Tick too.
+      // maxLive (ADR-0041) reloads at the next Tick too.
       this.renderMaxLiveField(
         "pool",
         this.poolDraft.maxLive,

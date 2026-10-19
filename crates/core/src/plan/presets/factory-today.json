@@ -2,7 +2,7 @@
   "horde": 1,
   "name": "Factory today",
   "author": "Agent Console",
-  "source": "docs/adr/0039-the-factory-runs-a-plan-the-operator-builds.md",
+  "source": "docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md",
   "note": "This is ADR-0037's fixed Line as a Plan, with the Grill, then Implement, Prove, Review and Decide, then the Finish. Prove may fail twice per Round with the Steward allowed one more pass, Decide may ask for one extra Round, and notes on the Finish send the work back to Implement.",
   "nodes": [
     {"kind":"conversation","id":"grill","title":"Grill","x":40,"y":60,"skill":"my-grill-with-docs","assign":{"harness":"claude","model":"opus","effort":"high"}},
