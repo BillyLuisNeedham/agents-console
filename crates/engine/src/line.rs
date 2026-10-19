@@ -633,14 +633,30 @@ fn unknown_harness(session: &Session, plan: &Plan) -> Option<String> {
             }) => assign,
             NodeBody::Merger(_) | NodeBody::Gate(_) => return None,
         };
-        let harness = assign.harness.as_deref()?;
-        (!session.harnesses.contains(harness)).then(|| {
-            format!(
-                "node {} names unknown harness '{harness}'. Known: {}",
-                node.id,
-                session.harnesses.known()
-            )
-        })
+        unknown_node_harness(session, &node.id, assign.harness.as_deref()?)
+    })
+}
+
+fn unknown_node_harness(
+    session: &Session,
+    node: impl std::fmt::Display,
+    harness: &str,
+) -> Option<String> {
+    (!session.harnesses.contains(harness)).then(|| {
+        format!(
+            "node {node} names unknown harness '{harness}'. Known: {}",
+            session.harnesses.known()
+        )
+    })
+}
+
+/// The first harness a Line brief's node overrides name that this machine lacks, worded as
+/// `line.plan.edit` refuses it: the brief's `nodes` land on the frozen Plan as operator edits, so a
+/// harness it names must pass the check the Plan's own nodes do.
+pub(crate) fn brief_unknown_harness(session: &Session, brief: &LineBrief) -> Option<String> {
+    brief.nodes.iter().find_map(|(id, change)| {
+        let harness = change.assign.as_ref()?.harness.as_deref()?;
+        unknown_node_harness(session, id, harness)
     })
 }
 
@@ -655,6 +671,9 @@ fn checkout_brief(session: &Session, path: &str) -> Result<LineBrief, EngineErro
     let text = js::read_text(Path::new(&session.cwd).join(path))
         .map_err(|_| refused("not found in the pool checkout".into()))?;
     let brief = LineBrief::parse(&text).map_err(refused)?;
+    if let Some(problem) = brief_unknown_harness(session, &brief) {
+        return Err(refused(problem));
+    }
     if let Some(spec) = &brief.spec
         && !(in_checkout(spec) && Path::new(&session.cwd).join(spec).is_file())
     {

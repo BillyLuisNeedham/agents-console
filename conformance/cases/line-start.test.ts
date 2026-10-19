@@ -72,6 +72,12 @@ conformance("line", "POST /api/line refuses a bad body, an invalid Plan, an unkn
   expect(reason(await beginLine(server))).toContain("Line brief docs/specs/line.brief.json: unknown field `factory`");
   writeFileSync(brief, JSON.stringify({ spec: SPEC, nodes: { nope: { note: "n" } } }));
   expect(reason(await beginLine(server))).toBe("the Line cannot begin: nodes: the Plan has no node nope");
+  writeFileSync(brief, JSON.stringify({ spec: SPEC, nodes: { implement: { assign: { harness: "nonesuch" } } } }));
+  const unknownHarness = await beginLine(server);
+  expect(unknownHarness.status).toBe(409);
+  expect(reason(unknownHarness)).toStartWith(
+    "Line brief docs/specs/line.brief.json: node implement names unknown harness 'nonesuch'. Known: ",
+  );
   const outside = await beginLine(server, { plan: "factory-today", brief: "../line.brief.json" });
   expect(reason(outside)).toBe("Line brief ../line.brief.json: name it by its path inside the pool checkout");
 

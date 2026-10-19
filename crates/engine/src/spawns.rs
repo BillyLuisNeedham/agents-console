@@ -256,11 +256,12 @@ fn spawn_proposal_problem(
     None
 }
 
+// Started means the scheduler launched it at least once. A Ticket can be a Checkpoint without ever
+// launching (a config gap, a held branch), so its status says nothing.
 fn has_started(session: &Session, id: &str) -> bool {
-    matches!(
-        state_of(session, id),
-        Some(TicketStatus::InProgress | TicketStatus::Checkpoint)
-    )
+    read_events(Path::new(&session.runs_dir), id)
+        .iter()
+        .any(|event| event.kind == TicketEventKind::Scheduled)
 }
 
 // The Tickets a proposal's named `blocks` reach that have already started (ADR-0040): their

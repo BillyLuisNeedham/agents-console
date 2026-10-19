@@ -520,8 +520,10 @@ pub fn record_failed_merge(
 
 /// How many other Tickets have started since a Ticket's merge-conflict Interrupt was raised: the
 /// distinct ones with a `scheduled` event after the Ticket's latest `merge-conflict` or
-/// `merge-blocked` event. A failed Resume appends a fresh one, so the baseline moves with the
-/// re-raised Interrupt. `None` while none has, or when the Ticket has no such event.
+/// `merge-blocked` event. That event is written when the conflict is found, before a resolver runs,
+/// so a Ticket that starts while the resolver works counts. A failed Resume appends a fresh one, so
+/// the baseline moves with the re-raised Interrupt. `None` while none has, or when the Ticket has no
+/// such event.
 fn started_since_conflict(
     conflicted: &[Arc<TicketEvent>],
     others: impl Iterator<Item = Vec<Arc<TicketEvent>>>,
@@ -549,7 +551,8 @@ fn started_since_conflict(
 /// The state a snapshot carries, with each Ticket merge-conflict Interrupt's copy saying how many
 /// other Tickets started since it was raised (ADR-0040). Derived from the Tickets' events at each
 /// build, never persisted, so it survives a restart; nothing is read while no such Interrupt waits.
-/// Engine-run ids (graders) and Conversations are not in the markers, so they never count.
+/// Engine-run Tickets (graders and judges) are in the markers but were never started by the
+/// scheduler, and Conversations are not in the markers, so neither counts.
 pub fn with_started_since(session: &Session, state: &mut PoolState) {
     let runs = Path::new(&session.runs_dir);
     for interrupt in &mut state.interrupts {
@@ -562,7 +565,7 @@ pub fn with_started_since(session: &Session, state: &mut PoolState) {
         let others = session
             .markers
             .iter()
-            .filter(|m| m.id != interrupt.ticket_id)
+            .filter(|m| m.id != interrupt.ticket_id && engine_ticket_build_id(&m.id).is_none())
             .map(|m| read_events(runs, &m.id));
         interrupt.started_since = started_since_conflict(&own, others);
     }
@@ -1218,6 +1221,23 @@ mod tests {
         let others = vec![verify_round, before_the_conflict, never_started];
         assert_eq!(
             started_since_conflict(&conflicted, others.into_iter()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_start_while_the_resolver_works_counts_from_the_conflict_not_the_resolver() {
+        let conflicted = vec![
+            event_at("2026-10-18T10:00:00.000Z", TicketEventKind::MergeConflict),
+            event_at("2026-10-18T10:00:01.000Z", TicketEventKind::Resolver),
+            event_at("2026-10-18T10:00:02.000Z", TicketEventKind::Spawned),
+        ];
+        let during_the_resolver = vec![event_at(
+            "2026-10-18T10:00:03.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        assert_eq!(
+            started_since_conflict(&conflicted, vec![during_the_resolver].into_iter()),
             Some(1)
         );
     }

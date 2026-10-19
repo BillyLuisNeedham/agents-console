@@ -485,6 +485,9 @@ fn brief_refusal(s: &Session, id: &str) -> Option<String> {
     if let Some(problem) = brief_problem(run.plan().0, &brief) {
         return Some(format!("Line brief {path}: {problem}"));
     }
+    if let Some(problem) = crate::line::brief_unknown_harness(s, &brief) {
+        return Some(format!("Line brief {path}: {problem}"));
+    }
     match &brief.spec {
         Some(spec) if committed(spec).is_none() => Some(format!(
             "Line brief {path}: its spec {spec} is not on {id}'s committed branch {branch}"

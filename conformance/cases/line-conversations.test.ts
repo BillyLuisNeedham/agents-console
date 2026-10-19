@@ -185,6 +185,12 @@ conformance("line", "a Line Conversation's End refuses without a committed, vali
     [BRIEF]: JSON.stringify({ spec: SPEC, nodes: { nope: { note: "n" } } }),
   });
   expect(reason(await end(server, { id: "grill-1" }))).toBe(`Line brief ${BRIEF}: nodes: the Plan has no node nope`);
+  grillWrites(world, grill, {
+    [BRIEF]: JSON.stringify({ spec: SPEC, nodes: { implement: { assign: { harness: "nonesuch" } } } }),
+  });
+  expect(reason(await end(server, { id: "grill-1" }))).toStartWith(
+    `Line brief ${BRIEF}: node implement names unknown harness 'nonesuch'. Known: `,
+  );
 
   // Refused before anything moved: the talk goes on, its tab open, and nothing merged or was written.
   expect(world.git(["rev-parse", "main"])).toBe(before);

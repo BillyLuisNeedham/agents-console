@@ -507,3 +507,32 @@ conformance("merges", "a waiting merge conflict's Interrupt says how many Ticket
   expect(counted.state.interrupts.find((i) => i.ticketId === "02")).toEqual({ ...raised, startedSince: 1 });
   expect(eventShape(world, "02").filter(([kind]) => kind === "merge-conflict")).toEqual([["merge-conflict", 1]]);
 });
+
+conformance("merges", "a waiting merge conflict's count leaves out the grader and judge Tickets of a verify Ticket that started and finished during the wait", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "01-t.md", marker: marker("01") },
+      { file: "02-t.md", marker: marker("02") },
+      { file: "04-t.md", marker: marker("04") },
+      { file: "05-t.md", marker: marker("05", "04") },
+    ],
+    config: { defaults: { harness: "claude", model: "m" }, resolver: "none", assign: { "05": { verify: 2 } } },
+    repoFiles: { "shared.txt": "base\n" },
+  });
+  world.stubs.script("01", { run: "echo from-01 > shared.txt\ngit add -A\ngit commit -qm work-01" });
+  world.stubs.script("02", { run: `${AFTER_01_MERGED}echo from-02 > shared.txt\ngit add -A\ngit commit -qm work-02` });
+  const four = world.stubs.hold("04", { run: "echo four > four.txt\ngit add -A\ngit commit -qm work-04" });
+  for (const n of [1, 2]) world.stubs.script(`05.attempt-${n}`, { work: { file: `cand-${n}.txt`, message: `cand-${n}` } });
+  const server = await t.start(world);
+  await untilInterrupt(server, "merge-conflict");
+
+  await four.release();
+  const finished = await untilState(server, (s) => cardOf(s, "05").status === "done", {
+    ms: 60_000,
+    what: "05 graded, judged and merged",
+  });
+
+  expect(readEvents(world.pool, "05-grader-1").some((e) => e.kind === "scheduled"), "the graders were scheduled").toBe(true);
+  expect(readEvents(world.pool, "05-head-to-head").some((e) => e.kind === "scheduled"), "the judge was scheduled").toBe(true);
+  expect(finished.state.interrupts.find((i) => i.ticketId === "02")!.startedSince, "only 05 started").toBe(1);
+});

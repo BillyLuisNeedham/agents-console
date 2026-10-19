@@ -146,6 +146,33 @@ conformance("spawns", "holds a spawn whose blocks names a running ticket as star
   expect(readStateLine(world.pool, "03-t.md").status).toBe("done");
 });
 
+conformance("spawns", "lands a spawn whose blocks names a checkpoint ticket that never launched, and blocks it", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01"), ticket("03")],
+    config: { assign: { "01": { harness: "claude", model: "m" } } },
+  });
+  const release = releaseFile(world, "01");
+  world.stubs.script("01", { waitFor: release.path, spawn: [proposal("Before three", { blocks: ["03"] })] });
+  const server = await t.start(world);
+
+  await snapshotUntil(
+    server,
+    (snap) => statuses(snap)["03"] === "checkpoint" && statuses(snap)["01"] === "in-progress",
+    "03 at its config checkpoint while 01 runs",
+  );
+  expect(eventKinds(world, "03")).toEqual(["unassigned"]);
+  release.release();
+
+  const landed = await snapshotUntil(server, (snap) => statuses(snap)["01-spawn-1"] !== undefined, "01-spawn-1 landed");
+  expect(landed.heldSpawns).toEqual([]);
+  expectSameBytes(
+    readStateLine(world.pool, "03-t.md").line,
+    "<!-- state: id=03 blocked-by=01-spawn-1 status=checkpoint -->",
+    "03's state line",
+  );
+  expect(logged(await poolLog(server), "has started")).toBe(false);
+});
+
 conformance("spawns", "lands an Adopt of a cap-held spawn whose blocks names a running ticket without blocking it", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", "01")],
