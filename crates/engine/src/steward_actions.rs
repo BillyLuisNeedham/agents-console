@@ -23,8 +23,8 @@ use ac_core::steward::{
 };
 use ac_protocol::{
     AnswerBy, Interrupt, InterruptKind, ResumeAction, StewardAnswerAction, StewardNote,
-    StewardStateHeld, StewardStateInterrupt, StewardStateMerge, StewardStatePending,
-    StewardStateResponse, TicketEvent, TicketEventKind,
+    StewardStateHeld, StewardStateInterrupt, StewardStateLine, StewardStateMerge,
+    StewardStateParked, StewardStatePending, StewardStateResponse, TicketEvent, TicketEventKind,
 };
 
 use crate::actor::Engine;
@@ -666,6 +666,18 @@ pub fn steward_state(
                 reason: view.reason.as_str().to_owned(),
             })
             .collect(),
+        line: crate::line::line_view(session).map(|view| StewardStateLine {
+            rev: view.rev,
+            parked: view
+                .nodes
+                .into_iter()
+                .filter(|node| !node.parked.is_empty())
+                .map(|node| StewardStateParked {
+                    node: node.id,
+                    verdicts: node.parked,
+                })
+                .collect(),
+        }),
         ledger: crate::spawns::ledger_path(session),
     })
 }

@@ -14,9 +14,9 @@
 import { expect } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PoolConfig } from "../../../protocol/wire.ts";
+import type { PoolConfig, StewardStateResponse } from "../../../protocol/wire.ts";
 import { type Case, type CaseServer, conformance } from "../../harness/case.ts";
-import { readEvents } from "../../harness/pool-files.ts";
+import { readEvents, until } from "../../harness/pool-files.ts";
 import { BRIEF, SPEC, begun, lineOf } from "../line-support.ts";
 import { edge, node, plan } from "../plans-support.ts";
 import {
@@ -265,9 +265,12 @@ conformance(
     await untilInterrupt(server, "approve-1", "checkpoint", 60_000);
     const id = await enlistSteward(server);
     expect(turnsInto(sw.herdr, STEWARD_PANE).join("\n")).toContain(
-      "This Plan lets you edit it with plan <rev> <edits>: rev is the `rev` GET /api/line on the Console answers",
+      "This Plan lets you edit it with plan <rev> <edits>: rev is the one state prints on its Line Plan line",
     );
     const rev = async () => (await lineOf(server))?.rev;
+    const stateLine = async () =>
+      (await server.http.get(`/api/steward/state?conversation=${id}`)).json<StewardStateResponse>().line;
+    expect(await stateLine()).toEqual({ rev: 0, parked: [] });
     const edit = (baseRev: number, edits: unknown[]) => post(server, "/api/steward/plan", { conversation: id, baseRev, edits });
 
     expect(await edit(0, [{ edit: "setNode", node: node.gate("sign", "steward") }])).toEqual(
@@ -279,6 +282,7 @@ conformance(
       body: { ok: true, message: "edited the Plan: now at rev 1" },
     });
     expect(await rev()).toBe(1);
+    expect(await stateLine()).toEqual({ rev: 1, parked: [] });
 
     const hold = (await lineOf(server))?.nodes.find((n) => n.id === "approve")?.hold;
     expect(hold).toBe("approve-1");
@@ -300,6 +304,46 @@ conformance(
       refused("this Plan does not let the Steward edit it"),
     );
     expect(await rev()).toBe(2);
+  },
+  { timeoutMs: 120_000 },
+);
+
+conformance(
+  "steward",
+  "the Steward's state carries the Line's rev and the verdicts parked on a node with no out edge, and a pool with no Line carries neither",
+  async (t) => {
+    const sw = await lineStewardWorld(t);
+    driveOutcomes(sw.herdr, { "build-1": [done()], "test-1": [FAIL] });
+    const server = await sw.start();
+    const id = await enlistSteward(server);
+    const stateOf = async () =>
+      (await server.http.get(`/api/steward/state?conversation=${id}`)).json<StewardStateResponse>();
+    expect(await stateOf()).not.toHaveProperty("line");
+
+    const tested = {
+      ...plan(
+        [node.agent("build"), node.prove("test"), node.finish()],
+        [edge("build", "done", "test"), edge("test", "pass", "finish")],
+        "Tested",
+      ),
+      stewardEdits: true,
+    };
+    await begun(server, { plan: tested, work: "#1" });
+    await until(() => stateOf(), (state) => (state.line?.parked.length ?? 0) > 0, { what: "test's fail to park", ms: 60_000 });
+    expect((await stateOf()).line).toEqual({ rev: 0, parked: [{ node: "test", verdicts: ["fail"] }] });
+
+    const linked = await post(server, "/api/steward/plan", {
+      conversation: id,
+      baseRev: 0,
+      edits: [
+        { edit: "addNode", kind: "agent", x: 600, y: 300 },
+        { edit: "link", edge: edge("test", "fail", "agent") },
+        { edit: "link", edge: edge("agent", "done", "finish") },
+      ],
+    });
+    expect(linked).toEqual({ status: 200, body: { ok: true, message: "edited the Plan: now at rev 1" } });
+    expect((await stateOf()).line?.rev).toBe(1);
+    expect((await stateOf()).line?.parked).toEqual([]);
   },
   { timeoutMs: 120_000 },
 );

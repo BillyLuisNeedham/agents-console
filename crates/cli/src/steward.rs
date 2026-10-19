@@ -429,6 +429,33 @@ pub fn format_steward_state(state: &Value) -> String {
             ))
         )
     });
+    if let Some(line) = state.get("line").filter(|line| line.is_object()) {
+        let parked = items(line, "parked");
+        lines.push(format!(
+            "Line Plan: rev {}; {}",
+            printed(line, "rev"),
+            if parked.is_empty() {
+                "no parked verdicts.".to_owned()
+            } else {
+                format!(
+                    "parked verdicts: {}.",
+                    parked
+                        .iter()
+                        .map(|node| format!(
+                            "{} {}",
+                            printed(node, "node"),
+                            items(node, "verdicts")
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }
+        ));
+    }
     lines.push(format!("Spawn ledger: {}", printed(state, "ledger")));
     lines.join("\n")
 }
@@ -841,6 +868,7 @@ mod tests {
         let quiet = json!({
             "steward": "conv-2", "budget": 3, "mayClose": true, "phase": "done", "interrupts": [],
             "mergeQueue": [], "pendingSpawns": [], "heldSpawns": [], "ledger": "/l",
+            "line": { "rev": 2, "parked": [{ "node": "test", "verdicts": ["fail", "blocked"] }, { "node": "ship", "verdicts": ["ok"] }] },
         });
         assert_eq!(
             format_steward_state(&quiet),
@@ -850,6 +878,7 @@ mod tests {
                 "Merge queue: empty.",
                 "Pending spawns: none.",
                 "Held spawns: none.",
+                "Line Plan: rev 2; parked verdicts: test fail, blocked; ship ok.",
                 "Spawn ledger: /l",
             ]
             .join("\n")
