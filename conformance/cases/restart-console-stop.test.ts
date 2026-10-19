@@ -137,10 +137,11 @@ restartCase(
     expect(cardOf(adopted, "01")).toMatchObject({ status: "in-progress", liveAttempt: { attempt: 1, paneId: ticketPane } });
 
     // The harness the first server launched was alive all along: let go now,
-    // its done Outcome lands on the re-adopted Attempt.
+    // its done Outcome lands on the re-adopted Attempt, which merges at once (ADR-0041).
     await held.release();
     await untilState(second, "01 done", (s) => cardOf(s, "01").status === "done", 60_000);
-    expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 exited"]);
+    await until(() => eventLine(world, "01"), (lines) => lines.includes("1 tab-closed"), { what: "01's tab-closed" });
+    expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 exited", "1 merged", "1 tab-closed"]);
     await herdr.settle();
     expect(callsOf(herdr, "tab.create", atBoot)).toEqual([]);
     expect(world.stubs.calls().filter((call) => call.key === "01")).toHaveLength(1);
