@@ -51,7 +51,7 @@ function model(overrides: Partial<CanvasModel> = {}): CanvasModel {
     terminalBacked: false,
     mergeQueueLine: null,
     spawnLine: null,
-    lineStrip: null,
+    line: null,
     closeTerminals: { offered: false, count: 0, state: "idle", failure: null },
     ...overrides,
   };
@@ -163,10 +163,11 @@ function mountCanvas(
     onFocusTerminal: async () => true,
     onEnlist: () => {},
     onOpenSettings: () => {},
+    onOpenPlans: () => {},
+    onOpenLine: () => {},
     onOpenHeldSpawns: () => {},
     onResetLayout: () => {},
     onEndConversation: () => {},
-    onStartLine: () => {},
     onArmCloseTerminals: () => {},
     onCancelCloseTerminals: () => {},
     onConfirmCloseTerminals: () => {},
@@ -209,7 +210,7 @@ describe("Canvas across a morphing render", () => {
         resolver: null,
         assignment: { harness: "claude", model: "opus", drivers: "tdd" },
         enlisted: false,
-        station: null,
+        node: null,
         reassign: {
           eligible: false,
           reason: "an Attempt is in flight",
@@ -592,29 +593,41 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
     { kind: "utility", id: "u-1", label: "start", interrupt: null, x: 100, y: 100 },
   ];
 
-  it("shows the Line strip in the header, after the Spawn caps line, whole on hover", () => {
-    const strip = "Round 2 · Prove · fails 1/2 · Finish: draft PR";
+  it("shows the Line button in the header, after the Spawn caps line, whole on hover", () => {
+    const headline = "Factory today · finishing";
     const { root, commit } = mountCanvas(
       model({
         cards,
         spawnLine: { text: "Spawns 3/20 this run · 5 per attempt", warn: false },
-        lineStrip: strip,
+        line: { headline },
       }),
     );
     commit();
-    const el = root.querySelector<HTMLElement>(".canvas-lines .canvas-line-strip")!;
-    expect(el.textContent).toBe(strip);
-    expect(el.title).toBe(strip);
+    const el = root.querySelector<HTMLButtonElement>(".canvas-lines .canvas-line-open")!;
+    expect(el.tagName).toBe("BUTTON");
+    expect(el.textContent).toBe(headline);
+    expect(el.title).toBe(`${headline} (open the Line)`);
     expect(el.previousElementSibling?.classList.contains("canvas-spawn-line")).toBe(true);
   });
 
-  it("shows no strip before Start the Line", () => {
-    const { root, commit } = mountCanvas(model({ cards }));
+  it("opens the Line view from the header button", () => {
+    let opens = 0;
+    const { root, commit } = mountCanvas(
+      model({ cards, line: { headline: "Factory today · running" } }),
+      { onOpenLine: () => (opens += 1) },
+    );
     commit();
-    expect(root.querySelector(".canvas-line-strip")).toBeNull();
+    root.querySelector<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(opens).toBe(1);
   });
 
-  function stationPool(): CanvasModel {
+  it("shows no Line button in a pool that runs no Line", () => {
+    const { root, commit } = mountCanvas(model({ cards }));
+    commit();
+    expect(root.querySelector(".canvas-line-open")).toBeNull();
+  });
+
+  function linePool(): CanvasModel {
     const snapshot: EnrichedSnapshot = {
       seq: 1,
       phase: "running",
@@ -628,14 +641,14 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
       state: {
         tickets: (
           [
-            ["r1-implement", "implement"],
-            ["r1-prove", "prove"],
-            ["r1-review", "review"],
-            ["r1-decide", "decide"],
-            ["r1-finish", "finish"],
+            ["implement-1", "implement"],
+            ["prove-1", "prove"],
+            ["review-1", "review"],
+            ["decide-1", "decide"],
+            ["finish-1-act", "finish"],
             ["side-quest", undefined],
           ] as const
-        ).map(([id, station]) => ({
+        ).map(([id, node]) => ({
           id,
           title: `ticket ${id}`,
           blockedBy: [],
@@ -651,7 +664,7 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
             verify: null,
             sources: { harness: "default", model: "default", effort: "unset", drivers: "default" },
           },
-          ...(station ? { station } : {}),
+          ...(node ? { node } : {}),
         })),
         conversations: [],
         log: [],
@@ -665,35 +678,34 @@ describe("the Line on the canvas (#187, ADR-0037)", () => {
     return model({ cards: projectPool(snapshot).cards });
   }
 
-  it("labels each Station Ticket's card with its Station in the head, beside the id", () => {
-    const { root, commit } = mountCanvas(stationPool());
+  it("labels each Line Ticket's card with its node in the head, beside the id", () => {
+    const { root, commit } = mountCanvas(linePool());
     commit();
     const label = (id: string) =>
-      root.querySelector(`[data-ticket-id="${id}"] .node-card-head .station-badge`);
-    expect(label("r1-implement")?.textContent).toBe("Implement");
-    expect(label("r1-prove")?.textContent).toBe("Prove");
-    expect(label("r1-review")?.textContent).toBe("Review");
-    expect(label("r1-decide")?.textContent).toBe("Decide");
-    expect(label("r1-finish")?.textContent).toBe("Finish");
-    expect(label("r1-prove")?.previousElementSibling?.classList.contains("node-card-id")).toBe(true);
+      root.querySelector(`[data-ticket-id="${id}"] .node-card-head .node-badge`);
+    expect(label("implement-1")?.textContent).toBe("implement");
+    expect(label("prove-1")?.textContent).toBe("prove");
+    expect(label("review-1")?.textContent).toBe("review");
+    expect(label("decide-1")?.textContent).toBe("decide");
+    expect(label("finish-1-act")?.textContent).toBe("finish");
+    expect(label("prove-1")?.previousElementSibling?.classList.contains("node-card-id")).toBe(true);
   });
 
   it("puts no label on a Ticket that is not on the Line", () => {
-    const { root, commit } = mountCanvas(stationPool());
+    const { root, commit } = mountCanvas(linePool());
     commit();
-    expect(root.querySelector('[data-ticket-id="side-quest"] .station-badge')).toBeNull();
+    expect(root.querySelector('[data-ticket-id="side-quest"] .node-badge')).toBeNull();
   });
 });
 
-describe("faded cards for Pending and Held spawns (issue #150)", () => {
+describe("faded cards for Held spawns (issue #150)", () => {
   const spawnCard = (
     overrides: Partial<Extract<CanvasModel["cards"][number], { kind: "spawn" }>> = {},
   ): CanvasModel["cards"][number] => ({
     kind: "spawn",
     id: "spawn:proposal-1",
     proposalId: "proposal-1",
-    state: "pending",
-    label: "lands next boundary",
+    label: "held · per-run cap",
     title: "Write the migration guide",
     parentCardId: "ticket:01",
     parentId: "01",
@@ -715,7 +727,6 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
           spawnCard({
             id: "spawn:proposal-2",
             proposalId: "proposal-2",
-            state: "held",
             label: "held · overlaps 02",
             spawnKind: "conversation",
           }),
@@ -723,11 +734,11 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
       }),
     );
     commit();
-    const pending = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
-    expect(pending.classList.contains("spawn-card-pending")).toBe(true);
-    expect(pending.dataset.nodeId).toBe("spawn:proposal-1");
-    expect(pending.querySelector(".spawn-card-label")?.textContent).toBe("lands next boundary");
-    expect(pending.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
+    const first = root.querySelector<HTMLElement>('[data-key="spawn:proposal-1"]')!;
+    expect(first.classList.contains("spawn-card-held")).toBe(true);
+    expect(first.dataset.nodeId).toBe("spawn:proposal-1");
+    expect(first.querySelector(".spawn-card-label")?.textContent).toBe("held · per-run cap");
+    expect(first.querySelector(".spawn-card-parent")?.textContent).toBe("from 01");
     const held = root.querySelector<HTMLElement>('[data-key="spawn:proposal-2"]')!;
     expect(held.classList.contains("spawn-card-held")).toBe(true);
     expect(held.querySelector(".spawn-card-label")?.textContent).toBe("held · overlaps 02");
@@ -819,16 +830,16 @@ describe("the Steward on the canvas (ADR-0030)", () => {
       "|",
       "Enlist terminal",
       "Settings",
+      "Plans",
     ]);
   });
 });
 
 
-describe("a Grill on the canvas (ADR-0037)", () => {
-  function grillPool(
-    overrides: { ending?: boolean } = {},
-    lineStart: { starting: boolean; failure: string | null } = { starting: false, failure: null },
-    role: "grill" | "steward" = "grill",
+describe("a Line's Conversation on the canvas (ADR-0040)", () => {
+  function conversationPool(
+    extra: { node?: string; role?: "steward"; ending?: boolean } = {},
+    end: { ending: boolean; failure: string | null } = { ending: false, failure: null },
   ): CanvasModel {
     const snapshot: EnrichedSnapshot = {
       seq: 1,
@@ -844,7 +855,7 @@ describe("a Grill on the canvas (ADR-0037)", () => {
         tickets: [],
         conversations: [
           {
-            id: "conv-2",
+            id: "grill-1",
             title: "grill the next feature",
             status: "live",
             spawnedBy: null,
@@ -854,8 +865,9 @@ describe("a Grill on the canvas (ADR-0037)", () => {
             turn: { state: "waiting", lastLine: "", idleSince: null },
             children: [],
             enlisted: false,
-            ending: overrides.ending ?? false,
-            role,
+            ending: extra.ending ?? false,
+            ...(extra.node ? { node: extra.node } : {}),
+            ...(extra.role ? { role: extra.role } : {}),
           },
         ],
         log: [],
@@ -866,48 +878,60 @@ describe("a Grill on the canvas (ADR-0037)", () => {
         config: {},
       },
     };
-    const lineStarts = { "conv-2": lineStart };
-    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), {}, {}, lineStarts).cards });
+    const endings = { "grill-1": end };
+    return model({ cards: projectPool(snapshot, {}, {}, {}, Date.now(), endings).cards });
   }
 
-  it("marks a Grill's card and offers Start the Line on it", () => {
-    const starts: string[] = [];
-    const { root, commit } = mountCanvas(grillPool(), {
-      onStartLine: (grillId) => starts.push(grillId),
-    });
+  const REFUSED =
+    "grill-1's committed branch pool/x/grill-1 has no Line brief at docs/specs/main.grill-1.brief.json";
+
+  it("marks the card with the node it works, and offers no Start the Line", () => {
+    const { root, commit } = mountCanvas(conversationPool({ node: "grill" }));
     commit();
-    const card = root.querySelector('[data-conversation-id="conv-2"]')!;
-    expect(card.classList.contains("conversation-card-grill")).toBe(true);
-    expect(card.querySelector(".grill-badge")?.textContent).toBe("Grill");
-    const start = card.querySelector<HTMLButtonElement>(".conversation-start-line")!;
-    expect(start.textContent).toBe("Start the Line");
-    expect(start.disabled).toBe(false);
-    start.click();
-    expect(starts).toEqual(["conv-2"]);
+    const card = root.querySelector('[data-conversation-id="grill-1"]')!;
+    expect(card.classList.contains("conversation-card-node")).toBe(true);
+    expect(card.querySelector(".node-card-head .node-badge")?.textContent).toBe("grill");
+    expect(card.querySelector(".conversation-start-line")).toBeNull();
+    expect(card.textContent).not.toContain("Start the Line");
   });
 
-  it("disables Start the Line in flight and shows its refusal", () => {
-    const busy = mountCanvas(grillPool({}, { starting: true, failure: null }));
-    busy.commit();
-    const button = busy.root.querySelector<HTMLButtonElement>(".conversation-start-line")!;
-    expect(button.disabled).toBe(true);
-    expect(button.textContent).toBe("starting...");
-
-    const refused = mountCanvas(grillPool({}, { starting: false, failure: "the Line has already started" }));
-    refused.commit();
-    expect(refused.root.querySelector(".conversation-start-line-failure")?.textContent).toBe(
-      "the Line has already started",
-    );
-  });
-
-  it("offers no Start the Line on a Grill that is ending, or on a Conversation that is not a Grill", () => {
-    for (const pool of [grillPool({ ending: true }), grillPool({}, undefined, "steward")]) {
+  it("marks no node on an ordinary Conversation or the Steward", () => {
+    for (const pool of [conversationPool(), conversationPool({ role: "steward" })]) {
       const { root, commit } = mountCanvas(pool);
       commit();
-      expect(root.querySelector(".conversation-start-line")).toBeNull();
+      expect(root.querySelector(".node-badge")).toBeNull();
+      expect(root.querySelector(".conversation-card-node")).toBeNull();
+    }
+  });
+
+  it("shows a refused End inline and then offers End as closed, sending close", () => {
+    const ends: [string, boolean | undefined][] = [];
+    const { root, commit } = mountCanvas(
+      conversationPool({ node: "grill" }, { ending: false, failure: REFUSED }),
+      { onEndConversation: (id, close) => ends.push([id, close]) },
+    );
+    commit();
+    const card = root.querySelector('[data-conversation-id="grill-1"]')!;
+    expect(card.querySelector(".conversation-end-failure")?.textContent).toBe(REFUSED);
+    const closed = card.querySelector<HTMLButtonElement>(".conversation-end-closed")!;
+    expect(closed.textContent).toBe("End as closed");
+    closed.click();
+    expect(ends).toEqual([["grill-1", true]]);
+  });
+
+  it("offers End as closed before any End is refused, on an ordinary Conversation, or while ending", () => {
+    for (const pool of [
+      conversationPool({ node: "grill" }),
+      conversationPool({}, { ending: false, failure: "pool resume failed: 500" }),
+      conversationPool({ node: "grill" }, { ending: true, failure: REFUSED }),
+    ]) {
+      const { root, commit } = mountCanvas(pool);
+      commit();
+      expect(root.querySelector(".conversation-end-closed")).toBeNull();
     }
   });
 });
+
 describe("Notices not landing on the canvas", () => {
   it("warns on the card, the error on hover", () => {
     const delivery = { failingSince: "2026-10-01T02:05:00.000Z", lastError: "a dialog is open" };

@@ -32,8 +32,8 @@ your exit and writes the final status to the ticket itself.
 
 Follow-up tickets you discover mid-attempt are proposed, never written: add an optional `"spawn"`
 array to that outcome JSON, one entry per follow-up, each `{"title": "...", "body": "...",
-"blockedBy": ["id", ...]}`. The engine assigns the ids, writes the ticket files at the super-step
-boundary, and drops thin or out-of-pool proposals with the reason in the ticket log. You never
+"blockedBy": ["id", ...]}`. The engine assigns the ids, writes the ticket files at the next Tick,
+and drops thin or out-of-pool proposals with the reason in the ticket log. You never
 write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.
 
 If you exit without an outcome status, the runner treats that as a crash and halts.

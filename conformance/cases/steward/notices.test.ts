@@ -84,6 +84,28 @@ function expectNotices(herdr: HerdrProcess, expected: string[]): void {
   typed.forEach((turn, i) => expectSameBytes(turn, expected[i]!, `Steward Notice ${i + 1}`));
 }
 
+function noticeParts(turn: string): { heading: string; items: string[] } {
+  const [heading, ...rest] = turn.split("\n\n");
+  const merged = "Merged since your last Notice: ";
+  const items = rest
+    .join("\n\n")
+    .split("\n\n---\n\n")
+    .map((item) =>
+      item.startsWith(merged) ? `${merged}${item.slice(merged.length, -1).split(", ").sort().join(", ")}.` : item,
+    );
+  return { heading: heading!, items };
+}
+
+function expectNoticeParts(herdr: HerdrProcess, expected: string[], anyOrder = false): void {
+  const typed = stewardNotices(herdr);
+  expect(typed.length, `the Steward Notices typed: ${JSON.stringify(typed)}`).toBe(expected.length);
+  const items = (turn: string) => (anyOrder ? [...noticeParts(turn).items].sort() : noticeParts(turn).items);
+  typed.forEach((turn, i) => {
+    expect(noticeParts(turn).heading, `Steward Notice ${i + 1}'s heading`).toBe(noticeParts(expected[i]!).heading);
+    expect(items(turn), `Steward Notice ${i + 1}'s items`).toEqual(items(expected[i]!));
+  });
+}
+
 /**
  * Nothing more is typed: a bounded wait of about two and a half Conversation
  * polls (2 s each), in which the Notices must stay exactly `count`. A
@@ -224,8 +246,6 @@ async function doneUnmergedAtBoot(sw: StewardWorld, server: CaseServer, ids: str
   const spawned = await Promise.all(ids.map((id) => untilSpawned(sw.world.pool, id)));
   await server.stop();
   ids.forEach((id, i) => {
-    // A lone ready Ticket runs in the pool checkout itself, on no branch of
-    // its own: a case must run at least two, so each has a worktree.
     const head = sw.world.git(["-C", spawned[i]!.cwd, "rev-parse", "--abbrev-ref", "HEAD"]).trim();
     if (head !== spawned[i]!.branch) throw new Error(`${id} ran on ${head}, not in a worktree on ${spawned[i]!.branch}`);
     commitFile(sw.world, spawned[i]!.cwd, `work-${id}.txt`, `${id}\n`);
@@ -244,8 +264,8 @@ function ticket(id: string, title: string, blockedBy = "none"): TicketSeed {
 function stallText(head: string, title: string, behind: string): string {
   return (
     `The Merge queue head, Ticket ${head} ("${title}"), is stalled: it is done, its branch ` +
-    "has not landed, and no resolver runs and no Interrupt is raised for it. Nothing in the " +
-    "pool moves until it lands.\n" +
+    "has not landed, and no resolver runs and no Interrupt is raised for it. Only the Tickets " +
+    "that name it as a blocker wait until it lands.\n" +
     `${behind}\n` +
     "There is no Interrupt to answer. Read its Ticket log and branch, and tell the operator in " +
     "this pane what you found; merge it by hand only if the operator's own words allowed you to."
@@ -389,49 +409,6 @@ conformance(
 
 conformance(
   "steward",
-  "a crash with the operator's answer queued is not told, while one unanswered is",
-  async (t) => {
-    // 07 waits for 08, so once 08 merges it runs in the next super-step and
-    // keeps it in flight: an answer given then is queued until it joins.
-    const sw = await stewardWorld(t, {
-      tickets: [ticket("02", "Two"), ticket("06", "Six"), ticket("07", "Seven", "08"), ticket("08", "Eight")],
-    });
-    playAgents(sw.herdr, { "08": [done()] });
-    const server = await sw.start();
-    await crashTicket(sw, "02");
-    await crashTicket(sw, "06");
-    await untilPrompted(sw.herdr, "07");
-    await untilSnapshot(
-      server,
-      (snap) => snap.state.interrupts.filter((i) => i.kind === "crash").length === 2,
-      "both crashes",
-    );
-    // Answered mid-flight, the request is held until the answer is
-    // processed; it is not awaited.
-    void server.http.post("/api/resume", { ticketId: "02", action: "resume" });
-    await untilSnapshot(server, (snap) => snap.state.queuedAnswers.some((a) => a.ticketId === "02"), "02's answer queued");
-    await enlistSteward(server);
-    await untilNotices(sw.herdr, 1);
-    await noFurtherNotices(sw.herdr, 1);
-    expect((await snapshot(server)).state.queuedAnswers.map((a) => a.ticketId)).toEqual(["02"]);
-    const runs = join(sw.world.pool, "runs");
-    expectNotices(sw.herdr, [
-      "Pool news for the Steward:\n\n" +
-        "Ticket 06 (\"Six\") is waiting at a crash Interrupt.\n" +
-        "Body:\n" +
-        `crash: harness exit code unreadable: the pane wrapper never wrote a usable ${runs}/06.exitcode\n` +
-        `${runs}/06.log\n` +
-        "\n" +
-        `outcome file: ${runs}/06.outcome.json (missing)\n` +
-        "Answers: answer 06 resume [note]; or leave 06 <note> for the operator.\n" +
-        "Steward budget on 06: 5 of 5 answers left.",
-    ]);
-  },
-  { timeoutMs: 120_000 },
-);
-
-conformance(
-  "steward",
   "an Interrupt the Steward left with a note is not told again, even to the Steward re-adopted after a restart",
   async (t) => {
     // 04 has no model anywhere, so it waits at a config Interrupt.
@@ -466,7 +443,7 @@ conformance(
         "Ticket 04 (\"Four\") is waiting at a config Interrupt.\n" +
         "Body:\n" +
         "ticket 04 has no model: set one in console.json (an assign entry for 04, or defaults.model) and answer " +
-        "resume. The pool reloads console.json at the next super-step boundary and schedules the ticket on what it finds.\n" +
+        "resume. The pool reloads console.json at the next Tick and schedules the ticket on what it finds.\n" +
         "Answers: reassign 04 field=value..., then answer 04 resume; or leave 04 <note> for the operator.\n" +
         "Steward budget on 04: 5 of 5 answers left.\n\n---\n\n" +
         CHECKPOINT_ONE,
@@ -518,9 +495,6 @@ conformance(
     const sw = await stewardWorld(t, { tickets: [ticket("01", "One"), ticket("02", "Two")] });
     const agents = playAgents(sw.herdr, { "01": [checkpoint("ask me")], "02": [done()] }, { held: true });
     const server = await sw.start();
-    // The case holds console.db's write lock while the super-step runs, so
-    // the engine cannot write its checkpoint when the step joins and, its
-    // retries spent, raises the persistence Interrupt.
     const store = join(sw.world.pool, "console.db");
     await until(() => existsSync(store), Boolean, { what: "console.db" });
     const lock = new Database(store);
@@ -653,11 +627,6 @@ conformance(
       "blocker 09 was closed\n" +
       "Answers: answer 03 resume [note]; or leave 03 <note> for the operator.\n" +
       "Steward budget on 03: 5 of 5 answers left.";
-    // The rest in the order they were raised: the checkpoint as 01's
-    // Attempt ended, then the conflict and the crash as the super-step
-    // joined. The deadlock comes first at the first boot, where it was
-    // raised before anything ran, and last after the restart, which
-    // restores the others and derives it afresh.
     const others = (close: boolean): string =>
       "Ticket 01 (\"One\") is waiting at a checkpoint Interrupt.\n" +
       "Brief:\n" +
@@ -678,10 +647,13 @@ conformance(
       `${crash}\n` +
       "Answers: answer 04 resume [note]; or leave 04 <note> for the operator.\n" +
       "Steward budget on 04: 5 of 5 answers left.";
-    expectNotices(sw.herdr, [
+    expectNoticeParts(sw.herdr, [
       `Pool news for the Steward (4 items):\n\n${deadlock}\n\n---\n\n${others(false)}`,
       `Pool news for the Steward (4 items):\n\n${others(true)}\n\n---\n\n${deadlock}`,
-    ]);
+    ], true);
+    const [first, second] = stewardNotices(sw.herdr).map((turn) => noticeParts(turn).items);
+    expect(first![0]).toBe(deadlock);
+    expect(second!.at(-1)).toBe(deadlock);
   },
   { timeoutMs: 120_000 },
 );
@@ -792,9 +764,6 @@ conformance(
     const sw = await stewardWorld(t, {
       tickets: [ticket("01", "One"), ticket("02", "Two"), ticket("03", "Three"), ticket("04", "Four", "03")],
     });
-    // 02 writes nothing and its pane ends: a crash, raised once its
-    // super-step joins. 04 waits for 03, so it runs in the next one, and
-    // finishes only when the case writes its Outcome.
     const agents = playAgents(sw.herdr, { "01": [done()], "03": [done()] }, { held: true });
     const server = await sw.start();
     await enlistBusySteward(sw, server);
@@ -817,7 +786,7 @@ conformance(
     await untilNotices(sw.herdr, 2);
     await noFurtherNotices(sw.herdr, 2);
     const runs = join(sw.world.pool, "runs");
-    expectNotices(sw.herdr, [
+    expectNoticeParts(sw.herdr, [
       "Pool news for the Steward (2 items):\n\n" +
         "Ticket 02 (\"Two\") is waiting at a crash Interrupt.\n" +
         "Body:\n" +
@@ -1125,7 +1094,7 @@ conformance(
         "Ticket 01 (\"One\") is waiting at a config Interrupt.\n" +
         "Body:\n" +
         "ticket 01 has no model: set one in console.json (an assign entry for 01, or defaults.model) and answer " +
-        "resume. The pool reloads console.json at the next super-step boundary and schedules the ticket on what it finds.\n" +
+        "resume. The pool reloads console.json at the next Tick and schedules the ticket on what it finds.\n" +
         "Answers: reassign 01 field=value..., then answer 01 resume; or leave 01 <note> for the operator.\n" +
         "Steward budget on 01: 5 of 5 answers left.\n\n---\n\n" +
         "Ticket 02 (\"Two\") is waiting at a selection Interrupt.\n" +

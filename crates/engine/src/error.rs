@@ -7,6 +7,10 @@ pub enum EngineError {
     /// queued-answers.ts `AnswerQueuedConflict`: a different answer is already queued (409).
     #[error("{0}")]
     AnswerQueuedConflict(String),
+    /// The Line refuses this answer now (ADR-0040): an approval of the Finish while something
+    /// blocks it, or notes on a Finish with no revise edge (409).
+    #[error("{0}")]
+    LineRefusal(String),
     /// reassign.ts `ReassignRefusal` (400 on the Reassign route, 409 on the Steward's).
     #[error("{0}")]
     ReassignRefusal(String),
@@ -28,6 +32,7 @@ impl EngineError {
     pub fn message(&self) -> &str {
         match self {
             EngineError::AnswerQueuedConflict(m)
+            | EngineError::LineRefusal(m)
             | EngineError::ReassignRefusal(m)
             | EngineError::ConfigUnreadable(m)
             | EngineError::Refused(m) => m,

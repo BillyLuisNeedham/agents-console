@@ -29,15 +29,51 @@ loop (issue #157), which folds every ask before the next frame into one; the
 burst must cost exactly one render. The loop's frame is a timer here, since
 under `--virtual-time-budget` a `requestAnimationFrame` may never fire.
 Three scenarios cover the Detail's Spec, Progress and Outcome tabs, since only
-one is on screen at a time, one more the Detail of a Pending spawn's faded
-card (issue #150), whose card and a Held spawn's keep their nodes too, and one
+one is on screen at a time, one more the Detail of a Held spawn's faded
+card (issue #150), whose card keeps its node too, and one
 the Steward's Detail opened from the tray's Steward box (ADR-0030), whose
-card and the Steward note on a tray row keep theirs. One more opens the
-Finish checkpoint's Detail on a Factory Line (ADR-0037), whose report frame
+card and the Steward note on a tray row keep theirs. One more opens a
+Decide Ticket's Detail on a Line (ADR-0040), whose report frame
 must keep its node, since moving an iframe reloads it; a pass after it
 checks the frame reads at its height inside the Detail with Open in browser
-beside its heading, and the layout checks find the header's Line strip and
-each Station Ticket's labelled card head inside its card.
+beside its heading, and the layout checks find the header's Line button and
+each Line Ticket's labelled card head inside its card.
+The Line view (ADR-0040) has its own scenario. The fixture's Line has a
+per-item Implement node with a done copy, two running and three queued, a
+capped loop edge at 1 of 2, a parked verdict on Review and a Finish that
+refuses while two copies run, and its copy Tickets are in the pool. The
+scenario opens the view from the header's Line button and checks the graph:
+five cards and five edges, the dots by status, the loop's "fail · 1/2 · S"
+label, and each card's state word. It renders five times with the same model
+and asserts the cards, a running dot, a queued dot, the loop edge and its
+label are the same nodes and the pan has not moved. It then pushes a
+snapshot in which one copy finished, the queue shrank and a new copy started,
+and asserts the dots repaint on the same nodes, the new dot appears and the
+pan holds. A pointer tap on a copy dot (the pointer pair, then the click the
+browser makes of it) must open that Ticket's Detail beside the still-open
+view, select its card and leave the graph where it was, and a second tap must
+keep the Detail open. A second Line scenario edits the running Plan: Review's
+parked verdict dragged onto Decide must send exactly one `line.plan.edit`
+carrying that Link at the rev the view drew, the Link must not be drawn from
+the reply alone, and the snapshot at the next rev must draw it and stop the
+verdict parking. A card drag that core refuses must leave its long reason
+inside the view and the card back where it was. At the narrow window the
+layout run opens the view and checks its head holds one line, each live
+card's text, state word and pass summary stay inside the card, uncut, a
+refused edit's reason wraps inside the view, and that every edge label, here
+and in the Plans view, clears every card and every other label as drawn. It
+then pushes a crowded Line, a forked Plan whose `build` holds forty copies
+(done, running, pending and one checkpointed late in the list), and checks that
+the done copies fold into a count, the pass summary drops its pass number
+rather than be cut, the checkpointed copy is still a dot, every dot and pill
+stays inside its card's copy row, every copy the row hides opens by tapping
+`+N` again and again (the same pointer pair and click as a dot), and the
+fork's two `done` labels out of `tasks` are both drawn and clear. The previous
+snapshot is put back afterwards.
+One more presses End on a Line's Conversation pass whose End the fixture
+refuses with a long reason: the reason and End as closed must stay inside the
+card, and inside the Detail's End box once it opens, and an ordinary
+Conversation offers neither.
 
 ## Run it
 

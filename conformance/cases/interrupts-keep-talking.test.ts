@@ -1,21 +1,3 @@
-/**
- * Keep talking and Continued attempts (issue #139, ADR-0027), seen from
- * outside the server (ADR-0036): a checkpointed terminal-backed Attempt's
- * pane is held while its Interrupt waits, POST /api/keep-talking continues it
- * in that pane as a Continued attempt at once, and the Continued attempt ends
- * on its Outcome, its pane going or its TUI exiting. Also the refusals, each
- * a 409 `reason` in the engine's own words, and the teaching Turn typed into
- * the pane, pinned byte for byte (inventory Decided 4).
- *
- * The pools are terminal-backed on the fake herdr. The stub claude reads the
- * prompt typed into its pane, writes the checkpoint Outcome it is scripted
- * with, and stays up the way an interactive harness does; the case then plays
- * the agent in the pane and writes each later Outcome itself. A lone Ticket
- * runs in the pool checkout. The server's own timings are its real ones: the
- * Continued attempt's ending is read every 2 s and the pane survey runs every
- * 15 s, so a case that answers "before the next survey" acts at once.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -23,6 +5,7 @@ import type { EnrichedSnapshot, EnrichedTicketState, PoolConfig, TicketLogRespon
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { anyIsoTime, expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
 import { callsOf, CLAUDE_READY, type HerdrProcess } from "../harness/herdr.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import type { HttpAnswer } from "../harness/http.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import type { ConformanceStubBehaviour } from "../harness/stubs.ts";
@@ -143,14 +126,11 @@ interface Talking {
   quit: string;
 }
 
-/**
- * A terminal-backed pool whose Ticket 01 checkpointed and waits with its pane
- * held. Its stub TUI stays up two minutes, or, with `quit`, until the case
- * writes the quit file. With `holdPane` the fake herdr keeps a pane open
- * after the TUI in it exits, as a real pane keeps its shell.
- */
-async function checkpointed(t: Case, options: { holdPane?: boolean; quit?: boolean } = {}): Promise<Talking> {
-  const world = t.world({ tickets: [TALK_01], config: TERMINAL });
+async function checkpointed(
+  t: Case,
+  options: { holdPane?: boolean; quit?: boolean; git?: boolean } = {},
+): Promise<Talking> {
+  const world = t.world({ tickets: [TALK_01], config: TERMINAL, ...(options.git === false ? { git: false } : {}) });
   const quit = join(world.root, "quit");
   world.stubs.script("01", { ...PAUSE, hold: options.quit ? quit : 120 });
   const herdr = await t.herdr(world, { rendered: CLAUDE_READY, ...(options.holdPane ? { holdPane: true } : {}) });
@@ -214,6 +194,7 @@ conformance(
     const before = await snapshot(server);
     const first = readEvents(world.pool, "01").find((e) => e.kind === "spawned" && e.attempt === 1)!;
     expect(first.payload.pane_id).toBe(paneId);
+    const worktree = ticketWorktree(world.repo, "01");
     expect(ticketOf(before, "01").liveAttempt).toBeNull();
     expect(before.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
     const from = herdr.calls.length;
@@ -240,8 +221,8 @@ conformance(
       events.find((e) => e.kind === "spawned" && e.attempt === 2)?.payload,
       {
         argv: [],
-        cwd: world.repo,
-        branch: null,
+        cwd: worktree.path,
+        branch: worktree.branch,
         commitSha: first.payload.commitSha,
         env: first.payload.env,
         harness: "claude",
@@ -343,8 +324,6 @@ conformance(
   { timeoutMs: 120_000 },
 );
 
-// Issue #186: a Continued attempt's checkpoint takes its Outcome's Spawn proposals, as its done does
-// and as a launched attempt's checkpoint does; they land at the next boundary while the run pauses.
 conformance(
   "interrupts",
   "a Continued attempt's checkpoint Outcome takes its spawn proposals",
@@ -365,7 +344,6 @@ conformance(
     expect(interrupt.body).toBe("do the follow-up first");
     expect(readStateLine(world.pool, "01.md").status).toBe("checkpoint");
     expectParsedEqual(
-      // The boundary may already have landed the proposal: its spawn-adopted is pinned below.
       readEvents(world.pool, "01")
         .filter((e) => e.attempt === 2 && e.kind !== "spawned" && e.kind !== "spawn-adopted")
         .map((e) => [e.kind, e.payload]),
@@ -541,10 +519,8 @@ conformance(
 // engine/keep-talking.test.ts:259
 conformance(
   "interrupts",
-  "Keep talking refuses a Ticket not waiting at a checkpoint, and one whose checkpoint already has an answer queued",
+  "Keep talking refuses a Ticket not waiting at a checkpoint, and a Resume relaunches the checkpointed one afresh",
   async (t) => {
-    // 01 and 02 run as one super-step, each in its own worktree; 02 stays
-    // at work, so an answer to 01 queues for the boundary.
     const world = t.world({ tickets: [TALK_01, BUSY_02], config: TERMINAL });
     world.stubs.script("01", { ...PAUSE, hold: 120 });
     const busy = world.stubs.hold("02");
@@ -556,30 +532,25 @@ conformance(
     await expectRefused(server, "02", "keep talking: ticket 02 is not waiting at a checkpoint");
     const resumed = await server.http.post("/api/resume", { ticketId: "01" });
     expect(resumed.status).toBe(202);
-    expect((await snapshot(server)).state.queuedAnswers.map((a) => [a.ticketId, a.kind])).toEqual([["01", "checkpoint"]]);
-    await expectRefused(server, "01", "keep talking: ticket 01 already has an answer to its checkpoint queued");
-    expect(readEvents(world.pool, "01").filter((e) => e.kind === "spawned")).toHaveLength(1);
 
-    // The queued Resume is still the answer: at the boundary 01 launches
-    // afresh, in a tab of its own.
-    await busy.release();
     await until(
       () => readEvents(world.pool, "01").filter((e) => e.kind === "spawned"),
       (spawned) => spawned.length === 2,
       { what: "01's fresh attempt", ms: 30_000 },
     );
     expect(readEvents(world.pool, "01").find((e) => e.kind === "spawned" && e.attempt === 2)?.payload.continued).toBeUndefined();
+    expect(ticketOf(await snapshot(server), "02").liveAttempt).not.toBeNull();
+    await busy.release();
   },
   { timeoutMs: 120_000 },
 );
 
-// engine/keep-talking.test.ts:334
 conformance(
   "interrupts",
-  "Keep talking refuses while an enlisted Conversation works in a subdirectory of the pool checkout",
+  "Keep talking continues a Ticket that worked in its worktree while an enlisted Conversation works in the pool checkout",
   async (t) => {
-    const { world, herdr, server } = await checkpointed(t);
-    expect(readEvents(world.pool, "01").find((e) => e.kind === "spawned")?.payload.cwd).toBe(world.repo);
+    const { world, herdr, server, paneId } = await checkpointed(t);
+    expect(readEvents(world.pool, "01").find((e) => e.kind === "spawned")?.payload.cwd).toBe(ticketWorktree(world.repo, "01").path);
     const sub = join(world.repo, "sub");
     mkdirSync(sub, { recursive: true });
     await herdr.control("seedAgent", {
@@ -592,18 +563,10 @@ conformance(
       tabId: "tab-op",
     });
     const enlisted = await server.http.post("/api/enlist", { becomes: "conversation", paneId: "pane-op", title: "Beside" });
-    expect(enlisted.status).toBe(201);
-    const { conversationId } = enlisted.json<{ conversationId: string }>();
+    expect(enlisted.status, enlisted.text).toBe(201);
 
-    await expectRefused(
-      server,
-      "01",
-      `keep talking: ticket 01 worked in the pool checkout, where ${conversationId} is working now; ` +
-        "keep talking once it is done",
-    );
-    const after = await snapshot(server);
-    expect(after.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
-    expect(ticketOf(after, "01").heldPane).not.toBeNull();
+    await expectContinued(server, "01", 2);
+    expect(ticketOf(await snapshot(server), "01").liveAttempt).toMatchObject({ attempt: 2, paneId });
   },
   { timeoutMs: 120_000 },
 );

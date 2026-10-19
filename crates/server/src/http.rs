@@ -249,16 +249,40 @@ async fn fetch(server: Server, request: Request) -> Response {
         }
         ("/api/reassign", &Method::PUT) => {
             let body = read_body(body).await;
-            let mut inner = server.lock();
-            return http_of(routes::reassign_request(&server, &mut inner, body));
+            return http_of(routes::reassign_request(&server, body).await);
         }
         ("/api/settings/machine", &Method::PUT) => {
             let body = read_body(body).await;
-            return http_of(routes::machine_settings_request(&server, body));
+            return http_of(routes::machine_settings_request(&server, body).await);
         }
         ("/api/resume", _) if post => {
             let body = read_body(body).await;
             return http_of(routes::resume_request(&server, body).await);
+        }
+        ("/api/plans/validate", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_validate_request(body));
+        }
+        ("/api/plans/edit", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_edit_request(body));
+        }
+        ("/api/plans/boot", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::plan_boot_request(&server, body).await);
+        }
+        ("/api/plans", &Method::GET) => return http_of(routes::plans_list_request(&server)),
+        (plan_path, _) if plan_path.starts_with("/api/plans/") => {
+            let slug = decode_component(&plan_path["/api/plans/".len()..]);
+            match method {
+                Method::GET => return http_of(routes::plan_get_request(&server, &slug)),
+                Method::PUT => {
+                    let body = read_body(body).await;
+                    return http_of(routes::plan_save_request(&server, &slug, body));
+                }
+                Method::DELETE => return http_of(routes::plan_delete_request(&server, &slug)),
+                _ => {}
+            }
         }
         ("/api/events", _) => {
             let ticket = param("ticket").unwrap_or_default();
@@ -305,15 +329,21 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(routes::enlist_request(&server, body).await);
         }
-        ("/api/line/start", _) if post => {
+        ("/api/line", _) if post => {
             let body = read_body(body).await;
-            return http_of(routes::start_line_request(&server, body).await);
+            return http_of(routes::begin_line_request(&server, body).await);
+        }
+        ("/api/line/plan", &Method::POST) => {
+            let body = read_body(body).await;
+            return http_of(routes::line_plan_edit_request(&server, body).await);
         }
         ("/api/line", _) => {
-            return http_of(routes::line_request(&server));
+            return http_of(routes::line_request(&server).await);
         }
         ("/api/line/report", &Method::GET) => {
-            return match routes::line_report(&server) {
+            let node = param("node").unwrap_or_default();
+            let pass = param("pass").unwrap_or_default();
+            return match routes::line_report(&server, &node, &pass).await {
                 Ok(html) => html_response(html),
                 Err(answer) => http_of(answer),
             };
@@ -335,18 +365,6 @@ async fn fetch(server: Server, request: Request) -> Response {
             let body = read_body(body).await;
             return http_of(
                 routes::spawn_request(&server, RequestKind::SpawnsHeldDiscard, body).await,
-            );
-        }
-        ("/api/spawns/pending/hold", _) if post => {
-            let body = read_body(body).await;
-            return http_of(
-                routes::spawn_request(&server, RequestKind::SpawnsPendingHold, body).await,
-            );
-        }
-        ("/api/spawns/pending/discard", _) if post => {
-            let body = read_body(body).await;
-            return http_of(
-                routes::spawn_request(&server, RequestKind::SpawnsPendingDiscard, body).await,
             );
         }
         _ => {}
@@ -599,15 +617,30 @@ async fn steward_route(
             }
         }
         "/api/steward/reassign" => {
-            if let Err(err) = engine.steward_check(conversation.clone()).await {
+            let tickets = match body.get("tickets") {
+                Some(Value::Array(items)) => Value::Array(items.clone()),
+                _ => json!([]),
+            };
+            let named: Vec<String> = tickets
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|ticket| {
+                    if ticket.is_null() {
+                        String::new()
+                    } else {
+                        js::string_of(ticket)
+                    }
+                })
+                .collect();
+            if let Err(err) = engine
+                .steward_check_reassign(conversation.clone(), named.clone())
+                .await
+            {
                 return engine_refused(err);
             }
             let Some(raw) = server.last_raw() else {
                 return steward_refusal(409, "reassign: pool not started");
-            };
-            let tickets = match body.get("tickets") {
-                Some(Value::Array(items)) => Value::Array(items.clone()),
-                _ => json!([]),
             };
             let fields = match body.get("fields") {
                 Some(Value::Object(fields)) => fields.clone(),
@@ -639,18 +672,6 @@ async fn steward_route(
                 };
                 return steward_refusal(status, err.message());
             }
-            let named: Vec<String> = tickets
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|ticket| {
-                    if ticket.is_null() {
-                        String::new()
-                    } else {
-                        js::string_of(ticket)
-                    }
-                })
-                .collect();
             if let Err(err) = engine
                 .steward_reassigned(conversation, named.clone(), fields)
                 .await
@@ -665,6 +686,21 @@ async fn steward_route(
                 format!("reassigned {}; resume to run on it", named.join(", ")),
                 200,
             )
+        }
+        "/api/steward/plan" => {
+            let (base_rev, edits) = match routes::read_plan_edit(body.clone()) {
+                Ok(read) => read,
+                Err(err) => return steward_refusal(400, err),
+            };
+            match engine
+                .steward_edit_plan(conversation, base_rev, edits)
+                .await
+            {
+                Ok(edited) => {
+                    steward_done(format!("edited the Plan: now at rev {}", edited.rev), 200)
+                }
+                Err(err) => engine_refused(err),
+            }
         }
         "/api/steward/end" => {
             if let Err(err) = engine.steward_check(conversation.clone()).await {

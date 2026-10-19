@@ -19,7 +19,6 @@ import {
   initialLogWindow,
   isTerminalBacked,
   joinStreamFiles,
-  lineStrip,
   logAtBottom,
   logTailOffset,
   nextNodeSelection,
@@ -47,7 +46,6 @@ import {
   projectLogPane,
   projectNeedsInput,
   projectHeldSpawns,
-  projectPendingSpawns,
   projectPool,
   projectTimeline,
   timelineEvent,
@@ -64,14 +62,13 @@ import {
   type EnrichedSnapshot,
   type EnrichedTicketState,
   type InterruptKind,
-  type LineView,
+  type LineGraphView,
   type NeedsInputRow,
   type QueuedAnswer,
   type TabOverride,
   type TerminalSurfaceView,
   type TicketActivityResponse,
   type HeldSpawnView,
-  type PendingSpawnView,
   type TicketCardView,
   type TicketDetailView,
   type TicketEvent,
@@ -283,7 +280,7 @@ describe("projectPool", () => {
           ticket("C", { status: "checkpoint", blockedBy: ["B"] }),
           ticket("D", { status: "ready", blockedBy: ["B"] }),
         ],
-        log: ["super-step 1: A"],
+        log: ["start A at abc1234"],
         outcomes: { A: { status: "done", summary: "done A", commitSha: "abc" } },
         interrupts: [{ ticketId: "C", kind: "checkpoint", body: "brief" }],
         config: {},
@@ -309,7 +306,7 @@ describe("projectPool", () => {
     expect(c && c.kind === "ticket" ? c.interrupt?.kind : null).toBe("checkpoint");
     const d = view.cards.find((c) => c.id === "ticket:D");
     expect(d && d.kind === "ticket" ? d.status : null).toBe("ready");
-    expect(view.log).toEqual(["super-step 1: A"]);
+    expect(view.log).toEqual(["start A at abc1234"]);
   });
 
   it("attaches the outcome to a done ticket", () => {
@@ -665,7 +662,7 @@ describe("projectNeedsInput", () => {
     expect(rows[1].interrupt.queued).toBe(false);
   });
 
-  it("drops a waiting row when the boundary snapshot drains the queued answer", () => {
+  it("drops a waiting row when the next Tick's snapshot drains the queued answer", () => {
     const waiting = snapshot({
       state: {
         tickets: [ticket("A")],
@@ -674,7 +671,7 @@ describe("projectNeedsInput", () => {
       },
     });
     expect(projectNeedsInput(projectPool(waiting).cards)).toHaveLength(1);
-    // The boundary applies the queued answer: the interrupt and its queued
+    // The next Tick applies the queued answer: the interrupt and its queued
     // record both drop, and the waiting row goes with them.
     const drained = snapshot({
       state: {
@@ -1215,8 +1212,8 @@ describe("projectDetailTabs", () => {
       },
       hasLiveAttempt: false,
       stewardBudget: null,
-      station: null,
-      report: null,
+      node: null,
+      report: null
     };
   }
 
@@ -1500,13 +1497,13 @@ describe("merge queue projection (#129)", () => {
     expect(card?.vitals?.elapsed).toBe("resolving 10m 5s");
   });
 
-  it("names the head and the tickets behind it in the header line while the hold stands", () => {
+  it("names the head and the tickets behind it in the header line while the Merge queue holds them", () => {
     expect(projectPool(snap, {}, {}, {}, RESOLVER_NOW).mergeQueueLine).toBe(
-      "merge hold: 02 resolving (10m) · 04, 05 queued",
+      "merge queue: 02 resolving (10m) · 04, 05 queued",
     );
   });
 
-  it("words the header by what the head waits on, and hides it when nothing is held", () => {
+  it("words the header by what the head waits on, and hides it when the Merge queue is empty", () => {
     const line = (mergeQueue: EnrichedSnapshot["state"]["mergeQueue"]) =>
       projectPool(snapshot({ state: { mergeQueue } }), {}, {}, {}, RESOLVER_NOW).mergeQueueLine;
     expect(
@@ -1515,15 +1512,15 @@ describe("merge queue projection (#129)", () => {
         { ticketId: "04", state: "needs-you" },
         { ticketId: "05", state: "queued" },
       ]),
-    ).toBe("merge hold: 02 awaiting approval · 04 needs you · 05 queued");
+    ).toBe("merge queue: 02 awaiting approval · 04 needs you · 05 queued");
     expect(
       line([
         { ticketId: "02", state: "stalled" },
         { ticketId: "03", state: "stalled" },
       ]),
-    ).toBe("merge hold: 02, 03 stalled, nothing running");
+    ).toBe("merge queue: 02, 03 stalled, nothing running");
     // A resolver not yet live (the engine is launching it) has no time yet.
-    expect(line([{ ticketId: "09", state: "resolving" }])).toBe("merge hold: 09 resolving");
+    expect(line([{ ticketId: "09", state: "resolving" }])).toBe("merge queue: 09 resolving");
     expect(line([])).toBeNull();
   });
 });
@@ -1833,18 +1830,42 @@ describe("projectTimeline", () => {
       "done",
     );
     expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
-      "2 spawns pending for the next boundary: 'Fix the login test', 'Write the docs'",
+      "2 spawns pending for the next Tick: 'Fix the login test', 'Write the docs'",
       "1 spawn held (overlaps 02, proposal-1): 'Again'",
       "1 spawn held (held by operator): 'Write the docs'",
       "1 spawn held (refused at landing: blocks names done tickets: 04): 'Late'",
       "1 spawn held (overlaps 99 (99 not in the pool)): 'Maybe'",
       "landed 03-spawn-1 from proposal-1 · 03-spawn-1 blocks 04",
       "pending spawn 'Stale' discarded",
-      "pending spawn 'Late' rejected at the boundary: blockedBy names tickets outside the pool: 09",
+      "pending spawn 'Late' rejected at the Tick: blockedBy names tickets outside the pool: 09",
     ]);
   });
 
-  it("names both caps when one boundary held spawns under each", () => {
+  it("words a spawn held for blocking a started Ticket, with the ids when the event has them (ADR-0041)", () => {
+    const view = projectTimeline(
+      response([
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-1", title: "Gate it", reason: "started", startedIds: ["02"] }],
+        }),
+        event(1, "spawn-held", {
+          held: [
+            { id: "proposal-2", title: "Gate more", reason: "started", startedIds: ["02", "03"] },
+          ],
+        }),
+        event(1, "spawn-held", {
+          held: [{ id: "proposal-3", title: "Gate any", reason: "started" }],
+        }),
+      ]),
+      "done",
+    );
+    expect(view.attempts[0].events.map((e) => e.spawn)).toEqual([
+      "1 spawn held (blocks 02, which has started): 'Gate it'",
+      "1 spawn held (blocks 02, 03, which have started): 'Gate more'",
+      "1 spawn held (blocks a Ticket that has started): 'Gate any'",
+    ]);
+  });
+
+  it("names both caps when one Tick held spawns under each", () => {
     const view = projectTimeline(
       response([
         event(1, "spawn-held", {
@@ -3363,10 +3384,33 @@ describe("projectDetail for a Conversation card", () => {
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
-      grill: false,
-      lineStart: { starting: false, failure: null },
+      node: null,
       delivery: null,
     });
+  });
+});
+
+describe("a Line Conversation's node", () => {
+  it("rides the card, its Detail and the tray row, and is null on an ordinary Conversation", () => {
+    const snap = snapshot({
+      state: {
+        tickets: [],
+        conversations: [conversation("grill-1", { node: "grill" }), conversation("conv-2")],
+      },
+    });
+    const view = projectPool(snap);
+    const nodes = view.cards.flatMap((card) =>
+      card.kind === "conversation" ? [[card.conversationId, card.node]] : [],
+    );
+    expect(nodes).toEqual([
+      ["grill-1", "grill"],
+      ["conv-2", null],
+    ]);
+    expect((detailOf(snap, "conversation:grill-1") as { node: string | null }).node).toBe("grill");
+    expect(projectConversationsTray(snap.state.conversations).map((row) => row.node)).toEqual([
+      "grill",
+      null,
+    ]);
   });
 });
 
@@ -3637,23 +3681,6 @@ describe("a Conversation the engine says is ending (issue #140)", () => {
   });
 });
 
-/** A Pending spawn as the wire carries it (issue #150). */
-function pendingSpawn(overrides: Partial<PendingSpawnView> = {}): PendingSpawnView {
-  return {
-    id: "proposal-1",
-    parentId: "04",
-    origin: "ticket",
-    kind: "ticket",
-    title: "Write the migration guide",
-    body: "Document every renamed flag.",
-    blockedBy: [],
-    blocks: null,
-    overlaps: [],
-    at: "2026-09-29T10:10:00Z",
-    ...overrides,
-  };
-}
-
 /** A Held spawn as the wire carries it (issue #149). */
 function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
   return {
@@ -3667,6 +3694,7 @@ function heldSpawn(overrides: Partial<HeldSpawnView> = {}): HeldSpawnView {
     blocks: null,
     overlaps: [],
     unknownOverlaps: [],
+    startedIds: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,
@@ -3706,44 +3734,8 @@ describe("the Spawn caps header line (issue #149)", () => {
   });
 });
 
-describe("the Spawn caps header line with Pending spawns (issue #150)", () => {
-  it("counts the Pending spawns before the held ones, without a warning of their own", () => {
-    const view = projectPool(
-      snapshot({
-        spawnUsage: { spawnedThisRun: 1, perAttempt: 5, perRun: 20 },
-        pendingSpawns: [pendingSpawn(), pendingSpawn({ id: "proposal-2" })],
-      }),
-    );
-    expect(view.spawnLine).toEqual({
-      text: "Spawns 1/20 this run · 5 per attempt · 2 pending",
-      warn: false,
-    });
-    expect(
-      projectPool(
-        snapshot({ pendingSpawns: [pendingSpawn()], heldSpawns: [heldSpawn()] }),
-      ).spawnLine.text,
-    ).toBe("Spawns 0/20 this run · 5 per attempt · 1 pending · 1 held");
-  });
-});
-
-describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
+describe("the hold reasons (issue #150)", () => {
   const NOW = Date.parse("2026-09-29T10:12:00Z");
-
-  it("words a Pending spawn as the list shows it", () => {
-    const [row] = projectPendingSpawns([pendingSpawn({ overlaps: ["02"] })], NOW);
-    expect(row).toEqual({
-      id: "proposal-1",
-      title: "Write the migration guide",
-      kind: "ticket",
-      parent: "from 04",
-      waited: "2m ago",
-      at: "2026-09-29T10:10:00Z",
-      blockedBy: null,
-      blocks: null,
-      overlaps: "overlaps 02",
-      body: "Document every renamed flag.",
-    });
-  });
 
   it("says a spawn was held for overlapping named work, or by the operator", () => {
     const [overlapping, operator] = projectHeldSpawns(
@@ -3775,23 +3767,35 @@ describe("projectPendingSpawns and the hold reasons (issue #150)", () => {
       "blocks names done tickets, which have no next attempt to hold: 02",
     );
   });
+
+  it("names the Tickets a started hold found started, on the row and the faded card", () => {
+    const started = heldSpawn({ reason: "started", blocks: ["02"], startedIds: ["02"] });
+    const [row] = projectHeldSpawns([started], NOW);
+    expect(row?.reason).toBe("blocks 02, which has started");
+    const card = projectPool(
+      snapshot({ state: { tickets: [ticket("02")] }, heldSpawns: [started] }),
+    ).cards.find((c) => c.kind === "spawn");
+    expect(card?.kind === "spawn" && card.label).toBe("held · blocks 02, which has started");
+  });
 });
 
-describe("faded cards for Pending and Held spawns (issue #150)", () => {
+describe("faded cards for Held spawns (issue #150)", () => {
   const snap = () =>
     snapshot({
       state: { tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })] },
-      pendingSpawns: [pendingSpawn({ parentId: "01", blockedBy: ["01"], blocks: ["02"] })],
-      heldSpawns: [heldSpawn({ id: "proposal-2", parentId: "02", reason: "operator" })],
+      heldSpawns: [
+        heldSpawn({ id: "proposal-1", parentId: "01", blockedBy: ["01"], blocks: ["02"] }),
+        heldSpawn({ id: "proposal-2", parentId: "02", reason: "operator" }),
+      ],
     });
 
-  it("draws one faded card per proposal under its own key, saying when it lands or why it is held", () => {
+  it("draws one faded card per proposal under its own key, saying why it is held", () => {
     const spawns = projectPool(snap()).cards.filter((c) => c.kind === "spawn");
     expect(
-      spawns.map((c) => c.kind === "spawn" && [c.id, c.state, c.label, c.title, c.parentCardId]),
+      spawns.map((c) => c.kind === "spawn" && [c.id, c.label, c.title, c.parentCardId]),
     ).toEqual([
-      ["spawn:proposal-1", "pending", "lands next boundary", "Write the migration guide", "ticket:01"],
-      ["spawn:proposal-2", "held", "held · held by operator", "Fix the flaky login test", "ticket:02"],
+      ["spawn:proposal-1", "held · per-run cap", "Fix the flaky login test", "ticket:01"],
+      ["spawn:proposal-2", "held · held by operator", "Fix the flaky login test", "ticket:02"],
     ]);
   });
 
@@ -3836,12 +3840,12 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     const withSpawns = snapshot({
       ...base,
       state: base.state,
-      pendingSpawns: [
-        pendingSpawn({ parentId: "01" }),
-        pendingSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
-        pendingSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+      heldSpawns: [
+        heldSpawn({ id: "proposal-1", parentId: "01" }),
+        heldSpawn({ id: "proposal-2", parentId: "01", blockedBy: ["03"] }),
+        heldSpawn({ id: "proposal-3", parentId: "conv-1", kind: "conversation", origin: "conversation" }),
+        heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] }),
       ],
-      heldSpawns: [heldSpawn({ id: "proposal-4", parentId: "01", blockedBy: ["01"] })],
     });
     const where = (snap: EnrichedSnapshot) =>
       Object.fromEntries(
@@ -3871,7 +3875,7 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
     const base = snapshot({ state: { tickets: [ticket("01")] } });
     const withSpawn = snapshot({
       state: base.state,
-      pendingSpawns: [pendingSpawn({ parentId: "01", kind: "conversation" })],
+      heldSpawns: [heldSpawn({ id: "proposal-1", parentId: "01", kind: "conversation" })],
     });
     const cards = projectPool(withSpawn).cards;
     const at = (id: string) => cards.find((c) => c.id === id)!;
@@ -3883,18 +3887,14 @@ describe("faded cards for Pending and Held spawns (issue #150)", () => {
 
   it("opens a Detail with the whole proposal and the row its decisions act on", () => {
     const view = projectPool(snap());
-    const detail = projectDetail(view.cards, "spawn:proposal-1", {
-      pending: view.pendingSpawns,
-      held: view.heldSpawns,
-    });
+    const detail = projectDetail(view.cards, "spawn:proposal-1", view.heldSpawns);
     expect(detail).toMatchObject({
       kind: "spawn",
       proposalId: "proposal-1",
-      state: "pending",
-      label: "lands next boundary",
-      title: "Write the migration guide",
+      label: "held · per-run cap",
+      title: "Fix the flaky login test",
       parentId: "01",
-      body: "Document every renamed flag.",
+      body: "The login test fails one run in five.",
       blockedBy: ["01"],
       blocks: ["02"],
       overlaps: [],
@@ -3954,11 +3954,11 @@ describe("projectHeldSpawns (issue #149)", () => {
     expect(row?.kind).toBe("conversation");
   });
 
-  it("marks one whose Adopt is on its way to the boundary", () => {
+  it("marks one whose Adopt is on its way to the next Tick", () => {
     expect(projectHeldSpawns([heldSpawn({ adopting: true })], NOW)[0]?.adopting).toBe(true);
   });
 
-  it("carries why the boundary refused the last Adopt, and null before any refusal", () => {
+  it("carries why the Tick refused the last Adopt, and null before any refusal", () => {
     const [refused, fresh] = projectHeldSpawns(
       [heldSpawn({ adoptError: "blocker 09 is gone" }), heldSpawn({ id: "held-2" })],
       NOW,
@@ -4178,12 +4178,12 @@ describe("the Steward (ADR-0030)", () => {
       expect(
         stewardLines([
           event("reassign-requested", { fields: { model: "opus", effort: null }, ...by }),
-          event("end-requested", { closing: "the super-step is done", ...by }),
+          event("end-requested", { closing: "the pool is done", ...by }),
           event("end-requested", { closing: null }),
         ]),
       ).toEqual([
         "the Steward reassigned: model opus · effort cleared",
-        "the Steward ended itself: the super-step is done",
+        "the Steward ended itself: the pool is done",
         null,
       ]);
     });
@@ -4274,100 +4274,56 @@ describe("a Conversation whose Notices are not landing", () => {
   });
 });
 
-describe("the Line (#187, ADR-0037)", () => {
-  function line(overrides: Partial<LineView> = {}): LineView {
+describe("the Line (#187, ADR-0040)", () => {
+  function line(overrides: Partial<LineGraphView> = {}): LineGraphView {
     return {
-      round: 2,
-      station: "prove",
-      ticket: "r2-prove",
+      plan: {
+        horde: 1,
+        name: "Factory today",
+        nodes: [
+          { kind: "agent", id: "implement", title: "Implement", x: 0, y: 0 },
+          { kind: "decide", id: "decide", title: "Decide", x: 200, y: 0 },
+        ],
+        edges: [{ from: "implement", on: "done", to: "decide" }],
+      },
+      rev: 1,
       status: "running",
-      proveFails: 1,
-      proveFailsAllowed: 2,
-      finish: "draft-pr",
-      report: false,
-      halted: null,
+      waitingFor: [],
+      nodes: [],
+      edges: [],
       ...overrides,
     };
   }
 
-  it("reads the running Line in the header strip: Round, Station, fails and Finish", () => {
-    expect(lineStrip(line())).toBe("Round 2 · Prove · fails 1/2 · Finish: draft PR");
-    expect(lineStrip(line({ round: 1, station: "implement", proveFails: 0 }))).toBe(
-      "Round 1 · Implement · fails 0/2 · Finish: draft PR",
-    );
-  });
-
-  it("names the Finish: the PR acts as words, none as none, any other act as the Grill wrote it", () => {
-    expect(lineStrip(line({ finish: "pr" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: PR");
-    expect(lineStrip(line({ finish: "none" }))).toBe("Round 2 · Prove · fails 1/2 · Finish: none");
-    expect(lineStrip(line({ finish: "post the report in #releases" }))).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: post the report in #releases",
-    );
-  });
-
-  it("says the Line ended after its last Round once it is done or closed", () => {
-    expect(lineStrip(line({ status: "done", station: "finish", finish: "pr" }))).toBe(
-      "Line done after Round 2 · Finish: PR",
-    );
-    expect(lineStrip(line({ status: "closed", station: "finish" }))).toBe(
-      "Line closed after Round 2 · Finish: draft PR",
-    );
-  });
-
-  it("marks a halted Line", () => {
-    expect(lineStrip(line({ halted: "r2-prove closed: flaky harness" }))).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: draft PR · halted",
-    );
-    expect(lineStrip(line({ status: "closed", halted: "closed" }))).toBe(
-      "Line closed after Round 2 · Finish: draft PR · halted",
-    );
-  });
-
-  it("has no strip before Start the Line, and the pool view carries the snapshot's", () => {
-    expect(lineStrip(undefined)).toBeNull();
-    expect(projectPool(snapshot()).lineStrip).toBeNull();
-    expect(projectPool(snapshot({ line: line() })).lineStrip).toBe(
-      "Round 2 · Prove · fails 1/2 · Finish: draft PR",
-    );
-  });
-
-  it("carries a Station Ticket's Station onto its card, and none onto any other", () => {
+  it("carries a Line Ticket's node onto its card, and none onto any other", () => {
     const cards = projectPool(
-      snapshot({ state: { tickets: [ticket("r1-review", { station: "review" }), ticket("A")] } }),
+      snapshot({ state: { tickets: [ticket("review-1", { node: "review" }), ticket("A")] } }),
     ).cards;
-    const station = (id: string) =>
-      (cards.find((c) => c.id === `ticket:${id}`) as TicketCardView).station;
-    expect(station("r1-review")).toBe("review");
-    expect(station("A")).toBeNull();
+    const node = (id: string) => (cards.find((c) => c.id === `ticket:${id}`) as TicketCardView).node;
+    expect(node("review-1")).toBe("review");
+    expect(node("A")).toBeNull();
   });
 
-  it("gives the Finish Ticket's Detail the report, at the Round it was written", () => {
+  it("gives a Decide Ticket's Detail the report of its pass, once the pass is done", () => {
     const snap = snapshot({
-      line: line({ status: "finish", station: "finish", ticket: "r2-finish", report: true }),
+      line: line(),
       state: {
         tickets: [
-          ticket("r2-decide", { status: "done", station: "decide" }),
-          ticket("r2-finish", { status: "checkpoint", station: "finish" }),
+          ticket("implement-1", { status: "done", node: "implement" }),
+          ticket("decide-2", { status: "done", node: "decide" }),
+          ticket("decide-3", { status: "in-progress", node: "decide" }),
         ],
       },
     });
     const cards = projectPool(snap).cards;
-    const finish = projectDetail(cards, "ticket:r2-finish", undefined, snap.line);
-    expect(finish?.kind === "ticket" && finish.report).toEqual({ written: true, round: 2 });
-    expect(finish?.kind === "ticket" && finish.station).toBe("finish");
-    const decide = projectDetail(cards, "ticket:r2-decide", undefined, snap.line);
-    expect(decide?.kind === "ticket" && decide.report).toBeNull();
-    // Without the Line there is no report to say anything of.
-    const bare = projectDetail(cards, "ticket:r2-finish");
-    expect(bare?.kind === "ticket" && bare.report).toBeNull();
-  });
-
-  it("says when Decide wrote no report", () => {
-    const snap = snapshot({
-      line: line({ status: "finish", station: "finish", report: false }),
-      state: { tickets: [ticket("r2-finish", { status: "checkpoint", station: "finish" })] },
-    });
-    const detail = projectDetail(projectPool(snap).cards, "ticket:r2-finish", undefined, snap.line);
-    expect(detail?.kind === "ticket" && detail.report).toEqual({ written: false, round: 2 });
+    const report = (id: string, view: LineGraphView | null = snap.line ?? null) => {
+      const detail = projectDetail(cards, `ticket:${id}`, undefined, view);
+      return detail?.kind === "ticket" ? detail.report : undefined;
+    };
+    expect(report("decide-2")).toEqual({ written: true, node: "decide", pass: 2 });
+    expect(report("decide-3")).toEqual({ written: false, node: "decide", pass: 3 });
+    expect(report("implement-1")).toBeNull();
+    // Without the Line there is no node kind to say anything of.
+    expect(report("decide-2", null)).toBeNull();
   });
 });

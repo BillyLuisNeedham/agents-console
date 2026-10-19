@@ -49,8 +49,6 @@ pub fn enrich(
     meta: &[TicketMarker],
     pool_name: &str,
     pool_dir: &str,
-    // One row per ticket, resolved from the config file rather than from the engine's session, so a
-    // save shows on the card before the boundary that will apply it (issue #126).
     reassign: &IndexMap<String, TicketReassignEntry>,
     // The Pool title from the config file as it stands now (issue #100).
     pool_title: Option<String>,
@@ -87,8 +85,8 @@ pub fn enrich(
                 // An enlisted ticket (issue #101) reads "as found": the marker field is the durable fact.
                 enlisted: marker.enlisted_from.is_some(),
                 reassign: row.map_or_else(unknown_reassign, |row| row.reassign.clone()),
-                // A Line's Station Ticket (ADR-0037): the marker field is the durable fact.
-                station: marker.station,
+                // A Line's Ticket (ADR-0040): the marker field is the durable fact.
+                node: marker.node.clone(),
             }
         })
         .collect();

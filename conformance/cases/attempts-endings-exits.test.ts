@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { anyIsoTime, expectJsonlEqual } from "../harness/equal.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import {
@@ -32,13 +33,13 @@ import {
   waitForExit,
 } from "./attempts-endings-support.ts";
 
-/** The spawned event of a lone Ticket's headless claude launch, run in the checkout. */
-function spawnedInCheckout(world: World): Record<string, unknown> {
+function spawnedInWorktree(world: World, id: string): Record<string, unknown> {
+  const { path, branch } = ticketWorktree(world.repo, id);
   return {
     at: anyIsoTime(),
     attempt: 1,
     kind: "spawned",
-    payload: expect.objectContaining({ cwd: world.repo, branch: null, harness: "claude", model: "m", pid: expect.any(Number) }),
+    payload: expect.objectContaining({ cwd: path, branch, harness: "claude", model: "m", pid: expect.any(Number) }),
   };
 }
 
@@ -47,11 +48,12 @@ conformance("attempts", "a headless Attempt that writes a done Outcome and exits
   const world = t.world({ tickets: [ready("01")], config: HEADLESS });
   await t.start(world);
 
-  await waitForExit(world, "01");
+  await until(() => readEvents(world.pool, "01"), (events) => events.some((e) => e.kind === "merged"), { what: "01's merge" });
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), [
     { at: anyIsoTime(), attempt: 1, kind: "scheduled", payload: {} },
-    spawnedInCheckout(world),
+    spawnedInWorktree(world, "01"),
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 0, status: "done", logTail: [], outcomeExists: true } },
+    { at: anyIsoTime(), attempt: 1, kind: "merged", payload: {} },
   ], "runs/01.events.jsonl");
   await until(() => readStateLine(world.pool, "01-t.md"), (line) => line.status === "done", { what: "01 done" });
 });
@@ -67,7 +69,7 @@ conformance("attempts", "a headless Attempt that exits 3 with no Outcome is a cr
   const reason = "harness exited 3";
   expectJsonlEqual(readFileSync(join(world.pool, "runs", "01.events.jsonl")), [
     { at: anyIsoTime(), attempt: 1, kind: "scheduled", payload: {} },
-    spawnedInCheckout(world),
+    spawnedInWorktree(world, "01"),
     { at: anyIsoTime(), attempt: 1, kind: "exited", payload: { code: 3, status: "in-progress", logTail: [], outcomeExists: false } },
     { at: anyIsoTime(), attempt: 1, kind: "crash", payload: { code: 3, reason, logTail: [], outcomeExists: false } },
   ], "runs/01.events.jsonl");
@@ -101,8 +103,8 @@ conformance("attempts", "the pool log gives a real exit as the shell's status be
   await waitForExit(world, "02");
   const log = await until(
     () => poolLog(server),
-    (got) => got.some((line) => line.startsWith("ticket 02: exited")),
-    { what: "02's ending in the pool log" },
+    (got) => ["01", "02"].every((id) => got.some((line) => line.startsWith(`ticket ${id}: exited`))),
+    { what: "01's and 02's endings in the pool log" },
   );
   expect(log).toContain("ticket 01: exited 3, marker in-progress, crash: harness exited 3");
   expect(log).toContain("ticket 02: exited 0, marker done");

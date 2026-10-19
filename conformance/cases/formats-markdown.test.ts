@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { ConversationView, EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { expectSameBytes, expectSameFile } from "../harness/equal.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
 import { events, refusedStart, snapshot, ticket, ticketView, untilReview, untilStatus } from "./formats-helpers.ts";
@@ -25,9 +26,9 @@ const DEFAULTS = { defaults: { harness: "claude", model: "m" } };
 /** The provenance paragraph the engine writes under a spawned Ticket's heading. */
 function provenance(parent: string): string {
   return (
-    `**Spawned by** ticket ${parent} (ADR-0010): the engine wrote this ticket at the super-step boundary ` +
-    "from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it " +
-    "schedules, verifies, and may itself spawn, and the operator can edit or kill it before it schedules."
+    `**Spawned by** ticket ${parent} (ADR-0010): the engine wrote this ticket at a Tick from the ` +
+    "attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it " +
+    "schedules, verifies, and may itself spawn."
   );
 }
 
@@ -185,7 +186,9 @@ conformance("formats", "a spawn-assign token's verify is ignored: the child runs
   await untilStatus(world, "01-spawn-1.md", "done");
   expect(world.stubs.calls().map((call) => call.key)).toEqual(["01-spawn-1"]);
   const spawned = readEvents(world.pool, "01-spawn-1").filter((e) => e.kind === "spawned");
-  expect(spawned.map((e) => [e.attempt, (e.payload as { branch: string | null }).branch])).toEqual([[1, null]]);
+  expect(spawned.map((e) => [e.attempt, (e.payload as { branch: string | null }).branch])).toEqual([
+    [1, ticketWorktree(world.repo, "01-spawn-1").branch],
+  ]);
 });
 
 // pool.test.ts:120 spawn namespace reservation › fails pool load on a malformed spawn-assign, naming the file

@@ -200,12 +200,6 @@ export async function rebuiltSnapshot(server: CaseServer, skippedId: string): Pr
   return snapshotOf(server);
 }
 
-/**
- * The snapshot once the pool rests, quiescent. Its first boundary has run by
- * then, so the engine has read console.json for the last time until
- * something drives it again: a hand edit made after this reaches the
- * snapshot's rows and nothing else.
- */
 export function restedSnapshot(server: CaseServer, ms = 30_000): Promise<EnrichedSnapshot> {
   return untilSnapshot(server, (s) => s.phase === "quiescent", "the pool to rest", ms);
 }

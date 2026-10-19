@@ -1,7 +1,7 @@
-//! Boot's Factory mode (issue #187, ADR-0037, ADR-0038): a Factory pool runs one Line on a branch of its
-//! own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s) before there
-//! is any pool, and the pool lives inside that branch's checkout. The base goes into the pool's
-//! console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
+//! Boot's Line mode (issue #187, ADR-0037, ADR-0038, ADR-0040): a Line pool runs one Line on a branch
+//! of its own, so Boot cuts `line/<slug>` from its Line base (the current branch, or `--from`'s)
+//! before there is any pool, and the pool lives inside that branch's checkout. The base goes into the
+//! pool's console.json as `lineBase`, so the Line knows what it was cut from (issue #193).
 //!
 //! The engine finds a pool's checkout from the pool directory (the git toplevel above it) and merges
 //! into whatever that checkout has out. So Boot gives the Line branch a worktree of its own, at
@@ -9,16 +9,18 @@
 //! pool's target branch is the Line's with no setting to keep in step, and the directory Boot was run
 //! from keeps the branch it had, whatever else is running there.
 //!
-//! Then one of two starts. Asked for the work (an issue number or free text), Boot opens the Grill, a
-//! Conversation on the Grill Station's skills with the work as its first Turn, and the operator's Start
-//! the Line hands off from it. Given a ready brief (`--brief`), Boot commits the brief and its spec onto
-//! the Line branch and starts Round 1 at once, with no Grill and no question asked.
+//! Then the Line begins on its Plan (`POST /api/line`), in one of two ways. Asked for the work (an
+//! issue number or free text), Boot hands it over, and on a Plan that starts with a Conversation the
+//! engine opens that node's first pass on it, which ends once its Line brief has merged. Given a
+//! ready brief (`--brief`), Boot commits the brief and its spec onto the Line branch and hands over
+//! the brief's path, with no Conversation opened and no question asked.
 
 use ac_protocol::LineBase;
 use serde_json::{Map, Value};
 
 use ac_core::js;
-use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX, parse_brief};
+use ac_core::line::run::LineBrief;
+use ac_core::line::{BRIEF_DIR, BRIEF_SUFFIX, BaseBranch, LINE_BRANCH_PREFIX, issue_number};
 use ac_core::pool_title::normalise_title;
 
 use super::BootIo;
@@ -27,21 +29,22 @@ use super::pool::{Excluded, ensure_scratch_excluded, git_line, slugify};
 /// Where Line worktrees go under the checkout Boot runs from.
 pub const LINES_DIR: &str = "lines";
 
-/// A ready brief Boot was handed: the brief as written, the spec's text, and the name its file gives.
+/// A ready brief Boot was handed: the brief as written, its spec's text when it names one, and the
+/// name its file gives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadyBrief {
     pub brief: Map<String, Value>,
-    pub spec_text: String,
+    pub spec_text: Option<String>,
     /// The spec's first `# ` heading, which titles the pool when nothing else does.
     pub heading: Option<String>,
     /// The brief's file name without `.brief.json`.
     pub stem: String,
 }
 
-/// What the Line starts from: the Grill's first Turn, or a ready brief.
+/// What the Line starts from: the work, or a ready brief.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineWork {
-    Grill { work: String },
+    Work { work: String },
     Ready(Box<ReadyBrief>),
 }
 
@@ -58,11 +61,24 @@ pub fn read_ready_brief(path: &str, cwd: &str) -> Result<ReadyBrief, String> {
         return Err(format!("--brief {path}: no such file"));
     }
     let text = js::read_text(&file).map_err(|err| format!("--brief {path}: {err}"))?;
-    let checked = parse_brief(&text).map_err(|reason| format!("--brief {path}: {reason}"))?;
+    let checked = LineBrief::parse(&text).map_err(|reason| format!("--brief {path}: {reason}"))?;
     let Ok(Value::Object(brief)) = js::parse(&text) else {
         return Err(format!("--brief {path}: not a JSON object"));
     };
-    let spec = js::trim(&checked.spec).to_owned();
+    let name = js::basename(&file);
+    let stem = name
+        .strip_suffix(BRIEF_SUFFIX)
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name)
+        .to_owned();
+    let Some(spec) = checked.spec else {
+        return Ok(ReadyBrief {
+            brief,
+            spec_text: None,
+            heading: None,
+            stem,
+        });
+    };
     let beside = super::pool::dirname(&file);
     let candidates = if std::path::Path::new(&spec).is_absolute() {
         vec![spec.clone()]
@@ -81,16 +97,10 @@ pub fn read_ready_brief(path: &str, cwd: &str) -> Result<ReadyBrief, String> {
         ));
     };
     let spec_text = js::read_text(found).map_err(|err| format!("--brief {path}: {err}"))?;
-    let name = js::basename(&file);
-    let stem = name
-        .strip_suffix(BRIEF_SUFFIX)
-        .or_else(|| name.strip_suffix(".json"))
-        .unwrap_or(name)
-        .to_owned();
     Ok(ReadyBrief {
         brief,
         heading: first_heading(&spec_text),
-        spec_text,
+        spec_text: Some(spec_text),
         stem,
     })
 }
@@ -102,18 +112,12 @@ pub fn first_heading(text: &str) -> Option<String> {
         .and_then(normalise_title)
 }
 
-/// The issue number a piece of work names, when it is only that: `186` or `#186`.
-pub fn issue_number(work: &str) -> Option<String> {
-    let digits = js::trim(work).trim_start_matches('#');
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| digits.to_owned())
-}
-
 /// The Line's slug when `--line` names none: the issue's number, the ready brief's name, or the first
 /// words of the work.
 pub fn derived_slug(work: &LineWork) -> String {
     let slug = match work {
         LineWork::Ready(ready) => slugify(&ready.stem),
-        LineWork::Grill { work } => match issue_number(work) {
+        LineWork::Work { work } => match issue_number(work) {
             Some(number) => number,
             None => {
                 let words: Vec<&str> = work.split_whitespace().take(6).collect();
@@ -140,43 +144,18 @@ pub fn derived_title(work: &LineWork, slug: &str) -> Option<String> {
             .heading
             .clone()
             .or_else(|| normalise_title(&format!("Line {slug}"))),
-        LineWork::Grill { work } => match issue_number(work) {
+        LineWork::Work { work } => match issue_number(work) {
             Some(number) => Some(format!("Issue #{number}")),
             None => normalise_title(work),
         },
     }
 }
 
-/// The standing orders of the Steward a Factory pool starts with (ADR-0037).
-pub const STEWARD_ORDERS: &str = "Steward this Factory pool's Line while the operator is away: keep \
-its Stations moving through the checkpoints that are yours to answer. The Finish checkpoint is the \
-operator's: when the Line waits there, say in your pane where the Line stands and wait. End yourself \
-once the Line is done.";
-
-/// The Grill's first Turn: the work as the operator gave it, an issue number spelled out, and the Line
-/// base it was cut from.
-pub fn grill_opening(work: &str, base: &LineBase) -> String {
-    let cut = format!(
-        "This Line was cut from `{}` at `{}`.",
-        base.base_ref,
-        short_commit(&base.commit)
-    );
-    match issue_number(work) {
-        Some(number) => format!(
-            "The piece of work for this Line is issue #{number}. Read it (gh issue view {number}) \
-             and grill me on it. {cut}"
-        ),
-        None => format!(
-            "The piece of work for this Line:\n\n{}\n\n{cut}",
-            js::trim(work)
-        ),
-    }
-}
-
-/// A commit as Boot shows it: its first seven characters.
-pub fn short_commit(commit: &str) -> &str {
-    commit.get(..7).unwrap_or(commit)
-}
+/// The standing orders of the Steward a Line pool starts with (ADR-0037, ADR-0040).
+pub const STEWARD_ORDERS: &str = "Steward this pool's Line while the operator is away: keep its \
+Plan moving through the checkpoints and holds your teaching says are yours to answer. The Finish \
+and its act are the operator's: when the Line waits there, say in your pane where the Line stands \
+and what the Finish waits for, and wait. End yourself once the Line is done.";
 
 /// A slug whose `line/<slug>` branch and worktree directory are both free: the slug itself, else the
 /// first `-2`, `-3`, … that is. A Line branch is never reused, since what is on it is another Line's.
@@ -348,18 +327,19 @@ pub fn cut_line(
 
 /// Commit a ready brief and its spec onto the Line branch as `docs/specs/<slug>.md` and
 /// `docs/specs/<slug>.brief.json`, the brief's spec renamed to match. Answers the brief's path in the
-/// Line's checkout, which Start the Line is then given.
+/// Line's checkout, which `POST /api/line` is then given.
 pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, String> {
     let spec_path = format!("{BRIEF_DIR}/{}.md", line.slug);
     let brief_path = format!("{BRIEF_DIR}/{}{BRIEF_SUFFIX}", line.slug);
     let mut brief = ready.brief.clone();
-    brief.insert("spec".to_owned(), Value::String(spec_path.clone()));
     js::mkdir_all(js::path_join(&[&line.worktree, BRIEF_DIR])).map_err(|err| err.to_string())?;
-    js::write_file(
-        js::path_join(&[&line.worktree, &spec_path]),
-        &ready.spec_text,
-    )
-    .map_err(|err| err.to_string())?;
+    let mut paths = vec![brief_path.as_str()];
+    if let Some(spec_text) = &ready.spec_text {
+        brief.insert("spec".to_owned(), Value::String(spec_path.clone()));
+        js::write_file(js::path_join(&[&line.worktree, &spec_path]), spec_text)
+            .map_err(|err| err.to_string())?;
+        paths.push(&spec_path);
+    }
     let text =
         serde_json::to_string_pretty(&Value::Object(brief)).map_err(|err| err.to_string())?;
     js::write_file(
@@ -367,7 +347,9 @@ pub fn commit_ready_brief(line: &CutLine, ready: &ReadyBrief) -> Result<String, 
         &format!("{text}\n"),
     )
     .map_err(|err| err.to_string())?;
-    git_ok(&line.worktree, &["add", "--", &spec_path, &brief_path])?;
+    let mut add = vec!["add", "--"];
+    add.extend(paths);
+    git_ok(&line.worktree, &add)?;
     let message = format!("Write down the spec and the Line brief for {}", line.branch);
     let mut commit: Vec<&str> = Vec::new();
     // A machine with no git identity still gets its Line: the commit says who made it.
@@ -410,36 +392,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_an_issue_number_with_or_without_its_hash() {
-        assert_eq!(issue_number("186"), Some("186".to_owned()));
-        assert_eq!(issue_number(" #179 "), Some("179".to_owned()));
-        assert_eq!(issue_number("fix #179"), None);
-        assert_eq!(issue_number("#"), None);
-    }
-
-    #[test]
     fn derives_the_slug_from_the_issue_the_brief_or_the_first_words() {
-        let grill = |work: &str| LineWork::Grill {
+        let work = |work: &str| LineWork::Work {
             work: work.to_owned(),
         };
-        assert_eq!(derived_slug(&grill("#186")), "186");
+        assert_eq!(derived_slug(&work("#186")), "186");
         assert_eq!(
-            derived_slug(&grill(
-                "Make the header strip show the Round and the Station too"
+            derived_slug(&work(
+                "Make the header strip show the Round and the node too"
             )),
             "make-the-header-strip-show-the"
         );
-        assert_eq!(derived_slug(&grill("!!!")), "line");
+        assert_eq!(derived_slug(&work("!!!")), "line");
         let ready = LineWork::Ready(Box::new(ReadyBrief {
             brief: Map::new(),
-            spec_text: String::new(),
+            spec_text: None,
             heading: None,
             stem: "186".to_owned(),
         }));
         assert_eq!(derived_slug(&ready), "186");
         assert_eq!(derived_title(&ready, "186"), Some("Line 186".to_owned()));
         assert_eq!(
-            derived_title(&grill("#186"), "186"),
+            derived_title(&work("#186"), "186"),
             Some("Issue #186".to_owned())
         );
     }
@@ -449,22 +423,6 @@ mod tests {
         let taken = ["186", "186-2"];
         assert_eq!(free_line_slug("186", |s| taken.contains(&s)), "186-3");
         assert_eq!(free_line_slug("179", |s| taken.contains(&s)), "179");
-    }
-
-    #[test]
-    fn the_grill_opening_spells_out_an_issue_keeps_free_text_and_names_the_base() {
-        let base = LineBase {
-            base_ref: "experiment/x".to_owned(),
-            commit: "abc1234def5678".to_owned(),
-        };
-        let issue = grill_opening("#186", &base);
-        assert!(issue.starts_with("The piece of work for this Line is issue #186."));
-        assert!(issue.ends_with("This Line was cut from `experiment/x` at `abc1234`."));
-        assert_eq!(
-            grill_opening("  tidy the header  ", &base),
-            "The piece of work for this Line:\n\ntidy the header\n\nThis Line was cut from \
-             `experiment/x` at `abc1234`."
-        );
     }
 
     #[test]
@@ -525,8 +483,6 @@ mod tests {
             "refs/heads/origin/mistake is a local branch named like origin's, which the Line base \
              would read as origin's mistake: rename it, or cut from another branch"
         );
-        assert_eq!(short_commit("abc1234def"), "abc1234");
-        assert_eq!(short_commit("abc"), "abc");
     }
 
     #[test]
@@ -560,7 +516,7 @@ mod tests {
         js::write_file(js::path_join(&[&pilots, "186.md"]), "# Fix it\n\nbody\n").unwrap();
         js::write_file(
             js::path_join(&[&pilots, "186.brief.json"]),
-            r#"{"spec": "pilots/186.md", "finish": "draft-pr", "factory": {}}"#,
+            r#"{"spec": "pilots/186.md", "finish": "draft-pr"}"#,
         )
         .unwrap();
         js::write_file(
@@ -578,8 +534,9 @@ mod tests {
         assert_eq!(
             read_ready_brief("pilots/beside.brief.json", &dir)
                 .unwrap()
-                .spec_text,
-            "# Fix it\n\nbody\n"
+                .spec_text
+                .as_deref(),
+            Some("# Fix it\n\nbody\n")
         );
         js::write_file(
             js::path_join(&[&pilots, "lost.brief.json"]),

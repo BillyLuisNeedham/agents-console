@@ -757,7 +757,8 @@ mod tests {
                 spawned_by: None,
                 enlisted_from: None,
                 spawn_assign: None,
-                station: None,
+                node: None,
+                hold: false,
             }
         }
 
@@ -926,6 +927,7 @@ mod tests {
                         body: "b".into(),
                         candidates: None,
                         steward_note: None,
+                        started_since: None,
                     });
                     let events = read_events(Path::new(&s.runs_dir), "01");
                     let held = held_pane_of(&events, 1, |_| String::new()).unwrap();

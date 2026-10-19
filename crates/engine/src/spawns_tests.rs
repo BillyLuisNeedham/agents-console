@@ -75,9 +75,6 @@ impl CheckpointStore for HookedStore {
     }
 }
 
-// engine.test.ts "lands a spawn queued while the drive was closing, without another kick": an Adopt
-// of a Held spawn accepted while the drive is closing (after its last boundary, as the Review is
-// raised) keeps the run quiescent and starts a fresh drive that lands the spawn and runs it to done.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lands_a_spawn_queued_while_the_drive_was_closing_without_another_kick() {
     let pool = Pool::git(&[("01", &[])]);
@@ -255,25 +252,35 @@ async fn writes_the_spawn_ledger_with_every_ticket_pending_and_held_spawn() {
     );
 }
 
-// engine.test.ts "holds a Pending spawn the boundary can no longer land, with the reason on it": the
-// blocks target finished between the take and the boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn holds_a_pending_spawn_the_boundary_can_no_longer_land_with_the_reason_on_it() {
+async fn holds_a_pending_spawn_the_tick_can_no_longer_land_with_the_reason_on_it() {
     let pool = Pool::git(&[("01", &[]), ("02", &[])]);
-    pool.script(
-        "01",
-        vec![spawning(vec![proposal(
-            "Fix first",
-            json!({ "blocks": ["02"] }),
-        )])],
-    );
+    for id in ["01", "02"] {
+        std::fs::write(
+            pool.file(&format!("issues/{id}.md")),
+            crate::testkit::ticket_text(id, &[], "done"),
+        )
+        .unwrap();
+    }
+    let mut proposals = ac_core::spawn_proposals::load_spawn_proposals(&pool.file("runs")).unwrap();
+    proposals
+        .take(vec![ac_core::spawn_proposals::TakenProposal {
+            parent_id: "01".into(),
+            origin: ac_protocol::SpawnKind::Ticket,
+            proposal: serde_json::from_value(proposal("Fix first", json!({ "blocks": ["02"] })))
+                .unwrap(),
+            at: "2026-01-01T00:00:00.000Z".into(),
+            held: None,
+            unknown_overlaps: None,
+        }])
+        .unwrap();
     let engine = pool.start().await;
     assert_eq!(settled(&engine).await, RunPhase::Quiescent);
     let reason = "blocks names done tickets, which have no next attempt to hold: 02";
     assert!(!pool.file("issues/01-spawn-1.md").exists());
     let snapshot = last(&engine);
     assert!(snapshot.pending_spawns.is_empty());
-    assert_eq!(snapshot.held_spawns.len(), 1);
+    assert_eq!(snapshot.held_spawns.len(), 1, "{:#?}", snapshot.state.log);
     assert_eq!(snapshot.held_spawns[0].reason, HeldSpawnReason::Refused);
     assert_eq!(snapshot.held_spawns[0].adopt_error.as_deref(), Some(reason));
     assert_eq!(
@@ -286,4 +293,138 @@ async fn holds_a_pending_spawn_the_boundary_can_no_longer_land_with_the_reason_o
         "ticket 01: pending spawn proposal-1 ('Fix first') could not land: {reason}; it is held for the operator"
     )));
     assert!(ledger(&pool).contains(&format!("refused at landing: {reason}")));
+}
+
+fn session_in(dir: &std::path::Path, caps: Value) -> crate::session::Session {
+    let runs = dir.join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let (publisher, _) = tokio::sync::watch::channel(None);
+    let mut session = crate::testkit::bare_session(publisher);
+    // As mid-run: a wake rings the running drive rather than starting one.
+    session.driving = true;
+    session.pool_dir = dir.to_string_lossy().into_owned();
+    session.issues_dir = dir.join("issues").to_string_lossy().into_owned();
+    session.runs_dir = runs.to_string_lossy().into_owned();
+    session.spawn_proposals = ac_core::spawn_proposals::load_spawn_proposals(&runs).unwrap();
+    session.state.config = ac_core::config::PoolConfig::from_map(
+        json!({ "spawnCaps": caps }).as_object().unwrap().clone(),
+    );
+    session.markers.push(ac_core::pool::TicketMarker {
+        id: "01".into(),
+        file: dir.join("issues/01.md"),
+        blocked_by: Vec::new(),
+        status: TicketStatus::Done,
+        title: "t".into(),
+        spec: String::new(),
+        spawned_by: None,
+        enlisted_from: None,
+        spawn_assign: None,
+        node: None,
+        hold: false,
+    });
+    session
+        .state
+        .tickets
+        .insert("01".into(), TicketStatus::Done);
+    session
+}
+
+fn spawn_file(dir: &std::path::Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(dir.join("runs/held-spawns.json")).unwrap())
+        .unwrap()
+}
+
+fn parent_events(dir: &std::path::Path, kind: TicketEventKind) -> Vec<Value> {
+    ac_core::events::read_events(&dir.join("runs"), "01")
+        .iter()
+        .filter(|event| event.kind == kind)
+        .map(|event| Value::Object(event.payload.clone()))
+        .collect()
+}
+
+#[test]
+fn discarding_a_held_spawn_wakes_the_drive_since_the_lines_finish_waits_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({ "perRun": 0 }));
+    let proposals = vec![serde_json::from_value(proposal("Over the cap", json!({}))).unwrap()];
+    let (_, held) = crate::spawns::take_spawn_proposals(
+        &mut session,
+        "01",
+        proposals,
+        ac_protocol::SpawnKind::Ticket,
+    )
+    .unwrap();
+    assert_eq!(held[0].reason, HeldSpawnReason::PerRun);
+
+    session.wakes.see_all();
+    crate::spawns::discard_held_spawn(&mut session, &held[0].id, None).unwrap();
+    assert!(session.wakes.any_unseen(), "a held discard wakes the drive");
+}
+
+#[test]
+fn a_conversation_spawn_the_pool_cannot_host_is_rejected_in_the_tick_that_adopts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({}));
+    let proposals =
+        vec![serde_json::from_value(proposal("Talk", json!({ "kind": "conversation" }))).unwrap()];
+    crate::spawns::take_spawn_proposals(
+        &mut session,
+        "01",
+        proposals,
+        ac_protocol::SpawnKind::Conversation,
+    )
+    .unwrap();
+
+    crate::spawns::adopt_spawn_proposals(&mut session).unwrap();
+
+    assert_eq!(
+        parent_events(dir.path(), TicketEventKind::SpawnRejected),
+        [json!({
+            "title": "Talk",
+            "reason": r#"conversation start failed: conversation start: the pool is not terminal-backed (set console.json terminal: "herdr")"#
+        })]
+    );
+    assert!(crate::conversations::reserved_ids(&session).is_empty());
+}
+
+#[test]
+fn a_queued_adopt_the_tick_refuses_keeps_the_spawn_held_with_the_reason_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = session_in(dir.path(), json!({ "perAttempt": 0 }));
+    let proposals = vec![
+        serde_json::from_value(proposal(
+            "Waits on a ticket",
+            json!({ "blockedBy": ["02"] }),
+        ))
+        .unwrap(),
+    ];
+    let mut waited_on = session.markers[0].clone();
+    waited_on.id = "02".into();
+    session.markers.push(waited_on);
+    let (_, held) = crate::spawns::take_spawn_proposals(
+        &mut session,
+        "01",
+        proposals,
+        ac_protocol::SpawnKind::Ticket,
+    )
+    .unwrap();
+    assert_eq!(held[0].id, "proposal-1");
+    session.spawn_proposals.begin_adopt("proposal-1").unwrap();
+    session.markers.retain(|marker| marker.id != "02");
+    let reason = "blockedBy names tickets outside the pool: 02";
+
+    crate::spawns::adopt_spawn_proposals(&mut session).unwrap();
+
+    assert!(!dir.path().join("issues/01-spawn-1.md").exists());
+    assert_eq!(
+        parent_events(dir.path(), TicketEventKind::SpawnRejected),
+        [json!({ "title": "Waits on a ticket", "reason": reason, "fromHeld": "proposal-1" })]
+    );
+    let file = spawn_file(dir.path());
+    assert_eq!(file["held"][0]["id"], "proposal-1");
+    assert_eq!(file["held"][0]["adoptError"], reason);
+    assert!(session.state.log.contains(&format!(
+        "ticket 01: adopting held spawn proposal-1 ('Waits on a ticket') refused: {reason}; it stays held"
+    )));
+    assert!(!session.spawn_proposals.is_adopting("proposal-1"));
 }

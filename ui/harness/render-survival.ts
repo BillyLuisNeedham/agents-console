@@ -26,6 +26,15 @@ import type {
   TicketLogResponse,
 } from "../src/project";
 import type { LogPush } from "../../protocol/protocol.ts";
+import type {
+  LineGraphView,
+  LineNodeView,
+  LinePlanEditRequest,
+  LinePlanEditResponse,
+  PlanDraftResponse,
+  PlanEditFile,
+  PlanFile,
+} from "../../protocol/wire.ts";
 import type { SessionSocket } from "../src/session";
 
 // ---------------------------------------------------------------------------
@@ -46,11 +55,70 @@ const TRAY_NOTE = `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] textar
 const STEWARD = "steward-1";
 const STEWARD_NOTE =
   "Recommend resume with: keep the old endpoint behind the flag until the migration lands, then delete it in a follow-up ticket.";
-/** A Factory Line's Station Tickets (ADR-0037), the Line at its Finish
- *  checkpoint with Decide's report written: the header strip, the cards'
- *  Station labels and the report's frame in the Finish Ticket's Detail. */
-const FINISH_TICKET = "r1-finish";
-const STATIONS = ["implement", "prove", "review", "decide", "finish"] as const;
+/** A Line's Tickets (ADR-0040), the Line at its Finish with Decide's pass 1
+ *  report written: the header's Line button, the cards' node labels and the
+ *  report's frame in the Decide Ticket's Detail. */
+const FINISH_TICKET = "finish-1";
+const DECIDE_TICKET = "decide-1";
+const LINE_NODES = ["implement", "prove", "review", "decide", "finish"] as const;
+/**
+ * The Line's live graph (ADR-0040): Implement is a per-item node on its
+ * second pass with a done copy, two running and three queued behind the cap,
+ * Prove's fail loop has been taken once of two, Review parked its findings
+ * with no edge to take them, and the Finish refuses while two copies run.
+ */
+const LINE_KIND = { implement: "agent", prove: "prove", review: "review", decide: "decide", finish: "finish" } as const;
+const IMPLEMENT_COPIES = ["implement-1", "implement-2", "implement-3"];
+function liveLine(): LineGraphView {
+  const view = (id: string, verdicts: string[], overrides: Partial<LineNodeView> = {}): LineNodeView => ({
+    id,
+    verdicts,
+    passes: 1,
+    tickets: [],
+    queued: 0,
+    inbox: 0,
+    parked: [],
+    arrived: [],
+    ...overrides,
+  });
+  return {
+    plan: {
+      horde: 1,
+      name: "Factory today",
+      nodes: LINE_NODES.map((id, i) => ({
+        kind: LINE_KIND[id],
+        id,
+        title: id,
+        x: i * 260,
+        y: 0,
+        ...(id === "implement" ? { copies: { perItem: 2 } } : {}),
+      })) as PlanFile["nodes"],
+      edges: [
+        { from: "implement", on: "done", to: "prove" },
+        { from: "prove", on: "pass", to: "review" },
+        { from: "prove", on: "fail", to: "implement", cap: { max: 2, stewardExtra: true } },
+        { from: "review", on: "clean", to: "decide" },
+        { from: "decide", on: "ship", to: "finish" },
+      ],
+    },
+    rev: 1,
+    status: "finishing",
+    waitingFor: ["implement-2", "implement-3"],
+    nodes: [
+      view("implement", ["done"], { passes: 2, pass: 2, tickets: IMPLEMENT_COPIES, queued: 3 }),
+      view("prove", ["pass", "fail"]),
+      view("review", ["clean", "findings"], { parked: ["findings"] }),
+      view("decide", ["ship"]),
+      view("finish", [], { passes: 0 }),
+    ],
+    edges: [{ edge: { from: "prove", on: "fail", to: "implement" }, count: 1, max: 2, bought: 0 }],
+  };
+}
+
+/** A Line's Conversation pass (ADR-0040) whose End the engine refuses with a
+ *  reason as long as a real one, so the card and the Detail offer End as closed. */
+const GRILL = "grill-1";
+const GRILL_REFUSAL = `${GRILL}'s committed branch pool/harness/${GRILL} has no Line brief at docs/specs/main.${GRILL}.brief.json`;
 /** The canvas keys a ticket's card as "ticket:<id>"; the session's select takes the card id. */
 const card = (ticketId: string): string => `ticket:${ticketId}`;
 
@@ -125,16 +193,20 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     ticket("t-5", { status: "in-progress", blockedBy: ["t-1", "t-2"], liveAttempt: agentAttempt(1, null) }),
     ticket("t-6", { status: "ready", blockedBy: ["t-3", "t-4"] }),
     ticket("t-7", { status: "ready", blockedBy: ["t-5"] }),
-    // The Line's Round, one Station Ticket each, the first held on the longest
-    // state word a card head carries, so its Station label is measured
+    // The Line's first pass, one Ticket per node, the first held on the
+    // longest state word a card head carries, so its node label is measured
     // against it.
-    ...STATIONS.map((station, i) =>
-      ticket(`r1-${station}`, {
-        station,
-        blockedBy: i === 0 ? [] : [`r1-${STATIONS[i - 1]}`],
-        status: station === "finish" ? "checkpoint" : "done",
-        mergeState: station === "implement" ? "awaiting-approval" : null,
+    ...LINE_NODES.map((node, i) =>
+      ticket(`${node}-1`, {
+        node,
+        blockedBy: i === 0 ? [] : [`${LINE_NODES[i - 1]}-1`],
+        status: node === "finish" ? "checkpoint" : "done",
+        mergeState: node === "implement" ? "awaiting-approval" : null,
       }),
+    ),
+    // The Implement node's second pass: two copies running beside the first.
+    ...IMPLEMENT_COPIES.slice(1).map((id) =>
+      ticket(id, { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
     ),
     // Extra interrupted tickets so the Needs input tray overflows its max-height.
     ...Array.from({ length: 12 }, (_, i) =>
@@ -159,36 +231,25 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     poolDir: "/tmp/harness-pool",
     finishedTerminals: 0,
     spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
-    // Pending spawns (issue #150) above the held ones in the list, each a
-    // faded card on the canvas with dashed edges from its parent and to what
-    // it would block.
-    // The last lands as a Conversation, so it joins the Conversations lane.
-    pendingSpawns: Array.from({ length: 5 }, (_, i) => ({
-      id: `proposal-${i + 1}`,
-      parentId: i % 2 ? "t-3" : "t-1",
-      origin: "ticket" as const,
-      kind: i === 4 ? ("conversation" as const) : ("ticket" as const),
-      title: `Pending proposal ${i + 1}`,
-      body: TICKET_BODY,
-      blockedBy: i === 0 ? ["t-1"] : [],
-      blocks: i === 0 ? ["t-6"] : null,
-      overlaps: [],
-      at: "2026-09-29T10:05:00Z",
-    })),
+    pendingSpawns: [],
     // Enough Held spawns (issue #149) that the list scrolls under its head,
     // the first with a long body that scrolls once expanded, held for each
-    // reason issue #150 adds as well as the caps.
+    // reason issue #150 adds as well as the caps. Each is a faded card on
+    // the canvas with a dashed edge from its parent, the first to what it
+    // would block, and the fifth lands as a Conversation, so it joins the
+    // Conversations lane.
     heldSpawns: Array.from({ length: 10 }, (_, i) => ({
       id: `held-${i + 1}`,
       parentId: "t-1",
       origin: "ticket" as const,
-      kind: "ticket" as const,
+      kind: i === 4 ? ("conversation" as const) : ("ticket" as const),
       title: `Held proposal ${i + 1}`,
       body: TICKET_BODY,
-      blockedBy: [],
+      blockedBy: i === 0 ? ["t-1"] : [],
       blocks: i === 0 ? ("all" as const) : null,
       overlaps: i === 2 ? ["t-2", "proposal-1"] : [],
       unknownOverlaps: [],
+      startedIds: [],
       reason:
         i === 2
           ? ("overlaps" as const)
@@ -203,17 +264,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
     // The Steward has answered the selected ticket twice since the operator
     // last did (ADR-0030), so its Detail shows the budget line.
     stewardBudget: { budget: 5, used: { [SELECTED_TICKET]: 2 } },
-    line: {
-      round: 1,
-      station: "finish",
-      ticket: FINISH_TICKET,
-      status: "finish",
-      proveFails: 0,
-      proveFailsAllowed: 2,
-      finish: "draft-pr",
-      report: true,
-      halted: null,
-    },
+    line: liveLine(),
     state: {
       tickets,
       conversations: [
@@ -222,6 +273,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
           role: "steward",
           turn: { state: "waiting", lastLine: "left t-3 to you", idleSince: "2026-09-21T10:00:00Z" },
         }),
+        conversation(GRILL, { title: "grill the work", node: "grill" }),
         ...Array.from({ length: 30 }, (_, i) =>
           conversation(`c-${i + 1}`, {
             // One whose Notices are not landing, so its tray row wraps a
@@ -254,7 +306,7 @@ function snapshot(seq: number, changedTitle: string | null): EnrichedSnapshot {
         { ticketId: "t-4", kind: "crash", body: lines("crash log", 10) },
         { ticketId: "t-5", kind: "review", body: lines("review", 10) },
         { ticketId: "t-1", kind: "merge-approval", body: lines("merge", 10) },
-        { ticketId: FINISH_TICKET, kind: "checkpoint", body: "The Line is finished: read the report." },
+        { ticketId: FINISH_TICKET, kind: "checkpoint", body: "The Finish is waiting: read the report on decide-1." },
         ...Array.from({ length: 12 }, (_, i) => ({
           ticketId: `t-${i + 8}`,
           kind: `t-${i + 8}` === SECOND_CHECKPOINT ? ("checkpoint" as const) : ("crash" as const),
@@ -348,6 +400,89 @@ const TICKET_BODY =
 // Mount: the app's bootstrap, minus the network and the timers.
 // ---------------------------------------------------------------------------
 
+const PLAN_VERDICTS: Record<string, string[]> = {
+  conversation: ["done", "closed"],
+  agent: ["done", "closed"],
+  prove: ["pass", "fail", "closed"],
+  review: ["clean", "findings", "closed"],
+  decide: ["ship", "another-round", "closed"],
+  gate: ["open", "revise", "closed"],
+  finish: ["revise"],
+};
+
+const ticketNode = (kind: "agent" | "prove" | "review" | "decide", id: string, title: string, x: number, skill: string) =>
+  ({ kind, id, title, x, y: 60, skill, assign: { harness: "claude", model: "opus", effort: "high" }, copies: "one", checkpoint: "steward", spawns: "hold" }) as const;
+
+const FACTORY_TODAY: PlanFile = {
+  horde: 1,
+  name: "Factory today",
+  author: "Agent Console",
+  source: "docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md",
+  note: "ADR-0037's fixed Line as a Plan.",
+  nodes: [
+    { kind: "conversation", id: "grill", title: "Grill", x: 40, y: 60, skill: "my-grill-with-docs", assign: { harness: "claude", model: "opus", effort: "high" } },
+    ticketNode("agent", "implement", "Implement", 340, "tdd"),
+    ticketNode("prove", "prove", "Prove", 640, "my-verify"),
+    ticketNode("review", "review", "Review", 940, "code-review"),
+    ticketNode("decide", "decide", "Decide", 1240, "html"),
+    { kind: "finish", id: "finish", title: "Finish", x: 1540, y: 60, act: "none" },
+  ],
+  edges: [
+    { from: "grill", on: "done", to: "implement" },
+    { from: "implement", on: "done", to: "prove" },
+    { from: "prove", on: "pass", to: "review" },
+    { from: "prove", on: "fail", to: "implement", cap: { max: 2, stewardExtra: true, whenSpent: "hold" } },
+    { from: "review", on: "clean", to: "decide" },
+    { from: "review", on: "findings", to: "decide" },
+    { from: "decide", on: "ship", to: "finish" },
+    { from: "decide", on: "another-round", to: "implement", cap: { max: 1, whenSpent: { to: "finish" } } },
+    { from: "finish", on: "revise", to: "implement" },
+    { from: "implement", on: "closed", to: "decide" },
+    { from: "prove", on: "closed", to: "decide" },
+    { from: "review", on: "closed", to: "decide" },
+  ],
+};
+
+const planEdits: PlanEditFile[][] = [];
+let heldEdits: (() => void)[] | null = null;
+
+function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
+  planEdits.push(edits);
+  const doc = JSON.parse(JSON.stringify(plan)) as PlanFile;
+  for (const edit of edits) {
+    if (edit.edit === "move") {
+      const node = doc.nodes.find((n) => n.id === edit.id);
+      if (node) Object.assign(node, { x: edit.x, y: edit.y });
+    } else if (edit.edit === "link") {
+      doc.edges.push(edit.edge);
+    } else if (edit.edit === "setNode") {
+      doc.nodes = doc.nodes.map((n) => (n.id === edit.node.id ? { ...edit.node, x: n.x, y: n.y } : n));
+    }
+  }
+  const reply: PlanDraftResponse = {
+    plan: doc,
+    problems: [],
+    notes: [],
+    verdicts: doc.nodes.map((n) => ({ id: n.id, verdicts: PLAN_VERDICTS[n.kind] ?? [] })),
+  };
+  if (heldEdits) {
+    const held = heldEdits;
+    return new Promise((resolve) => held.push(() => resolve(reply)));
+  }
+  return Promise.resolve(reply);
+}
+
+/** Every `line.plan.edit` the Line view sent; core applies each at the next rev unless `lineRefusal` is set. */
+const lineEdits: LinePlanEditRequest[] = [];
+let lineRefusal: string | null = null;
+const LINE_REFUSAL =
+  "implement has 3 live copies: their work must end before the node is removed (pool/harness/implement-1, pool/harness/implement-2, pool/harness/implement-3)";
+
+function fakeLineEdit(baseRev: number, edits: PlanEditFile[]): Promise<LinePlanEditResponse> {
+  lineEdits.push({ baseRev, edits });
+  return lineRefusal ? Promise.reject(new Error(lineRefusal)) : Promise.resolve({ rev: baseRev + 1, notes: [] });
+}
+
 const root = document.getElementById("app") as HTMLElement;
 let current = snapshot(0, null);
 
@@ -415,13 +550,31 @@ const view = new ConsoleView({
   onSavePoolSettings: () => Promise.resolve(SETTINGS),
   onAdoptHeldSpawn: (id) => Promise.resolve({ id }),
   onDiscardHeldSpawn: (id) => Promise.resolve({ id }),
-  onHoldPendingSpawn: (id) => Promise.resolve({ id }),
-  onDiscardPendingSpawn: (id) => Promise.resolve({ id }),
   onSaveMachineDefaults: () => Promise.resolve(SETTINGS),
   onReassign: () => Promise.resolve({ applied: [], skipped: [] }),
   onStart: () => Promise.resolve(conversation("c-new")),
-  onEnd: () => Promise.resolve(),
-  onStartLine: () => Promise.resolve(),
+  onEnd: (id) => (id === GRILL ? Promise.reject(new Error(GRILL_REFUSAL)) : Promise.resolve()),
+  onListPlans: () =>
+    Promise.resolve({
+      plans: [
+        {
+          slug: "factory-today",
+          preset: true,
+          name: FACTORY_TODAY.name,
+          author: FACTORY_TODAY.author,
+          source: FACTORY_TODAY.source,
+          note: FACTORY_TODAY.note,
+          problems: [],
+        },
+      ],
+    }),
+  onGetPlan: (slug) => Promise.resolve({ slug, preset: true, plan: FACTORY_TODAY, problems: [] }),
+  onEditPlan: fakeEdit,
+  onSavePlan: (slug, plan) => Promise.resolve({ slug, plan }),
+  onDeletePlan: () => Promise.resolve(),
+  onBootPlan: (slug, work) =>
+    Promise.resolve({ argv: ["--plan", slug, "--work", work, "--yes"], cwd: "/tmp/harness-repo", log: "/tmp/harness-pool/runs/boot.log" }),
+  onEditLine: fakeLineEdit,
 });
 
 const handlers: Handlers = {
@@ -480,8 +633,7 @@ const SCROLL_SELECTORS = [
   // The Reassign bulk dialog's row list (issue #126): its own scroll region
   // so the head and the form below it stay put however many tickets list.
   ".reassign-rows",
-  // The Spawns list, Pending over Held (issues #149, #150), and an
-  // expanded proposal's body.
+  // The Spawns list (issues #149, #150), and an expanded proposal's body.
   ".held-spawns-scroll",
   ".held-spawn-body",
 ];
@@ -604,11 +756,10 @@ async function runScenario(name: string, setup: () => Promise<void>): Promise<vo
     ["needs-input tray", ".needs-input-tray"],
     ["conversations tray", ".conversations-tray"],
     ["canvas viewport", ".canvas-viewport"],
-    // The faded cards (issue #150) keep their own keys across renders.
-    ["pending spawn card", '.node-card[data-node-id="spawn:proposal-1"]'],
     // The Steward's card and its note on the tray row (ADR-0030).
     ["steward card", `.node-card[data-node-id="conversation:${STEWARD}"]`],
     ["steward note", `.needs-input-row[data-key="ticket:${SELECTED_TICKET}"] .steward-note`],
+    // The faded cards (issue #150) keep their own keys across renders.
     ["held spawn card", '.node-card[data-node-id="spawn:held-3"]'],
     ["spawns list", ".held-spawns-pane"],
     // The Line's report (ADR-0037): moving an iframe reloads it, so its
@@ -942,6 +1093,25 @@ function overflowOf(el: HTMLElement, container: HTMLElement): string | null {
     : `scrollWidth ${el.scrollWidth} > clientWidth ${el.clientWidth}, or ${Math.round(e.left)}-${Math.round(e.right)} outside ${Math.round(c.left)}-${Math.round(c.right)}`;
 }
 
+const overlaps = (a: DOMRect, b: DOMRect): boolean =>
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+function labelCollisions(pane: string): string | null {
+  const cards = [...root.querySelectorAll<HTMLElement>(`${pane} .plan-node`)];
+  const labels = [...root.querySelectorAll<SVGGElement>(`${pane} .plan-edge-label`)];
+  const meets: string[] = [];
+  labels.forEach((label, i) => {
+    const box = label.querySelector("rect")!.getBoundingClientRect();
+    for (const card of cards) {
+      if (overlaps(box, card.getBoundingClientRect())) meets.push(`${label.dataset.edge} under ${card.dataset.node}`);
+    }
+    for (const other of labels.slice(i + 1)) {
+      if (overlaps(box, other.querySelector("rect")!.getBoundingClientRect())) meets.push(`${label.dataset.edge} on ${other.dataset.edge}`);
+    }
+  });
+  return labels.length === 0 ? "no edge labels" : meets.length ? meets.join("; ") : null;
+}
+
 /**
  * The canvas header and the Conversations tray's head and Steward box hold
  * their width: the header's tools wrap rather than run off its right edge,
@@ -968,21 +1138,21 @@ function layoutChecks(name: string): void {
   } else {
     push("canvas header holds its width", "no canvas header", "");
   }
-  // The Line strip (ADR-0037) sits in the header's lines and ellipsises
+  // The Line button (ADR-0037) sits in the header's lines and ellipsises
   // there, never pushing past the header's edge.
-  const strip = q<HTMLElement>(".canvas-lines .canvas-line-strip");
+  const open = q<HTMLElement>(".canvas-lines .canvas-line-open");
   push(
-    "line strip in the header",
-    !strip
-      ? "no .canvas-line-strip"
-      : header && strip.getBoundingClientRect().right > header.getBoundingClientRect().right + 1
-        ? `strip ends at ${Math.round(strip.getBoundingClientRect().right)}, past the header's ${Math.round(header.getBoundingClientRect().right)}`
+    "line button in the header",
+    !open
+      ? "no .canvas-line-open"
+      : header && open.getBoundingClientRect().right > header.getBoundingClientRect().right + 1
+        ? `button ends at ${Math.round(open.getBoundingClientRect().right)}, past the header's ${Math.round(header.getBoundingClientRect().right)}`
         : null,
-    `"${strip?.textContent}" in ${Math.round(strip?.getBoundingClientRect().width ?? 0)}px`,
+    `"${open?.textContent}" in ${Math.round(open?.getBoundingClientRect().width ?? 0)}px`,
   );
-  // A Station Ticket's label rides its card's head beside the id and the
+  // A Line Ticket's label rides its card's head beside the id and the
   // state word: the head holds the card's width, nothing in it past its edge.
-  const labelled = [...root.querySelectorAll<HTMLElement>(".ticket-card .node-card-head .station-badge")];
+  const labelled = [...root.querySelectorAll<HTMLElement>(".ticket-card .node-card-head .node-badge")];
   const heads = labelled.map((badge) => badge.parentElement as HTMLElement);
   const spilled = heads.filter((head) => {
     const card = head.closest<HTMLElement>(".node-card")!;
@@ -992,13 +1162,31 @@ function layoutChecks(name: string): void {
     );
   });
   push(
-    "station card heads hold their width",
-    labelled.length !== STATIONS.length
-      ? `${labelled.length} Station labels, expected ${STATIONS.length}`
+    "node card heads hold their width",
+    labelled.length !== LINE_NODES.length
+      ? `${labelled.length} node labels, expected ${LINE_NODES.length}`
       : spilled.length
         ? `heads overflow: ${spilled.map((head) => head.textContent).join(", ")}`
         : null,
     `${labelled.length} labelled heads, each inside its card`,
+  );
+  // A Line Conversation's card head carries the node beside its id and state.
+  const nodeHeads = [
+    ...root.querySelectorAll<HTMLElement>(".conversation-card .node-card-head .node-badge"),
+  ].map((badge) => badge.parentElement as HTMLElement);
+  const nodeSpilled = nodeHeads.filter(
+    (head) =>
+      overflowOf(head, head.closest<HTMLElement>(".node-card")!) !== null ||
+      [...head.children].some((kid) => overflowOf(kid as HTMLElement, head) !== null),
+  );
+  push(
+    "line conversation card head holds its width",
+    nodeHeads.length !== 1
+      ? `${nodeHeads.length} node badges on Conversation cards, expected 1`
+      : nodeSpilled.length
+        ? `head overflows: ${nodeSpilled[0]!.textContent}`
+        : null,
+    `"${nodeHeads[0]?.textContent}" inside its card`,
   );
   const tray = q<HTMLElement>(".conversations-tray");
   for (const [assertion, selector] of [
@@ -1036,6 +1224,11 @@ async function layoutMain(): Promise<void> {
   });
   await settleAll();
   layoutChecks(`layout ${width}, no steward`);
+  await plansLayoutChecks(`layout ${width}, plans view`);
+  q<HTMLButtonElement>(".plans-close")?.click();
+  await settleAll();
+  await lineLayoutChecks(`layout ${width}, line view`);
+  await crowdedLineChecks(`layout ${width}, crowded line`);
   publish("done");
 }
 
@@ -1046,6 +1239,53 @@ function publish(outcome: string): void {
   const pre = document.getElementById("report") as HTMLPreElement;
   pre.textContent = btoa(unescape(encodeURIComponent(json)));
   document.title = `render survival: ${outcome}`;
+}
+
+/**
+ * A refused End on a Line's Conversation (ADR-0040): End from the card, the
+ * engine's reason stands inside the card with End as closed beside End, and
+ * the Detail's End box offers the same inside the panel. An ordinary
+ * Conversation's card offers neither.
+ */
+async function lineConversationChecks(): Promise<void> {
+  const name = "line conversation end";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const cardOf = (id: string) => q<HTMLElement>(`.node-card[data-node-id="conversation:${id}"]`);
+  const grill = cardOf(GRILL);
+  push(
+    "ordinary Conversation offers no End as closed",
+    cardOf("c-1")?.querySelector(".conversation-end-closed") ? "c-1 offers it" : null,
+    "no End as closed on c-1",
+  );
+  if (!grill) {
+    push("refused End offers End as closed on the card", "no grill card", "");
+    return;
+  }
+  grill.querySelector<HTMLButtonElement>(".conversation-end")!.click();
+  await settleAll();
+  const closed = cardOf(GRILL)!.querySelector<HTMLElement>(".conversation-end-closed");
+  const failure = cardOf(GRILL)!.querySelector<HTMLElement>(".conversation-end-failure");
+  push(
+    "refused End offers End as closed on the card",
+    !closed || !failure
+      ? `closed ${closed !== null}, failure ${failure !== null}`
+      : (overflowOf(closed, cardOf(GRILL)!) ?? overflowOf(failure, cardOf(GRILL)!)),
+    `End as closed and ${failure?.textContent?.length} characters of reason inside the card`,
+  );
+  session.select(`conversation:${GRILL}`);
+  await settleAll();
+  const panel = q<HTMLElement>(".detail-open");
+  const box = q<HTMLElement>(".detail-open .conversation-end-box");
+  const detailClosed = box?.querySelector<HTMLElement>(".conversation-end-closed");
+  push(
+    "refused End offers End as closed in the Detail",
+    !panel || !box || !detailClosed
+      ? "no End as closed in the Detail's End box"
+      : (overflowOf(box, panel) ?? overflowOf(detailClosed, box)),
+    `inside a ${Math.round(box?.getBoundingClientRect().width ?? 0)}px End box`,
+  );
 }
 
 /**
@@ -1138,17 +1378,17 @@ async function closeSelectedChecks(): Promise<void> {
 }
 
 /**
- * The Line's report on the Finish checkpoint's Detail (ADR-0037): framed
- * under the checkpoint on Progress at a height that reads, inside the
- * Detail's width, with Open in browser beside its heading.
+ * A Decide pass's report on its Ticket's Detail (ADR-0040): framed on
+ * Progress at a height that reads, inside the Detail's width, with Open in
+ * browser beside its heading.
  */
-async function finishReportChecks(): Promise<void> {
-  const name = "finish report";
+async function decideReportChecks(): Promise<void> {
+  const name = "decide report";
   stage = name;
   const push = (assertion: string, failure: string | null, ok: string) =>
     report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
-  session.select(card(FINISH_TICKET));
-  session.selectTab(FINISH_TICKET, "progress");
+  session.select(card(DECIDE_TICKET));
+  session.selectTab(DECIDE_TICKET, "progress");
   await settleAll();
   const detail = q<HTMLElement>(".detail-open");
   const frame = q<HTMLIFrameElement>(".detail-open iframe.detail-report-frame");
@@ -1161,7 +1401,7 @@ async function finishReportChecks(): Promise<void> {
   const d = detail.getBoundingClientRect();
   push(
     "report framed in the Detail",
-    frame.getAttribute("src") === "/api/line/report?round=1" &&
+    frame.getAttribute("src") === "/api/line/report?node=decide&pass=1" &&
       f.height >= window.innerHeight * 0.5 &&
       f.left >= d.left - 1 &&
       f.right <= d.right + 1
@@ -1173,7 +1413,7 @@ async function finishReportChecks(): Promise<void> {
     "open in browser beside the heading",
     open &&
       open.textContent === "Open in browser" &&
-      open.getAttribute("href") === "/api/line/report?round=1" &&
+      open.getAttribute("href") === "/api/line/report?node=decide&pass=1" &&
       open.target === "_blank" &&
       open.getBoundingClientRect().width > 0
       ? null
@@ -1231,6 +1471,737 @@ function fadedCardsClear(): void {
   });
 }
 
+
+function middle(el: Element): { x: number; y: number } {
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+const planCard = (id: string) => q<HTMLElement>(`.plans-pane .plan-node[data-node="${id}"]`);
+const planEdge = (key: string) => q<SVGGElement>(`.plans-pane .plan-edges [data-key="edge:${key}"]`);
+
+async function openFactoryToday(): Promise<void> {
+  if (!q(".plans-pane")) q<HTMLButtonElement>(".canvas-plans")?.click();
+  await settleAll();
+  q<HTMLButtonElement>('.plans-item[data-key="plan:factory-today"]')?.click();
+  await settleAll();
+}
+
+async function plansChecks(): Promise<void> {
+  const name = "plans view";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openFactoryToday();
+  const viewport = q<HTMLElement>(".plans-pane .plan-viewport");
+  const world = q<HTMLElement>(".plans-pane .plan-world");
+  const cards = root.querySelectorAll(".plans-pane .plan-node").length;
+  const edges = root.querySelectorAll(".plans-pane .plan-edges .plan-edge").length;
+  push(
+    "a Preset opens as its graph",
+    viewport && world && cards === 6 && edges === 12 ? null : `${cards} cards, ${edges} edges, viewport ${!!viewport}`,
+    `${cards} cards, ${edges} edges`,
+  );
+  if (!viewport || !world) return;
+  const zoom = parsePan(world.style.transform).zoom;
+
+  stage = `${name}: node drag`;
+  const prove = planCard("prove");
+  const head = prove?.querySelector(".plan-node-head");
+  if (prove && head) {
+    const routeBefore = planEdge("implement.done>prove")?.querySelector("path")?.getAttribute("d");
+    const r = head.getBoundingClientRect();
+    const x = r.left + 20;
+    const y = r.top + 10;
+    const before = planEdits.length;
+    heldEdits = [];
+    pointer("pointerdown", head, x, y);
+    pointer("pointermove", viewport, x + 60, y + 20);
+    session.setSnapshot(snapshot(1, null));
+    render();
+    pointer("pointermove", viewport, x + 120, y + 40);
+    pointer("pointerup", viewport, x + 120, y + 40);
+    await settle();
+    const want = { x: Math.round(640 + 120 / zoom), y: Math.round(60 + 40 / zoom) };
+    const sent = planEdits.slice(before);
+    const move = sent.length === 1 && sent[0]!.length === 1 ? sent[0]![0] : null;
+    push(
+      "plan node drag sends one move",
+      move && move.edit === "move" && move.id === "prove" && move.x === want.x && move.y === want.y
+        ? null
+        : `sent ${JSON.stringify(sent)}, expected one move of prove to ${want.x},${want.y}`,
+      `one move of prove to ${want.x},${want.y} at zoom ${zoom.toFixed(3)}`,
+    );
+    const at = (el: HTMLElement | null) => `${parseFloat(el?.style.left ?? "NaN")},${parseFloat(el?.style.top ?? "NaN")}`;
+    const heldAt = at(planCard("prove"));
+    for (const release of heldEdits ?? []) release();
+    heldEdits = null;
+    await settleAll();
+    const landed = planCard("prove");
+    const routeAfter = planEdge("implement.done>prove")?.querySelector("path")?.getAttribute("d");
+    push(
+      "plan drag survives a render mid-drag",
+      landed !== prove
+        ? "the card was replaced"
+        : heldAt !== `${want.x},${want.y}` || at(landed) !== `${want.x},${want.y}`
+          ? `at ${heldAt} while the reply was out and ${at(landed)} after, expected ${want.x},${want.y}`
+          : routeAfter === routeBefore
+            ? "the edge into prove was not re-routed"
+            : null,
+      `same card at ${want.x},${want.y} while the reply was out and after it, its edges re-routed`,
+    );
+  }
+
+  stage = `${name}: drag to link`;
+  const port = q<HTMLElement>('.plans-pane .plan-node[data-node="grill"] .plan-port[data-on="closed"]');
+  const finish = planCard("finish");
+  if (port && finish) {
+    const from = middle(port);
+    const to = middle(finish);
+    const before = planEdits.length;
+    pointer("pointerdown", port, from.x, from.y);
+    pointer("pointermove", viewport, (from.x + to.x) / 2, (from.y + to.y) / 2);
+    pointer("pointermove", viewport, to.x, to.y);
+    render();
+    const marked = planCard("finish")?.classList.contains("plan-node-drop") ?? false;
+    const ghost = !!q(".plans-pane .plan-ghost");
+    pointer("pointerup", viewport, to.x, to.y);
+    await settleAll();
+    const sent = planEdits.slice(before);
+    const link = sent.length === 1 && sent[0]!.length === 1 ? sent[0]![0] : null;
+    push(
+      "drag to link marks the drop card",
+      marked && ghost ? null : `drop mark ${marked}, ghost edge ${ghost}, across a render`,
+      "finish marked and the ghost edge drawn across a render",
+    );
+    push(
+      "drag to link sends one link",
+      link && link.edit === "link" && link.edge.from === "grill" && link.edge.on === "closed" && link.edge.to === "finish"
+        ? planEdge("grill.closed>finish") && !q(".plans-pane .plan-ghost")
+          ? null
+          : "the link was sent but its edge is not drawn, or the ghost stayed"
+        : `sent ${JSON.stringify(sent)}`,
+      "one link grill.closed → finish, drawn keyed grill.closed>finish",
+    );
+    const vr = viewport.getBoundingClientRect();
+    const blank = { x: vr.left + 8, y: vr.bottom - 8 };
+    const again = planEdits.length;
+    const port2 = q<HTMLElement>('.plans-pane .plan-node[data-node="grill"] .plan-port[data-on="done"]');
+    if (port2) {
+      const p = middle(port2);
+      pointer("pointerdown", port2, p.x, p.y);
+      pointer("pointermove", viewport, blank.x, blank.y);
+      pointer("pointerup", viewport, blank.x, blank.y);
+      await settleAll();
+    }
+    push(
+      "a link dropped on blank sends nothing",
+      planEdits.length === again && !q(".plans-pane .plan-ghost") && !q(".plans-pane .plan-node-drop")
+        ? null
+        : `${planEdits.length - again} batches sent, ghost ${!!q(".plans-pane .plan-ghost")}`,
+      "nothing sent, no ghost left",
+    );
+  }
+
+  stage = `${name}: inspector typing`;
+  const decideHead = planCard("decide")?.querySelector(".plan-node-head");
+  if (decideHead) {
+    const p = middle(decideHead);
+    pointer("pointerdown", decideHead, p.x, p.y);
+    pointer("pointerup", viewport, p.x, p.y);
+    await settleAll();
+  }
+  const selector = '.plans-pane [data-key="input:node:decide:title"]';
+  const input = q<HTMLInputElement>(selector);
+  if (!input) {
+    push("inspector typing keeps focus and caret", "no title field for decide", "");
+    return;
+  }
+  const pan = world.style.transform;
+  input.focus();
+  input.setSelectionRange(2, 2);
+  let failure: string | null = null;
+  for (const key of "-x") {
+    const at = input.selectionStart ?? 0;
+    input.value = input.value.slice(0, at) + key + input.value.slice(at);
+    input.setSelectionRange(at + 1, at + 1);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    for (let i = 0; i < 3; i++) {
+      session.setSnapshot(snapshot(2 + i, null));
+      render();
+    }
+    if (q(selector) !== input) failure ??= `after "${key}": the field was replaced`;
+    else if (document.activeElement !== input) failure ??= `after "${key}": activeElement is ${describe(document.activeElement)}`;
+    else if (input.selectionStart !== at + 1) failure ??= `after "${key}": caret at ${input.selectionStart}, expected ${at + 1}`;
+  }
+  push("inspector typing keeps focus and caret", failure, `caret held at 4 in "${input.value}" over 6 snapshot renders`);
+  push("plans canvas pan survives renders", world.style.transform === pan ? null : `${pan} became ${world.style.transform}`, `held ${pan}`);
+  const before = planEdits.length;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.blur();
+  await settleAll();
+  const sent = planEdits.slice(before).flat();
+  const set = sent.length === 1 && sent[0]!.edit === "setNode" ? sent[0]!.node : null;
+  push(
+    "a committed field sends one setNode",
+    set && set.id === "decide" && set.title === "De-xcide" && q<HTMLInputElement>(selector)?.value === "De-xcide"
+      ? null
+      : `sent ${JSON.stringify(sent)}, field reads ${q<HTMLInputElement>(selector)?.value}`,
+    'one setNode titling decide "De-xcide", which the field shows after the reply',
+  );
+}
+
+const lineCard = (id: string) => q<HTMLElement>(`.line-pane .plan-node[data-node="${id}"]`);
+const lineDot = (id: string) => q<HTMLElement>(`.line-pane .plan-dot[data-card="ticket:${id}"]`);
+const lineEdge = (key: string) => q<SVGGElement>(`.line-pane .plan-edges [data-key="edge:${key}"]`);
+
+async function openLine(): Promise<void> {
+  if (!q(".line-pane")) q<HTMLButtonElement>(".canvas-line-open")?.click();
+  await settleAll();
+}
+
+/** The Line a pass later: one copy finished, the queue shrank, a new copy started. */
+function lineMovedOn(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  return {
+    ...snap,
+    seq: 500,
+    line: {
+      ...line,
+      nodes: line.nodes.map((n) =>
+        n.id === "implement" ? { ...n, tickets: [...n.tickets, "implement-4"], queued: 2 } : n,
+      ),
+    },
+    state: {
+      ...snap.state,
+      tickets: [
+        ...snap.state.tickets.map((t) => (t.id === "implement-2" ? { ...t, status: "done" as const, liveAttempt: null } : t)),
+        ticket("implement-4", { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
+      ],
+    },
+  };
+}
+
+/** A tap as the browser sends it: the pointer pair, then the click it makes. */
+function tap(el: Element): void {
+  const p = middle(el);
+  pointer("pointerdown", el, p.x, p.y);
+  pointer("pointerup", el, p.x, p.y);
+  (el as HTMLElement).click();
+}
+
+async function lineChecks(): Promise<void> {
+  const name = "line view";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openLine();
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  const world = q<HTMLElement>(".line-pane .plan-world");
+  const cards = root.querySelectorAll(".line-pane .plan-node").length;
+  const edges = root.querySelectorAll(".line-pane .plan-edges .plan-edge").length;
+  const implement = lineCard("implement");
+  const running = implement?.querySelectorAll(".plan-dot-running").length;
+  const queued = implement?.querySelectorAll(".plan-dot-queued").length;
+  const label = lineEdge("prove.fail>implement")?.querySelector("text")?.textContent;
+  push(
+    "the Line opens as its live graph",
+    viewport && world && cards === 5 && edges === 5 && running === 2 && queued === 3 && label === "fail · 1/2 · S"
+      ? null
+      : `${cards} cards, ${edges} edges, ${running} running and ${queued} queued dots, loop label ${label}`,
+    `${cards} cards, ${edges} edges, 2 running and 3 queued dots, loop "${label}"`,
+  );
+  if (!viewport || !world) return;
+  const states = LINE_NODES.map((id) => `${id}: ${lineCard(id)?.querySelector(".plan-node-state")?.textContent}`).join(", ");
+  const parked = lineCard("review")?.querySelector(".plan-port-parked")?.textContent;
+  push(
+    "each card reads its state, and a parked verdict looks parked",
+    lineCard("finish")?.querySelector(".plan-node-state")?.textContent === "waiting for 2" && parked === "● findings"
+      ? null
+      : `${states}; parked port ${parked}`,
+    states,
+  );
+
+  stage = `${name}: render survival`;
+  const r = viewport.getBoundingClientRect();
+  const x = r.right - 20;
+  const y = r.bottom - 20;
+  pointer("pointerdown", viewport, x, y);
+  pointer("pointermove", viewport, x - 30, y - 20);
+  pointer("pointermove", viewport, x - 80, y - 50);
+  pointer("pointerup", viewport, x - 80, y - 50);
+  const pan = world.style.transform;
+  const runningDot = lineDot("implement-2");
+  const kept: [string, Element | null][] = [
+    ["implement card", lineCard("implement")],
+    ["finish card", lineCard("finish")],
+    ["a running dot", runningDot],
+    ["a queued dot", q(".line-pane .plan-dot-queued")],
+    ["the loop edge", lineEdge("prove.fail>implement")],
+    ["the loop label", lineEdge("prove.fail>implement")?.querySelector(".plan-edge-label") ?? null],
+  ];
+  const gone = () => kept.filter(([, el]) => !el?.isConnected).map(([what]) => what);
+  for (let i = 0; i < 5; i++) render();
+  await settle();
+  const lost = gone();
+  push(
+    "graph nodes, dots and edge labels keep their identity across same-model renders",
+    lost.length ? `lost ${lost.join(", ")}` : null,
+    `${kept.length} elements the same after 5 renders`,
+  );
+  push(
+    "line canvas pan survives same-model renders",
+    world.style.transform === pan ? null : `${pan} became ${world.style.transform}`,
+    `held ${pan}`,
+  );
+
+  const next = lineMovedOn(current);
+  session.setSnapshot(next);
+  render();
+  await settle();
+  const same = gone();
+  const doneDot = lineDot("implement-2")?.classList.contains("plan-dot-done");
+  const fresh = lineDot("implement-4");
+  const nowQueued = lineCard("implement")?.querySelectorAll(".plan-dot-queued").length;
+  const text = lineCard("implement")?.querySelector(".plan-node-state")?.textContent;
+  push(
+    "a pushed Line delta repaints the dots and keeps the graph",
+    same.length
+      ? `lost ${same.join(", ")}`
+      : lineDot("implement-2") !== runningDot
+        ? "the finished copy's dot was replaced"
+        : !doneDot || !fresh?.classList.contains("plan-dot-running") || nowQueued !== 2 || text !== "2 running · 2 queued"
+          ? `finished dot done ${doneDot}, new dot ${!!fresh}, ${nowQueued} queued, state "${text}"`
+          : world.style.transform !== pan
+            ? `pan ${pan} became ${world.style.transform}`
+            : null,
+    'implement-2 turned done in the same node, implement-4 appeared, 2 queued, "2 running · 2 queued", pan held',
+  );
+
+  stage = `${name}: copy click-through`;
+  const target = lineDot("implement-3");
+  if (!target) {
+    push("a tap on a copy dot opens that Ticket", "no dot for implement-3", "");
+    return;
+  }
+  const before = world.style.transform;
+  tap(target);
+  await settleAll();
+  const title = () => q(".detail-open .detail-title")?.textContent ?? null;
+  const selected = () =>
+    q<HTMLElement>(`.node-card[data-node-id="${card("implement-3")}"]`)?.classList.contains("node-card-selected") ?? false;
+  push(
+    "a tap on a copy dot opens that Ticket's Detail and selects its card",
+    title() === "implement-3" && selected() && q(".line-pane") && lineDot("implement-3")?.classList.contains("plan-dot-selected")
+      ? null
+      : `Detail "${title()}", card selected ${selected()}, view open ${!!q(".line-pane")}`,
+    "the Detail shows implement-3 beside the open Line view, its card selected",
+  );
+  push(
+    "a tap on a copy dot does not pan the graph",
+    world.style.transform === before ? null : `${before} became ${world.style.transform}`,
+    "the pan held",
+  );
+  tap(lineDot("implement-3")!);
+  await settleAll();
+  push(
+    "a second tap on the same dot keeps the Detail open",
+    title() === "implement-3" && selected() ? null : `Detail "${title()}", card selected ${selected()}`,
+    "still open on implement-3",
+  );
+  session.select(null);
+  await settleAll();
+}
+
+/** The Line once core took a Link for Review's parked findings: the next rev, the edge drawn, nothing parked. */
+function lineLinked(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  return {
+    ...snap,
+    seq: 501,
+    line: {
+      ...line,
+      rev: line.rev + 1,
+      plan: { ...line.plan, edges: [...line.plan.edges, { from: "review", on: "findings", to: "decide" }] },
+      nodes: line.nodes.map((n) => (n.id === "review" ? { ...n, parked: [] } : n)),
+    },
+  };
+}
+
+/** A Line card dragged by its head, the way the operator moves it. */
+function dragLineCard(id: string, dx: number, dy: number): void {
+  const head = lineCard(id)?.querySelector(".plan-node-title");
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  if (!head || !viewport) return;
+  const { x, y } = middle(head);
+  pointer("pointerdown", head, x, y);
+  pointer("pointermove", viewport, x + dx / 2, y + dy / 2);
+  pointer("pointermove", viewport, x + dx, y + dy);
+  pointer("pointerup", viewport, x + dx, y + dy);
+}
+
+/** A refused edit's reason stands inside the Line view, wrapped rather than cut, and the card it moved is back. */
+async function lineRefusalChecks(push: (assertion: string, failure: string | null, ok: string) => void): Promise<void> {
+  const before = lineCard("finish")?.style.left;
+  const sent = lineEdits.length;
+  lineRefusal = LINE_REFUSAL;
+  dragLineCard("finish", 0, 60);
+  await settleAll();
+  lineRefusal = null;
+  const pane = q<HTMLElement>(".line-pane");
+  const shown = q<HTMLElement>(".line-pane .line-refusal");
+  const box = shown?.getBoundingClientRect();
+  const view = pane?.getBoundingClientRect();
+  push(
+    "a refused edit's reason stands inside the Line view",
+    lineEdits.length !== sent + 1
+      ? `${lineEdits.length - sent} edits sent`
+      : !shown || !pane || !box || !view
+        ? "no .line-refusal in the view"
+        : shown.textContent !== LINE_REFUSAL
+          ? `reads "${shown.textContent}"`
+          : (overflowOf(shown, pane) ??
+            (box.top < view.top || box.bottom > view.bottom
+              ? `${Math.round(box.top)}-${Math.round(box.bottom)} outside ${Math.round(view.top)}-${Math.round(view.bottom)}`
+              : lineCard("finish")?.style.left !== before
+                ? `finish at ${lineCard("finish")?.style.left}, was ${before}`
+                : null)),
+    `${Math.round(box?.height ?? 0)}px of reason inside a ${pane?.clientWidth}px view, finish back at ${before}`,
+  );
+  q<HTMLButtonElement>(".line-dismiss")?.click();
+  await settleAll();
+}
+
+async function lineEditChecks(): Promise<void> {
+  const name = "line view edits";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  await openLine();
+  const shown = lineMovedOn(current);
+  const rev = shown.line!.rev;
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  const port = q<HTMLElement>('.line-pane .plan-port[data-node="review"][data-on="findings"]');
+  const decide = lineCard("decide");
+  if (!viewport || !port || !decide) {
+    push("a parked verdict dragged onto a node sends its Link", `viewport ${!!viewport}, parked port ${!!port}, decide ${!!decide}`, "");
+    return;
+  }
+  const from = middle(port);
+  const to = middle(decide);
+  const before = lineEdits.length;
+  pointer("pointerdown", port, from.x, from.y);
+  pointer("pointermove", viewport, (from.x + to.x) / 2, (from.y + to.y) / 2);
+  pointer("pointermove", viewport, to.x, to.y);
+  pointer("pointerup", viewport, to.x, to.y);
+  await settleAll();
+  const sent = lineEdits.slice(before);
+  const want: LinePlanEditRequest[] = [{ baseRev: rev, edits: [{ edit: "link", edge: { from: "review", on: "findings", to: "decide" } }] }];
+  push(
+    "a parked verdict dragged onto a node sends one line.plan.edit with its Link at the rev drawn",
+    JSON.stringify(sent) === JSON.stringify(want) ? null : `sent ${JSON.stringify(sent)}`,
+    `one Link review.findings → decide at rev ${rev}`,
+  );
+  push(
+    "the Link waits for the snapshot that carries it",
+    lineEdge("review.findings>decide") ? "drawn before the snapshot" : null,
+    "not drawn from the reply alone",
+  );
+  session.setSnapshot(lineLinked(shown));
+  await settleAll();
+  const after = q('.line-pane .plan-port[data-node="review"][data-on="findings"]')?.textContent;
+  push(
+    "the snapshot at the next rev draws the Link, and the verdict no longer parks",
+    lineEdge("review.findings>decide") && after === "findings" ? null : `edge ${!!lineEdge("review.findings>decide")}, port reads "${after}"`,
+    "review.findings>decide drawn, the port reads findings",
+  );
+
+  stage = `${name}: refusal`;
+  await lineRefusalChecks(push);
+}
+
+/**
+ * The Line view at the narrow window: its head holds one line, and each live
+ * card's text stays inside its card, nothing clipped by the card's fixed height.
+ */
+async function lineLayoutChecks(name: string): Promise<void> {
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  await openLine();
+  const head = q<HTMLElement>(".line-head");
+  if (!head) {
+    push("line head on one line", "no .line-head", "");
+    return;
+  }
+  const kids = [...head.children].map((k) => k.getBoundingClientRect());
+  const centres = kids.map((k) => k.top + k.height / 2);
+  const outside = kids.filter((k) => k.right > head.getBoundingClientRect().right + 1);
+  push(
+    "line head on one line",
+    kids.length < 3
+      ? `${kids.length} parts in the head`
+      : Math.max(...centres) - Math.min(...centres) > 3
+        ? `parts wrap: centres ${centres.map(Math.round).join(", ")}`
+        : outside.length
+          ? `${outside.length} parts past the head's right edge`
+          : null,
+    `${kids.length} parts on one line in ${head.clientWidth}px`,
+  );
+  const cards = [...root.querySelectorAll<HTMLElement>(".line-pane .plan-node")];
+  const spilled: string[] = [];
+  for (const el of cards) {
+    const box = el.getBoundingClientRect();
+    const body = el.querySelector<HTMLElement>(".plan-node-body");
+    const outsideKids = [...el.querySelectorAll<HTMLElement>(".plan-node-head > *, .plan-node-body *, .plan-ports > *")].filter((kid) => {
+      const k = kid.getBoundingClientRect();
+      return k.left < box.left - 1 || k.right > box.right + 1 || k.top < box.top - 1 || k.bottom > box.bottom + 1;
+    });
+    const clipped = [...el.querySelectorAll<HTMLElement>(".plan-node-state, .plan-live-summary")].filter(
+      (kid) => kid.scrollWidth > kid.clientWidth,
+    );
+    if (clipped.length) spilled.push(`${el.dataset.node} (${clipped.map((k) => `"${k.textContent}" cut`).join(", ")})`);
+    else if (outsideKids.length || (body && body.scrollHeight > body.clientHeight + 1)) {
+      spilled.push(`${el.dataset.node} (${outsideKids.map((k) => k.className).join(", ") || `body ${body?.scrollHeight} > ${body?.clientHeight}`})`);
+    }
+  }
+  push(
+    "live card text stays inside its card, state word and pass summary uncut",
+    cards.length !== LINE_NODES.length ? `${cards.length} cards` : spilled.length ? `spilled: ${spilled.join("; ")}` : null,
+    `${cards.length} cards, every part inside its box`,
+  );
+  const world = q<HTMLElement>(".line-pane .plan-world");
+  const title = q<HTMLElement>(".line-pane .plan-node-title");
+  if (world && title) {
+    const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
+    push("line card text is readable at the fit zoom", onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`, `card titles are ${onScreen.toFixed(1)}px on screen`);
+  }
+  await lineRefusalChecks(push);
+  const labelCount = root.querySelectorAll(".line-pane .plan-edge-label").length;
+  push("line edge labels clear every card and each other", labelCollisions(".line-pane"), `${labelCount} labels clear`);
+}
+
+const CROWD = 40;
+const LATE_CHECKPOINT = 37;
+const crowdId = (i: number): string => `build-1.${i + 1}`;
+const crowdStatus = (i: number): EnrichedTicketState["status"] =>
+  i === LATE_CHECKPOINT ? "checkpoint" : i % 4 === 0 && i < 30 ? "done" : i < 35 ? "in-progress" : "ready";
+
+function crowdedLineOn(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const node = (kind: "agent" | "merger" | "finish", id: string, x: number) =>
+    ({
+      kind,
+      id,
+      title: id,
+      x,
+      y: 60,
+      ...(id === "tasks" ? { makesItems: true } : {}),
+      ...(id === "build" ? { copies: { perItem: "all" } } : {}),
+      ...(kind === "merger" ? { of: "build" } : {}),
+    }) as PlanFile["nodes"][number];
+  const view = (id: string, verdicts: string[], overrides: Partial<LineNodeView> = {}): LineNodeView => ({
+    id,
+    verdicts,
+    passes: 1,
+    tickets: [],
+    queued: 0,
+    inbox: 0,
+    parked: [],
+    arrived: [],
+    ...overrides,
+  });
+  const copies = Array.from({ length: CROWD }, (_, i) => crowdId(i));
+  const line: LineGraphView = {
+    plan: {
+      horde: 1,
+      name: "Forked",
+      nodes: [node("agent", "tasks", 0), node("agent", "build", 300), node("merger", "build-merge", 600), node("finish", "finish", 900)],
+      edges: [
+        { from: "tasks", on: "done", to: "build" },
+        { from: "tasks", on: "done", to: "finish" },
+        { from: "build", on: "done", to: "build-merge" },
+        { from: "build-merge", on: "done", to: "finish" },
+      ],
+    },
+    rev: 1,
+    status: "running",
+    waitingFor: [],
+    nodes: [
+      view("tasks", ["done"]),
+      view("build", ["done"], { pass: 1, tickets: copies, queued: 3 }),
+      view("build-merge", ["done"], { passes: 0 }),
+      view("finish", [], { passes: 0 }),
+    ],
+    edges: [],
+  };
+  return {
+    ...snap,
+    seq: 900,
+    line,
+    state: {
+      ...snap.state,
+      tickets: [
+        ...snap.state.tickets,
+        ...copies.map((id, i) =>
+          ticket(id, {
+            node: "build",
+            status: crowdStatus(i),
+            liveAttempt: crowdStatus(i) === "in-progress" ? agentAttempt(1, null) : null,
+          }),
+        ),
+      ],
+    },
+  };
+}
+
+async function crowdedLineChecks(name: string): Promise<void> {
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  const before = current;
+  session.setSnapshot(crowdedLineOn(before));
+  render();
+  await settleAll();
+
+  const build = () => lineCard("build");
+  const drawn = (): string[] =>
+    [...(build()?.querySelectorAll<HTMLElement>(".plan-dot[data-card]") ?? [])].map((d) => d.dataset.card!.replace("ticket:", ""));
+  const spilled = (): string[] => {
+    const row = build()?.querySelector<HTMLElement>(".plan-copies")?.getBoundingClientRect();
+    const parts = [...(build()?.querySelectorAll<HTMLElement>(".plan-dot, .plan-copies-done, .plan-copies-more") ?? [])];
+    return !row || parts.length === 0
+      ? ["no copy row"]
+      : parts
+          .filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.left < row.left - 1 || r.right > row.right + 1 || r.top < row.top - 1 || r.bottom > row.bottom + 1;
+          })
+          .map((el) => el.className);
+  };
+  const active = Array.from({ length: CROWD }, (_, i) => i)
+    .filter((i) => crowdStatus(i) !== "done")
+    .map(crowdId);
+  const folded = CROWD - active.length;
+  const pill = build()?.querySelector(".plan-copies-done");
+  const hidden = active.filter((id) => !drawn().includes(id));
+  push(
+    "a crowded card folds its done copies into a count and hides the rest behind +N",
+    pill?.textContent === String(folded) && hidden.length > 0 && build()?.querySelector(".plan-copies-more")?.textContent === `+${hidden.length}`
+      ? null
+      : `done pill "${pill?.textContent}", ${hidden.length} hidden, button "${build()?.querySelector(".plan-copies-more")?.textContent}"`,
+    `${folded} done in the pill, ${hidden.length} behind +${hidden.length}`,
+  );
+  const summary = build()?.querySelector<HTMLElement>(".plan-live-summary");
+  push(
+    "a crowded card's pass summary is uncut",
+    !summary ? "no pass summary" : summary.scrollWidth > summary.clientWidth ? `"${summary.textContent}" cut: ${summary.scrollWidth} > ${summary.clientWidth}` : null,
+    `"${summary?.textContent}" fits in ${summary?.clientWidth}px`,
+  );
+  push(
+    "the checkpointed copy past the old row's end is a dot",
+    drawn().includes(crowdId(LATE_CHECKPOINT)) ? null : `drawn: ${drawn().join(", ")}`,
+    `${crowdId(LATE_CHECKPOINT)} is drawn`,
+  );
+
+  const out = new Set(spilled());
+  const reached = new Set<string>();
+  let taps = 0;
+  for (; taps < CROWD && !hidden.every((id) => reached.has(id)); taps++) {
+    const more = build()?.querySelector<HTMLElement>(".plan-copies-more");
+    if (!more) break;
+    tap(more);
+    await settleAll();
+    const opened = q(".detail-open .detail-title")?.textContent;
+    if (opened) reached.add(opened);
+    for (const el of spilled()) out.add(el);
+  }
+  push(
+    "every dot and pill sits inside its card's copy row, at every step of the walk",
+    out.size ? `outside: ${[...out].join("; ")}` : null,
+    `${taps} taps, every part inside`,
+  );
+  const missed = hidden.filter((id) => !reached.has(id));
+  push(
+    "every copy not drawn opens by tapping +N again and again",
+    missed.length ? `never opened: ${missed.join(", ")} after ${taps} taps` : null,
+    `all ${hidden.length} hidden copies opened in ${taps} taps`,
+  );
+
+  session.select(null);
+  await settleAll();
+  const tasksLabels = ["tasks.done>build", "tasks.done>finish"].map((key) => lineEdge(key)?.querySelector<SVGGElement>(".plan-edge-label"));
+  const texts = tasksLabels.map((label) => label?.querySelector("text")?.textContent);
+  push(
+    "the fork's two done labels out of tasks are both drawn and clear",
+    tasksLabels.some((label) => !label) || texts.some((t) => t !== "done") ? `labels ${JSON.stringify(texts)}` : labelCollisions(".line-pane"),
+    "both labels read done, clear of every card and of each other",
+  );
+
+  session.setSnapshot(before);
+  render();
+  await settleAll();
+}
+
+async function plansLayoutChecks(name: string): Promise<void> {
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+  await openFactoryToday();
+  const implement = planCard("implement")?.querySelector(".plan-node-head");
+  const viewport = q<HTMLElement>(".plans-pane .plan-viewport");
+  if (implement && viewport) {
+    const p = middle(implement);
+    pointer("pointerdown", implement, p.x, p.y);
+    pointer("pointerup", viewport, p.x, p.y);
+    await settleAll();
+  }
+  const head = q<HTMLElement>(".plans-head");
+  const pane = q<HTMLElement>(".plans-pane");
+  if (head && pane) {
+    const tools = [...head.querySelectorAll<HTMLElement>(".btn")];
+    const line = Math.min(...tools.map((t) => t.getBoundingClientRect().height));
+    const off = tools.filter((t) => overflowOf(t, head) !== null || t.getBoundingClientRect().height > line * 1.5);
+    push(
+      "plans toolbar on one line",
+      tools.length < 3 ? `${tools.length} tools` : off.length ? `off the line: ${off.map((t) => t.textContent).join(", ")}` : overflowOf(head, pane),
+      `${tools.length} tools in ${head.clientWidth}px`,
+    );
+  }
+  const shelf = q<HTMLElement>(".plans-pane .plan-shelf");
+  if (shelf) {
+    const tools = [...shelf.querySelectorAll<HTMLElement>(".btn")];
+    const rows = new Set(tools.map((t) => Math.round(t.getBoundingClientRect().top)));
+    const off = tools.filter((t) => overflowOf(t, shelf) !== null);
+    push(
+      "plans shelf on one line",
+      tools.length < 8 ? `${tools.length} tools` : rows.size > 1 ? `${rows.size} rows` : off.length ? `off the line: ${off.map((t) => t.textContent).join(", ")}` : null,
+      `${tools.length} tools in ${shelf.clientWidth}px`,
+    );
+  }
+  const world = q<HTMLElement>(".plans-pane .plan-world");
+  const title = q<HTMLElement>(".plans-pane .plan-node-title");
+  if (world && title) {
+    const onScreen = parseFloat(getComputedStyle(title).fontSize) * new DOMMatrix(getComputedStyle(world).transform).a;
+    push(
+      "plans card text is readable at the fit zoom",
+      onScreen >= 9 ? null : `card titles are ${onScreen.toFixed(1)}px on screen`,
+      `card titles are ${onScreen.toFixed(1)}px on screen`,
+    );
+  }
+  const labelCount = root.querySelectorAll(".plans-pane .plan-edge-label").length;
+  push("plans edge labels clear every card and each other", labelCollisions(".plans-pane"), `${labelCount} labels clear`);
+  const side = q<HTMLElement>(".plans-side");
+  const fields = [...root.querySelectorAll<HTMLElement>(".plans-side .plan-field, .plans-side .plan-link-row, .plans-side .plan-check")];
+  const spilled = side ? fields.filter((f) => overflowOf(f, side) !== null) : [];
+  push(
+    "plans inspector fields hold its width",
+    !side || fields.length < 5 ? `${fields.length} fields` : spilled.length ? `spilled: ${spilled.map((f) => f.dataset.key).join(", ")}` : null,
+    `${fields.length} fields inside a ${side?.clientWidth}px column`,
+  );
+}
+
 async function main(): Promise<void> {
   stage = "mount";
   session.setSnapshot(current);
@@ -1271,7 +2242,7 @@ async function main(): Promise<void> {
   // A faded card's Detail (issue #150): the proposal, its decisions, and a
   // long body that scrolls the panel.
   await runScenario("spawn detail", async () => {
-    session.select("spawn:proposal-1");
+    session.select("spawn:held-3");
   });
   // The Steward's Detail, reached the operator's way: the Conversations
   // tray's Steward box (ADR-0030).
@@ -1285,16 +2256,20 @@ async function main(): Promise<void> {
     q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
   });
   q<HTMLButtonElement>(".detail-fullscreen-toggle")?.click();
-  // The Finish checkpoint's Detail (ADR-0037): the Line's report framed
-  // under the checkpoint, which must keep its frame across every render.
-  await runScenario("finish report detail", async () => {
-    session.select(card(FINISH_TICKET));
-    session.selectTab(FINISH_TICKET, "progress");
+  // A Decide Ticket's Detail (ADR-0040): its pass's report framed, which
+  // must keep its frame across every render.
+  await runScenario("decide report detail", async () => {
+    session.select(card(DECIDE_TICKET));
+    session.selectTab(DECIDE_TICKET, "progress");
   });
-  await finishReportChecks();
+  await decideReportChecks();
   await stewardChecks();
   await closeSelectedChecks();
   await settingsTyping();
+  await plansChecks();
+  await lineChecks();
+  await lineEditChecks();
+  await lineConversationChecks();
 
   for (const selector of DEAD_SELECTORS) {
     report.push({ scenario: "-", assertion: `scroll ${selector}`, pass: null, detail: "selector in styles.css but no live module renders it" });

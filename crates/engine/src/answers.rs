@@ -1,9 +1,7 @@
-//! Answers (ADR-0004; engine.ts 5397-5887): accepting an answer, the processing kick, the drain that
-//! applies queued answers in submission order, processing one, and Close (issue #154).
-
 use std::path::Path;
 
 use serde_json::{Map, Value};
+use tokio::sync::oneshot;
 
 use ac_core::assignment::{engine_ticket_build_id, resolve_unseen_assignments};
 use ac_core::events::{append_event, event_now, last_attempt, read_events};
@@ -16,7 +14,7 @@ use ac_protocol::{
     TicketEventKind, TicketStatus,
 };
 
-use crate::checkout_gate::{in_pool_checkout, pool_checkout_held};
+use crate::checkout_gate::in_pool_checkout;
 use crate::error::EngineError;
 use crate::interrupts::{
     CLOSE_KINDS, approve_review, clear_interrupt, named_review_tickets, reject_review,
@@ -143,6 +141,12 @@ pub fn accept_answer(
     {
         return Err(refused(review_reject_unnamed_error(&session.markers)));
     }
+    if pending.kind == InterruptKind::Checkpoint
+        && let Some(refusal) =
+            crate::line::answer_refusal(session, ticket_id, close, note.as_deref())
+    {
+        return Err(EngineError::LineRefusal(format!("answer: {refusal}")));
+    }
     if pending.kind == InterruptKind::Selection {
         let named = parse_selection_answer(note.as_deref());
         let candidate = named.is_some_and(|n| {
@@ -214,20 +218,42 @@ pub fn accept_answer(
     );
     // Mid-flight acceptance is the one moment the queue changes without an emit of its own.
     if session.driving {
-        session.queued_since_drain = true;
         emit_snapshot(session, RunPhase::Running);
     }
     Ok(record)
 }
 
-/// `kickProcessing`: every answer path's second step. Idle, the drain applies the answer right away
-/// and a fresh drive starts; in flight, the queued record waits for the boundary drain.
-pub fn kick_processing(session: &mut Session) -> anyhow::Result<()> {
-    if session.driving {
+pub fn submit_answer(
+    session: &mut Session,
+    ticket_id: &str,
+    note: Option<String>,
+    action: ResumeAction,
+    attempt: Option<u64>,
+    steward: Option<&str>,
+    waiter: Option<oneshot::Sender<Result<(), EngineError>>>,
+) -> Result<(), EngineError> {
+    let record = accept_answer(session, ticket_id, note, action, attempt, steward)?;
+    if let Some(waiter) = waiter {
+        if record.processed_at.is_some() {
+            let _ = waiter.send(Ok(()));
+            return Ok(());
+        }
+        session
+            .answer_waiters
+            .entry(record.seq)
+            .or_default()
+            .push(waiter);
+    }
+    if !session.drive_startable() {
+        session.wake();
         return Ok(());
     }
-    drain_answers(session)?;
-    crate::drive::start_drive(session);
+    let queued = !session.answers.pending().is_empty();
+    drain_answers(session).map_err(fs_refused)?;
+    session.wake();
+    if queued {
+        emit_snapshot(session, RunPhase::Running);
+    }
     Ok(())
 }
 
@@ -235,10 +261,7 @@ pub fn kick_processing(session: &mut Session) -> anyhow::Result<()> {
 /// rejects its own waiters and is consumed; a processed one persists the resulting state itself
 /// before its record is marked processed. A persist failure propagates.
 pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
-    session.queued_since_drain = false;
     for record in session.answers.pending() {
-        // An answer that merges into the pool checkout waits, still queued, while a Continued attempt
-        // works there (ADR-0027). A Close merges nothing, so it never waits.
         let merges_into_checkout = record.action == Some(QueuedAnswerAction::Adopt)
             || (record.action != Some(QueuedAnswerAction::Close)
                 && matches!(
@@ -247,13 +270,21 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
                         | InterruptKind::MergeApproval
                         | InterruptKind::Selection
                 ));
-        if pool_checkout_held(session) && merges_into_checkout {
+        let merging = !session.merge_line.unsettled().is_empty();
+        if merging && merges_into_checkout {
             continue;
         }
         let waiters = session
             .answer_waiters
             .remove(&record.seq)
             .unwrap_or_default();
+        if let Some(refusal) = line_refusal_at_drain(session, &record) {
+            drop_refused_answer(session, &record, &refusal)?;
+            for waiter in waiters {
+                let _ = waiter.send(Err(EngineError::LineRefusal(refusal.clone())));
+            }
+            continue;
+        }
         if let Err(error) = process_answer(session, &record) {
             session.answers.mark_processed(record.seq)?;
             session.publish_now();
@@ -275,6 +306,43 @@ pub fn drain_answers(session: &mut Session) -> anyhow::Result<()> {
             let _ = waiter.send(Ok(()));
         }
     }
+    Ok(())
+}
+
+// An answer on a Line hold is checked again as it drains: the Finish may have gained a blocker since
+// it was accepted (ADR-0040).
+fn line_refusal_at_drain(session: &mut Session, record: &QueuedAnswer) -> Option<String> {
+    if record.kind != InterruptKind::Checkpoint {
+        return None;
+    }
+    let close = record.action == Some(QueuedAnswerAction::Close);
+    crate::line::answer_refusal(session, &record.ticket_id, close, record.note.as_deref())
+}
+
+// A refused answer is consumed with its record and an event; its Interrupt stays for the next one.
+fn drop_refused_answer(
+    session: &mut Session,
+    record: &QueuedAnswer,
+    refusal: &str,
+) -> anyhow::Result<()> {
+    let runs = Path::new(&session.runs_dir).to_path_buf();
+    let mut payload = Map::new();
+    payload.insert("reason".into(), Value::String(refusal.to_owned()));
+    append_event(
+        &runs,
+        &record.ticket_id,
+        &event_now(
+            last_attempt(&runs, &record.ticket_id),
+            TicketEventKind::AnswerRefused,
+            payload,
+        ),
+    )?;
+    session.answers.mark_processed(record.seq)?;
+    session.log(format!(
+        "line: the answer on {} was dropped: {refusal}",
+        record.ticket_id
+    ));
+    session.publish_now();
     Ok(())
 }
 
@@ -307,8 +375,6 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         }
         return reject_review(session, &pending, note);
     }
-    // The persistence interrupt belongs to the run: answering it only clears it, and the resumed
-    // drive's next boundary write is the retry.
     if pending.kind == InterruptKind::Persistence {
         clear_interrupt(
             session,
@@ -366,20 +432,34 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
     }
     // A plain Resume passes the Held pane over (issue #139): the next Attempt launches fresh.
     session.held.shift_remove(&record.ticket_id);
-    if marker.status != TicketStatus::Done {
-        write_marker_status(&marker.file, TicketStatus::Ready)?;
-        if let Some(m) = session.marker_mut(&marker.id) {
-            m.status = TicketStatus::Ready;
-        }
-    }
-    if let Some(note) = note.map(js::trim).filter(|n| !n.is_empty()) {
-        // The Steward's note is marked as its own (ADR-0030).
-        let heading = if record.by == Some(AnswerBy::Steward) {
+    // The note lands before the status moves: a Line hold's Done state line is the fact the run reads
+    // its answer from, the note and its heading included (ADR-0040).
+    let note = note.map(js::trim).filter(|n| !n.is_empty());
+    let by_steward = record.by == Some(AnswerBy::Steward);
+    // The Steward's note is marked as its own (ADR-0030). On a hold its heading is written even with
+    // no note, because the run spends the Steward's one extra loop pass by that heading.
+    if note.is_some() || (marker.hold && by_steward) {
+        let heading = if by_steward {
             "## Resume note, from the Steward"
         } else {
             "## Resume note"
         };
-        js::append_file(&marker.file, &format!("\n{heading}\n\n{note}\n"))?;
+        js::append_file(
+            &marker.file,
+            &format!("\n{heading}\n\n{}\n", note.unwrap_or_default()),
+        )?;
+    }
+    if marker.status != TicketStatus::Done {
+        // A hold is answered, never run.
+        let resumed = if marker.hold {
+            TicketStatus::Done
+        } else {
+            TicketStatus::Ready
+        };
+        write_marker_status(&marker.file, resumed)?;
+        if let Some(m) = session.marker_mut(&marker.id) {
+            m.status = resumed;
+        }
     }
     let tickets = session.marker_statuses();
     let interrupts: Vec<Interrupt> = session
@@ -648,9 +728,72 @@ fn close_engine_tickets(session: &mut Session, build_id: &str) -> anyhow::Result
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use ac_protocol::{InterruptKind, ResumeAction, RunPhase, TicketStatus};
+    use ac_core::pool::TicketMarker;
+    use ac_core::queued_answers::QueuedAnswerStore;
+    use ac_protocol::{Interrupt, InterruptKind, ResumeAction, RunPhase, TicketStatus};
 
+    use crate::error::EngineError;
+    use crate::session::Session;
     use crate::testkit::{Pool, answer, last, settled};
+
+    fn checkpointed_ticket(runs: &std::path::Path) -> Session {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.runs_dir = runs.to_string_lossy().into_owned();
+        session.answers = QueuedAnswerStore::open(runs);
+        session.markers.push(TicketMarker {
+            id: "01".into(),
+            file: "/p/issues/01.md".into(),
+            blocked_by: Vec::new(),
+            status: TicketStatus::Checkpoint,
+            title: "t".into(),
+            spec: String::new(),
+            spawned_by: None,
+            enlisted_from: None,
+            spawn_assign: None,
+            node: None,
+            hold: false,
+        });
+        session
+            .state
+            .tickets
+            .insert("01".into(), TicketStatus::Checkpoint);
+        session.state.interrupts.push(Interrupt {
+            ticket_id: "01".into(),
+            kind: InterruptKind::Checkpoint,
+            body: "b".into(),
+            candidates: None,
+            steward_note: None,
+            started_since: None,
+        });
+        session
+    }
+
+    #[test]
+    fn a_different_answer_to_a_ticket_with_an_answer_queued_is_refused_whichever_came_first() {
+        for (first, second) in [
+            (ResumeAction::Resume, ResumeAction::Close),
+            (ResumeAction::Close, ResumeAction::Resume),
+        ] {
+            let runs = tempfile::tempdir().unwrap();
+            let mut session = checkpointed_ticket(runs.path());
+            super::accept_answer(&mut session, "01", None, first, None, None).unwrap();
+            let refusal =
+                super::accept_answer(&mut session, "01", None, second, None, None).unwrap_err();
+            assert_eq!(
+                refusal,
+                EngineError::AnswerQueuedConflict(
+                    "answer: ticket 01 already has an answer queued".into()
+                ),
+                "{second} behind {first}"
+            );
+            assert_eq!(
+                session.answers.pending().len(),
+                1,
+                "{second} behind {first}"
+            );
+        }
+    }
 
     // NOT-PORTED.md, interrupts "Pinned as the TypeScript server does it" (engine.ts:5587-5592): an
     // answer whose persist fails is refused with the store's error and its queued record stays pending,
@@ -660,7 +803,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_answer_whose_persist_fails_stays_queued_and_the_next_answer_carries_the_run_on() {
         let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
-        // The first boundary write fails all four attempts and raises the persistence Interrupt.
         pool.store.fail.store(4, Ordering::SeqCst);
         let engine = pool.start().await;
         assert_eq!(settled(&engine).await, RunPhase::Quiescent);

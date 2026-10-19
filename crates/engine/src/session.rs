@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
-use indexmap::{IndexMap, IndexSet};
-use tokio::sync::{oneshot, watch};
+use indexmap::IndexMap;
+use tokio::sync::{Notify, oneshot, watch};
 
 use ac_core::assignment::Assignments;
 use ac_core::checkpoints::CheckpointStore;
@@ -26,6 +26,7 @@ use ac_protocol::{Interrupt, Outcome, RunPhase, TicketStatus};
 use crate::actor::{Engine, SnapshotPublisher};
 use crate::children::ChildTracker;
 use crate::conversations::Conversations;
+use crate::drive::VerifyGroup;
 use crate::enlisted::EnlistedAttempts;
 use crate::error::EngineError;
 use crate::held::HeldPane;
@@ -47,8 +48,6 @@ pub use crate::snapshot::PoolState;
 /// it on the review card.
 pub const REVIEW_TICKET_ID: &str = "REVIEW";
 
-/// The persistence interrupt is run-level too: raised when the checkpoint store keeps failing at a
-/// boundary.
 pub const PERSISTENCE_TICKET_ID: &str = "PERSISTENCE";
 
 /// One change to the pool state (engine.ts `PoolUpdate`). Tickets and outcomes merge by key, the log
@@ -60,8 +59,6 @@ pub struct PoolUpdate {
     pub outcomes: Option<IndexMap<String, Outcome>>,
     pub interrupts: Option<Vec<Interrupt>>,
     pub review_approved: Option<bool>,
-    /// The sanctioned way to replace the assignment slice of the live config (ADR-0018), at the
-    /// super-step boundary only.
     pub config: Option<ac_core::config::PoolConfig>,
 }
 
@@ -154,26 +151,25 @@ pub struct Session {
     pub snapshot_history: Option<usize>,
     /// The count of every emit so far, kept or not: the next emit's seq.
     pub emitted: u64,
+    pub store_failing: bool,
     pub store: Box<dyn CheckpointStore>,
     pub store_open: bool,
-    pub super_step: u64,
     pub answers: QueuedAnswerStore,
-    /// True while a drive loop is in flight (between super-step boundaries included).
     pub driving: bool,
+    /// `notify_one` stores a permit when no task waits, so a wake between a Tick and the wait after it
+    /// is not lost.
+    pub wake: Arc<Notify>,
+    pub wakes: Wakes,
+    pub verify_groups: HashMap<String, VerifyGroup>,
+    pub grading: usize,
+    pub launched: Vec<String>,
+    pub drive_failure: Option<String>,
+    pub persisted: Option<serde_json::Value>,
+    pub shutdown_noted: bool,
     pub settled_phase: Option<RunPhase>,
     pub settle_waiters: Vec<SettleWaiter>,
     pub answer_waiters: HashMap<u64, Vec<AnswerWaiter>>,
-    /// An answer was queued while a drive was in flight and no drain has run since. The drive that
-    /// closes with one kicks the next, so an answer accepted between the last boundary and the
-    /// settle is never left waiting for an unrelated kick (in the TypeScript only microtasks run in
-    /// that window, so no answer can arrive there).
-    pub queued_since_drain: bool,
-    /// An adopted or Continued attempt's finalize kicked while a drive was in flight, which does
-    /// nothing: the drive that closes starts the next, so a merge that lands while that drive decides
-    /// its closing phase is never left stalled. In the TypeScript the finalize's merge is synchronous
-    /// and lands before the drive's next await, so the window does not open there.
-    pub finalized_while_driving: bool,
-    /// Fired once when the boot's drive first waits on something real (an attempt, a merge hold, the
+    /// Fired once when the boot's drive first waits on something real (an attempt, a waiting merge, the
     /// boot reconcile) or settles: start_pool returns then, as the TypeScript's start returns before
     /// any I/O but after every microtask the drive runs first.
     pub first_turn: Option<oneshot::Sender<()>>,
@@ -203,8 +199,6 @@ pub struct Session {
     pub merge_chain: MergeChain,
     /// The Merge queue's in-memory line.
     pub merge_line: MergeLine,
-    /// The raw console.json text last considered at a boundary (ADR-0018); `None` when no file was
-    /// there.
     pub last_config_text: Option<String>,
     pub jev: Jev,
     /// The pool-log subscription on the Jev port, released at close.
@@ -216,11 +210,11 @@ pub struct Session {
     pub conversations: Conversations,
     /// The Live attempts registry: every Attempt between its launch and its ending.
     pub live_attempts: LiveAttempts,
-    /// The Merge hold watch: re-derives the hold while the last emitted set is non-empty.
+    /// The unlanded-list watch: re-derives the list while the last emitted set is non-empty.
     pub hold_watch: MergeHoldWatch,
     /// The running watch timer's generation; a timer whose generation is no longer this one stops.
     pub hold_watch_timer: u64,
-    /// The Merge hold's derivation behind its memo (issue #157).
+    /// The unlanded list's derivation behind its memo (issue #157).
     pub derive_hold: MergeHoldMemo,
     pub enlisted: EnlistedAttempts,
     /// The pane read register (issue #122).
@@ -244,8 +238,6 @@ pub struct Session {
     /// as a phrase for Keep talking's refusal, in the order they began.
     pub pool_checkout_writers: IndexMap<u64, String>,
     pub pool_checkout_writer_seq: u64,
-    /// Tickets the drive planned into the pool checkout, from the plan to the attempt's ending.
-    pub pool_checkout_planned: IndexSet<String>,
     /// The pane survey (issue #139); `None` in a headless pool.
     pub pane_survey: Option<PaneSurvey>,
     /// The tabs this pool's `spawned` events name, re-read with each survey listing.
@@ -256,12 +248,9 @@ pub struct Session {
     pub steward_notes: StewardNotes,
     /// The Steward budget used per Ticket; only Tickets with some used are kept.
     pub steward_used: IndexMap<String, u64>,
-    /// Held spawns the Steward adopted, by id, waiting for the boundary that lands them.
     pub steward_adopts: HashMap<String, String>,
-    /// The pool's Line (ADR-0037), as `line.json` holds it; `None` until Start the Line.
-    pub line: Option<ac_protocol::LineState>,
-    /// The Factory settings the Line runs on as last resolved, for the snapshot's Line view.
-    pub line_factory: Option<ac_core::line::ResolvedFactory>,
+    /// The pool's Line (ADR-0040), as `line.json` holds it; `None` in a pool that runs none.
+    pub line: Option<ac_core::line::run::LineRun>,
 }
 
 /// What a Session cannot be built without; every other field starts empty (see [`Session::new`]).
@@ -279,6 +268,30 @@ pub struct SessionBase {
     pub herdr_socket: String,
     pub spawn_proposals: SpawnProposals,
     pub terminal_reconcile: watch::Receiver<bool>,
+}
+
+#[derive(Debug, Default)]
+pub struct Wakes {
+    rung: u64,
+    seen: u64,
+}
+
+impl Wakes {
+    pub fn ring(&mut self) {
+        self.rung += 1;
+    }
+
+    pub fn rung(&self) -> u64 {
+        self.rung
+    }
+
+    pub fn see_all(&mut self) {
+        self.seen = self.rung;
+    }
+
+    pub fn any_unseen(&self) -> bool {
+        self.rung != self.seen
+    }
 }
 
 impl Session {
@@ -303,15 +316,21 @@ impl Session {
             snapshots: VecDeque::new(),
             snapshot_history: None,
             emitted: 0,
+            store_failing: false,
             store: base.store,
             store_open: true,
-            super_step: 0,
             driving: false,
+            wake: Arc::new(Notify::new()),
+            wakes: Wakes::default(),
+            verify_groups: HashMap::new(),
+            grading: 0,
+            launched: Vec::new(),
+            drive_failure: None,
+            persisted: None,
+            shutdown_noted: false,
             settled_phase: None,
             settle_waiters: Vec::new(),
             answer_waiters: HashMap::new(),
-            queued_since_drain: false,
-            finalized_while_driving: false,
             first_turn: None,
             on_snapshot: None,
             machine_defaults: base.machine_defaults,
@@ -353,14 +372,12 @@ impl Session {
             continued_grades: Vec::new(),
             pool_checkout_writers: IndexMap::new(),
             pool_checkout_writer_seq: 0,
-            pool_checkout_planned: IndexSet::new(),
             pane_survey: None,
             opened_tabs: Vec::new(),
             enlisted_terminals: EnlistedTerminals::default(),
             steward_used: IndexMap::new(),
             steward_adopts: HashMap::new(),
             line: None,
-            line_factory: None,
         }
     }
 
@@ -505,6 +522,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         });
         apply_update(
             &mut state,

@@ -19,7 +19,6 @@ import {
   type DetailView,
   type EnlistBlockRow,
   type HeldSpawnRow,
-  type PendingSpawnRow,
   type LogPaneView,
   type NeedsInputRow,
   type PoolCardView,
@@ -46,10 +45,12 @@ import {
   type SavePoolHandler,
 } from "./settings";
 import { ReassignStore, type ReassignHandler } from "./reassign";
+import { PlansStore, type PlansHandlers } from "./plans";
+import { LinePane, type EditLineHandler } from "./line-pane";
+import type { LineLive } from "./line-projection";
 import {
   HeldSpawnsStore,
   type HeldSpawnHandler,
-  type PendingSpawnHandler,
 } from "./held-spawns";
 import { Detail, type DetailHandlers } from "./detail";
 import { DraftAnswers } from "./drafts";
@@ -146,10 +147,9 @@ export interface AppModel {
   mergeQueueLine: string | null;
   /** The canvas header's Spawn caps line (issue #149); null before a snapshot. */
   spawnLine: SpawnLineView | null;
-  /** The canvas header's Line strip (ADR-0037); null before Start the Line. */
-  lineStrip: string | null;
-  /** The Pending spawns the Spawn caps line's list shows first (issue #150). */
-  pendingSpawns: PendingSpawnRow[];
+  /** The running Line's live graph (ADR-0040), which the header's Line button
+   *  and the Line view read; null in a pool that runs no Line. */
+  line: LineLive | null;
   /** The Held spawns list the Spawn caps line opens (issue #149). */
   heldSpawns: HeldSpawnRow[];
   detail: DetailView | null;
@@ -220,7 +220,8 @@ export interface Handlers {
 }
 
 export type ConsoleViewOptions = NeedsInputOptions &
-  ConversationsOptions & {
+  ConversationsOptions &
+  PlansHandlers & {
     /** Run something in the next frame. Given, the page's first render
      *  leaves measuring the canvas's cards and drawing its edges to the frame
      *  after it, so it forces no layout of its own (issue #161). */
@@ -246,9 +247,9 @@ export type ConsoleViewOptions = NeedsInputOptions &
      *  both are optimistic (issue #161). */
     onAdoptHeldSpawn: HeldSpawnHandler;
     onDiscardHeldSpawn: HeldSpawnHandler;
-    /** A Pending spawn's Hold and Discard (issue #150), the same way. */
-    onHoldPendingSpawn: PendingSpawnHandler;
-    onDiscardPendingSpawn: PendingSpawnHandler;
+    /** An edit to the running Line's Plan (ADR-0040). The snapshot carrying
+     *  the new rev redraws the Line view; the reply only names that rev. */
+    onEditLine: EditLineHandler;
   };
 
 /**
@@ -282,6 +283,8 @@ export class ConsoleView {
   private readonly settings: SettingsStore;
   private readonly reassign: ReassignStore;
   private readonly heldSpawns: HeldSpawnsStore;
+  private readonly plans: PlansStore;
+  private readonly linePane: LinePane;
   private readonly onFocusTerminal: (id: string) => Promise<boolean>;
   private readonly onChange: () => void;
   // The selection outlives any one render (snapshots never close the panel
@@ -318,15 +321,32 @@ export class ConsoleView {
     this.heldSpawns = new HeldSpawnsStore({
       onAdopt: options.onAdoptHeldSpawn,
       onDiscard: options.onDiscardHeldSpawn,
-      onHold: options.onHoldPendingSpawn,
-      onDiscardPending: options.onDiscardPendingSpawn,
       onChange: options.onChange,
+    });
+    this.plans = new PlansStore({
+      onListPlans: options.onListPlans,
+      onGetPlan: options.onGetPlan,
+      onEditPlan: options.onEditPlan,
+      onSavePlan: options.onSavePlan,
+      onDeletePlan: options.onDeletePlan,
+      onBootPlan: options.onBootPlan,
+      onChange: options.onChange,
+    });
+    this.linePane = new LinePane({
+      onChange: options.onChange,
+      onOpenCard: (cardId) => this.focusCard(cardId),
+      onEditLine: options.onEditLine,
+      onSaveAs: (plan) => this.plans.openCopy(plan),
     });
     this.settings = new SettingsStore({
       onGetSettings: options.onGetSettings,
       onSavePool: options.onSavePoolSettings,
       onSaveMachine: options.onSaveMachineDefaults,
       onOpenReassign: () => this.reassign.openDialog(),
+      onOpenPlans: () => {
+        this.settings.close();
+        void this.plans.open();
+      },
       onChange: options.onChange,
     });
     this.canvas = new Canvas({
@@ -339,13 +359,14 @@ export class ConsoleView {
         void this.enlist.openPicker();
       },
       onOpenSettings: () => this.settings.toggle(),
+      onOpenPlans: () => {
+        void this.plans.open();
+      },
+      onOpenLine: () => this.linePane.open(),
       onOpenHeldSpawns: () => this.heldSpawns.toggle(),
       onResetLayout: () => this.needsInput.resetWidth(),
-      onEndConversation: (conversationId) => {
-        void this.conversationsTray.endConversation(conversationId);
-      },
-      onStartLine: (grillId) => {
-        void this.conversationsTray.startLine(grillId);
+      onEndConversation: (conversationId, close) => {
+        void this.conversationsTray.endConversation(conversationId, undefined, close);
       },
       onArmCloseTerminals: () => this.headerHandlers?.onArmCloseTerminals(),
       onCancelCloseTerminals: () => this.headerHandlers?.onCancelCloseTerminals(),
@@ -360,12 +381,6 @@ export class ConsoleView {
     return this.conversationsTray.endState();
   }
 
-  /** The Conversations store's per-Grill Start the Line state (ADR-0037),
-   *  for the pool projection beside the End state. */
-  conversationLineStartState(): Record<string, { starting: boolean; failure: string | null }> {
-    return this.conversationsTray.lineStartState();
-  }
-
   render(root: HTMLElement, model: AppModel, handlers: Handlers): void {
     this.onSelectNode = handlers.onSelectNode;
     this.headerHandlers = handlers;
@@ -378,14 +393,11 @@ export class ConsoleView {
     );
     const liveConversations = new Set(model.conversationsTray.map((row) => row.id));
     this.conversationsTray.pruneEndFailures(liveConversations);
-    this.conversationsTray.pruneLineStartFailures(liveConversations);
     // A Reassign draft belongs to a ticket a write could still reach; one
     // that started an Attempt or finished loses its draft rather than
     // holding an edit that can no longer land.
     this.reassign.pruneDrafts(new Set(model.reassignTickets.map((row) => row.id)));
-    this.heldSpawns.prune(
-      new Set([...model.pendingSpawns, ...model.heldSpawns].map((row) => row.id)),
-    );
+    this.heldSpawns.prune(new Set(model.heldSpawns.map((row) => row.id)));
     // The harness list is read once, when a Reassign surface first needs it.
     if (model.detail?.kind === "ticket" && model.detail.reassign.eligible) {
       this.reassign.ensureHarnesses();
@@ -398,11 +410,8 @@ export class ConsoleView {
     };
     const detailHandlers: DetailHandlers = {
       ...handlers,
-      onEndConversation: (conversationId: string, closing?: string) => {
-        void this.conversationsTray.endConversation(conversationId, closing);
-      },
-      onStartLine: (grillId: string) => {
-        void this.conversationsTray.startLine(grillId);
+      onEndConversation: (conversationId: string, closing?: string, close?: boolean) => {
+        void this.conversationsTray.endConversation(conversationId, closing, close);
       },
       onFocusConversationTerminal: (conversationId: string) =>
         this.onFocusTerminal(conversationId),
@@ -414,7 +423,7 @@ export class ConsoleView {
         this.onChange();
       },
       reassign: this.reassign,
-      renderSpawnDecision: (row, state) => this.heldSpawns.renderDecision(row, state),
+      renderSpawnDecision: (row) => this.heldSpawns.renderDecision(row),
     };
     // The two trays overlay the canvas column, not the window: anchored to
     // its edges they stay clear of the Detail beside it, however wide the
@@ -442,8 +451,10 @@ export class ConsoleView {
       this.settings.render(model.restart, model.stop, handlers),
       this.reassign.render(model.reassignTickets),
       model.spawnLine
-        ? this.heldSpawns.render(model.pendingSpawns, model.heldSpawns, model.spawnLine)
+        ? this.heldSpawns.render(model.heldSpawns, model.spawnLine)
         : null,
+      this.linePane.render(model.line),
+      this.plans.render(),
     );
     const content = h(
       "div",
@@ -472,6 +483,8 @@ export class ConsoleView {
     } else {
       this.canvas.unbind();
     }
+    this.plans.bindCanvas(root);
+    this.linePane.bindCanvas(root);
   }
 
   private selectNode(nodeId: string): void {

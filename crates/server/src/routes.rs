@@ -10,22 +10,26 @@ use serde_json::{Map, Value, json};
 
 use ac_core::config::read_config;
 use ac_core::js;
-use ac_core::line::normalise_factory;
 use ac_core::machine_defaults::write_machine_defaults;
-use ac_core::pool_settings::{relaunch_port, require_known_station_harnesses, write_pool_settings};
+use ac_core::plan::library::{self, LibraryError};
+use ac_core::plan::{Plan, PlanEdit};
+use ac_core::pool_settings::{relaunch_port, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
 use ac_io::herdr::PaneReadSource;
+use ac_protocol::json::Unchecked;
 use ac_protocol::{
     BecomesConversation, BecomesSteward, BecomesTicket, ConversationAssign, ConversationRole,
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
-    LineResponse, LineStartResponse, LogAttemptInfo, POOL_LOG_WINDOW, RequestKind, ResumeAction,
+    LinePlanEditRequest, LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest,
+    PlanDraftResponse, PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse,
+    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction,
     StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
-use crate::reassign::{ReassignContext, ReassignError, write_reassign};
-use crate::server::{Inner, Server, live_attempt_ids};
+use crate::reassign::{ReassignContext, ReassignError, ReassignOutcome, write_reassign};
+use crate::server::{Inner, LineBoot, LineBootRefusal, Server, live_attempt_ids};
 
 /// Which key a refusal's reason goes under over HTTP: the older routes say `error`, the Conversation
 /// routes and those after them `reason`.
@@ -140,7 +144,7 @@ fn or_empty(body: Value) -> Value {
 
 fn engine_refusal_status(err: &EngineError, otherwise: u16) -> u16 {
     match err {
-        EngineError::AnswerQueuedConflict(_) => 409,
+        EngineError::AnswerQueuedConflict(_) | EngineError::LineRefusal(_) => 409,
         _ => otherwise,
     }
 }
@@ -227,19 +231,39 @@ pub async fn pool_settings_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// Reassign (issue #126): an edit of console.json's `assign`, answered in the settings convention: 400
-/// for a refused request, 500 for a file this server can no longer read or a pool that never started.
-pub fn reassign_request(server: &Server, inner: &mut Inner, body: Body) -> Answer {
+pub async fn reassign_request(server: &Server, body: Body) -> Answer {
+    let written = {
+        let mut inner = server.lock();
+        write_reassign_request(server, &mut inner, body)
+    };
+    let outcome = match written {
+        Ok(outcome) => outcome,
+        Err(refused) => return refused,
+    };
+    if let Some(engine) = server.engine() {
+        engine.reload_config().await;
+    }
+    let Some(snapshot) = server.reenrich(&mut server.lock()) else {
+        return Answer::refused(500, Field::Error, "reassign: pool not started".to_owned());
+    };
+    Answer::ok(
+        200,
+        &json!({ "applied": outcome.applied, "skipped": outcome.skipped, "snapshot": &*snapshot }),
+    )
+}
+
+fn write_reassign_request(
+    server: &Server,
+    inner: &mut Inner,
+    body: Body,
+) -> Result<ReassignOutcome, Answer> {
     let failed = |err: String| Answer::refused(500, Field::Error, err);
     let Some(raw) = server.last_raw() else {
-        return failed("reassign: pool not started".to_owned());
+        return Err(failed("reassign: pool not started".to_owned()));
     };
-    let body = match body {
-        Ok(body) => body,
-        Err(err) => return failed(err),
-    };
+    let body = body.map_err(failed)?;
     if !body.is_object() {
-        return failed("reassign: body must be an object".to_owned());
+        return Err(failed("reassign: body must be an object".to_owned()));
     }
     server.refresh_meta(inner, Some(&raw));
     let live = live_attempt_ids(&raw);
@@ -254,58 +278,197 @@ pub fn reassign_request(server: &Server, inner: &mut Inner, body: Body) -> Answe
         None | Some(Value::Null) => json!({}),
         Some(fields) => fields.clone(),
     };
-    let outcome = match write_reassign(
+    write_reassign(
         server.pool_dir(),
         field_of(&body, "tickets"),
         &fields,
         &context,
-    ) {
-        Ok(outcome) => outcome,
-        Err(ReassignError::Refusal(err)) => return Answer::refused(400, Field::Error, err),
-        Err(err) => return failed(err.message().to_owned()),
-    };
-    let Some(snapshot) = server.reenrich(inner) else {
-        return failed("reassign: pool not started".to_owned());
-    };
-    Answer::ok(
-        200,
-        &json!({ "applied": outcome.applied, "skipped": outcome.skipped, "snapshot": &*snapshot }),
     )
+    .map_err(|err| match err {
+        ReassignError::Refusal(err) => Answer::refused(400, Field::Error, err),
+        err => failed(err.message().to_owned()),
+    })
 }
 
-/// The Machine defaults, written whole: a field left empty is the operator clearing it.
-pub fn machine_settings_request(server: &Server, body: Body) -> Answer {
+/// The Machine defaults, written whole: a field left empty is the operator clearing it. The run is
+/// woken, so a pool that sets no `maxLive` of its own launches under the new one at once.
+pub async fn machine_settings_request(server: &Server, body: Body) -> Answer {
     let saved = (|| -> Result<(), String> {
         let body = body?;
         let Some(defaults @ Value::Object(_)) = field_of(&body, "defaults") else {
             return Err("settings: defaults must be an object".to_owned());
         };
-        // The machine's Factory layer names Station harnesses as the pool's does: each must be one
-        // this pool knows, or the Line would write a Station Ticket it cannot launch.
-        if let Some(Ok(Some(layer))) = defaults
-            .get("factory")
-            .filter(|factory| !factory.is_null())
-            .map(|factory| normalise_factory(factory, "machine defaults: factory"))
-        {
-            require_known_station_harnesses(
-                &layer,
-                "machine defaults",
-                &server.0.harnesses.names(),
-            )
-            .map_err(|err| err.to_string())?;
-        }
         write_machine_defaults(defaults, &server.0.machine_paths.file)
             .map_err(|err| err.to_string())?;
         Ok(())
     })();
+    if saved.is_ok()
+        && let Some(engine) = server.engine()
+    {
+        engine.reload_config().await;
+    }
     match saved.and_then(|()| server.settings_payload()) {
         Ok(payload) => Answer::ok(200, &payload),
         Err(err) => Answer::refused(400, Field::Error, err),
     }
 }
 
+fn library_refusal(err: LibraryError) -> Answer {
+    let status = match err {
+        LibraryError::BadSlug(_) | LibraryError::Invalid(_) => 400,
+        LibraryError::PresetSlug(_) => 409,
+        LibraryError::NotFound(_) => 404,
+        LibraryError::Unreadable(_) => 422,
+        LibraryError::Io(_) => 500,
+    };
+    Answer::refused(status, Field::Reason, err.to_string())
+}
+
+/// GET /api/plans: the Presets, then the Plan library.
+pub fn plans_list_request(server: &Server) -> Answer {
+    let plans = library::list(&server.0.home);
+    Answer::ok(200, &PlansListResponse { plans })
+}
+
+/// GET /api/plans/<slug>: the Plan's file as it stands, with what is wrong with it.
+pub fn plan_get_request(server: &Server, slug: &str) -> Answer {
+    match library::get(&server.0.home, slug) {
+        Ok(stored) => Answer::ok(
+            200,
+            &PlanResponse {
+                slug: stored.slug,
+                preset: stored.preset,
+                plan: Unchecked::new(stored.file),
+                problems: stored.problems,
+            },
+        ),
+        Err(err) => library_refusal(err),
+    }
+}
+
+/// POST /api/plans/validate: a draft Plan, checked whole.
+pub fn plan_validate_request(body: Body) -> Answer {
+    let checked = body.and_then(|body| {
+        field_of(&body, "plan")
+            .map(Plan::check)
+            .ok_or_else(|| "plan is required".to_owned())
+    });
+    match checked {
+        Ok(problems) => Answer::ok(200, &PlanValidateResponse { problems }),
+        Err(err) => Answer::refused(400, Field::Reason, err),
+    }
+}
+
+/// POST /api/plans/edit: typed edits on a draft, answered with the draft they make. Writes nothing. A
+/// body that is not `{plan, edits}`, an edit that cannot be read or misses, or a draft the edits
+/// would drop or rewrite is refused whole.
+pub fn plan_edit_request(body: Body) -> Answer {
+    let refused = |reason: String| Answer::refused(400, Field::Reason, reason);
+    let request: PlanEditRequest = match plans_request(body) {
+        Ok(request) => request,
+        Err(err) => return refused(err),
+    };
+    let edited = PlanEdit::read_all(&request.edits)
+        .and_then(|edits| Plan::edit_draft(&request.plan.value, &edits));
+    match edited {
+        Ok(edited) => Answer::ok(
+            200,
+            &PlanDraftResponse {
+                plan: edited.file,
+                problems: edited.problems,
+                notes: edited.notes,
+                verdicts: edited
+                    .verdicts
+                    .into_iter()
+                    .map(|(id, verdicts)| PlanNodeVerdicts {
+                        id,
+                        verdicts: verdicts.iter().map(|v| v.as_str().to_owned()).collect(),
+                    })
+                    .collect(),
+            },
+        ),
+        Err(problems) => {
+            let messages: Vec<_> = problems.into_iter().map(|p| p.message).collect();
+            refused(format!(
+                "plans: the edits cannot be made: {}",
+                messages.join("; ")
+            ))
+        }
+    }
+}
+
+fn plans_request<T: serde::de::DeserializeOwned>(body: Body) -> Result<T, String> {
+    body.and_then(|body| serde_json::from_value(body).map_err(|err| format!("plans: {err}")))
+}
+
+/// POST /api/plans/boot: Boot, detached, for a new Line on a saved Plan. Every refusal comes before
+/// anything is started: the work (400), then the Plan's load (404, 400, 422), then a server with no
+/// way to start Boot (409), then a pool in no git checkout (409).
+pub async fn plan_boot_request(server: &Server, body: Body) -> Answer {
+    let refused = |status: u16, reason: String| Answer::refused(status, Field::Reason, reason);
+    let request: PlanBootRequest = match plans_request(body) {
+        Ok(request) => request,
+        Err(err) => return refused(400, err),
+    };
+    let work = request.work.trim();
+    if work.is_empty() {
+        return refused(
+            400,
+            "plans: a Line needs its work: an issue number or what to build".to_owned(),
+        );
+    }
+    if work.starts_with("--") {
+        return refused(
+            400,
+            format!("plans: the work `{work}` starts with `--`, which Boot would read as a flag"),
+        );
+    }
+    if let Err(err) = library::load(&server.0.home, &request.slug) {
+        return library_refusal(err);
+    }
+    let Some(hand_off) = server.0.on_line_boot.clone() else {
+        return refused(409, "plans: this server cannot start Boot".to_owned());
+    };
+    let boot = LineBoot {
+        plan: request.slug,
+        work: work.to_owned(),
+    };
+    match tokio::task::spawn_blocking(move || hand_off(&boot)).await {
+        Ok(Ok(started)) => Answer::ok(200, &started),
+        Ok(Err(LineBootRefusal::NoCheckout(reason))) => refused(409, reason),
+        Ok(Err(LineBootRefusal::Launch(reason))) => refused(500, reason),
+        Err(err) => refused(500, format!("plans: {err}")),
+    }
+}
+
+/// PUT /api/plans/<slug>: `plan` is the Plan file, the HTTP body itself or the socket payload's field.
+pub fn plan_save_request(server: &Server, slug: &str, plan: Body) -> Answer {
+    let saved = match plan {
+        Ok(plan) => library::save(&server.0.home, slug, &plan),
+        Err(err) => return Answer::refused(400, Field::Reason, err),
+    };
+    match saved {
+        Ok(plan) => Answer::ok(
+            200,
+            &PlanSaveResponse {
+                slug: slug.to_owned(),
+                plan: plan.to_file(),
+            },
+        ),
+        Err(err) => library_refusal(err),
+    }
+}
+
+/// DELETE /api/plans/<slug>.
+pub fn plan_delete_request(server: &Server, slug: &str) -> Answer {
+    match library::delete(&server.0.home, slug) {
+        Ok(()) => Answer::ok_value(200, json!({})),
+        Err(err) => library_refusal(err),
+    }
+}
+
 /// POST /api/resume: acceptance only (ADR-0004). The engine records the answer and the caller gets the
-/// snapshot after acceptance right away.
+/// snapshot its acceptance left right away, never a later tick's.
 pub async fn resume_request(server: &Server, body: Body) -> Answer {
     let refused = |err: String| Answer::refused(400, Field::Error, err);
     let body = match body {
@@ -380,14 +543,17 @@ pub async fn resume_request(server: &Server, body: Body) -> Answer {
             ));
         }
     }
-    if let Err(err) = engine.accept(ticket_id, note, action, attempt).await {
-        return Answer::refused(
-            engine_refusal_status(&err, 400),
-            Field::Error,
-            err.message(),
-        );
-    }
-    let snapshot = server.snapshot();
+    let accepted = match engine.accept(ticket_id, note, action, attempt).await {
+        Ok(accepted) => accepted,
+        Err(err) => {
+            return Answer::refused(
+                engine_refusal_status(&err, 400),
+                Field::Error,
+                err.message(),
+            );
+        }
+    };
+    let snapshot = accepted.map(|raw| server.snapshot_of(&raw));
     Answer::ok(202, &json!({ "snapshot": snapshot.as_deref() }))
 }
 
@@ -402,19 +568,13 @@ pub async fn start_conversation_request(server: &Server, body: Body) -> Answer {
     let role = match field_of(&fields, "role") {
         None => None,
         Some(Value::String(role)) if role == "steward" => Some(ConversationRole::Steward),
-        Some(Value::String(role)) if role == "grill" => Some(ConversationRole::Grill),
         Some(_) => {
-            return Answer::refused(
-                400,
-                Field::Reason,
-                r#"role must be "steward" or "grill" when given"#,
-            );
+            return Answer::refused(400, Field::Reason, r#"role must be "steward" when given"#);
         }
     };
     let given = text_of(&fields, "title");
     let title = match js::trim(&given) {
         "" if role == Some(ConversationRole::Steward) => "Steward".to_owned(),
-        "" if role == Some(ConversationRole::Grill) => "Grill".to_owned(),
         trimmed => trimmed.to_owned(),
     };
     if title.is_empty() {
@@ -445,7 +605,8 @@ pub async fn start_conversation_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// End a Conversation (issue #60): 404 when there is no live Conversation with that id, 409 otherwise.
+/// End a Conversation (issue #60), or end it as closed (`close: true`), merging nothing: 404 when
+/// there is no live Conversation with that id, 409 otherwise.
 pub async fn end_conversation_request(server: &Server, body: Body) -> Answer {
     let Ok(body) = body else {
         return Answer::refused(400, Field::Reason, "invalid JSON body");
@@ -456,10 +617,11 @@ pub async fn end_conversation_request(server: &Server, body: Body) -> Answer {
         return Answer::refused(400, Field::Reason, "id is required");
     }
     let closing = string_field(&fields, "closing");
+    let close = field_of(&fields, "close") == Some(&Value::Bool(true));
     let ended = match server.engine() {
         None => Err("pool not started".to_owned()),
         Some(engine) => engine
-            .end_conversation(id, closing)
+            .end_conversation(id, closing, close)
             .await
             .map_err(|err| err.message().to_owned()),
     };
@@ -534,71 +696,116 @@ pub async fn enlist_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-/// POST /api/line/start (ADR-0037): start the pool's Line from its brief in the pool checkout, or, with
-/// `grill`, from the Grill's branch (Start the Line on the Grill, which merges that branch and ends the
-/// Grill). An operator route: the Steward's routes have no such verb. 202 with the first Ticket; a
-/// missing or invalid brief, a Line already started, or a Grill that is not one is the 409 `reason`
-/// envelope.
-pub async fn start_line_request(server: &Server, body: Body) -> Answer {
+/// POST /api/line (ADR-0040), sent once by Boot: `plan` is a Preset or library slug or a Plan file,
+/// with exactly one of `work` or `brief` (a Line brief's path in the pool checkout). 202 with the
+/// Line; an unknown slug, an invalid or not-yet-runnable Plan, a bad brief or a second Line is the
+/// 409 `reason` envelope.
+pub async fn begin_line_request(server: &Server, body: Body) -> Answer {
     let Ok(body) = body else {
         return Answer::refused(400, Field::Reason, "invalid JSON body");
     };
     let body = or_empty(body);
-    let brief = match body.get("brief") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(path)) => Some(path.clone()),
-        Some(_) => return Answer::refused(400, Field::Reason, "brief must be a path string"),
+    let text = |key: &str| match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !js::trim(text).is_empty() => Ok(Some(text.clone())),
+        Some(_) => Err(format!("{key} must be a non-empty string")),
     };
-    let grill = match body.get("grill") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(id)) if !js::trim(id).is_empty() => Some(js::trim(id).to_owned()),
-        Some(_) => return Answer::refused(400, Field::Reason, "grill must be a Conversation id"),
+    let begin = match (text("work"), text("brief")) {
+        (Err(why), _) | (_, Err(why)) => return Answer::refused(400, Field::Reason, why),
+        (Ok(Some(work)), Ok(None)) => ac_engine::line::Begin::Work(work),
+        (Ok(None), Ok(Some(brief))) => ac_engine::line::Begin::Brief(js::trim(&brief).to_owned()),
+        _ => return Answer::refused(400, Field::Reason, "give exactly one of work or brief"),
     };
-    if brief.is_some() && grill.is_some() {
-        return Answer::refused(
-            400,
-            Field::Reason,
-            "give brief or grill, not both: the Grill's brief is the one on its branch",
-        );
-    }
+    let plan = match body.get("plan") {
+        Some(Value::String(slug)) => match library::get(&server.0.home, slug) {
+            Ok(stored) => stored.file,
+            Err(err) => return library_refusal(err),
+        },
+        Some(plan @ Value::Object(_)) => plan.clone(),
+        _ => {
+            return Answer::refused(
+                400,
+                Field::Reason,
+                "plan is required: a Plan's slug or its file",
+            );
+        }
+    };
     let Some(engine) = server.engine() else {
         return Answer::refused(409, Field::Reason, "pool not started");
     };
-    let started = match grill {
-        Some(grill) => engine.start_line_from_grill(grill).await,
-        None => engine.start_line(brief).await,
-    };
-    match started {
-        Ok(ticket_id) => Answer::ok(202, &LineStartResponse { ticket_id }),
+    match engine.begin_line(plan, begin).await {
+        Ok(line) => Answer::ok(202, &LineResponse { line: Some(line) }),
         Err(err) => Answer::refused(409, Field::Reason, err.message()),
     }
 }
 
-/// GET /api/line: the pool's Line as `line.json` holds it, null before Start the Line.
-pub fn line_request(server: &Server) -> Answer {
-    match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
+/// GET /api/line: the pool's Line as the engine runs it, null in a pool that runs none.
+pub async fn line_request(server: &Server) -> Answer {
+    let Some(engine) = server.engine() else {
+        return Answer::ok(200, &LineResponse { line: None });
+    };
+    match engine.line_view().await {
         Ok(line) => Answer::ok(200, &LineResponse { line }),
-        Err(err) => Answer::refused(500, Field::Reason, err.to_string()),
+        Err(err) => Answer::refused(500, Field::Reason, err.message()),
     }
 }
 
-/// GET /api/line/report: the report Decide wrote at the Line's Finish (ADR-0037), as the HTML it is, for
-/// the Finish checkpoint's Detail and Open in browser. 404 with the `reason` envelope before Start the
-/// Line or while no report is written.
-pub fn line_report(server: &Server) -> Result<Vec<u8>, Answer> {
-    let line = match ac_core::line::load_line(std::path::Path::new(&server.0.pool_dir)) {
-        Ok(Some(line)) => line,
-        Ok(None) => return Err(Answer::refused(404, Field::Reason, "no Line has started")),
-        Err(err) => return Err(Answer::refused(500, Field::Reason, err.to_string())),
+/// A plan edit's `{baseRev, edits}`, the Steward's body with its `conversation` too, read into typed
+/// edits, or why it cannot be.
+pub fn read_plan_edit(body: Value) -> Result<(u64, Vec<PlanEdit>), String> {
+    let request: LinePlanEditRequest =
+        serde_json::from_value(body).map_err(|err| format!("line: {err}"))?;
+    let edits = PlanEdit::read_all(&request.edits).map_err(|problems| {
+        let messages: Vec<_> = problems.into_iter().map(|p| p.message).collect();
+        format!("line: the edits cannot be read: {}", messages.join("; "))
+    })?;
+    Ok((request.base_rev, edits))
+}
+
+/// POST /api/line/plan (`line.plan.edit`, ADR-0040): the operator's typed edits to the running
+/// Line's frozen Plan. 200 with the new rev; a body or an edit that cannot be read is a 400, and a
+/// refusal of the Line's (no Line, a stale rev, an invalid Plan, live run state) the 409 `reason`
+/// envelope.
+pub async fn line_plan_edit_request(server: &Server, body: Body) -> Answer {
+    let read = body.and_then(read_plan_edit);
+    let (base_rev, edits) = match read {
+        Ok(read) => read,
+        Err(err) => return Answer::refused(400, Field::Reason, err),
     };
-    let Some(path) = ac_core::line::written_report(&line) else {
+    let Some(engine) = server.engine() else {
+        return Answer::refused(409, Field::Reason, "pool not started");
+    };
+    match engine.edit_line_plan(base_rev, edits).await {
+        Ok(edited) => Answer::ok(200, &edited),
+        Err(err) => Answer::refused(409, Field::Reason, err.message()),
+    }
+}
+
+/// GET /api/line/report?node=&pass=: the report that Decide pass wrote (ADR-0037), as the HTML it is,
+/// for the Finish hold's Detail and Open in browser. 404 with the `reason` envelope when the pool's
+/// Line has no such node or the pass has written none.
+pub async fn line_report(server: &Server, node: &str, pass: &str) -> Result<Vec<u8>, Answer> {
+    let not_found = |why: String| Answer::refused(404, Field::Reason, why);
+    let Ok(pass) = pass.parse::<u32>() else {
         return Err(Answer::refused(
-            404,
+            400,
             Field::Reason,
-            "no report yet: Decide writes it when it ends the Line",
+            "pass must be a pass number",
         ));
     };
-    std::fs::read(path).map_err(|err| Answer::refused(500, Field::Reason, err.to_string()))
+    let Some(engine) = server.engine() else {
+        return Err(not_found("the pool runs no Line".into()));
+    };
+    let path = match engine.line_report_path(node.to_owned(), pass).await {
+        Ok(Ok(path)) => path,
+        Ok(Err(why)) => return Err(not_found(why)),
+        Err(err) => return Err(Answer::refused(500, Field::Reason, err.message())),
+    };
+    std::fs::read(&path).map_err(|_| {
+        not_found(format!(
+            "no report yet: {node} pass {pass} has written none"
+        ))
+    })
 }
 
 /// Keep talking (issue #139): continue a ticket's checkpointed Attempt in its Held pane. Never queued,
@@ -631,7 +838,7 @@ pub async fn close_finished_request(server: &Server) -> Answer {
     }
 }
 
-/// Adopt or Discard a Held spawn (issue #149, ADR-0029), or Hold or Discard a Pending one (issue #150).
+/// Adopt or Discard a Held spawn (issue #149, ADR-0029).
 pub async fn spawn_request(server: &Server, kind: RequestKind, body: Body) -> Answer {
     let Ok(body) = body else {
         return Answer::refused(400, Field::Reason, "invalid JSON body");
@@ -645,9 +852,7 @@ pub async fn spawn_request(server: &Server, kind: RequestKind, body: Body) -> An
     };
     let (done, status) = match kind {
         RequestKind::SpawnsHeldAdopt => (engine.adopt_held_spawn(id.clone()).await, 202),
-        RequestKind::SpawnsHeldDiscard => (engine.discard_held_spawn(id.clone()).await, 200),
-        RequestKind::SpawnsPendingHold => (engine.hold_pending_spawn(id.clone()).await, 200),
-        _ => (engine.discard_pending_spawn(id.clone()).await, 200),
+        _ => (engine.discard_held_spawn(id.clone()).await, 200),
     };
     match done {
         Ok(()) => Answer::ok(status, &json!({ "id": id })),
@@ -928,22 +1133,33 @@ pub async fn socket_request(
         RequestKind::TerminalFocus => focus_request(server, &field("ticketId")).await,
         RequestKind::TerminalsCloseFinished => close_finished_request(server).await,
         RequestKind::Enlist => enlist_request(server, body()).await,
-        RequestKind::Reassign => {
-            let mut inner = server.lock();
-            reassign_request(server, &mut inner, body()).without_snapshot()
+        RequestKind::Reassign => reassign_request(server, body()).await.without_snapshot(),
+        RequestKind::SpawnsHeldAdopt | RequestKind::SpawnsHeldDiscard => {
+            spawn_request(server, kind, body()).await
         }
-        RequestKind::SpawnsHeldAdopt
-        | RequestKind::SpawnsHeldDiscard
-        | RequestKind::SpawnsPendingHold
-        | RequestKind::SpawnsPendingDiscard => spawn_request(server, kind, body()).await,
         RequestKind::ConversationsStart => start_conversation_request(server, body()).await,
         RequestKind::ConversationsEnd => end_conversation_request(server, body())
             .await
             .without_snapshot(),
         RequestKind::SettingsGet => settings_request(server),
         RequestKind::SettingsPoolPut => pool_settings_request(server, body()).await,
-        RequestKind::SettingsMachinePut => machine_settings_request(server, body()),
+        RequestKind::SettingsMachinePut => machine_settings_request(server, body()).await,
         RequestKind::PanesList => panes_request(server).await,
+        RequestKind::PlansList => plans_list_request(server),
+        RequestKind::PlansGet => plan_get_request(server, &field("slug")),
+        RequestKind::PlansValidate => plan_validate_request(body()),
+        RequestKind::PlansSave => plan_save_request(
+            server,
+            &field("slug"),
+            payload
+                .get("plan")
+                .cloned()
+                .ok_or_else(|| "plan is required".to_owned()),
+        ),
+        RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
+        RequestKind::PlansEdit => plan_edit_request(body()),
+        RequestKind::PlansBoot => plan_boot_request(server, body()).await,
+        RequestKind::LinePlanEdit => line_plan_edit_request(server, body()).await,
         RequestKind::LogRead => {
             let mut inner = server.lock();
             log_request(

@@ -50,7 +50,11 @@ async fn two_ready_tickets_run_in_worktrees_merge_and_end_at_the_review() {
     );
     let log = &snap.state.log;
     assert!(
-        log.contains(&"super-step 1: 01, 02".to_string()),
+        log.iter().any(|l| l.starts_with("start 01 at ")),
+        "{log:#?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("start 02 at ")),
         "{log:#?}"
     );
     assert!(log.iter().any(|l| l.starts_with("ticket 01: merged pool/")));
@@ -82,28 +86,62 @@ async fn two_ready_tickets_run_in_worktrees_merge_and_end_at_the_review() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lone_ticket_runs_in_the_pool_checkout_and_a_blocked_one_waits_for_it() {
+async fn a_blocked_ticket_starts_in_its_own_worktree_once_its_blocker_has_merged() {
     let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
+    pool.script(
+        "01",
+        vec![Script::done("one").with_work(&commit("one.txt", "one"))],
+    );
     let engine = pool.start().await;
     assert_eq!(settled(&engine).await, RunPhase::Quiescent);
     let snap = last(&engine);
     let log = &snap.state.log;
-    assert!(log.contains(&"super-step 1: 01".to_string()), "{log:#?}");
-    assert!(log.contains(&"super-step 2: 02".to_string()));
-    assert!(log.contains(&"ticket 01: exited 0, marker done".to_string()));
-    // Run in the pool checkout: no merge to record.
+    let at = |prefix: &str| log.iter().position(|l| l.starts_with(prefix));
+    let merged = at("ticket 01: merged pool/").expect("01 merged");
+    let started = at("start 02 at ").expect("02 started");
+    assert!(merged < started, "{log:#?}");
     assert_eq!(
         pool.kinds("01"),
         [
             TicketEventKind::Scheduled,
             TicketEventKind::Spawned,
-            TicketEventKind::Exited
+            TicketEventKind::Exited,
+            TicketEventKind::Merged
         ]
     );
     let spawned = &pool.events("02")[1];
-    assert_eq!(spawned.payload["cwd"], pool.path.as_str());
-    assert_eq!(spawned.payload["branch"], serde_json::Value::Null);
-    assert_eq!(spawned.payload["harness"], "stub");
+    assert_eq!(
+        spawned.payload["branch"],
+        ac_io::git::branch_for(&pool.path, "02", None).as_str()
+    );
+    assert_ne!(spawned.payload["cwd"], pool.path.as_str());
+    let cut = log[started].trim_start_matches("start 02 at ");
+    assert!(
+        ac_io::git::show_file(&pool.path, &format!("{cut}:one.txt")).is_some(),
+        "02 is cut from a tip holding 01's merge: {log:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrelated_ticket_starts_while_a_slow_one_runs() {
+    let pool = Pool::git(&[("01", &[]), ("02", &[]), ("03", &["02"])]);
+    let go = pool.file("go");
+    pool.script(
+        "01",
+        vec![Script::done("slow").with_work(&format!(
+            "while [ ! -f {} ]; do sleep 0.05; done",
+            go.display()
+        ))],
+    );
+    let engine = pool.start().await;
+    let snap = wait_for(&engine, |s| {
+        s.state.tickets.get("03") == Some(&TicketStatus::Done)
+    })
+    .await;
+    assert_eq!(snap.state.tickets["01"], TicketStatus::InProgress);
+    std::fs::write(&go, "").unwrap();
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    assert_eq!(last(&engine).state.tickets["01"], TicketStatus::Done);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -159,7 +197,7 @@ async fn a_checkpoint_raises_its_interrupt_from_the_brief_and_a_resume_runs_it_a
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_crash_raises_its_interrupt_at_the_boundary_with_the_exit_facts() {
+async fn a_crash_raises_its_interrupt_at_the_exit_with_the_exit_facts() {
     let pool = Pool::git(&[("01", &[])]);
     pool.script("01", vec![Script::crash(3)]);
     let engine = pool.start().await;
@@ -235,12 +273,10 @@ async fn a_conflicted_merge_with_no_resolver_waits_for_the_operator_and_a_resume
         "resolve the conflict and resume this ticket; the merge is re-attempted on resume.\nThe resolver agent attempted: no resolver harness available (set console.json resolver= or a ~/.issue-runner default)"
     ));
     assert!(pool.kinds(&id).contains(&TicketEventKind::MergeConflict));
-    // The pool waits in the merge hold, which says why.
     let snap = wait_for(&engine, |s| {
-        s.state
-            .log
-            .iter()
-            .any(|l| l.starts_with("merge hold (ADR-0014): pool paused; awaiting the merge of"))
+        s.merge_hold == std::slice::from_ref(&id)
+            && s.merge_queue.first().map(|e| e.state)
+                == Some(ac_protocol::MergeQueueState::NeedsYou)
     })
     .await;
     assert_eq!(snap.merge_hold, std::slice::from_ref(&id));
@@ -355,7 +391,7 @@ async fn a_ticket_with_no_harness_waits_at_a_config_interrupt_and_a_resume_after
     assert_eq!(config.kind, InterruptKind::Config);
     assert_eq!(
         config.body,
-        "ticket 01 has no harness: set one in console.json (an assign entry for 01, or defaults.harness) and answer resume. The pool reloads console.json at the next super-step boundary and schedules the ticket on what it finds."
+        "ticket 01 has no harness: set one in console.json (an assign entry for 01, or defaults.harness) and answer resume. The pool reloads console.json at the next Tick and schedules the ticket on what it finds."
     );
     assert_eq!(snap.state.tickets["01"], TicketStatus::Checkpoint);
     assert_eq!(pool.kinds("01"), [TicketEventKind::Unassigned]);
@@ -397,7 +433,6 @@ async fn a_ticket_with_no_harness_waits_at_a_config_interrupt_and_a_resume_after
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_store_that_keeps_failing_raises_the_persistence_interrupt_and_an_answer_retries() {
     let pool = Pool::git(&[("01", &[])]);
-    // The boundary persist fails all four attempts; the close's own persist then lands.
     pool.store
         .fail
         .store(4, std::sync::atomic::Ordering::SeqCst);
@@ -460,7 +495,10 @@ async fn closing_a_checkpointed_blocker_deadlocks_its_dependent_and_the_review_n
     assert_eq!(deadlock.kind, InterruptKind::Deadlock);
     assert_eq!(deadlock.body, "blocker 01 was closed");
     assert!(snap.state.log.contains(
-        &"interrupt answered for 01 (checkpoint): closed; it ran in the pool checkout, so its work was left in place there; nothing was reset".to_string()
+        &format!(
+            "interrupt answered for 01 (checkpoint): closed; discarded {} unmerged, with its worktree",
+            ac_io::git::branch_for(&pool.path, "01", None)
+        )
     ), "{:#?}", snap.state.log);
     assert!(
         pool.read("issues/01.md")
@@ -626,12 +664,12 @@ async fn a_restart_restores_the_checkpointed_state_and_re_raises_nothing_it_alre
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_stops_the_headless_attempt_raises_no_crash_and_says_farewell() {
     let pool = Pool::git(&[("01", &[])]);
+    let started = pool.file("started");
     pool.script(
         "01",
-        vec![Script::done("never").with_work("touch started; sleep 30")],
+        vec![Script::done("never").with_work(&format!("touch {}; sleep 30", started.display()))],
     );
     let engine = pool.start().await;
-    let started = pool.file("started");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !started.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -645,10 +683,13 @@ async fn a_shutdown_stops_the_headless_attempt_raises_no_crash_and_says_farewell
     let snap = last(&engine);
     assert_eq!(snap.phase, RunPhase::Stopped);
     assert!(snap.state.interrupts.is_empty());
-    assert!(snap.state.log.contains(
-        &"engine shutdown: super-step joined; no crash interrupts raised and nothing more scheduled"
-            .to_string()
-    ), "{:#?}", snap.state.log);
+    assert!(
+        snap.state
+            .log
+            .contains(&crate::drive::SHUTDOWN_LINE.to_string()),
+        "{:#?}",
+        snap.state.log
+    );
     let crash = pool
         .events("01")
         .into_iter()
@@ -670,8 +711,6 @@ async fn a_drive_that_cannot_go_on_dies_with_a_record_and_a_dead_phase() {
     // AGENT.md is read at every spawn: a directory there fails the read and kills the drive.
     std::fs::create_dir(pool.file("AGENT.md")).unwrap();
     let engine = pool.start().await;
-    // The drive plans its first super-step in the job that finds it ready, so it may already be dead
-    // when this asks: a settle then answers the dead phase, the death itself being on record.
     let settled = tokio::time::timeout(std::time::Duration::from_secs(30), engine.settled())
         .await
         .unwrap();
@@ -764,7 +803,7 @@ async fn both_copies_changing_the_same_lines_leave_conflict_markers_and_a_record
     let file = pool.file("issues/01.md");
     let engine = pool.start().await;
     let _ = wait_for(&engine, |s| {
-        s.state.log.iter().any(|l| l.starts_with("super-step 1:"))
+        s.state.log.iter().any(|l| l.starts_with("start 01 at "))
     })
     .await;
     let text = std::fs::read_to_string(&file).unwrap();
@@ -783,7 +822,7 @@ async fn both_copies_changing_the_same_lines_leave_conflict_markers_and_a_record
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_store_gains_a_checkpoint_at_every_super_step_the_review_and_its_approval() {
+async fn the_store_takes_a_checkpoint_after_each_change_and_closes_after_the_approval() {
     let pool = Pool::git(&[("01", &[]), ("02", &["01"])]);
     let engine = pool.start().await;
     assert_eq!(settled(&engine).await, RunPhase::Quiescent);
@@ -792,21 +831,24 @@ async fn the_store_gains_a_checkpoint_at_every_super_step_the_review_and_its_app
         .unwrap();
     assert_eq!(phase, RunPhase::Done);
     let rows = pool.store.writes.lock().unwrap().clone();
-    assert_eq!(rows.len(), 6);
-    assert_eq!(
-        rows[0]["tickets"],
-        serde_json::json!({"01": "done", "02": "ready"})
+    let row_with = |tickets: serde_json::Value| rows.iter().find(|row| row["tickets"] == tickets);
+    let both = row_with(serde_json::json!({"01": "done", "02": "done"})).expect("both done");
+    assert_eq!(both["outcomes"]["01"]["summary"], "did 01");
+    assert!(
+        rows.iter()
+            .any(|row| row["reviewApproved"] == true && row["interrupts"] == serde_json::json!([]))
     );
     assert_eq!(
-        rows[1]["tickets"],
-        serde_json::json!({"01": "done", "02": "done"})
-    );
-    assert_eq!(rows[1]["outcomes"]["01"]["summary"], "did 01");
-    assert_eq!(rows[4]["interrupts"], serde_json::json!([]));
-    assert_eq!(rows[4]["reviewApproved"], true);
-    assert_eq!(
-        rows[5]["log"].as_array().unwrap().last().unwrap(),
+        rows.last().unwrap()["log"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap(),
         "pool done: every ticket reached done"
+    );
+    assert!(
+        rows.windows(2).all(|pair| pair[0] != pair[1]),
+        "a row is written only when the state changed"
     );
     assert_eq!(
         pool.store.closed.load(std::sync::atomic::Ordering::SeqCst),
@@ -841,4 +883,118 @@ async fn a_blocked_by_cycle_raises_deadlocks_without_launching_anything() {
         serde_json::Value::Object(pool.events("01")[0].payload.clone()),
         serde_json::json!({"blockers": ["02"]})
     );
+}
+
+fn graded(score: u32) -> Script {
+    Script {
+        exit: 0,
+        outcome: Some(format!(
+            r#"{{"status":"done","summary":"graded","commitSha":null,"grade":{{"score":{score},"verdict":"pass","reasons":"scored {score}"}}}}"#
+        )),
+        work: None,
+    }
+}
+
+fn verify_two(pool: &Pool) {
+    std::fs::write(
+        pool.file("console.json"),
+        r#"{"defaults": {"harness": "stub", "model": "m"}, "assign": {"01": {"verify": 2}}}"#,
+    )
+    .unwrap();
+    pool_git(pool, &["commit", "-qam", "verify 2"]);
+}
+
+fn attempts_of(pool: &Pool, kind: TicketEventKind) -> Vec<u64> {
+    pool.events("01")
+        .into_iter()
+        .filter(|e| e.kind == kind)
+        .map(|e| e.attempt)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_verify_round_whose_every_candidate_ended_before_a_restart_is_graded_once_not_fanned_out_again()
+ {
+    let pool = Pool::git(&[("01", &[])]);
+    verify_two(&pool);
+    let candidate = |text: &str| Script::done(text).with_work(&commit("f.txt", text));
+    pool.script("01", vec![candidate("one"), candidate("two")]);
+    let second_boot = pool.file("second-boot");
+    pool.script("01-grader-1", vec![graded(9)]);
+    pool.script(
+        "01-grader-2",
+        vec![graded(5).with_work(&format!("[ -f {} ] || sleep 30", second_boot.display()))],
+    );
+    let engine = pool.start().await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while attempts_of(&pool, TicketEventKind::Graded) != [1] {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    engine
+        .shutdown(Some(std::time::Duration::from_millis(200)))
+        .await;
+    assert!(
+        pool.read("issues/01.md")
+            .starts_with("<!-- state: id=01 blocked-by=none status=in-progress -->")
+    );
+
+    std::fs::write(&second_boot, "").unwrap();
+    let engine = pool.start().await;
+    let phase = settled(&engine).await;
+    let snap = last(&engine);
+    assert_eq!(phase, RunPhase::Quiescent, "{:#?}", snap.state.log);
+    assert_eq!(snap.state.tickets["01"], TicketStatus::Done);
+    assert!(snap.state.log.contains(
+        &"ticket 01: every candidate of its verify round ended before a restart; the round is graded, not fanned out again"
+            .to_string()
+    ), "{:#?}", snap.state.log);
+    assert_eq!(attempts_of(&pool, TicketEventKind::Scheduled), [1, 2]);
+    assert_eq!(attempts_of(&pool, TicketEventKind::Graded), [1, 2]);
+    assert_eq!(attempts_of(&pool, TicketEventKind::Selected), [1]);
+    assert_eq!(pool.read("f.txt"), "one\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_verify_round_with_a_candidate_that_never_ended_fans_out_again_after_a_restart() {
+    let pool = Pool::git(&[("01", &[])]);
+    verify_two(&pool);
+    std::fs::write(
+        pool.file("issues/01.md"),
+        crate::testkit::ticket_text("01", &[], "in-progress"),
+    )
+    .unwrap();
+    let runs = pool.file("runs");
+    let event = |attempt: u64, kind: TicketEventKind, payload: serde_json::Value| {
+        let serde_json::Value::Object(payload) = payload else {
+            unreachable!()
+        };
+        ac_core::events::append_event(
+            &runs,
+            "01",
+            &ac_core::events::event_now(attempt, kind, payload),
+        )
+        .unwrap();
+    };
+    event(1, TicketEventKind::Scheduled, serde_json::json!({}));
+    event(2, TicketEventKind::Scheduled, serde_json::json!({}));
+    event(1, TicketEventKind::Spawned, serde_json::json!({}));
+    event(2, TicketEventKind::Spawned, serde_json::json!({}));
+    event(
+        1,
+        TicketEventKind::Exited,
+        serde_json::json!({"code": 0, "status": "done", "logTail": [], "outcomeExists": true}),
+    );
+    pool.script("01-grader-1", vec![graded(9)]);
+    pool.script("01-grader-2", vec![graded(5)]);
+    let engine = pool.start().await;
+    assert_eq!(settled(&engine).await, RunPhase::Quiescent);
+    let snap = last(&engine);
+    assert!(snap.state.log.contains(
+        &"ticket 01: marker was in-progress with no live agent; back to ready".to_string()
+    ));
+    assert_eq!(attempts_of(&pool, TicketEventKind::Scheduled), [1, 2, 3, 4]);
+    assert_eq!(snap.state.tickets["01"], TicketStatus::Done);
 }

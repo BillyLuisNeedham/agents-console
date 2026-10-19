@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use ac_protocol::{SpawnAssignRequest, SpawnProposal, Station, TicketStatus};
+use ac_protocol::{SpawnAssignRequest, SpawnProposal, TicketStatus};
 use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde_json::Value;
@@ -64,9 +64,11 @@ pub struct TicketMarker {
     /// adopted it. It ranks under the operator's console.json assign entry for the id and over the
     /// parent's Assignment. The engine writes the field.
     pub spawn_assign: Option<SpawnAssignRequest>,
-    /// Set on a Line's Station Tickets (ADR-0037): which Station the Ticket is. The engine writes the
-    /// field when it routes the Line.
-    pub station: Option<Station>,
+    /// Set on a Line's Tickets (ADR-0040): the Plan node the Ticket belongs to. The engine writes the
+    /// field when it projects the Line.
+    pub node: Option<String>,
+    /// Set on a Line's hold Tickets, the bare word `hold`: answered, never run.
+    pub hold: bool,
 }
 
 impl AssignmentMarker for TicketMarker {
@@ -187,7 +189,8 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
             file.display()
         ));
     };
-    let fields = marker_fields(captures.get(1).map_or("", |m| m.as_str()));
+    let body = captures.get(1).map_or("", |m| m.as_str());
+    let fields = marker_fields(body);
     let Some(id) = field(&fields, "id").filter(|id| !id.is_empty()) else {
         return Err(anyhow!(
             "pool load: {}: marker is missing id=",
@@ -229,16 +232,8 @@ fn parse_marker_line(line: &str, file: &Path) -> Result<TicketMarker> {
         spawned_by: non_empty("spawned-by"),
         enlisted_from: non_empty("enlisted-from"),
         spawn_assign,
-        station: match field(&fields, "station").filter(|v| !v.is_empty()) {
-            None => None,
-            Some(raw) => Some(Station::parse(raw).ok_or_else(|| {
-                anyhow!(
-                    "pool load: {}: marker station must be one of implement|prove|review|decide|\
-                     finish, got '{raw}'",
-                    file.display()
-                )
-            })?),
-        },
+        node: non_empty("node"),
+        hold: js::words(body).any(|word| word == "hold"),
     })
 }
 
@@ -403,12 +398,6 @@ pub fn known_conversation_ids(pool_dir: &Path) -> Result<HashSet<String>> {
         .collect())
 }
 
-/// The pool's Tickets as every reader loads them: start, each boundary reload, and the server's
-/// pre-flight and per-snapshot meta. Two rules ride along with the parse, and they belong to every
-/// load or none: the pool's recorded Conversations are the known parents, and a pool with a
-/// conversations/ directory (even an empty one) loads an empty issues/ as zero Tickets.
-/// `allow_empty_issues` covers the one case that cannot infer itself: a Ticket-less pool asked to boot
-/// before its first Conversation has ever started and before the directory exists.
 pub fn load_pool_tickets(pool_dir: &Path, allow_empty_issues: bool) -> Result<Vec<TicketMarker>> {
     let known = known_conversation_ids(pool_dir)?;
     load_pool_markers(
@@ -441,10 +430,8 @@ pub fn spawn_ticket_text(parent_id: &str, id: &str, proposal: &SpawnProposal) ->
     format!(
         "<!-- state: id={id} blocked-by={blocked_by} status=ready spawned-by={parent_id}{assign} -->\n\n\
          # {id}: {}\n\n\
-         **Spawned by** ticket {parent_id} (ADR-0010): the engine wrote this ticket at the super-step \
-         boundary from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from \
-         here on: it schedules, verifies, and may itself spawn, and the operator can edit or kill it \
-         before it schedules.\n\n\
+         **Spawned by** ticket {parent_id} (ADR-0010): the engine wrote this ticket at a Tick from the \
+         attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it schedules, verifies, and may itself spawn.\n\n\
          {}\n",
         js::trim(&proposal.title),
         js::trim(&proposal.body)
@@ -560,6 +547,27 @@ mod tests {
             fs::write(dir.path().join(name), contents).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn a_line_ticket_carries_its_node_and_a_hold_the_bare_word_hold() {
+        let dir = temp();
+        let hold = read_marker(&temp_file(
+            &dir,
+            "<!-- state: id=finish-1 blocked-by=decide-1 status=checkpoint node=finish hold -->\n\n# Hold\n",
+        ))
+        .unwrap();
+        assert_eq!(hold.node.as_deref(), Some("finish"));
+        assert!(hold.hold);
+        let copy = read_marker(&temp_file(
+            &dir,
+            "<!-- state: id=implement-1 blocked-by=none status=ready node=implement -->\n\n# Copy\n",
+        ))
+        .unwrap();
+        assert_eq!(copy.node.as_deref(), Some("implement"));
+        assert!(!copy.hold);
+        let plain = read_marker(&temp_file(&dir, &format!("{MARKER}\n\n# Plain\n"))).unwrap();
+        assert_eq!((plain.node, plain.hold), (None, false));
     }
 
     fn assign(
@@ -1080,9 +1088,9 @@ mod tests {
             format!(
                 "<!-- state: id=01-spawn-1 blocked-by=none status=ready spawned-by=01 spawn-assign={token} -->\n\n\
                  # 01-spawn-1: Tidy up\n\n\
-                 **Spawned by** ticket 01 (ADR-0010): the engine wrote this ticket at the super-step boundary \
+                 **Spawned by** ticket 01 (ADR-0010): the engine wrote this ticket at a Tick \
                  from the attempt's Outcome proposal, engine-assigned id included. It is ordinary from here on: it \
-                 schedules, verifies, and may itself spawn, and the operator can edit or kill it before it schedules.\n\n\
+                 schedules, verifies, and may itself spawn.\n\n\
                  Make it tidy, every file of it.\n"
             )
         );

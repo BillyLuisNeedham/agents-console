@@ -66,6 +66,12 @@ interface ConflictSpec {
   resolverStub?: ConformanceStubBehaviour;
   /** 02's work per launch; default one commit of from-02 after 01 lands. */
   run02?: string | string[];
+  /**
+   * Add Ticket 04, held at launch until the case releases it, and Ticket 03
+   * blocked by it: 03 starts only once the case lets 04 end and merge, so
+   * after 02's conflict is raised. Not with `third`.
+   */
+  late?: boolean;
 }
 
 function conflictWorld(t: Case, spec: ConflictSpec = {}): World {
@@ -73,6 +79,12 @@ function conflictWorld(t: Case, spec: ConflictSpec = {}): World {
     { file: "01-t.md", marker: marker("01") },
     { file: "02-t.md", marker: marker("02") },
     ...(spec.third ? [{ file: "03-t.md", marker: marker("03", "02") }] : []),
+    ...(spec.late
+      ? [
+          { file: "03-t.md", marker: marker("03", "04") },
+          { file: "04-t.md", marker: marker("04") },
+        ]
+      : []),
   ];
   const world = t.world({
     tickets,
@@ -84,6 +96,7 @@ function conflictWorld(t: Case, spec: ConflictSpec = {}): World {
     run: spec.run02 ?? `${AFTER_01_MERGED}echo from-02 > shared.txt\ngit add -A\ngit commit -qm work-02`,
   });
   if (spec.third) world.stubs.script("03", { run: "echo three > three.txt\ngit add -A\ngit commit -qm work-03" });
+  if (spec.late) world.stubs.script("03", { run: "echo three > three.txt\ngit add -A\ngit commit -qm work-03" });
   if (spec.resolverStub) world.stubs.script("02.resolver", spec.resolverStub);
   return world;
 }
@@ -280,7 +293,7 @@ conformance("merges", "a conflict runs the resolver in the parked worktree, hold
   const server = await t.start(world);
   const held = await untilInterrupt(server, "merge-approval");
 
-  // One Interrupt, the approval, whole; 03 waits behind the merge hold.
+  // One Interrupt, the approval, whole; 03 waits on its blocker's merge.
   expect(held.state.interrupts).toEqual([
     { ticketId: "02", kind: "merge-approval", body: approvalBody(world, "kept both lines") },
   ]);
@@ -469,4 +482,57 @@ conformance("merges", "approving a resolution after main moved on raises a manua
   const held = await untilInterrupt(server, "merge-conflict");
   expectOnlyManual(held, world, "the resolver's resolution did not merge cleanly on approval");
   expect(gitIn(world.repo, ["show", "main:shared.txt"])).toBe("moved-on-main\n");
+});
+
+conformance("merges", "a waiting merge conflict's Interrupt says how many Tickets started since it was raised, without changing its body", async (t) => {
+  const world = conflictWorld(t, { resolver: "none", late: true });
+  const four = world.stubs.hold("04", { run: "echo four > four.txt\ngit add -A\ngit commit -qm work-04" });
+  const server = await t.start(world);
+  const waiting = await untilInterrupt(server, "merge-conflict");
+  const raised = waiting.state.interrupts.find((i) => i.ticketId === "02")!;
+  expect(raised.startedSince, "nothing has started since the conflict was raised").toBeUndefined();
+  expect(cardOf(waiting, "03").status).toBe("ready");
+
+  await four.release();
+  const counted = await untilState(server, (s) => s.state.interrupts.some((i) => i.ticketId === "02" && i.startedSince !== undefined), {
+    ms: 30_000,
+    what: "02's conflict counting 03's start",
+  });
+  const launched = await until(
+    () => world.stubs.calls().map((call) => call.key).sort(),
+    (keys) => keys.length === 4,
+    { ms: 20_000, what: "03's launch" },
+  );
+  expect(launched).toEqual(["01", "02", "03", "04"]);
+  expect(counted.state.interrupts.find((i) => i.ticketId === "02")).toEqual({ ...raised, startedSince: 1 });
+  expect(eventShape(world, "02").filter(([kind]) => kind === "merge-conflict")).toEqual([["merge-conflict", 1]]);
+});
+
+conformance("merges", "a waiting merge conflict's count leaves out the grader and judge Tickets of a verify Ticket that started and finished during the wait", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "01-t.md", marker: marker("01") },
+      { file: "02-t.md", marker: marker("02") },
+      { file: "04-t.md", marker: marker("04") },
+      { file: "05-t.md", marker: marker("05", "04") },
+    ],
+    config: { defaults: { harness: "claude", model: "m" }, resolver: "none", assign: { "05": { verify: 2 } } },
+    repoFiles: { "shared.txt": "base\n" },
+  });
+  world.stubs.script("01", { run: "echo from-01 > shared.txt\ngit add -A\ngit commit -qm work-01" });
+  world.stubs.script("02", { run: `${AFTER_01_MERGED}echo from-02 > shared.txt\ngit add -A\ngit commit -qm work-02` });
+  const four = world.stubs.hold("04", { run: "echo four > four.txt\ngit add -A\ngit commit -qm work-04" });
+  for (const n of [1, 2]) world.stubs.script(`05.attempt-${n}`, { work: { file: `cand-${n}.txt`, message: `cand-${n}` } });
+  const server = await t.start(world);
+  await untilInterrupt(server, "merge-conflict");
+
+  await four.release();
+  const finished = await untilState(server, (s) => cardOf(s, "05").status === "done", {
+    ms: 60_000,
+    what: "05 graded, judged and merged",
+  });
+
+  expect(readEvents(world.pool, "05-grader-1").some((e) => e.kind === "scheduled"), "the graders were scheduled").toBe(true);
+  expect(readEvents(world.pool, "05-head-to-head").some((e) => e.kind === "scheduled"), "the judge was scheduled").toBe(true);
+  expect(finished.state.interrupts.find((i) => i.ticketId === "02")!.startedSince, "only 05 started").toBe(1);
 });

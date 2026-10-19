@@ -1,0 +1,14 @@
+{
+  "horde": 1,
+  "name": "Matt Pocock · Quick",
+  "author": "Matt Pocock",
+  "source": "skills/engineering/implement/SKILL.md",
+  "note": "The on-ramp when no spec is needed: implement right here, which runs tdd at pre-agreed seams and then code-review before it commits, all in one node.",
+  "nodes": [
+    {"kind":"agent","id":"implement","title":"Implement","x":40,"y":60,"skill":"implement","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"operator","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":340,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"implement","on":"done","to":"finish"}
+  ]
+}

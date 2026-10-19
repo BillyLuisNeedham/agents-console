@@ -98,7 +98,7 @@ conformance(
 // engine/reassign-routes.test.ts:113
 conformance(
   "config",
-  "the snapshot's Reassign rows › merges over a hand edit made since the last boundary",
+  "the snapshot's Reassign rows › merges over a hand edit made since the last Tick",
   async (t) => {
     const world = heldWorld(t);
     const server = await t.start(world);

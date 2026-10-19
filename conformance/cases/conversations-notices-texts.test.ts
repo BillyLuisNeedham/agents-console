@@ -55,13 +55,7 @@ conformance(
     const parent = await startConversation(server, { title: "Planner" });
     const before = world.git(["rev-parse", "main"]).trim();
 
-    // Two at once, so each runs in a worktree of its own: a lone Ticket runs
-    // in the pool checkout and has no branch to merge. The second pauses,
-    // which ends the super-step the merge waits for.
-    proposeSpawns(world, "conv-1", [
-      { title: "Add a line", body: BODY },
-      { title: "Pause after", body: BODY },
-    ]);
+    proposeSpawns(world, "conv-1", [{ title: "Add a line", body: BODY }]);
     await answerPrompt(herdr, "conv-1-spawn-1", doneOutcome(), {
       ms: 30_000,
       // The agent's work: a.txt, committed on the Ticket's own branch.
@@ -76,14 +70,10 @@ conformance(
       ms: 30_000,
       what: "conv-1-spawn-1 done",
     });
-    await answerPrompt(herdr, "conv-1-spawn-2", checkpointOutcome("later"), { ms: 30_000 });
     await untilEvent(world, "conv-1-spawn-1", (e) => e.kind === "merged", "conv-1-spawn-1 merged");
-    await untilEvent(world, "conv-1-spawn-2", (e) => e.kind === "checkpoint", "conv-1-spawn-2's checkpoint");
     await show(herdr, parent.paneId!, IDLE);
 
-    // The pause is told at its exit and the merge at the super-step's end,
-    // so which is typed first is left open: each is matched whole.
-    const typed = (await untilNoticesInto(herdr, parent.paneId!, 2)).sort();
+    const typed = await untilNoticesInto(herdr, parent.paneId!, 1);
     // git's own stat of what the merge brought onto main, trimmed.
     const diff = world.git(["diff", "--stat", `${before}..main`]).trim();
     expect(diff).toContain("a.txt");
@@ -94,17 +84,7 @@ conformance(
       branch: ticketWorktree(world.repo, "conv-1-spawn-1").branch,
       diff,
     });
-    expectNotices(typed, [
-      done,
-      ticketEndedText({
-        id: "conv-1-spawn-2",
-        title: "conv-1-spawn-2: Pause after",
-        outcome: "checkpoint",
-        brief: "later",
-        branch: ticketWorktree(world.repo, "conv-1-spawn-2").branch,
-        diff: "(no changes)",
-      }),
-    ]);
+    expectNotices(typed, [done]);
     expect(done).not.toContain("Brief:");
   },
   { timeoutMs: 120_000 },

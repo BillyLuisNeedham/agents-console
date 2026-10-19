@@ -150,7 +150,7 @@ fn client_frames() {
         r#"{"type":"request","id":10,"kind":"log.read","payload":{"id":"01","attempt":1,"offset":0,"end":4096,"stream":true}}"#,
         r#"{"type":"request","id":11,"kind":"log.follow","payload":{"id":"01","attempt":null,"stream":false}}"#,
         r#"{"type":"request","id":12,"kind":"poolLog.read","payload":{"before":500,"limit":200}}"#,
-        r#"{"type":"request","id":13,"kind":"spawns.pending.hold","payload":{"id":"01-spawn-2"}}"#,
+        r#"{"type":"request","id":13,"kind":"spawns.held.adopt","payload":{"id":"01-spawn-2"}}"#,
         r#"{"type":"request","id":14,"kind":"keepTalking","payload":{"ticketId":"02"}}"#,
     ];
     for frame in frames {
@@ -205,7 +205,7 @@ fn a_reply_names_its_kind() {
             .iter()
             .filter(|kind| kind.is_action())
             .count(),
-        17
+        19
     );
 }
 
@@ -226,7 +226,6 @@ fn per_ticket_reads() {
     round_trip::<KeepTalkingResponse>(r#"{"ticketId":"02","attempt":2}"#);
     round_trip::<CloseFinishedTerminalsResponse>(r#"{"closed":0}"#);
     round_trip::<HeldSpawnResponse>(r#"{"id":"01-spawn-3"}"#);
-    round_trip::<PendingSpawnResponse>(r#"{"id":"01-spawn-2"}"#);
     round_trip::<TerminalFocusResponse>(r#"{"ok":true,"paneId":"p-7"}"#);
 }
 
@@ -247,7 +246,7 @@ fn settings() {
 #[test]
 fn pool_config_as_console_json_writes_it() {
     let config: PoolConfig = round_trip(
-        r#"{"defaults":{"harness":"claude","model":"opus","effort":"high","drivers":"implement"},"assign":{"01":{"model":"sonnet","verify":2}},"resolver":{"harness":"codex","model":"gpt-5"},"port":8787,"spawnCaps":{"perRun":10},"selection":"human","terminal":"herdr","reviewer":"Be strict.","checkpoint":"Ask early.","title":"Pool A","steward":{"budget":5,"assign":{"model":"haiku"},"mayClose":false}}"#,
+        r#"{"defaults":{"harness":"claude","model":"opus","effort":"high","drivers":"implement"},"assign":{"01":{"model":"sonnet","verify":2}},"resolver":{"harness":"codex","model":"gpt-5"},"port":8787,"spawnCaps":{"perRun":10},"maxLive":2,"selection":"human","terminal":"herdr","reviewer":"Be strict.","checkpoint":"Ask early.","title":"Pool A","steward":{"budget":5,"assign":{"model":"haiku"},"mayClose":false}}"#,
     );
     assert_eq!(
         config.resolver,
@@ -257,6 +256,7 @@ fn pool_config_as_console_json_writes_it() {
             effort: None,
         }))
     );
+    assert_eq!(config.max_live, Some(2));
     round_trip::<PoolConfig>(r#"{"resolver":"none"}"#);
     round_trip::<PoolConfig>(r#"{}"#);
 }
@@ -306,7 +306,7 @@ fn the_steward() {
         r#"{"conversation":"conv-1","ticketId":"02","note":"yours"}"#,
     );
     round_trip::<StewardStateResponse>(
-        r#"{"steward":"conv-1","budget":5,"mayClose":false,"mayAdoptLineSpawns":false,"phase":"running","interrupts":[{"ticketId":"02","title":"","kind":"checkpoint","answerable":true,"keepTalking":true,"queued":false,"note":null,"used":1,"remaining":4},{"ticketId":"conv-2","title":null,"kind":"merge-approval","answerable":false,"keepTalking":false,"queued":true,"note":"wait","used":0,"remaining":5}],"mergeQueue":[{"ticketId":"03","state":"queued"}],"pendingSpawns":[{"id":"01-spawn-2","parentId":"01","title":"Tidy up"}],"heldSpawns":[{"id":"01-spawn-3","parentId":"01","title":"Follow up","reason":"per-run"}],"ledger":"/p/runs/spawn-ledger.md"}"#,
+        r#"{"steward":"conv-1","budget":5,"mayClose":false,"mayAdoptLineSpawns":false,"phase":"running","interrupts":[{"ticketId":"02","title":"","kind":"checkpoint","answerable":true,"keepTalking":true,"queued":false,"note":null,"used":1,"remaining":4},{"ticketId":"conv-2","title":null,"kind":"merge-approval","answerable":false,"keepTalking":false,"queued":true,"note":"wait","used":0,"remaining":5}],"mergeQueue":[{"ticketId":"03","state":"queued"}],"pendingSpawns":[{"id":"01-spawn-2","parentId":"01","title":"Tidy up"}],"heldSpawns":[{"id":"01-spawn-3","parentId":"01","title":"Follow up","reason":"per-run"}],"line":{"rev":3,"parked":[{"node":"test","verdicts":["fail"]}]},"ledger":"/p/runs/spawn-ledger.md"}"#,
     );
     round_trip::<StewardConfig>(r#"{"budget":0}"#);
 }
@@ -319,8 +319,8 @@ fn requests_from_the_console_and_the_cli() {
     round_trip::<ResumeRequest>(r#"{"ticketId":"02","action":"resume"}"#);
     round_trip::<KeepTalkingRequest>(r#"{"ticketId":"02"}"#);
     round_trip::<HeldSpawnRequest>(r#"{"id":"x"}"#);
-    round_trip::<PendingSpawnRequest>(r#"{"id":"x"}"#);
     round_trip::<EndConversationRequest>(r#"{"id":"conv-1"}"#);
+    round_trip::<EndConversationRequest>(r#"{"id":"grill-1","close":true}"#);
     round_trip::<LogReadRequest>(r#"{"id":"01","offset":0}"#);
     round_trip::<PoolLogReadRequest>(r#"{"before":0}"#);
     round_trip::<CardSubscription>(r#"{"id":"01"}"#);
@@ -339,7 +339,7 @@ fn every_string_union_reads_its_own_strings() {
             Value::String(kind.as_str().to_string())
         );
     }
-    assert_eq!(TicketEventKind::ALL.len(), 36);
+    assert_eq!(TicketEventKind::ALL.len(), 37);
     assert_eq!(
         TicketStatus::parse("in-progress"),
         Some(TicketStatus::InProgress)

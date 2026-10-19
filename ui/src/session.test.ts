@@ -127,6 +127,7 @@ function heldSpawnView(id: string): HeldSpawnView {
     blocks: null,
     overlaps: [],
     unknownOverlaps: [],
+    startedIds: [],
     reason: "per-run",
     at: "2026-09-29T10:00:00Z",
     adopting: false,

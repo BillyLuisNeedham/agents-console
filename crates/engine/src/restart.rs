@@ -1,11 +1,10 @@
 //! Restart (engine.ts 2407-2440, 2518-2891, 3232-3935): the boot notes, headless and terminal
-//! orphans, terminal adoption and its finalize, and deferred merges. `rehydrate` itself is ported in
+//! orphans, and terminal adoption and its finalize. `rehydrate` itself is ported in
 //! [`crate::boot`].
 //!
 //! What a previous engine process left behind is settled here before the drive schedules anything:
 //! a headless attempt still running is stopped (ADR-0017), a terminal-backed attempt whose pane is
-//! still alive is re-adopted and its ending recorded when it comes (ADR-0014), and a merge a shutdown
-//! dropped at the pool checkout's gate is chained again (ADR-0027).
+//! still alive is re-adopted and its ending recorded when it comes (ADR-0014).
 //!
 //! Some of what adoption calls belongs to other ports (the Continued attempts, the enlisted runtime).
 //! Those calls go through the small functions in [`peers`], each named for the TypeScript it stands
@@ -15,8 +14,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use futures::FutureExt;
-use futures::future::{BoxFuture, Shared, join_all};
+use futures::future::join_all;
 use serde_json::{Map, Value};
 
 use ac_core::assignment::engine_ticket_build_id;
@@ -42,17 +40,14 @@ use crate::attempt_run::{
     start_pane_stream_tail,
 };
 use crate::boot::engine_reset_note;
-use crate::checkout_gate::{DeferredMerge, through_pool_checkout_gate};
 use crate::interrupts::{
     ENGINE_BRIEF_HEADING, interrupt, land_checkpoint_brief, raise_checkpoint, raise_interrupt,
 };
 use crate::live_attempts::{self, LiveAttemptEntry};
-use crate::merges::{
-    handle_merge_conflict, merge_target_ref, merge_target_sha, merge_ticket, merged_payload,
-};
+use crate::merges::chain_ticket_merge;
 use crate::session::{AdoptedAttempt, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::tickets::{CrashFacts, close_attempt_tab, crash_interrupt_body};
+use crate::tickets::{CrashFacts, crash_interrupt_body};
 
 /// A headless attempt a previous engine process spawned and never saw exit, still alive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,22 +271,10 @@ enum MarkerStep {
 /// interrupt up. Never fails: reconciliation is advisory boot work, and a daemon that cannot be asked
 /// changes nothing about the pool's ordinary recovery.
 pub async fn reconcile_terminal_attempts(engine: &Engine) {
-    let _ = reconcile(engine, false).await;
+    let _ = reconcile(engine).await;
 }
 
-/// [`reconcile_terminal_attempts`] followed by [`redo_deferred_merges`], for a boot with nothing else
-/// to reconcile: the TypeScript runs the second in the microtasks after the first, so nothing sees the
-/// adoption without the merges taken on beside it, and here the last stretch of the reconciliation
-/// takes them on in the same job. Fails only when the engine is gone.
-pub async fn reconcile_terminal_attempts_then_redo_merges(engine: &Engine) -> anyhow::Result<()> {
-    if !reconcile(engine, true).await.unwrap_or(false) {
-        engine.call(redo_deferred_merges).await?;
-    }
-    Ok(())
-}
-
-// Whether the deferred merges were redone, in the last job of the reconciliation.
-async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
+async fn reconcile(engine: &Engine) -> anyhow::Result<()> {
     let (terminal_backed, socket, workspace) = engine
         .call(|s| {
             (
@@ -302,7 +285,7 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
         })
         .await?;
     if !terminal_backed {
-        return Ok(false);
+        return Ok(());
     }
     let herdr = Herdr::new(&socket);
     // Scoped to the Pool workspace when there is one (issue #94): this pool's orphans can only be in
@@ -315,7 +298,7 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
                 ]))
             })
             .await?;
-        return Ok(false);
+        return Ok(());
     };
     let live: HashSet<String> = live.into_iter().collect();
     // An enlisted pane is the one orphan the scoped listing cannot answer for (issue #101): the
@@ -328,10 +311,10 @@ async fn reconcile(engine: &Engine, then_redo: bool) -> anyhow::Result<bool> {
     loop {
         let (taken, live) = (pass, live.clone());
         let next = engine
-            .call(move |s| reconcile_markers(s, &live, taken, then_redo))
+            .call(move |s| reconcile_markers(s, &live, taken))
             .await??;
         let (pane_id, resumed) = match next {
-            Reconciled::Finished => return Ok(then_redo),
+            Reconciled::Finished => return Ok(()),
             Reconciled::NeedsEnlistedLiveness { pane_id, pass } => (pane_id, pass),
         };
         let is_live = if let Some(panes) = &enlisted_panes {
@@ -378,7 +361,6 @@ fn reconcile_markers(
     session: &mut Session,
     live: &HashSet<String>,
     mut pass: Pass,
-    then_redo: bool,
 ) -> anyhow::Result<Reconciled> {
     while pass.next < session.markers.len() {
         let id = session.markers[pass.next].id.clone();
@@ -398,9 +380,6 @@ fn reconcile_markers(
     }
     if !pass.log.is_empty() {
         session.apply(PoolUpdate::log(pass.log));
-    }
-    if then_redo {
-        redo_deferred_merges(session);
     }
     Ok(Reconciled::Finished)
 }
@@ -430,7 +409,10 @@ fn reconcile_marker(
             .interrupts
             .iter()
             .any(|i| i.ticket_id == id && i.kind == InterruptKind::Checkpoint);
-    if marker.status != TicketStatus::Ready && !mid_adoption {
+    // An engine-run ticket's orphan is never adopted, whatever its marker says: rehydrate closes a
+    // head-to-head card done rather than ready, and its dead judge's pane still needs releasing.
+    if marker.status != TicketStatus::Ready && !mid_adoption && engine_ticket_build_id(id).is_none()
+    {
         return Ok((MarkerStep::Done, log));
     }
     if !terminal_adoptable(session, id, orphan.attempt) {
@@ -1012,8 +994,8 @@ pub fn record_adopted_exit(
     outcome_path: &str,
     what: &str,
 ) -> anyhow::Result<()> {
-    // A Line's Station ending here is checked for its verdict as a launched one is (ADR-0037).
-    let check = crate::line::verdict_check_for(session, marker);
+    // A Line Ticket ending here is checked for its verdict as a launched one is (ADR-0037).
+    let check = crate::line::outcome_check_for(session, marker);
     let checked_decision;
     let decision = match (&check, &decision.result) {
         (Some(check), Ok(valid)) => {
@@ -1144,116 +1126,13 @@ pub fn record_adopted_exit(
         )
         .ok
     {
-        // The merge chains onto the session merge chain: the drive's merges wait for it and it waits
-        // for them, so two git merges never run concurrently on the main checkout. The kick below runs
-        // only once the chain settles, so a resumed drive's closing gate can never raise the Review
-        // interrupt ahead of this merge landing.
-        session.merge_line.taken(&id);
-        drop(merge_done_ticket(
-            session, current, worktree, attempt, what, true,
-        ));
+        chain_ticket_merge(session, current, worktree, attempt, Some(what));
     } else {
         finish_adopted_finalize(session);
     }
     Ok(())
 }
 
-/// A merge chained onto the session's merge chain, settled when the merge has run.
-pub type MergeLink = Shared<BoxFuture<'static, Result<(), String>>>;
-
-/// `mergeDoneTicket`: merge a done ticket's worktree branch off the drive loop: an adopted or a
-/// Continued attempt's ending, or a merge a shutdown dropped at the pool checkout's gate and the next
-/// boot takes up again (ADR-0027). It chains onto the session merge chain, so two git merges never run
-/// at once on the main checkout, passes the gate inside its link, and records the merge exactly as the
-/// drive's own merges do: the merged event, the tab close, the done-Notice, the pool log; a conflict
-/// goes to the resolver machinery. With `finish` the link ends in [`finish_adopted_finalize`], however
-/// the merge went.
-pub fn merge_done_ticket(
-    session: &mut Session,
-    marker: TicketMarker,
-    worktree: WorktreeInfo,
-    attempt: u64,
-    what: &str,
-    finish: bool,
-) -> MergeLink {
-    let engine = session.engine();
-    let previous = session.merge_chain.clone();
-    let what = what.to_owned();
-    let link_engine = engine.clone();
-    let link: MergeLink = async move {
-        previous.await;
-        merge_link(&link_engine, marker, worktree, attempt, what).await
-    }
-    .boxed()
-    .shared();
-    session.merge_chain = link.clone().map(drop).boxed().shared();
-    let driven = link.clone();
-    tokio::spawn(async move {
-        let _ = driven.await;
-        if finish {
-            let _ = engine.call(finish_adopted_finalize).await;
-        }
-    });
-    link
-}
-
-// The merge inside its link: through the gate, recorded as the drive's own merges are, a conflict to the
-// resolver.
-async fn merge_link(
-    engine: &Engine,
-    marker: TicketMarker,
-    worktree: WorktreeInfo,
-    attempt: u64,
-    what: String,
-) -> Result<(), String> {
-    let deferred = DeferredMerge {
-        ticket_id: marker.id.clone(),
-        path: worktree.path.clone(),
-        branch: worktree.branch.clone(),
-        attempt,
-    };
-    let (merge_marker, merge_worktree) = (marker.clone(), worktree);
-    let passed = through_pool_checkout_gate(engine, Some(deferred), move |s| {
-        let (marker, worktree) = (merge_marker, merge_worktree);
-        // Captured inside the serialized chain, right before the merge: HEAD may have moved since this
-        // ticket's attempt ended (another merge landing first), and merge_ticket removes this branch
-        // on success, so the range for a done-Notice's diff summary has to be taken here or not at all.
-        let before_sha = merge_target_sha(s);
-        let merge = merge_ticket(s, &marker, &worktree)?;
-        if !merge.ok {
-            return Ok(Some(merge));
-        }
-        s.merge_line.settled(&marker.id);
-        append_event(
-            Path::new(&s.runs_dir),
-            &marker.id,
-            &event_now(attempt, TicketEventKind::Merged, merged_payload(&merge)),
-        )?;
-        close_attempt_tab(s, &marker.id, attempt);
-        let range =
-            (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(s)));
-        crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
-        s.apply(PoolUpdate::log([format!(
-            "ticket {}: {what} {attempt} merged {} onto the working branch",
-            marker.id, worktree.branch
-        )]));
-        Ok(None)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    if let Some(Some(merge)) = passed {
-        handle_merge_conflict(engine, marker, merge, attempt)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// `finishAdoptedFinalize`: the adopted finalize's last step, after its merge chain has settled: emit
-/// the new state, persist it, and kick a drive pass when the run had already settled (it was waiting
-/// quiescent on the adoption interrupt), so the closing gate, the ready set, and any queued answers see
-/// the attempt's real ending. The kick is a no-op while a drive is in flight; its boundary machinery
-/// picks the state up instead.
 pub fn finish_adopted_finalize(session: &mut Session) {
     let phase = if session.driving {
         RunPhase::Running
@@ -1261,103 +1140,7 @@ pub fn finish_adopted_finalize(session: &mut Session) {
         RunPhase::Quiescent
     };
     emit_snapshot(session, phase);
-    // The next boundary persist (or the persistence interrupt machinery) owns store failures; the
-    // finalize's record must not die on one.
-    let _ = crate::persist::persist(session);
-    if session.driving {
-        session.finalized_while_driving = true;
-    }
-    let _ = crate::answers::kick_processing(session);
-}
-
-// ---------------------------------------------------------------------------------------------------
-// Deferred merges (ADR-0027)
-// ---------------------------------------------------------------------------------------------------
-
-/// `redoDeferredMerges`: chain again every merge a shutdown dropped at the pool checkout's gate: a done
-/// ticket whose last `merge-deferred` has no merge record after it (merged, merge-conflict,
-/// merge-blocked, resolver) and no merge interrupt waiting. Through the ordinary path, so the merge
-/// passes the gate again (a re-adopted Continued attempt may still hold the checkout), lands or goes to
-/// the resolver machinery as any merge does, and takes its place in the Merge queue rather than
-/// standing there stalled.
-pub fn redo_deferred_merges(session: &mut Session) {
-    let mut taken = false;
-    for index in 0..session.markers.len() {
-        let marker = session.markers[index].clone();
-        if session.status_of(&marker.id) != Some(TicketStatus::Done) {
-            continue;
-        }
-        if session.state.interrupts.iter().any(|i| {
-            i.ticket_id == marker.id
-                && matches!(
-                    i.kind,
-                    InterruptKind::MergeConflict | InterruptKind::MergeApproval
-                )
-        }) {
-            continue;
-        }
-        let events = read_events(Path::new(&session.runs_dir), &marker.id);
-        let Some(deferred_at) = events
-            .iter()
-            .rposition(|event| event.kind == TicketEventKind::MergeDeferred)
-        else {
-            continue;
-        };
-        let settled = events.iter().skip(deferred_at + 1).any(|event| {
-            matches!(
-                event.kind,
-                TicketEventKind::Merged
-                    | TicketEventKind::MergeConflict
-                    | TicketEventKind::MergeBlocked
-                    | TicketEventKind::Resolver
-            )
-        });
-        if settled {
-            continue;
-        }
-        let deferred = &events[deferred_at];
-        // The ticket ran again since (a later attempt spawned): that attempt's own ending decides its
-        // merge, not this old record.
-        if events
-            .iter()
-            .skip(deferred_at + 1)
-            .any(|event| event.kind == TicketEventKind::Spawned && event.attempt > deferred.attempt)
-        {
-            continue;
-        }
-        let (Some(path), Some(branch)) = (
-            deferred.payload.get("path").and_then(Value::as_str),
-            deferred.payload.get("branch").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        let (path, branch) = (path.to_owned(), branch.to_owned());
-        session.apply(PoolUpdate::log([format!(
-            "ticket {}: merge dropped at the last shutdown chained again",
-            marker.id
-        )]));
-        if marker.enlisted_from.is_some() && session.enlisted_work.contains_key(&marker.id) {
-            peers::chain_enlisted_merge(session, &marker, deferred.attempt, &branch);
-            continue;
-        }
-        session.merge_line.taken(&marker.id);
-        taken = true;
-        drop(merge_done_ticket(
-            session,
-            marker,
-            WorktreeInfo { path, branch },
-            deferred.attempt,
-            "attempt",
-            true,
-        ));
-    }
-    // The Merge queue now has a place taken in it, which the TypeScript's drive shows in its next emit,
-    // a microtask away. Here the drive's next emit is a few jobs off, so a reader would see the
-    // adoption without the merges taken on beside it.
-    if taken {
-        let phase = session.current_phase();
-        emit_snapshot(session, phase);
-    }
+    session.wake();
 }
 
 /// What restart calls that belong to the ports of the Continued attempts and the enlisted runtime,
@@ -1420,16 +1203,6 @@ mod peers {
         attempt: u64,
     ) -> anyhow::Result<()> {
         crate::enlist_flow::end_enlisted_attempt(session, ticket_id, ending, Some(attempt))
-    }
-
-    /// `chainEnlistedMerge`.
-    pub fn chain_enlisted_merge(
-        session: &mut Session,
-        marker: &TicketMarker,
-        attempt: u64,
-        branch: &str,
-    ) {
-        crate::enlist_flow::chain_enlisted_merge(session, marker, attempt, branch);
     }
 
     /// What `session.enlisted.register` takes for a re-adopted pane: the pane was taught before the
@@ -1503,7 +1276,7 @@ mod tests {
     use ac_protocol::TicketEventKind as Kind;
 
     use super::*;
-    use crate::testkit::{Pool, Script, pool_git, settled, wait_for};
+    use crate::testkit::{Pool, settled, wait_for};
 
     fn orphan(attempt: u64, pid: u32) -> HeadlessOrphan {
         HeadlessOrphan {
@@ -1715,86 +1488,5 @@ mod tests {
             "attempt 1 (pid {pid}) was found still running in the working tree"
         )));
         crate::children::signal_group(elsewhere, nix::sys::signal::Signal::SIGKILL);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn boot_chains_again_a_merge_a_shutdown_dropped_at_the_gate() {
-        let pool = Pool::git(&[("01", &[])]);
-        pool.script("01", vec![Script::done("one")]);
-        let branch = ac_io::git::branch_for(&pool.path, "01", None);
-        let worktree = ac_io::git::worktree_path_for(&pool.path, "01", None);
-        pool_git(&pool, &["worktree", "add", "-q", "-b", &branch, &worktree]);
-        std::fs::write(format!("{worktree}/one.txt"), "one\n").unwrap();
-        for args in [
-            vec!["add", "one.txt"],
-            vec![
-                "-c",
-                "user.email=t@e.com",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-qm",
-                "one",
-            ],
-        ] {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&worktree)
-                .args(&args)
-                .output()
-                .unwrap();
-            assert!(out.status.success());
-        }
-        set_status(&pool, "issues/01.md", "ready", "done");
-        std::fs::create_dir_all(pool.file("runs")).unwrap();
-        let event = |attempt: u64, kind: &str, payload: serde_json::Value| {
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "at": "2026-10-04T09:00:00.000Z",
-                    "attempt": attempt,
-                    "kind": kind,
-                    "payload": payload,
-                })
-            )
-        };
-        std::fs::write(
-            pool.file("runs/01.events.jsonl"),
-            [
-                spawned_event(1, serde_json::json!({ "cwd": worktree, "branch": branch })),
-                event(
-                    1,
-                    "exited",
-                    serde_json::json!({ "code": 0, "status": "done" }),
-                ),
-                event(
-                    1,
-                    "merge-deferred",
-                    serde_json::json!({ "path": worktree, "branch": branch }),
-                ),
-            ]
-            .concat(),
-        )
-        .unwrap();
-        let engine = pool.start().await;
-        let snapshot = wait_for(&engine, |s| {
-            s.state.log.iter().any(|l| l.contains("attempt 1 merged"))
-        })
-        .await;
-        assert!(
-            snapshot.state.log.contains(
-                &"ticket 01: merge dropped at the last shutdown chained again".to_owned()
-            )
-        );
-        assert!(snapshot.state.log.contains(&format!(
-            "ticket 01: attempt 1 merged {branch} onto the working branch"
-        )));
-        assert!(pool.file("one.txt").exists());
-        assert_eq!(
-            pool.kinds("01").last().copied(),
-            Some(Kind::Merged),
-            "{:?}",
-            pool.kinds("01")
-        );
     }
 }

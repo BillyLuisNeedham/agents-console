@@ -31,7 +31,6 @@ import {
   type DetailTabView,
   type DetailView,
   type HeldSpawnRow,
-  type PendingSpawnRow,
   type ResumeAction,
   type SpawnDetailView,
   type InterruptView,
@@ -51,7 +50,7 @@ import { h } from "./dom";
 import { keep, placed } from "./morph";
 import { DRAFT_TICKET_ATTR, type DraftAnswers } from "./drafts";
 import { renderStewardBadge, renderStewardNote } from "./steward";
-import { renderDeliveryWarning, renderGrillBadge } from "./conversations";
+import { offersEndAsClosed, renderDeliveryWarning, renderNodeBadge } from "./conversations";
 import { EFFORT_NOT_APPLIED_TITLE, effortInput, effortText, effortValue } from "./effort";
 
 // One global localStorage key (not per pool) remembers the dragged width
@@ -89,12 +88,10 @@ export interface DetailHandlers {
    *  the Needs input row's both show it. */
   onUseStewardNote: (ticketId: string, text: string) => void;
   onSelectTab: (ticketId: string, tab: DetailTab) => void;
-  /** A Conversation's End: fire-and-forget, mirroring onAnswer. The
-   *  Conversations store tracks the in-flight/failure state on `endView`. */
-  onEndConversation: (conversationId: string, closing?: string) => void;
-  /** Start the Line on a Grill (ADR-0037): fire-and-forget like End; the
-   *  store tracks the in-flight/refusal state on `lineStart`. */
-  onStartLine: (grillId: string) => void;
+  /** A Conversation's End, or End as closed with `close` (merging nothing):
+   *  fire-and-forget, mirroring onAnswer. The Conversations store tracks the
+   *  in-flight/failure state on `endView`. */
+  onEndConversation: (conversationId: string, closing?: string, close?: boolean) => void;
   /** "Open in herdr" on a Conversation's terminal peek. */
   onFocusConversationTerminal: (conversationId: string) => Promise<boolean>;
   /** "open resolver" on a ticket whose merge a resolver is resolving
@@ -108,14 +105,11 @@ export interface DetailHandlers {
    */
   reassign: ReassignStore;
   /**
-   * A Pending or Held spawn's decisions (issue #150): Hold and Discard, or
-   * Adopt and Discard, drawn by the Spawns list's store so the Detail and
-   * the list share one in-flight and refusal state.
+   * A Held spawn's decisions (issue #150): Adopt and Discard, drawn by the
+   * Spawns list's store so the Detail and the list share one in-flight and
+   * refusal state.
    */
-  renderSpawnDecision: (
-    row: PendingSpawnRow | HeldSpawnRow,
-    state: "pending" | "held",
-  ) => HTMLElement;
+  renderSpawnDecision: (row: HeldSpawnRow) => HTMLElement;
 }
 
 export class Detail {
@@ -317,7 +311,8 @@ export class Detail {
   // checkpoint offers one Adopt per finished Candidate (ADR-0035), scored
   // from the timeline's graded events when it has them, each sending the
   // note. A Steward note (ADR-0030) sits above the note field, with "Use as
-  // answer" to take it as the draft.
+  // answer" to take it as the draft. A waiting merge conflict says under its
+  // body how many Tickets started since it was raised (ADR-0041).
   private renderInterrupt(
     interrupt: InterruptView,
     handlers: DetailHandlers,
@@ -328,9 +323,12 @@ export class Detail {
       { class: interrupt.queued ? "interrupt-box interrupt-box-queued" : "interrupt-box" },
       h("span", { class: "interrupt-kind" }, interrupt.form.title),
       h("pre", { class: "interrupt-body" }, interrupt.body || "(no details)"),
+      interrupt.startedSince
+        ? h("div", { class: "interrupt-started-since" }, startedSinceLine(interrupt.startedSince))
+        : null,
     );
     // Answered-and-waiting: the answer is recorded and will be applied at the
-    // next super-step boundary, so the form steps aside for the waiting line.
+    // next Tick, so the form steps aside for the waiting line.
     // The interrupt stays on the card until processing clears it.
     if (interrupt.queued) {
       box.append(
@@ -338,7 +336,7 @@ export class Detail {
           "div",
           { class: "interrupt-waiting" },
           (interrupt.closing ? "closing" : "answered") +
-            " · waiting for the next super-step boundary",
+            " · waiting for the next Tick",
         ),
       );
       return box;
@@ -983,16 +981,15 @@ export class Detail {
     return panel;
   }
 
-  // The report Decide wrote at the Line's Finish (ADR-0037), under the Finish
-  // checkpoint it is read beside, framed whole with a way out to a tab of
-  // its own. The Round rides the address so a later Round's report is
-  // fetched afresh rather than from the cache. Moving an iframe reloads it,
-  // so the frame and its section are keyed and nothing before the frame
-  // inside the section comes or goes; the panel above it only reshapes when
-  // the checkpoint is answered. The report is an agent's HTML: the frame is
-  // sandboxed, so it runs no script and is not of the Console's origin.
+  // The report a Decide pass wrote (ADR-0040), under its Ticket, framed whole
+  // with a way out to a tab of its own. The pass rides the address so a later
+  // pass's report is fetched afresh rather than from the cache. Moving an
+  // iframe reloads it, so the frame and its section are keyed and nothing
+  // before the frame inside the section comes or goes. The report is an
+  // agent's HTML: the frame is sandboxed, so it runs no script and is not of
+  // the Console's origin.
   private renderReport(report: LineReportView): HTMLElement {
-    const src = `/api/line/report?round=${report.round}`;
+    const src = `/api/line/report?node=${encodeURIComponent(report.node)}&pass=${report.pass}`;
     return h(
       "section",
       { class: "detail-report", key: "detail-report" },
@@ -1078,7 +1075,7 @@ export class Detail {
   // -------------------------------------------------------------------------
 
   // The ticket's Assignment, editable when the engine says a write would
-  // take effect at the next boundary and read-only with its one-line reason
+  // take effect at the next Tick and read-only with its one-line reason
   // when it would not. Each field carries the pill that says where its value
   // came from, so the operator can see at a glance whether editing the pool
   // defaults would move this ticket or whether it is pinned away from them.
@@ -1408,7 +1405,7 @@ export class Detail {
       "div",
       { class: "detail-body conversation-detail" },
       detail.steward ? renderStewardBadge() : null,
-      detail.grill ? renderGrillBadge() : null,
+      detail.node ? renderNodeBadge(detail.node) : null,
       detail.delivery ? renderDeliveryWarning(detail.delivery, { showError: true }) : null,
       h("div", { class: "dim" }, "assignment"),
       h(
@@ -1467,51 +1464,10 @@ export class Detail {
     if (model.logPane && !model.logPane.neverRun) {
       panel.append(this.renderLogPane(model.logPane, detail.conversationId, handlers));
     }
-    if (detail.status === "live" && detail.grill && !detail.endView.ending) {
-      panel.append(this.renderStartLine(detail, handlers));
-    }
     if (detail.status === "live") {
       panel.append(this.renderConversationEnd(detail, handlers));
     }
     return panel;
-  }
-
-  // Start the Line on a live Grill (ADR-0037): the engine reads the Line
-  // brief off the Grill's branch, merges it, writes the Line's first Ticket
-  // and ends the Grill, so there is no End to press after it. A refusal
-  // (no brief, a Line already started) stands beneath until the next press.
-  private renderStartLine(
-    detail: ConversationDetailView,
-    handlers: DetailHandlers,
-  ): HTMLElement {
-    const box = h(
-      "div",
-      { class: "interrupt-box conversation-end-box conversation-line-box" },
-      h(
-        "div",
-        { class: "dim" },
-        "hand the Line brief on: the Grill's branch merges, the Line's first Ticket starts and the Grill ends",
-      ),
-      h(
-        "div",
-        { class: "interrupt-actions" },
-        h(
-          "button",
-          {
-            class: "btn btn-primary conversation-start-line",
-            disabled: detail.lineStart.starting,
-            onclick: () => handlers.onStartLine(detail.conversationId),
-          },
-          detail.lineStart.starting ? "starting..." : "Start the Line",
-        ),
-      ),
-    );
-    if (detail.lineStart.failure) {
-      box.append(
-        h("div", { class: "error-inline conversation-start-line-failure" }, detail.lineStart.failure),
-      );
-    }
-    return box;
   }
 
   // End with an optional closing line: the operator's word to the
@@ -1534,6 +1490,12 @@ export class Detail {
         );
       },
     });
+    const end = (close?: boolean) =>
+      handlers.onEndConversation(
+        detail.conversationId,
+        closing.value.trim() || undefined,
+        close,
+      );
     const box = h(
       "div",
       { class: "interrupt-box conversation-end-box" },
@@ -1546,15 +1508,21 @@ export class Detail {
           {
             class: "btn btn-danger",
             disabled: detail.endView.ending,
-            onclick: () => {
-              handlers.onEndConversation(
-                detail.conversationId,
-                closing.value.trim() || undefined,
-              );
-            },
+            onclick: () => end(),
           },
           detail.endView.ending ? "ending..." : "End",
         ),
+        offersEndAsClosed(detail)
+          ? h(
+              "button",
+              {
+                class: "btn conversation-end-closed",
+                title: "end this conversation, merging nothing",
+                onclick: () => end(true),
+              },
+              "End as closed",
+            )
+          : null,
       ),
     );
     if (detail.endView.failure) {
@@ -1563,7 +1531,7 @@ export class Detail {
     return box;
   }
 
-  // A Pending or Held spawn's Detail (issue #150): the proposal whole, and
+  // A Held spawn's Detail (issue #150): the proposal whole, and
   // the Spawns list's own decisions, so the two never disagree about one in
   // flight. No Peek, logs or Assignment: it is not in the pool yet.
   private renderSpawnDetail(detail: SpawnDetailView, handlers: DetailHandlers): HTMLElement {
@@ -1582,8 +1550,8 @@ export class Detail {
       { class: "detail-body spawn-detail" },
       h(
         "div",
-        { class: `spawn-detail-state spawn-detail-${detail.state}` },
-        `${detail.state === "pending" ? "Pending" : "Held"} spawn · ${detail.label}`,
+        { class: "spawn-detail-state spawn-detail-held" },
+        `Held spawn · ${detail.label}`,
       ),
       ...field("title", detail.title),
       ...field("from", detail.parentId),
@@ -1593,7 +1561,7 @@ export class Detail {
       ...(detail.overlaps.length > 0 ? field("overlaps", detail.overlaps.join(", ")) : []),
       h("div", { class: "dim" }, "body"),
       h("div", { class: "card-text spawn-detail-body" }, detail.body),
-      handlers.renderSpawnDecision(detail.row, detail.state),
+      handlers.renderSpawnDecision(detail.row),
     );
   }
 
@@ -1679,6 +1647,12 @@ export class Detail {
 
 function currentMaxPx(): number {
   return Math.round(window.innerWidth * DETAIL_MAX_FRACTION);
+}
+
+function startedSinceLine(count: number): string {
+  return count === 1
+    ? "1 Ticket has started since this conflict was raised."
+    : `${count} Tickets have started since this conflict was raised.`;
 }
 
 // The interrupt note's morph key, which is also how settleNoteFocus finds

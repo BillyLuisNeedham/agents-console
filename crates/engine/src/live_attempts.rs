@@ -59,9 +59,6 @@ pub struct LiveAttempts {
 }
 
 impl LiveAttempts {
-    /// `createLiveAttempts(onChange)`: an empty registry whose changes run `on_change`, so the engine
-    /// can emit a snapshot the moment a pane becomes reachable or stops being so, instead of at the
-    /// next boundary.
     pub fn new(on_change: Option<LiveChangeHook>) -> Self {
         LiveAttempts {
             on_change,
@@ -135,6 +132,15 @@ impl LiveAttempts {
             }
         }
         out
+    }
+
+    /// How many live Attempts run in `role`.
+    pub fn count_of(&self, role: AttemptRole) -> usize {
+        self.live
+            .values()
+            .flat_map(|attempts| attempts.values())
+            .filter(|entry| entry.role == role)
+            .count()
     }
 
     /// The live entry of one Attempt.

@@ -5,7 +5,7 @@ description: Act as a Console pool's Steward, answering its Tickets' Interrupts 
 
 You are the pool's **Steward**: a Conversation standing in for the operator overnight. You keep the pool's Tickets moving. You **decide and talk**; the Tickets' own agents do the work. Your only ways to change the code are an answer, a coaching message and a Spawn. The my-console-citizen skill is how to work inside a pool; this skill is how to judge.
 
-Your teaching Turn names your **command** (its exact invocation, ending in `--as <your id>`), your **budget**, and the operator's **standing orders** came just before it. Re-read the orders before each decision: they set your scope ("only the next super-step"), what you may push or merge, and when you are done.
+Your teaching Turn names your **command** (its exact invocation, ending in `--as <your id>`), your **budget**, and the operator's **standing orders** came just before it. Re-read the orders before each decision: they set your scope ("only the Tickets that are running now"), what you may push or merge, and when you are done.
 
 ## Each time Pool news arrives
 
@@ -34,27 +34,29 @@ An item is done when the command answered without a refusal.
 - **selection**: graded attempts wait for a winner. Pick by grades: the highest score with a pass verdict, the reasons breaking a near tie. `answer <ticket> resume <attempt number>`.
 - **deadlock**: a blocker can never complete. Resume only once you have answered the blocker's own Interrupt; otherwise `leave` it naming the blocker. A dependent of a closed Ticket is the operator's to close, never yours: `leave` it saying whether it should be closed too.
 - **an adoption checkpoint** (the body says the engine re-adopted a live pane after a restart): answering it abandons that pane's Attempt. `leave` it unless the orders say otherwise.
-- **a stalled Merge queue head**: there is no Interrupt to answer and nothing moves until it lands. Read its log and branch, and tell the operator in your pane what you found. Merge it by hand only when the operator's own words allowed you to merge.
+- **a stalled Merge queue head**: there is no Interrupt to answer, and only the Tickets that name it as a blocker wait until it lands. Read its log and branch, and tell the operator in your pane what you found. Merge it by hand only when the operator's own words allowed you to merge.
 
-## A Factory pool's Line
+## A Line pool's Line
 
-In a Factory pool (your teaching says so) the engine runs one Line and routes its Stations: Implement, Prove, Review, Decide, then the Finish checkpoint. Never propose a Station yourself.
+In a pool that runs a Line (your teaching names its Plan) the engine writes the Line's Tickets and holds from the Plan and routes each verdict. Your teaching lists exactly which of the Line's Interrupts are yours; the engine hides and refuses the rest. Never propose a node's work yourself.
 
-- **"no verdict"** (the Brief's first line): a Station recorded done without a valid verdict. `answer <ticket> resume <note>` (or `keep-talking` while its pane lives) telling the Station to record its Outcome again with the verdict its Ticket teaches. Name what was wrong, from the Brief.
-- **The Prove limit** (Prove failed too often in one Round, so the next fix waits): `answer <ticket> resume <note>` buys one more fix, and your note goes into it. Resume when the failures point at a fix within reach; when the same thing keeps failing, `leave` it recommending Close (which halts the Line at its Finish).
-- **The Finish checkpoint** is the operator's approval of the Line. You are never told about it and the engine refuses your answer. When the Line waits there, say so in your pane.
+- **"no verdict"** (the Brief's first line) on a Ticket of a node your teaching names: it recorded done without a valid verdict. `answer <ticket> resume <note>` (or `keep-talking` while its pane lives) telling it to record its Outcome again with the verdict its Ticket teaches. Name what was wrong, from the Brief.
+- **A gate's hold** your teaching names: `answer <ticket> resume` opens it; a note answers `revise` instead and is handed on with it.
+- **A spent loop's hold** on an edge your teaching names (the loop ran its cap, so the next traversal waits): `answer <ticket> resume <note>` buys one more traversal, once until that loop resets, and your note goes into it. Resume when the failures point at a fix within reach; when the same thing keeps failing, `leave` it recommending Close.
+- **Editing the Plan** is yours only when your teaching says the Plan lets you, and only when your orders call for it, such as linking a parked verdict onward (`state` lists each node's parked verdicts on its `Line Plan` line). Run `plan <rev> <edits>`, with `rev` from the same `Line Plan` line and the edits a JSON array of Plan edits, or `-` to read them from standard input. Linking `test`'s parked `fail` on to `build` is `[{"edit":"link","edge":{"from":"test","on":"fail","to":"build"}}]`; the other edits are `unlink` (`from`, `on`, `to`), `setCap`, `setNode`, `addNode`, `removeNode`, `setMeta` and `move`. A stale rev is refused with the rev the Plan is at, so run `state` again and redo the edit against it. Any other refusal is the engine's rule, so say in your pane the edit you would make and leave it to the operator.
+- **The Finish** (its hold and its Ticket) is the operator's approval of the Line and its act. You are never told about it and the engine refuses your answer. When the Line waits there, say in your pane what the Finish waits for.
 - **Held spawns proposed from inside the Line** (`reason` `line` in `state`) merge into the Line's branch if they land. They are the operator's to adopt or discard unless the pool setting `steward.mayAdoptLineSpawns` is on (`state` says whether). When it is on, adopt one only when the Line needs it and its spec covers it; discard a duplicate.
 
 ## Held spawns, Spawns and Reassign
 
 - **Held spawns** (in `state`, and the Spawn ledger at `runs/spawn-ledger.md`): `held adopt <id>` a proposal the orders' scope wants now; `held discard <id>` a duplicate of work already listed. One that changes the plan's direction is the operator's: leave it held and say so in your pane.
 - **Spawn** a fix-up Ticket when a Ticket needs work no single answer gives (my-console-citizen has the how), within the pool's Spawn caps. A Spawn is how code you want changed gets changed.
-- **Reassign** changes the Assignment the Ticket's next Attempt runs on (`harness`, `model`, `effort`, `drivers`, `verify`; `field=` clears one); it lands at the next boundary, so follow it with the answer that resumes the Ticket.
+- **Reassign** changes the Assignment the Ticket's next Attempt runs on (`harness`, `model`, `effort`, `drivers`, `verify`; `field=` clears one); it lands at the next Tick, so follow it with the answer that resumes the Ticket.
 
 ## Your limits
 
 - **The budget**: every `answer`, `close` and `keep-talking` on a Ticket counts, until the operator next answers it. When it is spent the engine refuses: `leave` the Ticket with a note. A checkpoint you resumed that checkpoints again for the same reason is a loop; leave it before the budget does it for you.
-- **The operator's**: review and persistence Interrupts, a Line's Finish checkpoint, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
+- **The operator's**: review and persistence Interrupts, a Line's Finish, product decisions, and anything destructive or irreversible (deleting branches or data, force-pushing, rewriting history, dropping work). Leave each with a note that recommends an answer and says why. The one exception is Close, and only as far as Closing allows.
 - **Your hands**: the worktrees and the pool checkout belong to the Tickets' agents. You read them; you change code through answers, coaching and Spawns.
 - **Pushing and pull requests**: push, open a pull request or merge one only when the operator's own words in this pane allow it, and only as far as they allow.
 

@@ -1,25 +1,3 @@
-//! The Spawn proposals the engine keeps before they land (engine/spawn-proposals.ts; ADR-0029, issue
-//! #150; CONTEXT.md: Pending spawn, Held spawn). A proposal taken from an exited attempt, or from a
-//! Conversation's spawn.json, is one of two things until it lands or goes:
-//!
-//! - a **Pending spawn**: within the caps, waiting for the next super-step boundary to land it. The
-//!   operator may Hold it or Discard it first.
-//! - a **Held spawn**: one a cap had no room for, one the proposing agent marked as overlapping work
-//!   already in the pool, or one the operator held back. It waits for the operator's Adopt (past the
-//!   caps) or Discard.
-//!
-//! Both survive a restart. The record of them is one file, `runs/held-spawns.json` (the name ADR-0029
-//! gave it, kept so a pool that held spawns before issue #150 reads unchanged), replaced whole through
-//! a rename so a crash never leaves half of it. One file keeps a proposal's move from pending to held
-//! a single write. It carries both lists, the counter the proposal ids come from (never reused, so a
-//! discarded `proposal-1` cannot come back as the name of another proposal, and an id an agent read
-//! from the Spawn ledger keeps meaning one proposal), and the keys of the pre-ADR truncations boot has
-//! already recovered, so a recovery and the holds it made land in the same write and it never runs
-//! twice.
-//!
-//! A proposal keeps its id from the moment it is taken until it lands or is discarded, whether it is
-//! pending or held. Held spawns from before issue #150 keep their `held-N` ids.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -32,7 +10,6 @@ use serde_json::Value;
 
 use crate::js;
 
-/// A proposal waiting for the next super-step boundary to land it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingSpawn {
@@ -45,8 +22,6 @@ pub struct PendingSpawn {
     pub proposal: SpawnProposal,
     /// When it was taken from its attempt or spawn.json.
     pub at: String,
-    /// The id the boundary is landing it under, written before the ticket file is: a restart that
-    /// finds it set checks whether that ticket landed, so a crash mid-landing never lands it twice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<String>,
 }
@@ -62,14 +37,16 @@ pub struct HeldSpawn {
     pub reason: HeldSpawnReason,
     /// When it was held (for a recovered one, when the cap truncated it).
     pub at: String,
-    /// Why the boundary refused to land it: its last Adopt, or, held for "refused", its landing as a
-    /// Pending spawn. Cleared by the next Adopt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_error: Option<String>,
     /// Held for "overlaps": the ids it named that neither the pool nor any proposal of it ever had,
     /// kept so the operator sees the mark may be stale or mistaken. Absent when every id was known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_overlaps: Option<Vec<String>>,
+    /// Held for "started": the named `blocks` targets that had started when it was held, kept so the
+    /// ledger and the log say which. Adopting it lands it whether or not they still run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ids: Option<Vec<String>>,
 }
 
 /// A spawn to hold under a fresh id: a Held spawn before it has one.
@@ -82,6 +59,7 @@ pub struct NewHeldSpawn {
     pub at: String,
     pub adopt_error: Option<String>,
     pub unknown_overlaps: Option<Vec<String>>,
+    pub started_ids: Option<Vec<String>>,
 }
 
 impl NewHeldSpawn {
@@ -95,6 +73,7 @@ impl NewHeldSpawn {
             at: self.at,
             adopt_error: self.adopt_error,
             unknown_overlaps: self.unknown_overlaps,
+            started_ids: self.started_ids,
         }
     }
 }
@@ -262,6 +241,7 @@ impl SpawnProposals {
                     at: entry.at,
                     adopt_error: None,
                     unknown_overlaps: entry.unknown_overlaps.filter(|ids| !ids.is_empty()),
+                    started_ids: None,
                 }),
             }
         }
@@ -291,6 +271,7 @@ impl SpawnProposals {
         reason: HeldSpawnReason,
         at: &str,
         adopt_error: Option<String>,
+        started_ids: Option<Vec<String>>,
     ) -> Result<Option<HeldSpawn>, js::FsError> {
         let Some(index) = self.file.pending.iter().position(|p| p.id == id) else {
             return Ok(None);
@@ -306,41 +287,45 @@ impl SpawnProposals {
             at: at.to_owned(),
             adopt_error,
             unknown_overlaps: None,
+            started_ids,
         };
         self.file.held.push(held.clone());
         self.write()?;
         Ok(Some(held))
     }
 
-    /// The operator's Hold of a Pending spawn: held for "operator" under the same id, in one write.
-    /// `None` when it is not pending (landed, discarded, or never).
-    pub fn hold_pending(&mut self, id: &str, at: &str) -> Result<Option<HeldSpawn>, js::FsError> {
-        self.move_to_held(id, HeldSpawnReason::Operator, at, None)
-    }
-
-    /// The boundary could not land a Pending spawn: held for "refused" under the same id, the reason
-    /// kept as its adoptError, in one write.
     pub fn hold_refused(
         &mut self,
         id: &str,
         reason: &str,
         at: &str,
     ) -> Result<Option<HeldSpawn>, js::FsError> {
-        self.move_to_held(id, HeldSpawnReason::Refused, at, Some(reason.to_owned()))
+        self.move_to_held(
+            id,
+            HeldSpawnReason::Refused,
+            at,
+            Some(reason.to_owned()),
+            None,
+        )
     }
 
-    /// Drop a Pending spawn (discarded by the operator).
-    pub fn remove_pending(&mut self, id: &str) -> Result<Option<PendingSpawn>, js::FsError> {
-        let Some(found) = self.get_pending(id).cloned() else {
-            return Ok(None);
-        };
-        self.file.pending.retain(|p| p.id != id);
-        self.write()?;
-        Ok(Some(found))
+    /// A Pending spawn whose named `blocks` reached Tickets that had started, held for the operator
+    /// under the same id: landing it would rewrite a running Ticket's blockers (ADR-0041).
+    pub fn hold_started(
+        &mut self,
+        id: &str,
+        started_ids: &[String],
+        at: &str,
+    ) -> Result<Option<HeldSpawn>, js::FsError> {
+        self.move_to_held(
+            id,
+            HeldSpawnReason::Started,
+            at,
+            None,
+            Some(started_ids.to_vec()),
+        )
     }
 
-    /// Record the ids the boundary is about to land these Pending spawns under, in one write before any
-    /// ticket file is.
     pub fn mark_landing(&mut self, landing: &HashMap<String, String>) -> Result<(), js::FsError> {
         if landing.is_empty() {
             return Ok(());
@@ -423,8 +408,6 @@ impl SpawnProposals {
         Ok(held)
     }
 
-    /// The held ids an Adopt has queued for the boundary, in the order the operator adopted them. In
-    /// memory only: after a restart the spawn is simply held again.
     pub fn adopting(&self) -> &[String] {
         &self.adopting
     }
@@ -447,7 +430,6 @@ impl SpawnProposals {
         self.write()
     }
 
-    /// The boundary refused the Adopt: still held, the reason kept on it.
     pub fn refuse_adopt(&mut self, id: &str, reason: &str) -> Result<(), js::FsError> {
         self.adopting.retain(|a| a != id);
         let Some(held) = self.file.held.iter_mut().find(|h| h.id == id) else {
@@ -500,6 +482,7 @@ impl SpawnProposals {
                     at: h.at.clone(),
                     reason: h.reason,
                     unknown_overlaps: h.unknown_overlaps.clone().unwrap_or_default(),
+                    started_ids: h.started_ids.clone().unwrap_or_default(),
                     adopting: self.is_adopting(&h.id),
                     adopt_error: h.adopt_error.clone(),
                 }
@@ -570,6 +553,7 @@ mod tests {
             at: at.into(),
             adopt_error: None,
             unknown_overlaps: None,
+            started_ids: None,
         }
     }
 
@@ -669,8 +653,6 @@ mod tests {
         assert!(reloaded.held().is_empty());
     }
 
-    // An Adopt the boundary refused leaves the spawn held with the reason (ADR-0029), kept across a
-    // restart, and the next Adopt clears it.
     #[test]
     fn records_a_refused_adopts_reason_on_the_held_spawn_until_the_next_adopt() {
         let dir = runs_dir();
@@ -786,16 +768,14 @@ mod tests {
             json!([
                 { "id": "proposal-1", "parentId": "01", "origin": "ticket", "kind": "ticket", "title": "A",
                   "body": "A body long enough to stand.", "blockedBy": ["02"], "blocks": "all", "overlaps": [],
-                  "at": "t1", "reason": "per-run", "unknownOverlaps": [], "adopting": false },
+                  "at": "t1", "reason": "per-run", "unknownOverlaps": [], "startedIds": [], "adopting": false },
                 { "id": "proposal-2", "parentId": "c-1", "origin": "conversation", "kind": "conversation",
                   "title": "B", "body": "A body long enough to stand.", "blockedBy": [], "blocks": null,
-                  "overlaps": [], "at": "t2", "reason": "per-attempt", "unknownOverlaps": [], "adopting": true },
+                  "overlaps": [], "at": "t2", "reason": "per-attempt", "unknownOverlaps": [], "startedIds": [], "adopting": true },
             ])
         );
     }
 
-    // Issue #150: a proposal taken from an exited attempt is on disk at once, so a restart before the
-    // boundary finds it still pending.
     #[test]
     fn takes_proposals_as_pending_or_held_in_one_write_in_order_surviving_a_reload() {
         let dir = runs_dir();
@@ -839,46 +819,15 @@ mod tests {
         );
     }
 
-    // The id an agent read from the Spawn ledger keeps naming the proposal when the operator holds it.
     #[test]
-    fn holds_a_pending_spawn_for_the_operator_under_the_same_id() {
-        let dir = runs_dir();
-        let mut store = load_spawn_proposals(dir.path()).unwrap();
-        store.take(vec![taken("A", None)]).unwrap();
-        let held = store.hold_pending("proposal-1", "t2").unwrap().unwrap();
-        assert_eq!(
-            serde_json::to_value(&held).unwrap(),
-            json!({ "id": "proposal-1", "parentId": "01", "origin": "ticket",
-                    "proposal": {"title": "A", "body": "A body long enough to stand."},
-                    "reason": "operator", "at": "t2" })
-        );
-        assert!(store.pending().is_empty());
-        assert_eq!(
-            ids(load_spawn_proposals(dir.path()).unwrap().held(), |h| &h.id),
-            ["proposal-1"]
-        );
-        assert_eq!(store.hold_pending("proposal-1", "t3").unwrap(), None);
-    }
-
-    #[test]
-    fn removes_a_pending_spawn_once_and_forgets_landed_ones_in_one_write() {
+    fn forgets_landed_pending_spawns_in_one_write() {
         let dir = runs_dir();
         let mut store = load_spawn_proposals(dir.path()).unwrap();
         store
-            .take(vec![taken("A", None), taken("B", None), taken("C", None)])
+            .take(vec![taken("A", None), taken("B", None)])
             .unwrap();
-        assert_eq!(
-            store
-                .remove_pending("proposal-2")
-                .unwrap()
-                .unwrap()
-                .proposal
-                .title,
-            "B"
-        );
-        assert_eq!(store.remove_pending("proposal-2").unwrap(), None);
         store
-            .landed(&["proposal-1".into(), "proposal-3".into()])
+            .landed(&["proposal-1".into(), "proposal-2".into()])
             .unwrap();
         assert!(
             load_spawn_proposals(dir.path())
@@ -932,7 +881,7 @@ mod tests {
         store
             .take(vec![taken("A", None), taken("B", None)])
             .unwrap();
-        store.remove_pending("proposal-1").unwrap();
+        store.landed(&["proposal-1".into()]).unwrap();
         assert!(store.is_proposal_id("proposal-1"));
         assert!(store.is_proposal_id("proposal-2"));
         assert!(!store.is_proposal_id("proposal-3"));
@@ -964,10 +913,8 @@ mod tests {
         }
     }
 
-    // Issue #150 review: the boundary refusing a Pending spawn holds it, the reason kept, rather than
-    // dropping it.
     #[test]
-    fn holds_a_pending_spawn_the_boundary_refused_under_the_same_id_with_the_reason() {
+    fn holds_a_pending_spawn_a_tick_refused_under_the_same_id_with_the_reason() {
         let dir = runs_dir();
         let mut store = load_spawn_proposals(dir.path()).unwrap();
         store.take(vec![taken("A", None)]).unwrap();
@@ -1000,6 +947,30 @@ mod tests {
             store.hold_refused("proposal-1", "again", "t3").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn holds_a_pending_spawn_for_blocking_started_tickets_and_keeps_which_across_a_restart() {
+        let dir = runs_dir();
+        let mut store = load_spawn_proposals(dir.path()).unwrap();
+        store.take(vec![taken("A", None)]).unwrap();
+        let held = store
+            .hold_started("proposal-1", &["02".to_owned()], "t2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (held.id.as_str(), held.reason, held.started_ids.clone()),
+            (
+                "proposal-1",
+                HeldSpawnReason::Started,
+                Some(vec!["02".to_owned()])
+            )
+        );
+        assert!(store.pending().is_empty());
+        let reloaded = load_spawn_proposals(dir.path()).unwrap();
+        assert_eq!(reloaded.held()[0].started_ids, Some(vec!["02".to_owned()]));
+        assert_eq!(reloaded.held_views()[0].reason, HeldSpawnReason::Started);
+        assert_eq!(reloaded.held_views()[0].started_ids, ["02"]);
     }
 
     // A pool that held spawns before issue #150 has no pending list.

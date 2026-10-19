@@ -60,11 +60,6 @@ pub fn is_steward_budget(value: &Value) -> bool {
     js::is_integer(value) && js::number_of(value).is_some_and(|budget| budget >= 1.0)
 }
 
-/// A console.json `steward` value, checked for shape: absent, or an object whose budget, where
-/// present, is a whole number of 1 or more, whose assign, where present, is an object of strings, and
-/// whose mayClose, where present, is a boolean. Boot's parse and the boundary's reload share it, so a
-/// value the reload would refuse never boots. Whether the assign names a harness the pool knows is the
-/// caller's check (`config::check_steward_harness`): only the engine has the harness table.
 pub fn check_steward_config(raw: Option<&Value>) -> Result<(), ConfigError> {
     let Some(raw) = raw else { return Ok(()) };
     let Value::Object(steward) = raw else {
@@ -416,7 +411,7 @@ pub fn steward_merge_stall_text(ticket_id: &str, title: Option<&str>, behind: &[
     };
     [
         format!(
-            "The Merge queue head, Ticket {ticket_id}{title}, is stalled: it is done, its branch has not landed, and no resolver runs and no Interrupt is raised for it. Nothing in the pool moves until it lands."
+            "The Merge queue head, Ticket {ticket_id}{title}, is stalled: it is done, its branch has not landed, and no resolver runs and no Interrupt is raised for it. Only the Tickets that name it as a blocker wait until it lands."
         ),
         if behind.is_empty() {
             "Nothing else waits behind it.".to_owned()
@@ -609,6 +604,7 @@ mod tests {
             body: body.to_owned(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         }
     }
 

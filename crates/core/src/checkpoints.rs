@@ -1,8 +1,3 @@
-//! The checkpoint store (engine/checkpoints.ts): the pool state after every super-step, one row each in
-//! the `checkpoints` table of `<pool>/console.db`, so a restart resumes from the latest. The schema,
-//! the rows and the state's JSON text are the TypeScript's own, so a pool moves from the Bun server to
-//! this one and back without a migration.
-
 use std::path::Path;
 use std::time::Duration;
 

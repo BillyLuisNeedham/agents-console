@@ -16,15 +16,19 @@
  */
 
 import { expect } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { LineFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
 import { branches } from "../harness/git-pool.ts";
 import { callsOf, CLAUDE_READY } from "../harness/herdr.ts";
-import { poolLog, restartCase, settle, snapshotOf, untilLogged } from "./restart-support.ts";
+import { begun } from "./line-support.ts";
+import { poolLog, restartCase, settle, snapshotOf, startLeg, untilLogged, untilState } from "./restart-support.ts";
 import {
   DONE_01,
+  HERDR,
+  appendEvent,
   callsOnPane,
   callsOnTab,
   closeFinished,
@@ -278,4 +282,45 @@ conformance("restart", "an enlisted Conversation whose pane herdr no longer list
   await herdr.settle();
   expect(callsOf(herdr, "tab.close")).toEqual([]);
   expect(callsOf(herdr, "pane.close")).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// A Line Conversation pass whose End the stop cut short (ADR-0040)
+// ---------------------------------------------------------------------------
+
+restartCase("a stop after a Line Conversation's End and before its merge still hands the Line on once, after the merge", async (t) => {
+  const world = t.world({ config: { defaults: { harness: "claude", model: "m" }, terminal: "herdr" } });
+  mkdirSync(join(world.pool, "conversations"), { recursive: true });
+  world.stubs.script("_claude", { hold: 150 });
+  const herdr = await t.herdr(world, HERDR);
+  const first = await startLeg(t, world, 0, { herdr });
+  await begun(first, { plan: "factory-today", work: "#186" });
+  const live = await untilState(first, "grill-1 live in its pane", (snap) =>
+    snap.state.conversations.some((c) => c.id === "grill-1" && c.paneId),
+  );
+  const grill = conversationIn(live, "grill-1");
+  const brief = "docs/specs/main.grill-1.brief.json";
+  const tree = join(world.repo, ".git", "pool-worktrees", grill.branch!.split("/")[1]!, "grill-1");
+  mkdirSync(join(tree, "docs", "specs"), { recursive: true });
+  writeFileSync(join(tree, "docs", "specs", "186.md"), "# Fix it\n");
+  writeFileSync(join(tree, brief), JSON.stringify({ spec: "docs/specs/186.md", finish: "draft-pr" }));
+  world.git(["-C", tree, "add", "-A"]);
+  world.git(["-C", tree, "commit", "-q", "-m", "the spec and brief"]);
+  await first.stop();
+  // The End was asked for and recorded, and the server stopped before its merge.
+  appendEvent(world, "end-requested", { closing: null }, "grill-1");
+  expect(existsSync(join(world.pool, "issues", "implement-1.md"))).toBe(false);
+
+  const second = await startLeg(t, world, 1, { herdr });
+  await untilLogged(second, "line: wrote implement-1");
+  expect(world.git(["show", `main:${brief}`])).toContain('"finish":"draft-pr"');
+  await untilRecord(world, "ended", "grill-1");
+  expect(eventsOf(world, "ended", "grill-1")[0]!.payload).toEqual({ closing: null, by: "operator", merged: true });
+  expect(kindsOf(world, "grill-1").filter((kind) => kind === "merged")).toEqual(["merged"]);
+  const log = await poolLog(second);
+  expect(log.filter((line) => line === "line: grill-1 hands on its brief")).toHaveLength(1);
+  expect(log.filter((line) => line === "line: wrote implement-1")).toHaveLength(1);
+  const line = JSON.parse(readFileSync(join(world.pool, "line.json"), "utf8")) as LineFile;
+  expect(line.rev).toBe(1);
+  expect(line.plan.nodes.find((n) => n.id === "finish")).toMatchObject({ act: "draft-pr" });
 });

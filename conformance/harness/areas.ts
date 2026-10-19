@@ -13,10 +13,10 @@ export const AREAS = {
   attempts: "Attempts and harness launch, headless or terminal-backed: argv, env, cwd, the ticket prompt, spawned and exited facts, fallbacks, the Attempt's end",
   steward: "the Steward: its console.json entry, what it is told, its answers and their limits, its notes, routes and teaching",
   conversations: "Conversations: storage, start and launch, ending, Turn state, Notices, spawn.json adoption, the teaching Turn, Seeded Pools, the conversation routes",
-  scheduling: "the drive loop: super-steps, the ready set, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
-  spawns: "Spawns: proposals in Outcomes, adoption at the boundary, Pending and Held spawns, caps, the spawn routes",
+  scheduling: "the drive loop: Ticks and launches, eligibility, the Outcome contract and status writes, lifecycle events, blockers, the final Review, deadlock",
+  spawns: "Spawns: proposals in Outcomes, adoption at the next Tick, Pending and Held spawns, caps, the spawn routes",
   verify: "verify and Jev: the verify: N fan-out, grader Tickets, Jev grading (through a fake TypeSafe endpoint), Selection and head-to-head, human selection, Adopt, the grades endpoint",
-  merges: "pool worktrees and branches, merges, the Merge hold and Merge queue, the resolver, Ticket file reconcile",
+  merges: "pool worktrees and branches, merges, waiting on a blocker's merge and the Merge queue, the resolver, Ticket file reconcile",
   cli: "the boot, fleet and steward command lines: what they print, write, exit with and launch",
   restart: "restart and takeover: a server picking up a pool another server process left on disk, and what a stopping server leaves for the next",
   config: "Assignments and settings: what console.json resolves each Ticket to, Config reload, Reassign, Pool settings, Machine defaults, the settings routes",
@@ -26,7 +26,8 @@ export const AREAS = {
   server: "the server process: startup, the pool lock, ports, fleet registration, Stop, shutdown, runtime refusals",
   interrupts: "Interrupts and answers: /api/resume, Close, Keep talking, Queued answers",
   enlist: "enlisting a live herdr pane as a Ticket or a Conversation, and the enlisted Ticket's lifecycle",
-  factory: "the Factory's Line: Start the Line, Station Tickets, verdicts, routing and its counters, the Line's checkpoints, line.json",
+  plans: "Plans: the Plan format's validation, the Plan library under HOME, the compiled-in Presets, and the plans.* verbs and routes",
+  line: "the pool's Line running its Plan: POST /api/line, the Ticket nodes' Tickets and verdicts, loops and their holds, the Finish hold and its act, line.json, its Conversation passes and their briefs",
 } as const;
 
 export type Area = keyof typeof AREAS;

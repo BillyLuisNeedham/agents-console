@@ -29,9 +29,7 @@ use ac_core::jev_evidence::{BuiltEvidence, EvidenceInput, build_evidence};
 use ac_core::jev_rubric::{QUESTIONS, RUBRIC_VERSION, THRESHOLDS, compose};
 use ac_core::js;
 use ac_core::outcome::{ValidOutcome, validate_outcome};
-use ac_core::pool::{
-    TicketMarker, is_finished, load_pool_tickets, read_marker, write_marker_status,
-};
+use ac_core::pool::{TicketMarker, load_pool_tickets, read_marker, write_marker_status};
 use ac_core::verify_prompts::{
     GraderPromptParts, HeadToHeadPromptParts, HeadToHeadSideParts, build_grader_prompt,
     build_head_to_head_prompt,
@@ -54,15 +52,12 @@ use crate::interrupts::{
     raise_interrupt,
 };
 use crate::jev::Jev;
-use crate::merges::{
-    EngineHoldHost, hold_poll, merge_target_ref, merge_target_sha, merge_ticket, merged_payload,
-    through_merge_hold,
-};
+use crate::merges::{merge_ticket, merged_payload};
 use crate::restart::abandon_adoption;
 use crate::session::{PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
 use crate::spawns::take_spawn_proposals;
-use crate::tickets::{TicketResult, attempt_env_of, close_attempt_tab};
+use crate::tickets::{CandidateEnding, attempt_env_of, close_attempt_tab};
 
 // The grader's driver name, under the same contract as the resolver's: a real harness invokes it as a
 // command stub, so a pool that grades on real harnesses needs a `verify` command written where the
@@ -421,11 +416,45 @@ pub async fn grade_round(
     marker: &TicketMarker,
     attempts: &[u64],
 ) -> anyhow::Result<HashMap<u64, Grade>> {
+    let (id, round) = (marker.id.clone(), attempts.to_vec());
+    let mut graded = engine
+        .call(move |s| recorded_grades(s, &id, &round))
+        .await?;
+    let skip: Vec<u64> = graded.keys().copied().collect();
+    if skip.len() < attempts.len() {
+        graded.extend(grade_attempts(engine, marker, attempts, &skip).await?);
+    }
+    Ok(graded)
+}
+
+fn recorded_grades(session: &Session, ticket_id: &str, attempts: &[u64]) -> HashMap<u64, Grade> {
+    read_events(runs(session), ticket_id)
+        .iter()
+        .filter(|event| event.kind == TicketEventKind::Graded && attempts.contains(&event.attempt))
+        .filter_map(|event| {
+            serde_json::from_value::<Grade>(Value::Object(event.payload.clone()))
+                .ok()
+                .map(|grade| (event.attempt, grade))
+        })
+        .collect()
+}
+
+async fn grade_attempts(
+    engine: &Engine,
+    marker: &TicketMarker,
+    attempts: &[u64],
+    skip: &[u64],
+) -> anyhow::Result<HashMap<u64, Grade>> {
     let jev = engine.call(|s| s.jev.clone()).await?;
     if !jev.configured() {
-        return run_graders(engine, marker, attempts).await;
+        return run_graders(engine, marker, attempts, skip).await;
     }
-    match run_jev_graders(engine, &jev, marker, attempts).await? {
+    let ungraded: Vec<u64> = attempts
+        .iter()
+        .copied()
+        .filter(|attempt| !skip.contains(attempt))
+        .collect();
+    match run_jev_graders(engine, &jev, marker, &ungraded).await? {
         JevGrading::FellBack {
             attempt,
             cause,
@@ -437,12 +466,12 @@ pub async fn grade_round(
                 marker.id
             );
             engine.call(move |s| s.log(line)).await?;
-            run_graders(engine, marker, attempts).await
+            run_graders(engine, marker, attempts, skip).await
         }
         JevGrading::Graded(grades) => {
             // Named before the per-attempt lines, so the pool log reads in order; it is written only
             // once the whole round has an answer, because a fallback means the round was never Jev's.
-            let (marker, attempts, round) = (marker.clone(), attempts.to_vec(), grades.clone());
+            let (marker, attempts, round) = (marker.clone(), ungraded, grades.clone());
             engine
                 .call(move |s| -> anyhow::Result<()> {
                     s.log(format!(
@@ -577,31 +606,6 @@ fn record_jev_grade(
 // Grader tickets
 // ---------------------------------------------------------------------------------------------------
 
-/// `engineSpawnSet`: the engine-run flows' spawn set, the three sites that share it being grading's
-/// initial round, its re-spawn rounds and the head-to-head judge. The recompute is the ready set over
-/// the flow's proposal; an all-engine proposal returns empty for no reason but the hold, so the rule's
-/// re-wait on a held recompute keeps a judge spawn from ever destructuring an empty set.
-async fn engine_spawn_set(
-    engine: &Engine,
-    candidates: Vec<TicketMarker>,
-) -> anyhow::Result<Vec<TicketMarker>> {
-    let host = EngineHoldHost(engine);
-    through_merge_hold(
-        &host,
-        || {
-            let engine = engine.clone();
-            let candidates = candidates.clone();
-            async move {
-                Ok(engine
-                    .call(move |s| crate::drive::ready_set(s, &candidates))
-                    .await?)
-            }
-        },
-        hold_poll(),
-    )
-    .await
-}
-
 /// `writeGraderTicket`: a real ticket in the pool's directory, with the ordinary blocking edge from its
 /// build ticket, so it renders as a node card and its assignment is editable like any ticket's. The
 /// engine rewrites it every time the build's fan-out completes, so a re-round rebinds the same card to
@@ -664,13 +668,18 @@ async fn run_graders(
     engine: &Engine,
     build: &TicketMarker,
     attempts: &[u64],
+    skip: &[u64],
 ) -> anyhow::Result<HashMap<u64, Grade>> {
-    let (build_c, attempts_c) = (build.clone(), attempts.to_vec());
+    let build_c = build.clone();
+    let attempts_c: Vec<(u64, u64)> = (1..)
+        .zip(attempts.iter().copied())
+        .filter(|(_, attempt)| !skip.contains(attempt))
+        .collect();
     let (build_assignment, mut pending) = engine
         .call(
             move |s| -> anyhow::Result<(Assignment, Vec<PendingGrader>)> {
-                for (index, attempt) in attempts_c.iter().enumerate() {
-                    write_grader_ticket(s, &build_c, index as u64 + 1, *attempt)?;
+                for (index, attempt) in &attempts_c {
+                    write_grader_ticket(s, &build_c, *index, *attempt)?;
                 }
                 s.markers = load_pool_tickets(Path::new(&s.pool_dir), false)?;
                 let build_assignment =
@@ -678,8 +687,8 @@ async fn run_graders(
                         anyhow::anyhow!("no assignment for ticket {}", build_c.id)
                     })?;
                 let mut pending = Vec::new();
-                for (index, attempt) in attempts_c.iter().enumerate() {
-                    let id = grader_id_for(&build_c.id, index as u64 + 1);
+                for (index, attempt) in &attempts_c {
+                    let id = grader_id_for(&build_c.id, *index);
                     let marker = s
                         .marker(&id)
                         .cloned()
@@ -702,13 +711,8 @@ async fn run_graders(
             },
         )
         .await??;
-    // The verify flow's spawn set routes through the one entry point via the shared engine-run helper:
-    // the merge hold is the one rule that can withhold the graders.
-    let spawnable =
-        engine_spawn_set(engine, pending.iter().map(|g| g.marker.clone()).collect()).await?;
-    pending.retain(|g| spawnable.iter().any(|m| m.id == g.marker.id));
     let (build_c, round) = (build.clone(), pending.clone());
-    let attempt_count = attempts.len();
+    let attempt_count = pending.len();
     engine
         .call(move |s| -> anyhow::Result<()> {
             s.log(format!(
@@ -765,7 +769,7 @@ async fn run_graders(
             }
         }
         pending = still_pending;
-        if pending.is_empty() {
+        if pending.is_empty() || engine.call(|s| s.children.stopping).await? {
             return Ok(grades);
         }
         if round >= GRADER_RESPAWN_LIMIT {
@@ -776,19 +780,12 @@ async fn run_graders(
             return Ok(grades);
         }
         let respawn = round + 1;
-        // The re-spawn round's spawn set routes through the one entry point like the initial one: only
-        // the graders it hands back run again, and an empty recompute is the merge hold re-engaged.
-        let respawnable =
-            engine_spawn_set(engine, pending.iter().map(|g| g.marker.clone()).collect()).await?;
         let (build_c, waiting, build_assignment_c) =
             (build.clone(), pending, build_assignment.clone());
         pending = engine
             .call(move |s| -> anyhow::Result<Vec<PendingGrader>> {
                 let mut next = Vec::new();
-                for grader in waiting
-                    .into_iter()
-                    .filter(|g| respawnable.iter().any(|m| m.id == g.marker.id))
-                {
+                for grader in waiting {
                     // The re-spawn resolves its assignment fresh, so an operator's mid-run edit to
                     // console.json lands on the very next grader run.
                     let assignment = resolve_engine_ticket_assignment(
@@ -1081,12 +1078,10 @@ fn take_proposals(session: &mut Session, ticket_id: &str, outcome: &Outcome) -> 
 pub fn resolve_lone_attempt(
     session: &mut Session,
     marker: &TicketMarker,
-    result: &TicketResult,
+    result: &CandidateEnding,
     grade: Option<&Grade>,
 ) -> anyhow::Result<()> {
-    let attempt = result.plan.attempt;
-    // A crashed attempt decided nothing; the crash interrupt raised at the boundary owns the ticket and
-    // a resume re-runs it.
+    let attempt = result.attempt;
     if result.status == TicketStatus::InProgress {
         return Ok(());
     }
@@ -1151,19 +1146,19 @@ pub fn resolve_lone_attempt(
 pub fn checkpoint_fan_out_round(
     session: &mut Session,
     marker: &TicketMarker,
-    round: &[&TicketResult],
+    round: &[CandidateEnding],
     grades: &HashMap<u64, Grade>,
 ) -> anyhow::Result<()> {
-    let mut sorted: Vec<&TicketResult> = round.to_vec();
-    sorted.sort_by_key(|r| r.plan.attempt);
-    let paused: Vec<&&TicketResult> = sorted
+    let mut sorted: Vec<&CandidateEnding> = round.iter().collect();
+    sorted.sort_by_key(|r| r.attempt);
+    let paused: Vec<&&CandidateEnding> = sorted
         .iter()
         .filter(|r| r.status == TicketStatus::Checkpoint)
         .collect();
     let mut sections: Vec<String> = Vec::new();
     let mut paused_outcome: Option<Outcome> = None;
     for result in &sorted {
-        let attempt = result.plan.attempt;
+        let attempt = result.attempt;
         if result.status == TicketStatus::Checkpoint {
             let outcome = outcome_of(session, &marker.id, attempt);
             if let Ok(valid) = &outcome
@@ -1212,8 +1207,8 @@ pub fn checkpoint_fan_out_round(
     // exact round.
     let adoptable: Vec<u64> = sorted
         .iter()
-        .filter(|r| r.status == TicketStatus::Done && grades.contains_key(&r.plan.attempt))
-        .map(|r| r.plan.attempt)
+        .filter(|r| r.status == TicketStatus::Done && grades.contains_key(&r.attempt))
+        .map(|r| r.attempt)
         .collect();
     let mut brief = format!(
         "The verify round of {} attempts ended with {} checkpointed, so no candidate was selected \
@@ -1233,7 +1228,7 @@ pub fn checkpoint_fan_out_round(
     }
     let first = paused
         .first()
-        .map(|r| r.plan.attempt)
+        .map(|r| r.attempt)
         .ok_or_else(|| anyhow::anyhow!("a checkpointed round has a paused candidate"))?;
     checkpoint_ticket_by_engine(
         session,
@@ -1246,7 +1241,7 @@ pub fn checkpoint_fan_out_round(
             marker.id,
             paused
                 .iter()
-                .map(|r| r.plan.attempt.to_string())
+                .map(|r| r.attempt.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1303,32 +1298,25 @@ pub fn checkpoint_ticket_by_engine(
 fn complete_lone_attempt(
     session: &mut Session,
     marker: &TicketMarker,
-    result: &TicketResult,
+    result: &CandidateEnding,
     outcome: &Result<ValidOutcome, String>,
 ) -> anyhow::Result<()> {
-    let attempt = result.plan.attempt;
+    let attempt = result.attempt;
     let mut log = format!(
         "ticket {}: attempt {attempt} passed grading; ticket done",
         marker.id
     );
-    // Captured before mergeTicket runs (it removes the worktree and its branch on success): a verify
-    // ticket spawned by a Conversation still gets a done-Notice with a real diff summary.
-    let before_sha = merge_target_sha(session);
     if session.git {
-        let worktree = result
-            .plan
-            .worktree
-            .clone()
-            .unwrap_or_else(|| WorktreeInfo {
-                path: git::worktree_path_for(&session.cwd, &marker.id, attempt_number(attempt)),
-                branch: git::branch_for(&session.cwd, &marker.id, attempt_number(attempt)),
-            });
+        let worktree = result.worktree.clone().unwrap_or_else(|| WorktreeInfo {
+            path: git::worktree_path_for(&session.cwd, &marker.id, attempt_number(attempt)),
+            branch: git::branch_for(&session.cwd, &marker.id, attempt_number(attempt)),
+        });
         let merge = merge_ticket(session, marker, &worktree)?;
-        if !merge.ok {
+        if !merge.result.ok {
             // The conflict machinery re-attempts the solo branch on resume, and a lone attempt has
             // none, so the conflict surfaces as a checkpoint instead: the Brief names the conflicted
             // files and the parked attempt branch, and resume re-runs the ticket from the moved HEAD.
-            let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge);
+            let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge.result);
             checkpoint_ticket_by_engine(
                 session,
                 marker,
@@ -1338,7 +1326,7 @@ fn complete_lone_attempt(
                     "ticket {}: attempt {attempt} passed grading but its {}; checkpoint raised for \
                      the human",
                     marker.id,
-                    if merge.reason == Some(MergeFailure::Blocked) {
+                    if merge.result.reason == Some(MergeFailure::Blocked) {
                         "merge was blocked"
                     } else {
                         "merge conflicted"
@@ -1354,11 +1342,10 @@ fn complete_lone_attempt(
             &marker.id,
             attempt,
             TicketEventKind::Merged,
-            merged_payload(&merge),
+            merged_payload(&merge.result),
         )?;
         close_attempt_tab(session, &marker.id, attempt);
-        let range = (!before_sha.is_empty())
-            .then(|| format!("{before_sha}..{}", merge_target_ref(session)));
+        let range = merge.range(session);
         crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
         log = format!(
             "ticket {}: attempt {attempt} passed grading; merged {} onto the working branch",
@@ -1504,17 +1491,18 @@ fn margin_text(margin: Option<f64>) -> String {
     margin.map_or("null".to_owned(), score_text)
 }
 
-/// `selectAndMergeWinner`: selecting and merging the winner of a completed, fully graded fan-out: every
-/// attempt exited done and every grader returned a usable grade. A margin of two points or more takes
-/// the top score outright; a tighter spread calls the head-to-head ticket, whose pick decides between
-/// the top two, falling back to the deterministic order on a tie or an unusable outcome. Completing the
-/// selection does the rest.
-pub async fn select_and_merge_winner(
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub picked: Picked,
+    pub why: String,
+}
+
+pub async fn pick_winner(
     engine: &Engine,
     marker: &TicketMarker,
     attempts: &[u64],
     grades: &HashMap<u64, Grade>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Selection> {
     let ranked = ranked(attempts, grades);
     let selection = select_winner(&ranked);
     let mut picked = selection;
@@ -1572,19 +1560,7 @@ pub async fn select_and_merge_winner(
             }
         }
     }
-    let marker = marker.clone();
-    engine
-        .call(move |s| -> anyhow::Result<()> {
-            // A superseded head-to-head card closes with the selection: a review reject resets its
-            // marker to ready with its build ticket's, and a re-round whose grades then decide
-            // outright never rewrites it, so without this the run could never pass Review's all-done
-            // check.
-            if selection.rule == SelectionRule::Outright {
-                close_superseded_head_to_head(s, &marker.id)?;
-            }
-            complete_selection(s, &marker, picked, &why, true)
-        })
-        .await?
+    Ok(Selection { picked, why })
 }
 
 /// `raiseSelectionInterrupt`: the selection point with the human as judge: the interrupt carries every
@@ -1690,9 +1666,6 @@ fn without_interrupt(session: &Session, dropped: &Interrupt) -> Vec<Interrupt> {
         .collect()
 }
 
-/// `candidateScore`: the score of an adopted Candidate's grade: its latest well-formed graded event on
-/// the ticket's log. The grades of a round live only for the super-step that graded it, and the log is
-/// where they outlive a restart. `None` when no grade can be found.
 fn candidate_score(session: &Session, ticket_id: &str, attempt: u64) -> Option<f64> {
     read_events(runs(session), ticket_id)
         .iter()
@@ -1770,7 +1743,7 @@ pub fn adopt_candidate(
 /// engine writes the done status (ADR-0005), and every other attempt branch of the ticket, this round's
 /// losers and any superseded round's alike, is discarded. A conflicted merge parks the winner's branch
 /// and checkpoints for the human, the way a lone attempt's conflicted merge does.
-fn complete_selection(
+pub fn complete_selection(
     session: &mut Session,
     marker: &TicketMarker,
     picked: Picked,
@@ -1804,7 +1777,7 @@ fn complete_selection(
             path: git::worktree_path_for(&session.cwd, &marker.id, attempt_number(attempt)),
             branch: git::branch_for(&session.cwd, &marker.id, attempt_number(attempt)),
         };
-        let merge = merge_ticket(session, marker, &worktree)?;
+        let merge = merge_ticket(session, marker, &worktree)?.result;
         if !merge.ok {
             discard_losers(session, &marker.id, attempt);
             let complaint = merge_conflict_complaint(session, &marker.id, attempt, &merge);
@@ -1864,9 +1837,6 @@ fn complete_selection(
         )]),
         ..PoolUpdate::default()
     };
-    // The winner's outcome becomes the ticket's, the way a solo done attempt's does, so downstream
-    // prompts read what was actually selected. Its spawn proposals ride to the boundary's adoption
-    // buffer with it.
     if let Ok(valid) = outcome_of(session, &marker.id, attempt) {
         update.outcomes = Some(IndexMap::from([(marker.id.clone(), valid.outcome.clone())]));
         take_proposals(session, &marker.id, &valid.outcome)?;
@@ -1963,7 +1933,9 @@ pub fn validate_verdict(parsed: &Value, candidates: [u64; 2]) -> Result<HeadToHe
 /// `writeHeadToHeadTicket`: a real ticket in the pool's directory with the ordinary blocking edge from
 /// its build ticket, so it renders as a node card and its assignment is editable like any ticket's. The
 /// engine rewrites it every time the tight band is reached, rebinding the same card to the round's top
-/// two instead of accumulating one per round.
+/// two instead of accumulating one per round. It is written in-progress, because the card lives only
+/// as long as its round: it closes done when the judge ends or a restart finds it in-progress, and is
+/// never ready on disk for a later round to find.
 fn write_head_to_head_ticket(
     session: &Session,
     build: &TicketMarker,
@@ -1983,7 +1955,7 @@ fn write_head_to_head_ticket(
     };
     let build_id = &build.id;
     let body = format!(
-        "<!-- state: id={h2h_id} blocked-by={build_id} status=ready -->\n\n\
+        "<!-- state: id={h2h_id} blocked-by={build_id} status=in-progress -->\n\n\
          # {h2h_id}: pick between attempts {} and {} of ticket {build_id}\n\n\
          **Head-to-head for:** ticket {build_id}. Attempts {} and {} graded {} and {}, inside the \
          two-point outright margin, so the pairwise call decides.\n\n\
@@ -2058,14 +2030,7 @@ async fn run_head_to_head(
             },
         )
         .await??;
-    // The selection run's spawn set routes through the one entry point via the shared engine-run
-    // helper: the run spawns the judge it hands back, and the merge hold is the one rule that can
-    // withhold it.
-    let judge = engine_spawn_set(engine, vec![h2h.clone()])
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no head-to-head judge to spawn"))?;
+    let judge = h2h.clone();
     let (build_c, judge_c, h2h_c) = (build.clone(), judge.clone(), h2h.clone());
     let gap = score_gap(top.1.score, runner_up.1.score);
     let (top_attempt, runner_attempt) = (top.0, runner_up.0);
@@ -2232,35 +2197,6 @@ async fn run_head_to_head(
     Ok(verdict)
 }
 
-/// `closeSupersededHeadToHead`: closing a superseded head-to-head card: a review reject resets its
-/// marker to ready along with its build ticket's, and an engine crash mid-judge leaves it behind for
-/// rehydrate to reset; a re-round whose grades then decide outright never rewrites the card, so without
-/// this the run could never pass Review's all-done check. The engine owns the write, and the card's own
-/// ticket log already holds the round it judged.
-fn close_superseded_head_to_head(session: &mut Session, build_id: &str) -> anyhow::Result<()> {
-    let h2h_id = head_to_head_id_for(build_id);
-    let file = runs_parent_issue(session, &format!("{h2h_id}.md"));
-    if !js::exists(&file) {
-        return Ok(());
-    }
-    if is_finished(Some(read_marker(Path::new(&file))?.status)) {
-        return Ok(());
-    }
-    write_marker_status(Path::new(&file), TicketStatus::Done)?;
-    if let Some(marker) = session.marker_mut(&h2h_id) {
-        marker.status = TicketStatus::Done;
-    }
-    session.apply(PoolUpdate {
-        tickets: Some(IndexMap::from([(h2h_id.clone(), TicketStatus::Done)])),
-        log: Some(vec![format!(
-            "ticket {build_id}: closed superseded head-to-head card {h2h_id} (this round's \
-             selection did not need it)"
-        )]),
-        ..PoolUpdate::default()
-    });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2272,6 +2208,7 @@ mod tests {
             body: String::new(),
             candidates,
             steward_note: None,
+            started_since: None,
         }
     }
 

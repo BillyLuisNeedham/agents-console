@@ -20,6 +20,7 @@
 import { expect } from "bun:test";
 import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
+import { ticketWorktree } from "../harness/git-pool.ts";
 import type { World } from "../harness/world.ts";
 import {
   bootWorld,
@@ -34,9 +35,13 @@ import {
   writeEvents,
 } from "./herdr-panes-support.ts";
 
-/** A terminal-backed claude spawn's payload in the pool checkout, in pane `paneId` and tab `tabId`. */
 function inPane(world: World, paneId: string, tabId: string): Record<string, unknown> {
-  return { argv: ["claude"], cwd: world.repo, branch: null, harness: "claude", model: "m", pane_id: paneId, tab_id: tabId };
+  const { path, branch } = ticketWorktree(world.repo, "01");
+  return { argv: ["claude"], cwd: path, branch, harness: "claude", model: "m", pane_id: paneId, tab_id: tabId };
+}
+
+function worktreeOf01(world: World): string {
+  return ticketWorktree(world.repo, "01").path;
 }
 
 /** An enlisted opencode spawn's payload, in the operator's pane p-op, on main in the pool checkout. */
@@ -72,8 +77,8 @@ conformance("restart", "the pane held at boot is the one of the Attempt the late
     event(3, "checkpoint"),
   ]);
   const herdr = await fakeHerdr(t, world);
-  await herdr.control("injectPane", "p-1", { tabId: "t-1", cwd: world.repo });
-  await herdr.control("injectPane", "p-3", { tabId: "t-3", cwd: world.repo });
+  await herdr.control("injectPane", "p-1", { tabId: "t-1", cwd: worktreeOf01(world) });
+  await herdr.control("injectPane", "p-3", { tabId: "t-3", cwd: worktreeOf01(world) });
   await plantWitness(world, herdr);
   const server = await t.start(world, { herdr });
 
@@ -92,7 +97,7 @@ conformance("restart", "a checkpointed Attempt's own pane, still listed, is held
     event(1, "checkpoint"),
   ]);
   const herdr = await fakeHerdr(t, world);
-  await herdr.control("injectPane", "p-x", { tabId: "tab-ghost", cwd: world.repo });
+  await herdr.control("injectPane", "p-x", { tabId: "tab-ghost", cwd: worktreeOf01(world) });
   await plantWitness(world, herdr);
   const server = await t.start(world, { herdr });
 
@@ -110,7 +115,7 @@ conformance("restart", "an engine-raised checkpoint about a held branch holds no
     event(1, "checkpoint"),
   ]);
   const herdr = await fakeHerdr(t, world);
-  await herdr.control("injectPane", "p-x", { tabId: "tab-ghost", cwd: world.repo });
+  await herdr.control("injectPane", "p-x", { tabId: "tab-ghost", cwd: worktreeOf01(world) });
   await plantWitness(world, herdr);
   const server = await t.start(world, { herdr });
 

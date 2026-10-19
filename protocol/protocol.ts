@@ -28,15 +28,26 @@ import type {
   Interrupt,
   KeepTalkingRequest,
   KeepTalkingResponse,
-  LineView,
+  LineGraphView,
+  LinePlanEditRequest,
+  LinePlanEditResponse,
   LogAttemptInfo,
   MachineDefaultsRequest,
   MergeQueueEntry,
   Outcome,
   PanesResponse,
-  PendingSpawnRequest,
-  PendingSpawnResponse,
   PendingSpawnView,
+  PlanBootRequest,
+  PlanBootResponse,
+  PlanDraftResponse,
+  PlanEditRequest,
+  PlanResponse,
+  PlanSaveRequest,
+  PlanSaveResponse,
+  PlanSlugRequest,
+  PlanValidateRequest,
+  PlanValidateResponse,
+  PlansListResponse,
   PoolSettingsRequest,
   QueuedAnswer,
   ReassignRequest,
@@ -64,7 +75,7 @@ import type {
  * in `hello`; a page that was built for another one reloads itself, which is
  * how a Restart that rebuilt the UI reaches a tab left open across it.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 5;
 
 /** Where the socket is served. */
 export const WS_PATH = "/api/ws";
@@ -168,7 +179,7 @@ export interface SnapshotDelta {
     pendingSpawns?: PendingSpawnView[];
     heldSpawns?: HeldSpawnView[];
     stewardBudget?: StewardBudgetView;
-    line?: LineView;
+    line?: LineGraphView;
   };
   unset?: ("seq" | "phase" | "poolName" | "poolTitle" | "poolDir" | "finishedTerminals" | "spawnUsage" | "pendingSpawns" | "heldSpawns" | "stewardBudget" | "line")[];
   state?: {
@@ -216,10 +227,14 @@ export interface TerminalFocusResponse {
   paneId: string;
 }
 
-/** POST /api/conversations/end's body. */
+/**
+ * POST /api/conversations/end's body. `close: true` ends it as closed: nothing
+ * merges, its branch stays, and a Line Conversation pass hands on `closed`.
+ */
 export interface EndConversationRequest {
   id: string;
   closing?: string;
+  close?: boolean;
 }
 
 /**
@@ -303,8 +318,6 @@ export interface Requests {
   };
   "spawns.held.adopt": { payload: HeldSpawnRequest; result: HeldSpawnResponse };
   "spawns.held.discard": { payload: HeldSpawnRequest; result: HeldSpawnResponse };
-  "spawns.pending.hold": { payload: PendingSpawnRequest; result: PendingSpawnResponse };
-  "spawns.pending.discard": { payload: PendingSpawnRequest; result: PendingSpawnResponse };
   "conversations.start": { payload: StartConversationRequest; result: { conversation: ConversationView } };
   "conversations.end": { payload: EndConversationRequest; result: Empty };
   "settings.get": { payload: Empty; result: SettingsResponse };
@@ -314,6 +327,14 @@ export interface Requests {
   "log.read": { payload: LogReadRequest; result: TicketLogResponse };
   "log.follow": { payload: LogFollowRequest; result: LogFollowResult };
   "poolLog.read": { payload: PoolLogReadRequest; result: PoolLogRange };
+  "plans.list": { payload: Empty; result: PlansListResponse };
+  "plans.get": { payload: PlanSlugRequest; result: PlanResponse };
+  "plans.validate": { payload: PlanValidateRequest; result: PlanValidateResponse };
+  "plans.edit": { payload: PlanEditRequest; result: PlanDraftResponse };
+  "plans.save": { payload: PlanSaveRequest; result: PlanSaveResponse };
+  "plans.delete": { payload: PlanSlugRequest; result: Empty };
+  "plans.boot": { payload: PlanBootRequest; result: PlanBootResponse };
+  "line.plan.edit": { payload: LinePlanEditRequest; result: LinePlanEditResponse };
 }
 
 /** Every request the socket takes, by kind (`keyof Requests`). */
@@ -329,8 +350,6 @@ export type RequestKind =
   | "reassign"
   | "spawns.held.adopt"
   | "spawns.held.discard"
-  | "spawns.pending.hold"
-  | "spawns.pending.discard"
   | "conversations.start"
   | "conversations.end"
   | "settings.get"
@@ -339,7 +358,15 @@ export type RequestKind =
   | "panes.list"
   | "log.read"
   | "log.follow"
-  | "poolLog.read";
+  | "poolLog.read"
+  | "plans.list"
+  | "plans.get"
+  | "plans.validate"
+  | "plans.edit"
+  | "plans.save"
+  | "plans.delete"
+  | "plans.boot"
+  | "line.plan.edit";
 
 export type RequestPayload<K extends RequestKind> = Requests[K]["payload"];
 
@@ -362,8 +389,6 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   reassign: "PUT /api/reassign",
   "spawns.held.adopt": "POST /api/spawns/held/adopt",
   "spawns.held.discard": "POST /api/spawns/held/discard",
-  "spawns.pending.hold": "POST /api/spawns/pending/hold",
-  "spawns.pending.discard": "POST /api/spawns/pending/discard",
   "conversations.start": "POST /api/conversations",
   "conversations.end": "POST /api/conversations/end",
   "settings.get": "GET /api/settings",
@@ -373,6 +398,14 @@ export const HTTP_TWINS: Record<RequestKind, string> = {
   "log.read": "GET /api/log",
   "log.follow": "GET /api/log",
   "poolLog.read": "GET /api/pool-log",
+  "plans.list": "GET /api/plans",
+  "plans.get": "GET /api/plans/<slug>",
+  "plans.validate": "POST /api/plans/validate",
+  "plans.edit": "POST /api/plans/edit",
+  "plans.save": "PUT /api/plans/<slug>",
+  "plans.delete": "DELETE /api/plans/<slug>",
+  "plans.boot": "POST /api/plans/boot",
+  "line.plan.edit": "POST /api/line/plan",
 };
 
 /**
@@ -392,12 +425,14 @@ export const ACTION_KINDS: ReadonlySet<RequestKind> = new Set<RequestKind>([
   "reassign",
   "spawns.held.adopt",
   "spawns.held.discard",
-  "spawns.pending.hold",
-  "spawns.pending.discard",
   "conversations.start",
   "conversations.end",
   "settings.pool.put",
   "settings.machine.put",
+  "plans.save",
+  "plans.delete",
+  "plans.boot",
+  "line.plan.edit",
 ]);
 
 /**

@@ -345,7 +345,7 @@ conformance(
 // engine/settings-routes.test.ts:325
 conformance(
   "config",
-  "the Pool title (issue #100) › saves a title as one line and shows it at once, with no boundary to wait for",
+  "the Pool title (issue #100) › saves a title as one line and shows it at once, with no Tick to wait for",
   async (t) => {
     const world = settledWorld(t, { title: "Old title" });
     const server = await t.start(world);
@@ -425,7 +425,7 @@ conformance(
 // engine/settings-routes.test.ts:376
 conformance(
   "config",
-  "the Spawn caps (issue #149) › applies a saved cap to a settled pool at once, with no Restart badge",
+  "the Spawn caps (issue #149) › applies a saved cap to a settled pool at the Tick its save wakes, with no Restart badge",
   async (t) => {
     const world = settledWorld(t);
     const server = await t.start(world);
@@ -438,8 +438,11 @@ conformance(
     expect(answer.status).toBe(200);
     expect(onDisk(world).spawnCaps).toEqual({ perAttempt: 8, perRun: 30 });
     expect(answer.json<SettingsResponse>().pool.effective.stale).toEqual([]);
-    // On the very next snapshot, with no boundary to wait for.
-    expect((await snapshot(server))?.spawnUsage).toEqual({ spawnedThisRun: 0, perAttempt: 8, perRun: 30 });
+    await until(
+      () => snapshot(server),
+      (got) => got?.spawnUsage.perAttempt === 8 && got.spawnUsage.perRun === 30,
+      { what: "the saved caps on the snapshot" },
+    );
   },
 );
 

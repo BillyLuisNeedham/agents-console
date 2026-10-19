@@ -1,22 +1,3 @@
-/**
- * Ticket file reconcile at merge (#92), seen from outside the server
- * (ADR-0036). The pool's Ticket file is the file of record; an Attempt in a
- * worktree gets a seed copy of it at the same path relative to the
- * worktree, and whatever the agent adds to either copy must be in the file
- * of record once its branch merges.
- *
- * The engine places the worktree copy at the Ticket file's path relative
- * to the pool directory, under the worktree's root. That lines up with the
- * committed file only when the pool directory is the checkout root and its
- * issues/ are tracked, the layout the original engine tests used. So these
- * cases run their pool at the world's repository root (not the usual
- * gitignored .scratch/pool), with issues/ and console.json committed on
- * main before the server starts.
- *
- * Every case runs two ready Tickets, so each gets its own worktree: a lone
- * ready Ticket runs in the pool checkout and has no copy to reconcile.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -200,6 +181,55 @@ conformance(
   },
 );
 
+conformance(
+  "merges",
+  "answers every read of the Ticket with its body while its file steps aside for the merge",
+  async (t) => {
+    const world = trackedPool(t, {
+      "01": { workFile: "one.txt", ticketReplace: ["1. Do A", "1. [x] Do A"], hold: true },
+      "02": DEFAULT_02,
+    });
+    const server = await t.start(world, { pool: world.repo });
+    await until(
+      () => existsSync(join(world.stubs.dir, "edited-01")),
+      (edited) => edited,
+      { ms: 15_000, what: "01's agent to make its edits" },
+    );
+
+    const reads: { status: number; body: string; listed: boolean }[] = [];
+    let merging = true;
+    const polling = (async () => {
+      while (merging) {
+        const [ticket, state] = await Promise.all([
+          server.http.get("/api/ticket?id=01"),
+          server.http.get("/api/state"),
+        ]);
+        const snapshot = state.json<{ snapshot: { state: { tickets: { id: string }[] } } | null }>().snapshot;
+        reads.push({
+          status: ticket.status,
+          body: ticket.status === 200 ? ticket.json<{ body: string }>().body : ticket.text,
+          listed: snapshot === null || snapshot.state.tickets.some((card) => card.id === "01"),
+        });
+      }
+    })();
+    try {
+      writeFileSync(join(world.stubs.dir, "release-01"), "");
+      await runToDone(server);
+    } finally {
+      merging = false;
+      await polling;
+    }
+
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read.status).toBe(200);
+      expect(read.body).toStartWith("# Ticket");
+      expect(read.listed).toBe(true);
+    }
+    expect(existsSync(join(world.repo, "issues", "01-t.md.pool-aside"))).toBe(false);
+  },
+);
+
 conformance("merges", "keeps edits to different regions of both copies", async (t) => {
   const note = "\n## Notes\n\n- pool-side note\n";
   const world = trackedPool(t, {
@@ -244,8 +274,6 @@ conformance(
     const branch = ticketWorktree(world.repo, "01").branch;
     const server = await t.start(world, { pool: world.repo });
 
-    // Up to the Review gate no Interrupt but Review is ever raised: the file
-    // says it all, and the pool is not held.
     const atReview = await untilState(
       server,
       (s) => s.state.interrupts.length > 0,

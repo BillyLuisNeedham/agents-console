@@ -1,18 +1,3 @@
-/**
- * Raising and answering Interrupts, seen from outside the server (ADR-0036):
- * the checkpoint, crash, deadlock and config Interrupts a run raises, what
- * each carries, and what POST /api/resume does with each: a resume with a
- * note re-runs the Ticket and leaves the note in its file, a resume naming
- * nothing pending is refused, approve and reject are refused anywhere but the
- * Review gate and a merge-approval. Ticket C08 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * The stubs on PATH play the agents. Every answer here lands on an idle pool,
- * so it is processed the moment it is accepted; answers queued behind a
- * running super-step are interrupts-queued.test.ts's.
- */
-
 import { expect } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -57,8 +42,7 @@ const atReview = (server: CaseServer): Promise<EnrichedSnapshot> =>
 /** The config Interrupt's body for a Ticket missing `field` (engine/engine.ts). */
 const configBody = (id: string, field: "harness" | "model"): string =>
   `ticket ${id} has no ${field}: set one in console.json (an assign entry for ${id}, or defaults.${field}) ` +
-  "and answer resume. The pool reloads console.json at the next super-step boundary and schedules the " +
-  "ticket on what it finds.";
+  "and answer resume. The pool reloads console.json at the next Tick and schedules the ticket on what it finds.";
 
 // engine/engine.test.ts:399
 conformance(

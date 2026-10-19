@@ -3,7 +3,7 @@
 //! from the Console (issue #97) and a Restart (issue #121) all take the same orderly stop, bounded by a
 //! hard limit, and a Restart then hands the pool to Boot.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,9 +15,11 @@ use serde_json::Value;
 use ac_core::fleet::default_registry_path;
 use ac_core::js;
 use ac_core::machine_defaults::default_machine_defaults_paths;
+use ac_io::git::git_line;
 use ac_io::herdr::default_socket_path;
 use ac_io::own_exe::own_exe;
-use ac_server::{PoolServerOptions, Server};
+use ac_protocol::PlanBootResponse;
+use ac_server::{LineBoot, LineBootRefusal, PoolServerOptions, Server};
 
 use crate::boot::home_dir;
 use crate::detach::spawn_detached;
@@ -70,15 +72,7 @@ impl StopAndExit {
 /// to the pool's boot log, on the port the route promised the tab, passed as a pin even when nothing
 /// pinned it. Port 0 is any free port, never a pin, so it is never passed on.
 fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
-    let runs = Path::new(pool_dir).join("runs");
-    js::mkdir_all(&runs).map_err(|err| err.to_string())?;
-    let log_path = runs.join("boot.log");
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|err| js::FsError::new(&err, "open", &log_path).to_string())?;
-    let err_log = log.try_clone().map_err(|err| err.to_string())?;
+    let (_, log) = open_boot_log(Path::new(pool_dir))?;
     let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Boot may run in another directory, so a pool named relative to this one is named in full.
     let pool = if Path::new(pool_dir).is_relative() {
@@ -101,7 +95,23 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         args.push(js::string_of(port));
     }
     let exe = own_exe().map_err(|err| format!("{err}"))?;
-    let boot = boot_command(&exe, args, here);
+    spawn_boot(&boot_command(&exe, args, here), log)
+}
+
+fn open_boot_log(pool_dir: &Path) -> Result<(PathBuf, File), String> {
+    let runs = pool_dir.join("runs");
+    js::mkdir_all(&runs).map_err(|err| err.to_string())?;
+    let path = runs.join("boot.log");
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| js::FsError::new(&err, "open", &path).to_string())?;
+    Ok((path, log))
+}
+
+fn spawn_boot(boot: &BootCommand, log: File) -> Result<(), String> {
+    let err_log = log.try_clone().map_err(|err| err.to_string())?;
     let mut command = Command::new(&boot.program);
     command
         .args(&boot.args)
@@ -110,6 +120,44 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err_log));
     spawn_detached(&mut command).map_err(|err| format!("{err}"))
+}
+
+fn line_boot_args(boot: &LineBoot) -> Vec<String> {
+    ["--plan", &boot.plan, "--work", &boot.work, "--yes"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn main_worktree(pool_dir: &Path) -> Option<PathBuf> {
+    let listed = git_line(pool_dir, ["worktree", "list", "--porcelain"])?;
+    let main = PathBuf::from(listed.lines().next()?.strip_prefix("worktree ")?);
+    Some(std::fs::canonicalize(&main).unwrap_or(main))
+}
+
+fn hand_off_line_boot(
+    pool_dir: &str,
+    boot: &LineBoot,
+) -> Result<PlanBootResponse, LineBootRefusal> {
+    let pool = std::path::absolute(pool_dir).unwrap_or_else(|_| PathBuf::from(pool_dir));
+    let project = main_worktree(&pool).ok_or_else(|| {
+        LineBootRefusal::NoCheckout(format!(
+            "plans: the pool at {} is in no git checkout, so there is no project to cut a Line from",
+            js::path_text(&pool)
+        ))
+    })?;
+    let argv = line_boot_args(boot);
+    let (log_path, log) = open_boot_log(&pool).map_err(LineBootRefusal::Launch)?;
+    let exe = own_exe().map_err(|err| LineBootRefusal::Launch(format!("{err}")))?;
+    let command = BootCommand {
+        cwd: project.clone(),
+        ..boot_command(&exe, argv.clone(), project.clone())
+    };
+    spawn_boot(&command, log).map_err(LineBootRefusal::Launch)?;
+    Ok(PlanBootResponse {
+        argv,
+        cwd: js::path_text(&project),
+        log: js::path_text(&log_path),
+    })
 }
 
 /// What a Restart runs to bring the pool back: the program, its arguments, and the directory it runs in.
@@ -205,6 +253,10 @@ pub fn run(args: Vec<String>) -> ! {
             );
         })
     };
+    let on_line_boot = {
+        let pool_dir = pool_dir.clone();
+        Arc::new(move |boot: &LineBoot| hand_off_line_boot(&pool_dir, boot))
+    };
     let options = PoolServerOptions {
         pool_dir: pool_dir.clone(),
         port,
@@ -224,6 +276,7 @@ pub fn run(args: Vec<String>) -> ! {
         pane_survey: None,
         on_stop_requested: Some(on_stop),
         on_restart_requested: Some(on_restart),
+        on_line_boot_requested: Some(on_line_boot),
         machine_defaults_paths: default_machine_defaults_paths(&home),
         parent_env: std::sync::Arc::new(
             std::env::vars_os()
@@ -339,5 +392,69 @@ mod tests {
         let got = boot_command(&exe, boot_args(), PathBuf::from("/elsewhere"));
         assert_eq!(got.program, exe);
         assert_eq!(got.args[0], "boot");
+    }
+
+    #[test]
+    fn a_console_started_line_boots_with_its_plan_and_work_and_answers_yes() {
+        let boot = LineBoot {
+            plan: "addy-commands".to_owned(),
+            work: "fix the flaky test".to_owned(),
+        };
+        assert_eq!(
+            line_boot_args(&boot),
+            [
+                "--plan",
+                "addy-commands",
+                "--work",
+                "fix the flaky test",
+                "--yes"
+            ]
+        );
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn a_line_is_cut_from_the_main_worktree_of_the_pools_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".scratch/pool")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        git(&repo, &["worktree", "add", "-q", "-b", "line", "../line"]);
+        let linked_pool = root.join("line/.scratch/pool");
+        std::fs::create_dir_all(&linked_pool).unwrap();
+
+        assert_eq!(
+            main_worktree(&repo.join(".scratch/pool")),
+            Some(repo.clone())
+        );
+        assert_eq!(main_worktree(&linked_pool), Some(repo));
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(main_worktree(&outside), None);
     }
 }

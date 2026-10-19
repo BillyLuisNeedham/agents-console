@@ -1,9 +1,3 @@
-//! The Spawn caps (ADR-0010, made Pool settings by ADR-0029; spawn-caps.ts): how many proposals one
-//! attempt (or one Conversation spawn.json) has honored, and how many Ticket-origin Spawns one run
-//! adopts, a run being this Console boot. They live in console.json as `spawnCaps`, each field falling
-//! back to its default on its own, and reload at the super-step boundary with the assignment slice. A
-//! proposal beyond either cap is held for the operator, never dropped.
-
 use serde_json::Value;
 
 use crate::config::{ConfigError, PoolConfig};
@@ -42,10 +36,6 @@ pub fn spawn_caps_of(config: &PoolConfig) -> SpawnCaps {
     }
 }
 
-/// A console.json `spawnCaps` value, checked: absent, or an object whose fields, where present, are
-/// whole numbers of zero or more. A cap of 0 is a pool that holds every proposal for the operator
-/// (issue #150). Boot's parse and the boundary's reload share it, so a cap the reload would refuse
-/// never boots.
 pub fn check_spawn_caps(raw: Option<&Value>) -> Result<(), ConfigError> {
     let Some(raw) = raw else { return Ok(()) };
     let Value::Object(caps) = raw else {

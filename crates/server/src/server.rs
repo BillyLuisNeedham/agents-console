@@ -34,7 +34,9 @@ use ac_core::pool_settings::{SettingsContext, pool_settings_path, settings_paylo
 use ac_core::pool_title::title_of;
 use ac_engine::{Engine, EngineError, PoolSnapshot, RunOptions};
 use ac_io::herdr::Herdr;
-use ac_protocol::{EnrichedSnapshot, HEARTBEAT_MS, SettingsResponse, TicketGradeSummary};
+use ac_protocol::{
+    EnrichedSnapshot, HEARTBEAT_MS, PlanBootResponse, SettingsResponse, TicketGradeSummary,
+};
 
 use crate::enrich::{enrich, pool_name_of};
 use crate::hub::{self, HubState};
@@ -68,6 +70,29 @@ pub type StopHandOff = Arc<dyn Fn() + Send + Sync>;
 /// (console.json's raw `port` when pinned, else the bound port).
 pub type RestartHandOff = Arc<dyn Fn(Value) + Send + Sync>;
 
+/// A Line the Console asked Boot to start (`plans.boot`), once the route has accepted it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineBoot {
+    /// A Plan slug that loaded a moment ago.
+    pub plan: String,
+    /// Trimmed, not empty, and not starting with `--`.
+    pub work: String,
+}
+
+/// Why an accepted `plans.boot` started nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineBootRefusal {
+    /// The pool is in no git checkout, so there is no project to cut a Line from. 409.
+    NoCheckout(String),
+    /// Opening the log or starting Boot failed. 500.
+    Launch(String),
+}
+
+/// What an accepted `plans.boot` sets running: Boot, detached, for a new Line. Quick and blocking (a
+/// git read and a spawn); the route runs it off the async threads.
+pub type LineBootHandOff =
+    Arc<dyn Fn(&LineBoot) -> Result<PlanBootResponse, LineBootRefusal> + Send + Sync>;
+
 /// Everything a pool server is made with (server.ts `PoolServerOptions`). Only the CLI reads the
 /// environment; it fills these in.
 pub struct PoolServerOptions {
@@ -98,6 +123,8 @@ pub struct PoolServerOptions {
     pub on_stop_requested: Option<StopHandOff>,
     /// What an accepted Restart does; absent, the server shuts itself down in place.
     pub on_restart_requested: Option<RestartHandOff>,
+    /// What an accepted `plans.boot` does; absent, the verb is refused.
+    pub on_line_boot_requested: Option<LineBootHandOff>,
     pub machine_defaults_paths: MachineDefaultsPaths,
     /// The environment every harness child inherits (`process.env`, read by the CLI).
     pub parent_env: Arc<Vec<(String, String)>>,
@@ -171,6 +198,7 @@ pub(crate) struct Shared {
     pub check: Duration,
     pub on_stop: Option<StopHandOff>,
     pub on_restart: Option<RestartHandOff>,
+    pub on_line_boot: Option<LineBootHandOff>,
     starter: Starter,
     pub runtime: Handle,
     engine: OnceCell<Engine>,
@@ -340,6 +368,7 @@ impl Server {
             check: SNAPSHOT_COALESCE,
             on_stop: options.on_stop_requested,
             on_restart: options.on_restart_requested,
+            on_line_boot: options.on_line_boot_requested,
             starter: options.starter.unwrap_or_else(|| {
                 Arc::new(|options| {
                     async move {
@@ -532,16 +561,7 @@ impl Server {
                         _ => break,
                     }
                 }
-                let rows = self.reassign_rows(inner, &raw);
-                let title = self.title_now(inner);
-                inner.latest = Some(Arc::new(enrich(
-                    &raw,
-                    &inner.meta,
-                    &self.0.pool_name,
-                    &self.0.pool_dir,
-                    &rows,
-                    title,
-                )));
+                inner.latest = Some(Arc::new(self.enriched(inner, &raw)));
                 inner.enriched_from = Some(raw);
                 inner.dirty = false;
             }
@@ -553,6 +573,33 @@ impl Server {
     pub fn snapshot(&self) -> Option<Arc<EnrichedSnapshot>> {
         let mut inner = self.lock();
         self.current(&mut inner)
+    }
+
+    /// One engine emit enriched, even when a later one has been published since.
+    pub(crate) fn snapshot_of(&self, raw: &Arc<PoolSnapshot>) -> Arc<EnrichedSnapshot> {
+        let mut inner = self.lock();
+        let built = inner
+            .enriched_from
+            .as_ref()
+            .is_some_and(|from| Arc::ptr_eq(from, raw));
+        if let Some(latest) = inner.latest.clone().filter(|_| built && !inner.dirty) {
+            return latest;
+        }
+        self.refresh_meta(&mut inner, Some(raw));
+        Arc::new(self.enriched(&mut inner, raw))
+    }
+
+    fn enriched(&self, inner: &mut Inner, raw: &PoolSnapshot) -> EnrichedSnapshot {
+        let rows = self.reassign_rows(inner, raw);
+        let title = self.title_now(inner);
+        enrich(
+            raw,
+            &inner.meta,
+            &self.0.pool_name,
+            &self.0.pool_dir,
+            &rows,
+            title,
+        )
     }
 
     /// Rebuild the enriched snapshot from the last engine snapshot and the config file as it is now,

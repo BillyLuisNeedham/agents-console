@@ -1,19 +1,3 @@
-/**
- * Queued answers across a stop and start, seen from outside the server
- * (ADR-0036). An answer is accepted first (its `answered` event, then its
- * record in runs/queued-answers.json) and processed after; a server that
- * goes down between the two leaves the record pending, and the next boot
- * drains it at its first boundary without anyone answering again. One that
- * goes down after the processing finds the answer already in the last
- * checkpoint. Ticket C05 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * What a kill between acceptance and processing leaves is written by hand
- * while no server runs, in the exact shapes acceptance writes: no server
- * can be stopped at that point from outside.
- */
-
 import { expect } from "bun:test";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -201,8 +185,6 @@ restartCase("an answer processed before a SIGKILL is still answered at the next 
     config: CONFIG,
   });
   const release = join(world.root, "release-01");
-  // The resumed attempt holds its super-step open, so the kill lands after
-  // the answer is processed and before the next boundary.
   world.stubs.launches("01", [
     { status: "checkpoint", brief: "pick a name" },
     { status: "keep", run: waitScript(release) },

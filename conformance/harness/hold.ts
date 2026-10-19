@@ -25,13 +25,6 @@ export interface HoldRule {
 /** Bounds a held launch, at 50 ms a poll: two minutes, so a case that fails before it releases leaves nothing running. */
 const HOLD_POLLS = 2400;
 
-/**
- * Put the gate in front of `binary` (claude by default). Each launch is
- * keyed by the base name of its working directory: a Ticket's worktree is
- * named for its id, a lone Ticket runs in the checkout (`repo`), and `any`
- * matches every launch no other rule names. A launch whose key has no rule
- * goes straight to the stub.
- */
 export function holdLaunches(
   world: World,
   rules: Record<string, HoldRule>,

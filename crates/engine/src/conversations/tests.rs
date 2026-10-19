@@ -100,6 +100,7 @@ impl Rig {
             drivers: "implement".into(),
             enlisted: None,
             role: None,
+            node: None,
         }
     }
 
@@ -454,6 +455,7 @@ async fn an_end_on_an_unadopted_record_whose_pane_is_another_terminal_touches_no
         &rig.engine,
         "conv-1",
         Some("bye".into()),
+        false,
         Some(listing),
         ac_protocol::AnswerBy::Operator,
     )
@@ -486,6 +488,7 @@ async fn two_ends_of_one_unadopted_record_record_the_ending_once() {
             &rig.engine,
             "conv-1",
             None,
+            false,
             Some(listing.clone()),
             ac_protocol::AnswerBy::Operator,
         )
@@ -507,6 +510,7 @@ async fn ending_an_unknown_conversation_names_the_id() {
         &rig.engine,
         "conv-99",
         None,
+        false,
         ac_protocol::AnswerBy::Operator,
     )
     .await
@@ -571,7 +575,8 @@ fn spawned_ticket(id: &str, title: &str, parent: &str) -> ac_core::pool::TicketM
         spawned_by: Some(parent.to_owned()),
         enlisted_from: None,
         spawn_assign: None,
-        station: None,
+        node: None,
+        hold: false,
     }
 }
 
@@ -707,6 +712,7 @@ async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
         &rig.engine,
         "conv-1",
         Some("bye".into()),
+        false,
         ac_protocol::AnswerBy::Operator,
     )
     .await
@@ -721,14 +727,10 @@ async fn ending_an_enlisted_conversation_reads_nothing_of_its_pane() {
     assert!(rig.kinds("conv-1").contains(&TicketEventKind::Ended));
 }
 
-// A start refused before its launch gives back the id it was fired with: Spawn adoption reserves the
-// id it mints before the start runs, and a reservation left behind would make the parent's next Spawn
-// skip the number.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_start_gives_back_the_id_reserved_for_it() {
+async fn a_refused_start_reserves_no_id() {
     let pool = Pool::git(&[("01", &[])]);
     let engine = pool.start().await;
-    engine.call(|s| reserve(s, "01-spawn-1")).await.unwrap();
     let err = start(
         &engine,
         ac_protocol::StartConversationRequest {
@@ -748,6 +750,31 @@ async fn a_refused_start_gives_back_the_id_reserved_for_it() {
     );
     let reserved = engine.call(|s| reserved_ids(s)).await.unwrap();
     assert!(reserved.is_empty(), "still reserved: {reserved:?}");
+}
+
+#[tokio::test]
+async fn a_prepared_start_has_its_id_reserved_in_the_same_job() {
+    let rig = Rig::new().await;
+    let (prepared, reserved) = rig
+        .engine
+        .call(|s| {
+            let prepared = prepare_start(
+                s,
+                &ac_protocol::StartConversationRequest {
+                    title: "Talk".into(),
+                    opening: None,
+                    role: None,
+                    assign: None,
+                    spawned_by: None,
+                    id: Some("conv-1-spawn-1".into()),
+                },
+            );
+            (prepared.is_ok(), reserved_ids(s))
+        })
+        .await
+        .unwrap();
+    assert!(prepared);
+    assert_eq!(reserved, ["conv-1-spawn-1"]);
 }
 
 // A Conversation whose harness the pane's shell cannot find (issue #179) gets the Launch's not-found

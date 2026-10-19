@@ -34,8 +34,6 @@ use crate::interrupts::land_checkpoint_brief;
 use crate::merges::merge_target_ref;
 use crate::session::{PoolState, PoolUpdate, Session};
 
-/// `attemptEnvOf`: the Attempt-run module's environment, the one place the pool's terminal setting is
-/// decided. The drive passes the super-step's frozen config; the other spawn sites read the live one.
 pub fn attempt_env_of(session: &Session, config: Option<&PoolConfig>) -> AttemptEnv {
     let config = config.unwrap_or(&session.state.config);
     AttemptEnv {
@@ -62,12 +60,11 @@ pub struct TicketPlan {
     /// True when the attempt is one candidate of a verify fan-out: it runs on its own attempt branch
     /// and its exit never writes the ticket's status.
     pub verify: bool,
-    /// A Line's Station Ticket's verdict check (ADR-0037), fixed at the plan: its Outcome without a
-    /// valid verdict is the no-verdict checkpoint.
-    pub verdict: Option<ac_core::line::VerdictCheck>,
+    /// A Line Ticket's Outcome check (ADR-0037, ADR-0040), fixed at the plan: its done Outcome
+    /// without a valid verdict is the no-verdict checkpoint.
+    pub verdict: Option<ac_core::line::run::OutcomeCheck>,
 }
 
-/// One attempt's ending as the drive joins it.
 #[derive(Debug, Clone)]
 pub struct TicketResult {
     pub marker: TicketMarker,
@@ -76,8 +73,6 @@ pub struct TicketResult {
     pub exit_code: i64,
     pub plan: TicketPlan,
     pub update: PoolUpdate,
-    /// True when the drive applied this result's update at attempt exit; the boundary join skips it.
-    pub joined_at_exit: bool,
     /// The attempt's schema-valid spawn proposals (ADR-0010); a verify candidate carries none.
     pub spawn_proposals: Option<Vec<SpawnProposal>>,
     /// The exit facts (ADR-0012), frozen at exit for the crash interrupt body.
@@ -86,6 +81,45 @@ pub struct TicketResult {
     pub outcome_exists: bool,
     /// The crash reason the crash event recorded, `None` on a clean exit.
     pub crash_reason: Option<String>,
+}
+
+impl TicketResult {
+    pub fn ending(&self) -> CandidateEnding {
+        CandidateEnding {
+            attempt: self.plan.attempt,
+            status: self.status,
+            crash_reason: self.crash_reason.clone(),
+            log_path: self.log_path.clone(),
+            log_tail: self.log_tail.clone(),
+            outcome_path: self.outcome_path.clone(),
+            outcome_exists: self.outcome_exists,
+            worktree: self.plan.worktree.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateEnding {
+    pub attempt: u64,
+    pub status: TicketStatus,
+    pub crash_reason: Option<String>,
+    pub log_path: String,
+    pub log_tail: Vec<String>,
+    pub outcome_path: String,
+    pub outcome_exists: bool,
+    pub worktree: Option<WorktreeInfo>,
+}
+
+impl CandidateEnding {
+    pub fn crash_body(&self) -> String {
+        crash_interrupt_body(&CrashFacts {
+            crash_reason: self.crash_reason.as_deref().unwrap_or("crashed"),
+            log_path: &self.log_path,
+            log_tail: &self.log_tail,
+            outcome_path: &self.outcome_path,
+            outcome_exists: self.outcome_exists,
+        })
+    }
 }
 
 /// The exit facts a crash interrupt body quotes (ADR-0012), frozen at raise time.
@@ -272,41 +306,19 @@ fn git_attempt(attempt: u64) -> Option<u32> {
     Some(u32::try_from(attempt).unwrap_or(u32::MAX))
 }
 
-/// `planTicket`: where an attempt runs. A lone ready ticket runs in the pool checkout itself; a
-/// multi-ticket super-step, a parked branch, a verify candidate, a captured merge target or a
-/// Continued attempt in the checkout gives the ticket its own worktree, seeded with the Ticket file
-/// (kept under runs/ too for the reconcile at merge).
 pub fn plan_ticket(
     session: &mut Session,
     marker: &TicketMarker,
-    ready_count: usize,
     attempt: u64,
     verify: bool,
 ) -> anyhow::Result<TicketPlan> {
     if !session.git {
-        session.pool_checkout_planned.insert(marker.id.clone());
         return Ok(TicketPlan {
             cwd: session.cwd.clone(),
             worktree: None,
             attempt,
             verify,
-            verdict: crate::line::verdict_check_for(session, marker),
-        });
-    }
-    if !verify
-        && ready_count < 2
-        && !git::branch_exists(&session.cwd, &marker.id, None)
-        && session.merge_target.is_none()
-        && !session.continued.values().any(|c| c.in_pool_checkout)
-    {
-        // Occupied from the plan on (ADR-0027).
-        session.pool_checkout_planned.insert(marker.id.clone());
-        return Ok(TicketPlan {
-            cwd: session.cwd.clone(),
-            worktree: None,
-            attempt,
-            verify,
-            verdict: crate::line::verdict_check_for(session, marker),
+            verdict: crate::line::outcome_check_for(session, marker),
         });
     }
     let worktree = git::prepare_worktree(
@@ -334,7 +346,7 @@ pub fn plan_ticket(
         worktree: Some(worktree),
         attempt,
         verify,
-        verdict: crate::line::verdict_check_for(session, marker),
+        verdict: crate::line::outcome_check_for(session, marker),
     })
 }
 
@@ -345,19 +357,26 @@ fn exited_status(valid: &ValidOutcome) -> TicketStatus {
     }
 }
 
-// Malformed spawn entries were dropped per proposal at validation (ADR-0010); each reason lands on the
-// ticket's log at the exit that produced it, ahead of the exited event.
-fn spawn_rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Map<String, Value>)> {
-    valid
+// Malformed spawn and item entries were dropped per entry at validation (ADR-0010); each reason lands
+// on the ticket's log at the exit that produced it, ahead of the exited event.
+pub(crate) fn rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Map<String, Value>)> {
+    let spawns = valid
         .spawn_rejections
         .iter()
-        .map(|rejection| {
+        .map(|rejection| (TicketEventKind::SpawnRejected, rejection));
+    let items = valid
+        .item_rejections
+        .iter()
+        .map(|rejection| (TicketEventKind::ItemRejected, rejection));
+    spawns
+        .chain(items)
+        .map(|(kind, rejection)| {
             let mut payload = Map::new();
             payload.insert("reason".into(), Value::String(rejection.reason.clone()));
             if let Some(index) = rejection.index {
                 payload.insert("index".into(), Value::from(index));
             }
-            (TicketEventKind::SpawnRejected, payload)
+            (kind, payload)
         })
         .collect()
 }
@@ -413,7 +432,7 @@ pub async fn run_ticket(
         String::new()
     };
     let ledger = js::path_text(&spawn_ledger_path(Path::new(&env.attempt.runs_dir)));
-    let mut prompt = build_prompt(&PromptParts {
+    let prompt = build_prompt(&PromptParts {
         chain: &chain,
         agent_md: &agent_md,
         upstream: &upstream,
@@ -421,10 +440,6 @@ pub async fn run_ticket(
         spawn_caps: spawn_caps_of(&snapshot.config),
         ledger_path: &ledger,
     });
-    // A Station of a Line is taught its verdict (ADR-0037).
-    if let Some(teaching) = marker.station.and_then(ac_core::line::verdict_teaching) {
-        prompt.push_str(&format!("\n\n---\n\n{teaching}\n"));
-    }
     let check = plan.verdict.clone();
     let run = run_attempt(
         &env.attempt,
@@ -451,7 +466,7 @@ pub async fn run_ticket(
             crash_subject: CrashSubject::Harness,
             events: AttemptEvents::Full {
                 exited_status,
-                result_events: Some(spawn_rejection_events),
+                result_events: Some(rejection_events),
             },
         },
         move |parsed: &Value| {
@@ -525,7 +540,6 @@ pub async fn run_ticket(
         status,
         log_path: run.log_path.clone(),
         exit_code: run.code,
-        joined_at_exit: false,
         log_tail: run.log_tail.clone(),
         outcome_path: run.outcome_path.clone(),
         outcome_exists: run.outcome_exists,
@@ -566,6 +580,36 @@ mod tests {
                 outcome_exists: true,
             }),
             "crash: no outcome written\n/l\n\noutcome file: /o (exists)\n"
+        );
+    }
+
+    #[test]
+    fn a_dropped_spawn_and_a_dropped_item_each_log_their_own_event_before_the_exit() {
+        let valid = ac_core::outcome::validate_outcome(&serde_json::json!({
+            "status": "done", "summary": "s",
+            "spawn": ["x"], "items": ["y", {"title": "ok", "body": ""}, 3]
+        }))
+        .unwrap();
+        let logged: Vec<_> = rejection_events(&valid)
+            .into_iter()
+            .map(|(kind, payload)| (kind, Value::Object(payload)))
+            .collect();
+        assert_eq!(
+            logged,
+            [
+                (
+                    TicketEventKind::SpawnRejected,
+                    serde_json::json!({"reason": "spawn entry is not an object", "index": 0})
+                ),
+                (
+                    TicketEventKind::ItemRejected,
+                    serde_json::json!({"reason": "item is not an object", "index": 0})
+                ),
+                (
+                    TicketEventKind::ItemRejected,
+                    serde_json::json!({"reason": "item is not an object", "index": 2})
+                ),
+            ]
         );
     }
 }

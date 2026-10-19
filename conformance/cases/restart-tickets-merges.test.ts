@@ -1,29 +1,14 @@
-/**
- * Merges across a stop and start, seen from outside the server (ADR-0036):
- * the Merge hold a new server derives from what the last one left in the
- * Ticket files and in git, the Merge queue it reads back, and the merge
- * checkout a dead server left registered. Ticket C05 of the inventory's
- * split (docs/research/rust-port/test-inventory.md): each case names the
- * engine test it carries over, or the uncovered behaviour it pins.
- *
- * The hold is never persisted (ADR-0014): every boot derives it afresh from
- * the state lines (a done Ticket) and git (its pool branch not yet in the
- * merge target). A held pool reads phase running while it waits.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
-import type { CaseServer } from "../harness/case.ts";
 import { conformance } from "../harness/case.ts";
 import { cardOf, commitAll, gitCommonDir, gitIn, poolKey, ticketWorktree, worktreeList } from "../harness/git-pool.ts";
-import { CLAUDE_READY, type HerdrCall } from "../harness/herdr.ts";
-import { readStateLine, until } from "../harness/pool-files.ts";
+import { until } from "../harness/pool-files.ts";
 import type { World } from "../harness/world.ts";
+import { events } from "./formats-helpers.ts";
 import {
   CONFIG,
-  TERMINAL,
   answer,
   approveReview,
   interruptsOf,
@@ -35,9 +20,6 @@ import {
   ticket,
   untilState,
 } from "./restart-support.ts";
-
-/** The pool log line the drive writes as the hold pauses it. */
-const PAUSED = "merge hold (ADR-0014): pool paused; awaiting the merge of";
 
 /** Bash for a stub: wait, up to thirty seconds, for a commit titled `subject` on main, then go on. */
 function waitOnMain(subject: string): string {
@@ -56,27 +38,18 @@ function queueOf(snapshot: EnrichedSnapshot): string[] {
   return snapshot.state.mergeQueue.map((entry) => `${entry.ticketId}:${entry.state}`);
 }
 
-/** How many pool log lines contain `text`. */
-async function logCount(server: CaseServer, text: string): Promise<number> {
-  return (await poolLog(server)).filter((line) => line.includes(text)).length;
-}
-
 // engine/engine.test.ts:11223
 restartCase(
-  "a killed server's Merge hold is derived again by the next from state lines and branches alone",
+  "a killed server's unmerged Ticket is derived again by the next from state lines and branches alone, and its dependent waits for it",
   async (t) => {
     const config: PoolConfig = { ...CONFIG, resolver: "claude" };
     const world = t.world({
-      tickets: [ticket("01", "t"), ticket("02", "t"), ticket("03", "t")],
+      tickets: [ticket("01", "t"), ticket("02", "t"), ticket("03", "t", { blockedBy: "02" })],
       config,
       repoFiles: { "shared.txt": "base\n" },
     });
-    // 01 and 02 overwrite one line, 02 only once 01's work is on main, so
-    // 02's merge always conflicts. The resolver reproduces the conflict and
-    // stages its resolution. 03 checkpoints on its first run.
     world.stubs.script("01", { run: overwriteShared("from-01", "work-01") });
     world.stubs.script("02", { run: `${waitOnMain("work-01")}\n${overwriteShared("from-02", "work-02")}` });
-    world.stubs.script("03", { statuses: ["checkpoint", "done"] });
     world.stubs.script("02.resolver", {
       run: [
         "git merge main >/dev/null 2>&1 || true",
@@ -86,37 +59,27 @@ restartCase(
       outcomeRaw: JSON.stringify({ resolved: true, note: "kept both lines" }),
     });
 
-    // Server one: 02's merge waits on the operator's approval and holds the
-    // pool, with 03's checkpoint beside it.
     const first = await startLeg(t, world, 0);
     const held = await untilState(
       first,
-      "02's merge-approval holding the pool beside 03's checkpoint",
-      (s) => interruptsOf(s).join(" ") === "02:merge-approval 03:checkpoint" && queueOf(s).join(" ") === "02:awaiting-approval",
+      "02's merge-approval with 03 withheld",
+      (s) =>
+        interruptsOf(s).join(" ") === "02:merge-approval" &&
+        queueOf(s).join(" ") === "02:awaiting-approval" &&
+        cardOf(s, "01").mergeState === null,
       60_000,
     );
     const approval = held.state.interrupts.find((i) => i.kind === "merge-approval")!;
-
-    // Resuming 03 under the hold answers its checkpoint: the state line goes
-    // back to ready, and nothing launches while the hold stands.
-    await answer(first, { ticketId: "03" });
-    await until(() => readStateLine(world.pool, "03-t.md").status, (status) => status === "ready", {
-      what: "03's state line back to ready",
-      ms: 30_000,
-    });
-    await untilState(first, "03's answer processed", (s) => s.state.queuedAnswers.length === 0 && interruptsOf(s).join(" ") === "02:merge-approval");
-    const pausedBefore = await logCount(first, PAUSED);
+    expect(cardOf(held, "03").status).toBe("ready");
     await first.kill();
-    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver", "03"]);
+    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver"]);
     const branch = ticketWorktree(world.repo, "02").branch;
     expect(gitIn(world.repo, ["log", "main", "--format=%s"]).split("\n")).not.toContain("work-02");
 
-    // Server two derives the hold afresh: 02's approval is back and alone,
-    // and the drive pauses with 03 ready rather than launching it.
     const second = await startLeg(t, world, 1);
     const rederived = await untilState(
       second,
-      "the hold derived again, 02's approval alone",
+      "02 unmerged again, its approval alone",
       (s) =>
         interruptsOf(s).join(" ") === "02:merge-approval" &&
         queueOf(s).join(" ") === "02:awaiting-approval" &&
@@ -125,14 +88,10 @@ restartCase(
     );
     expect(rederived.state.interrupts).toEqual([approval]);
     expect(cardOf(rederived, "02").mergeState).toBe("awaiting-approval");
-    await until(() => logCount(second, PAUSED), (n) => n > pausedBefore, {
-      what: "the second server's drive paused by the hold",
-      ms: 30_000,
-    });
-    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver", "03"]);
+    expect(rederived.phase).toBe("running");
+    await Bun.sleep(1_000);
+    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver"]);
 
-    // Approving lands 02's merge the way it would have on server one; the
-    // hold lifts and 03 runs again from the ready state line.
     await answer(second, { ticketId: "02", action: "approve" });
     const done = await approveReview(second, 60_000);
     expect(Object.fromEntries(done.state.tickets.map((each) => [each.id, each.status]))).toEqual({
@@ -141,22 +100,48 @@ restartCase(
       "03": "done",
     });
     expect(done.state.mergeQueue).toEqual([]);
-    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver", "03", "03"]);
+    expect(launchKeys(world).sort()).toEqual(["01", "02", "02.resolver", "03"]);
     expect(gitIn(world.repo, ["show", "main:shared.txt"])).toBe("resolved-by-agent\n");
     expect(gitIn(world.repo, ["branch", "--list", branch]).trim()).toBe("");
+    const three = world.stubs.calls().find((call) => call.key === "03")!;
+    expect(gitIn(world.repo, ["show", `${three.head}:shared.txt`])).toBe("resolved-by-agent\n");
   },
   { timeoutMs: 180_000 },
 );
 
-/** The Enter that submits a typed Turn: keys alone, no text. */
-function submits(call: HerdrCall): boolean {
-  return (
-    call.method === "pane.send_input" &&
-    call.params.text === undefined &&
-    Array.isArray(call.params.keys) &&
-    (call.params.keys as string[]).includes("enter")
-  );
-}
+restartCase(
+  "a waiting merge conflict's count of Tickets started since it was raised is derived again after a restart",
+  async (t) => {
+    const world = t.world({
+      tickets: [ticket("01", "t"), ticket("02", "t"), ticket("03", "t", { blockedBy: "04" }), ticket("04", "t")],
+      config: { ...CONFIG, resolver: "none" },
+      repoFiles: { "shared.txt": "base\n" },
+    });
+    world.stubs.script("01", { run: overwriteShared("from-01", "work-01") });
+    world.stubs.script("02", { run: `${waitOnMain("work-01")}\n${overwriteShared("from-02", "work-02")}` });
+    world.stubs.script("03", { run: "echo three > three.txt; git add -A; git commit -qm work-03" });
+    const four = world.stubs.hold("04", { run: "echo four > four.txt; git add -A; git commit -qm work-04" });
+
+    const first = await startLeg(t, world, 0);
+    await untilState(first, "02's conflict waiting, nothing started since", (s) => interruptsOf(s).join(" ") === "02:merge-conflict", 60_000);
+    await four.release();
+    const counted = await untilState(
+      first,
+      "02's conflict counting 03's start",
+      (s) => s.state.interrupts.some((i) => i.ticketId === "02" && i.startedSince === 1),
+      60_000,
+    );
+    await untilState(first, "03 merged", (s) => cardOf(s, "03").status === "done" && cardOf(s, "03").mergeState === null, 60_000);
+    const raised = counted.state.interrupts.find((i) => i.ticketId === "02")!;
+    await first.kill();
+
+    const second = await startLeg(t, world, 1);
+    const rederived = await untilState(second, "02's conflict again", (s) => interruptsOf(s).join(" ") === "02:merge-conflict", 60_000);
+    expect(rederived.state.interrupts).toEqual([raised]);
+    expect(launchKeys(world).filter((key) => key === "03")).toEqual(["03"]);
+  },
+  { timeoutMs: 180_000 },
+);
 
 /**
  * Ticket `id` done on its pool branch, as a server that died before its
@@ -173,70 +158,35 @@ function doneUnmerged(world: World, id: string): { path: string; branch: string 
   return { path, branch };
 }
 
-// engine/merge-hold.test.ts:526
-restartCase(
-  "a restart takes on a merge a shutdown dropped first, and lists the held Tickets it never took after it, by id",
+// A pool checkout gate (ADR-0027) once recorded the merge it held as `merge-deferred`, and a boot chained
+// it again. No merge waits at a gate now, so a line an older engine wrote is skipped as an unknown kind.
+conformance(
+  "restart",
+  "a merge-deferred line an older engine wrote is skipped at boot, and its Ticket is listed unmerged beside the others, by id",
   async (t) => {
-    // 01 is a lone Ticket, so it works in the pool checkout; Keep talking
-    // continues it there, and a Continued attempt in the pool checkout holds
-    // every merge into it at the gate until it ends.
-    const world = t.world({ tickets: [ticket("01", "t")], config: TERMINAL });
-    world.stubs.script("01", { status: "checkpoint", brief: "ask me", hold: 120 });
-    const herdr = await t.herdr(world, { rendered: CLAUDE_READY });
-    const first = await startLeg(t, world, 0, { herdr });
-    await untilState(first, "01's pane held at its checkpoint", (s) => cardOf(s, "01").heldPane?.attempt === 1);
-    const from = herdr.calls.length;
-    const continued = await first.http.post("/api/keep-talking", { ticketId: "01" });
-    expect(continued.status).toBe(202);
-    await herdr.waitForCall(submits, { from, ms: 30_000 });
-    await first.stop();
-
-    // While no server runs: 03, 07 and 09 done on branches main lacks, as a
-    // server that died before their merges left them. 07's merge was held
-    // at the gate when it stopped, so its events end in merge-deferred.
+    const world = t.world({
+      config: { ...CONFIG, resolver: "claude" },
+      repoFiles: { "shared.txt": "base\n" },
+    });
     doneUnmerged(world, "03");
     const seven = doneUnmerged(world, "07");
     doneUnmerged(world, "09");
+    mkdirSync(join(world.pool, "runs"), { recursive: true });
     writeFileSync(
       join(world.pool, "runs", "07.events.jsonl"),
       `${JSON.stringify({ at: "2026-09-05T00:00:00.000Z", attempt: 1, kind: "merge-deferred", payload: seven })}\n`,
     );
 
-    const second = await startLeg(t, world, 1, { herdr });
-    const taken = await untilState(
-      second,
-      "07's merge taken on and waiting at the gate",
-      (s) => cardOf(s, "01").liveAttempt?.attempt === 2 && s.state.mergeQueue.length === 3,
-      60_000,
-    );
-    // 07 is the one merge the restart took on: first, queued. The two it
-    // never took follow, by id, and stall, with no merge Interrupt raised
-    // for any; the one Interrupt up is the re-adopted Continued attempt's.
-    expect(taken.state.mergeQueue).toEqual([
-      { ticketId: "07", state: "queued" },
-      { ticketId: "03", state: "stalled" },
-      { ticketId: "09", state: "stalled" },
-    ]);
-    expect(interruptsOf(taken)).toEqual(["01:checkpoint"]);
-    expect(await poolLog(second)).toContain("ticket 07: merge dropped at the last shutdown chained again");
+    const server = await t.start(world);
+    const listed = await untilState(server, "the three unmerged Tickets listed", (s) => s.state.mergeQueue.length === 3);
+    expect(queueOf(listed)).toEqual(["03:stalled", "07:stalled", "09:stalled"]);
+    expect(interruptsOf(listed)).toEqual([]);
+    expect(launchKeys(world)).toEqual([]);
+    expect((await poolLog(server)).join("\n")).not.toContain("chained again");
+    expect((await events(server.http, "07")).events.map((event) => event.kind)).not.toContain("merge-deferred");
     expect(gitIn(world.repo, ["log", "main", "--format=%s"]).split("\n")).not.toContain("work-07");
-
-    // The Continued attempt ends done; the gate opens and 07's merge lands,
-    // leaving the two it never took.
-    writeFileSync(join(world.pool, "runs", "01.outcome.json"), JSON.stringify({ status: "done", summary: "talked", commitSha: null }));
-    const landed = await untilState(
-      second,
-      "07 merged, 03 and 09 left",
-      (s) => s.state.mergeQueue.map((entry) => entry.ticketId).join(" ") === "03 09",
-      60_000,
-    );
-    expect(landed.state.mergeQueue).toEqual([
-      { ticketId: "03", state: "stalled" },
-      { ticketId: "09", state: "stalled" },
-    ]);
-    expect(gitIn(world.repo, ["show", "main:07.txt"])).toBe("07's work\n");
   },
-  { timeoutMs: 180_000 },
+  { timeoutMs: 120_000 },
 );
 
 // Gap: engine/worktrees.ts:332-341 (removeStaleMergeCheckout), called at

@@ -2,6 +2,7 @@
 //! the server asks of a running pool. Each method is one job on the actor (or a flow that sends jobs),
 //! and refuses with the TypeScript's message as an [`EngineError`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -15,35 +16,29 @@ use crate::actor::Engine;
 use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
-
-// What an answer waits on once accepted: the next settle at once (a retry of an answer already
-// processed), or its processing first.
-enum Accepted {
-    Processed,
-    Waiting(tokio::sync::oneshot::Receiver<Result<(), EngineError>>),
-}
+use crate::snapshot::PoolSnapshot;
 
 impl Engine {
-    /// `accept`: record an answer (ADR-0004) and kick processing; never waits for it. An idle pool
-    /// drains it and starts a fresh drive inside this call, so the snapshot read right after holds
-    /// the processed state.
+    /// Resolves with the snapshot the acceptance job left: the tick the answer wakes may drain it before
+    /// the caller could read the latest one.
     pub async fn accept(
         &self,
         ticket_id: String,
         note: Option<String>,
         action: ResumeAction,
         attempt: Option<u32>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<Arc<PoolSnapshot>>, EngineError> {
         self.call(move |s| {
-            crate::answers::accept_answer(
+            crate::answers::submit_answer(
                 s,
                 &ticket_id,
                 note,
                 action,
                 attempt.map(u64::from),
                 None,
+                None,
             )?;
-            crate::answers::kick_processing(s).map_err(|e| EngineError::refused(e.to_string()))
+            Ok(s.snapshots.back().cloned())
         })
         .await?
     }
@@ -57,33 +52,22 @@ impl Engine {
         action: ResumeAction,
         attempt: Option<u32>,
     ) -> Result<RunPhase, EngineError> {
-        let accepted = self
-            .call(move |s| -> Result<Accepted, EngineError> {
-                let record = crate::answers::accept_answer(
-                    s,
-                    &ticket_id,
-                    note,
-                    action,
-                    attempt.map(u64::from),
-                    None,
-                )?;
-                // A retry of an answer that was already processed: nothing new to wait for.
-                if record.processed_at.is_some() {
-                    return Ok(Accepted::Processed);
-                }
-                // The waiter registers before the kick: an idle kick drains at once.
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                s.answer_waiters.entry(record.seq).or_default().push(tx);
-                crate::answers::kick_processing(s)
-                    .map_err(|e| EngineError::refused(e.to_string()))?;
-                Ok(Accepted::Waiting(rx))
-            })
-            .await??;
-        if let Accepted::Waiting(processed) = accepted {
-            processed
-                .await
-                .unwrap_or(Err(EngineError::from(crate::actor::EngineGone::Stopped)))?;
-        }
+        let (waiter, processed) = tokio::sync::oneshot::channel();
+        self.call(move |s| {
+            crate::answers::submit_answer(
+                s,
+                &ticket_id,
+                note,
+                action,
+                attempt.map(u64::from),
+                None,
+                Some(waiter),
+            )
+        })
+        .await??;
+        processed
+            .await
+            .unwrap_or(Err(EngineError::from(crate::actor::EngineGone::Stopped)))?;
         self.settled().await
     }
 
@@ -93,13 +77,12 @@ impl Engine {
         settle.phase().await
     }
 
-    /// `shutdown` (ADR-0017): stop the headless attempts (TERM, the grace, then KILL), let the drive
-    /// join its super-step (bounded), close the store, and emit the `stopped` farewell.
     pub async fn shutdown(&self, grace: Option<Duration>) {
         crate::children::stop_all(self, grace).await;
         if let Ok(settle) = self
             .call(|s| {
                 s.children.stopping = true;
+                s.wake.notify_one();
                 s.driving.then(|| next_settle(s))
             })
             .await
@@ -137,13 +120,14 @@ impl Engine {
         crate::conversations::start(self, request).await
     }
 
-    /// `endConversation` (conversations.ts).
+    /// `endConversation` (conversations.ts): ended as closed (`close`), it merges nothing.
     pub async fn end_conversation(
         &self,
         id: String,
         closing: Option<String>,
+        close: bool,
     ) -> Result<(), EngineError> {
-        crate::conversations::end(self, &id, closing, ac_protocol::AnswerBy::Operator).await
+        crate::conversations::end(self, &id, closing, close, ac_protocol::AnswerBy::Operator).await
     }
 
     /// `paneRead` (issue #122): the last recorded read of a pane a loop watches.
@@ -166,44 +150,58 @@ impl Engine {
         crate::terminals::close_finished_terminals(self).await
     }
 
-    /// `reloadConfig` (issue #149): an idle pool runs the boundary's Config reload now and emits.
     pub async fn reload_config(&self) {
         let _ = self
-            .call(crate::config_reload::reload_config_when_idle)
+            .call(|s| -> anyhow::Result<()> {
+                if !s.driving {
+                    crate::config_reload::reload_config(s)?;
+                    let phase = s.idle_phase();
+                    if crate::snapshot::emit_would_change(s, phase) {
+                        crate::snapshot::emit_snapshot(s, phase);
+                    }
+                }
+                s.wake();
+                Ok(())
+            })
             .await;
     }
 
-    /// Start the Line (ADR-0037): the first Station Ticket's id, or the refusal's reason.
-    pub async fn start_line(&self, brief: Option<String>) -> Result<String, EngineError> {
-        self.call(move |s| crate::line::start_line(s, brief))
+    /// `POST /api/line` (ADR-0040): the Line begins on its Plan, or the refusal's reason.
+    pub async fn begin_line(
+        &self,
+        plan: serde_json::Value,
+        begin: crate::line::Begin,
+    ) -> Result<ac_protocol::LineGraphView, EngineError> {
+        self.call(move |s| crate::line::begin_line(s, &plan, begin))
             .await?
     }
 
-    /// Start the Line on the Grill (ADR-0037), the operator's act: the brief checked on the Grill's
-    /// branch, the branch merged and Round 1's Implement written, then the Grill ended. The first
-    /// Station Ticket's id, or the refusal's reason.
-    pub async fn start_line_from_grill(&self, grill: String) -> Result<String, EngineError> {
-        let id = grill.clone();
-        let ticket = self
-            .call(move |s| crate::line::start_line_from_grill(s, &id))
-            .await??;
-        // The Line has started by now, so an End that fails is logged, not a refusal: the Grill
-        // is left for the operator to end, with nothing left on its branch to merge.
-        if let Err(err) = crate::conversations::end(
-            self,
-            &grill,
-            Some("Start the Line".to_owned()),
-            ac_protocol::AnswerBy::Operator,
-        )
-        .await
-        {
-            let line = format!(
-                "line: the Line started but the Grill {grill} did not end: {}",
-                err.message()
-            );
-            let _ = self.call(move |s| s.log(line)).await;
-        }
-        Ok(ticket)
+    /// `line.plan.edit` (ADR-0040): the operator's edit to the running Line's Plan.
+    pub async fn edit_line_plan(
+        &self,
+        base_rev: u64,
+        edits: Vec<ac_core::plan::PlanEdit>,
+    ) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+        self.call(move |s| {
+            crate::line::edit_plan(s, ac_core::line::run::Editor::Operator, base_rev, &edits)
+        })
+        .await?
+    }
+
+    /// The Line's graph with live state, `None` in a pool that runs none.
+    pub async fn line_view(&self) -> Result<Option<ac_protocol::LineGraphView>, EngineError> {
+        Ok(self.call(|s| crate::line::line_view(s)).await?)
+    }
+
+    /// Where a Decide pass's report is, or why there is none.
+    pub async fn line_report_path(
+        &self,
+        node: String,
+        pass: u32,
+    ) -> Result<Result<String, String>, EngineError> {
+        Ok(self
+            .call(move |s| crate::line::report_path(s, &node, pass))
+            .await?)
     }
 
     /// `adoptHeldSpawn` (ADR-0029).
@@ -218,22 +216,23 @@ impl Engine {
             .await?
     }
 
-    /// `holdPendingSpawn` (issue #150).
-    pub async fn hold_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        self.call(move |s| crate::spawns::hold_pending_spawn(s, &id))
-            .await?
-    }
-
-    /// `discardPendingSpawn` (issue #150).
-    pub async fn discard_pending_spawn(&self, id: String) -> Result<(), EngineError> {
-        self.call(move |s| crate::spawns::discard_pending_spawn(s, &id))
-            .await?
-    }
-
     /// `steward.check`: refuses unless `conversation` is the live Steward.
     pub async fn steward_check(&self, conversation: String) -> Result<(), EngineError> {
         self.call(move |s| crate::steward_actions::check_steward(s, &conversation))
             .await?
+    }
+
+    /// `steward.checkReassign`: refuses unless `conversation` is the live Steward and may reassign
+    /// every one of `tickets`.
+    pub async fn steward_check_reassign(
+        &self,
+        conversation: String,
+        tickets: Vec<String>,
+    ) -> Result<(), EngineError> {
+        self.call(move |s| {
+            crate::steward_actions::check_steward_reassign(s, &conversation, &tickets)
+        })
+        .await?
     }
 
     /// `steward.answer`: answer on the operator's path, as the Steward's.
@@ -308,6 +307,19 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.call(move |s| {
             crate::steward_actions::steward_reassigned(s, &conversation, &tickets, fields)
+        })
+        .await?
+    }
+
+    /// `steward.plan`: the Steward's edit to the running Line's Plan, which the Plan must allow.
+    pub async fn steward_edit_plan(
+        &self,
+        conversation: String,
+        base_rev: u64,
+        edits: Vec<ac_core::plan::PlanEdit>,
+    ) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+        self.call(move |s| {
+            crate::steward_actions::steward_edit_plan(s, &conversation, base_rev, &edits)
         })
         .await?
     }

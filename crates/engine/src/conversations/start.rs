@@ -10,6 +10,7 @@ use ac_core::assignment::{
 use ac_core::conversation_record::{ConversationRecord, EnlistedConversation, write_conversation};
 use ac_core::harness::harness_descriptor;
 use ac_core::js;
+use ac_core::line::run::NewConversation;
 use ac_core::notices::{Notice, NoticeKind};
 use ac_core::steward::steward_assign_of;
 use ac_io::git::{self, WorktreeInfo};
@@ -36,12 +37,13 @@ fn refused(message: impl Into<String>) -> EngineError {
 
 // What the start's first stretch settled: everything the launch needs, and nothing that needs the
 // session.
-struct Prepared {
+pub(crate) struct Prepared {
     id: String,
     title: String,
     opening: String,
     role: Option<ConversationRole>,
     spawned_by: Option<String>,
+    node: Option<String>,
     assignment: Assignment,
     worktree: WorktreeInfo,
     file: PathBuf,
@@ -89,18 +91,32 @@ fn resolve_start_assignment(
             steward.effort.as_deref(),
             Some(steward.drivers.as_deref().unwrap_or("")),
         )),
-        (None, None) => grill_layer(s, req),
+        (None, None) => None,
     };
-    let defaults = ac_core::assignment::defaults_layer(config(s));
-    resolve_assignment(ResolveAssignmentParams {
-        subject: if is_steward {
+    resolve_between(
+        s,
+        if is_steward {
             "steward start:"
         } else {
             "conversation start:"
         },
-        request: request.as_ref(),
+        request.as_ref(),
+        inherited.as_ref(),
+    )
+}
+
+fn resolve_between(
+    s: &Session,
+    subject: &str,
+    request: Option<&AssignmentRequest>,
+    inherited: Option<&AssignmentLayer>,
+) -> Result<Assignment, EngineError> {
+    let defaults = ac_core::assignment::defaults_layer(config(s));
+    resolve_assignment(ResolveAssignmentParams {
+        subject,
+        request,
         requested: None,
-        inherited: inherited.as_ref(),
+        inherited,
         defaults: Some(&defaults),
         strict: true,
         verify: false,
@@ -109,60 +125,12 @@ fn resolve_start_assignment(
     .map_err(|err| refused(err.0))
 }
 
-// A Grill takes the Grill Station's Assignment and skills from the resolved Factory settings
-// (ADR-0037), between the request and the pool defaults, as a Steward takes its own entry.
-fn grill_layer(s: &Session, req: &StartConversationRequest) -> Option<AssignmentLayer> {
-    if req.role != Some(ConversationRole::Grill) {
-        return None;
-    }
-    let factory = ac_core::line::resolve_factory(
-        &crate::line::factory_layers(s),
-        &ac_protocol::LineBrief {
-            spec: String::new(),
-            finish: None,
-            factory: None,
-            push_base: false,
-        },
-    );
-    let grill = &factory.grill;
-    let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-    Some(AssignmentLayer::of_fields(
-        some(&grill.harness).as_deref(),
-        some(&grill.model).as_deref(),
-        some(&grill.effort).as_deref(),
-        some(&grill.drivers).as_deref(),
-    ))
-}
-
 // The refusals a start meets before it mints or takes its id: a pool that cannot host a Conversation,
 // no title, a second Steward.
 fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), EngineError> {
-    if !terminal_backed(s) {
-        return Err(refused(
-            "conversation start: the pool is not terminal-backed (set console.json terminal: \"herdr\")",
-        ));
-    }
-    if !s.git {
-        return Err(refused(
-            "conversation start: the pool has no git checkout, so it cannot give the Conversation \
-             its own worktree and branch",
-        ));
-    }
+    check_host(s)?;
     if js::trim(&req.title).is_empty() {
         return Err(refused("conversation start: title is required"));
-    }
-    if req.role == Some(ConversationRole::Grill) {
-        if let Some(line) = &s.line {
-            return Err(refused(format!(
-                "grill start: the Line has already started (Round {}, {})",
-                line.round, line.ticket
-            )));
-        }
-        if let Some(grill) = super::grill_id(s) {
-            return Err(refused(format!(
-                "grill start: {grill} is already this pool's Grill"
-            )));
-        }
     }
     if req.role == Some(ConversationRole::Steward)
         && let Some(on_duty) = steward_on_duty(s)
@@ -175,21 +143,44 @@ fn check_start(s: &Session, req: &StartConversationRequest) -> Result<(), Engine
     Ok(())
 }
 
-// The synchronous stretch of `start` up to the launch: the checks, the id, the reservation, the
-// Assignment, the worktree and the teaching.
-fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, EngineError> {
-    if let Err(err) = check_start(s, req) {
-        // A Spawn's id was reserved when its start was fired (`land_spawn`), so a refusal gives it
-        // back, or the parent's next Spawn would skip the number.
-        if let Some(id) = &req.id {
-            unreserve(s, id);
-        }
-        return Err(err);
+fn check_host(s: &Session) -> Result<(), EngineError> {
+    if !terminal_backed(s) {
+        return Err(refused(
+            "conversation start: the pool is not terminal-backed (set console.json terminal: \"herdr\")",
+        ));
     }
+    if !s.git {
+        return Err(refused(
+            "conversation start: the pool has no git checkout, so it cannot give the Conversation \
+             its own worktree and branch",
+        ));
+    }
+    Ok(())
+}
+
+// An id given verbatim (a spawn's precomputed one, or a Line pass's) is refused while a record or a
+// start in flight holds it.
+fn check_free(s: &Session, id: &str, existing: &[ConversationRecord]) -> Result<(), EngineError> {
+    if existing.iter().any(|rec| rec.id == id) || s.conversations.reserved.contains(id) {
+        return Err(refused(format!(
+            "conversation start: {id} is already a Conversation of this pool"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare(
+    s: &mut Session,
+    req: &StartConversationRequest,
+) -> Result<Prepared, EngineError> {
+    check_start(s, req)?;
     let is_steward = req.role == Some(ConversationRole::Steward);
     let existing = load(s);
     let id = match (&req.id, &req.spawned_by) {
-        (Some(id), _) => id.clone(),
+        (Some(id), _) => {
+            check_free(s, id, &existing)?;
+            id.clone()
+        }
         (None, Some(parent)) => {
             ac_core::conversation_record::next_conversation_spawn_id(parent, &existing)
         }
@@ -197,49 +188,111 @@ fn prepare(s: &mut Session, req: &StartConversationRequest) -> Result<Prepared, 
             s.conversations.reserved.contains(id)
         }),
     };
-    // Reserved before the first await, so an adoption that reads the reserved ids right after firing
-    // this start already sees it.
     s.conversations.reserved.insert(id.clone());
     if is_steward {
         s.conversations.steward_starting = Some(id.clone());
     }
-    let prepared = prepare_reserved(s, req, &id, &existing);
+    let prepared = resolve_start_assignment(s, req, &existing).and_then(|assignment| {
+        prepare_reserved(
+            s,
+            Opening {
+                id: id.clone(),
+                title: req.title.clone(),
+                opening: req.opening.clone().unwrap_or_default(),
+                role: req.role,
+                spawned_by: req.spawned_by.clone(),
+                node: None,
+                assignment,
+            },
+        )
+    });
     if prepared.is_err() {
         unreserve(s, &id);
     }
     prepared
 }
 
-fn prepare_reserved(
+/// Prepare a Line Conversation pass's start (ADR-0040): the id the Line named, used verbatim, on its
+/// node's Assignment and skill ahead of the pool defaults, its opening Turn the pass's.
+pub(crate) fn prepare_pass(
     s: &mut Session,
-    req: &StartConversationRequest,
-    id: &str,
-    existing: &[ConversationRecord],
+    pass: &NewConversation,
 ) -> Result<Prepared, EngineError> {
-    let assignment = resolve_start_assignment(s, req, existing)?;
+    check_host(s)?;
+    let id = pass.id.as_str();
+    check_free(s, id, &load(s))?;
+    s.conversations.reserved.insert(id.to_owned());
+    let node = AssignmentLayer::of_fields(
+        pass.assign.harness.as_deref(),
+        pass.assign.model.as_deref(),
+        pass.assign.effort.as_deref(),
+        pass.skill.as_deref(),
+    );
+    let prepared =
+        resolve_between(s, "conversation start:", None, Some(&node)).and_then(|assignment| {
+            prepare_reserved(
+                s,
+                Opening {
+                    id: id.to_owned(),
+                    title: pass.title.clone(),
+                    opening: pass.opening.clone(),
+                    role: None,
+                    spawned_by: None,
+                    node: Some(pass.node.to_string()),
+                    assignment,
+                },
+            )
+        });
+    if prepared.is_err() {
+        unreserve(s, id);
+    }
+    prepared
+}
+
+// A start whose id is reserved and whose Assignment resolved.
+struct Opening {
+    id: String,
+    title: String,
+    opening: String,
+    role: Option<ConversationRole>,
+    spawned_by: Option<String>,
+    node: Option<String>,
+    assignment: Assignment,
+}
+
+fn prepare_reserved(s: &mut Session, start: Opening) -> Result<Prepared, EngineError> {
+    let Opening {
+        id,
+        title,
+        opening,
+        role,
+        spawned_by,
+        node,
+        assignment,
+    } = start;
     // Forked from the merge target, not the pool checkout's HEAD: once an enlist has moved that
     // checkout onto a created pool branch (issue #101), HEAD there is the enlisted agent's branch, and
     // a Conversation forked from it would carry that agent's commits onto the target at End.
     let base = crate::merges::merge_target_branch(s);
     let worktree =
-        git::prepare_worktree(&s.cwd, id, None, &base).map_err(|err| refused(err.to_string()))?;
-    let file = conversation_file(s, id);
-    let opening = req.opening.clone().unwrap_or_default();
+        git::prepare_worktree(&s.cwd, &id, None, &base).map_err(|err| refused(err.to_string()))?;
+    let file = conversation_file(s, &id);
     // The spawn-teaching paragraph always lands, appended to the opening Turn when there is one; typed
     // alone otherwise, so an agent given no opening still learns the propose-and-adopt mechanism before
     // the operator's first real Turn.
-    let teaching = teaching_for(s, id, req.role, &assignment);
+    let teaching = teaching_for(s, &id, role, &assignment);
     let to_type = if js::trim(&opening).is_empty() {
         teaching.clone()
     } else {
         format!("{opening}\n\n{teaching}")
     };
     Ok(Prepared {
-        id: id.to_owned(),
-        title: req.title.clone(),
+        id,
+        title,
         opening,
-        role: req.role,
-        spawned_by: req.spawned_by.clone(),
+        role,
+        spawned_by,
+        node,
         assignment,
         worktree,
         file,
@@ -247,6 +300,43 @@ fn prepare_reserved(
         teaching,
         env: attempt_env_of(s, None),
     })
+}
+
+/// A Line pass whose start was refused is recorded crashed with the reason, so the Line reads it
+/// closed and goes on rather than opening it again at every tick.
+pub(crate) fn record_refused_pass(s: &mut Session, pass: &NewConversation, reason: &str) {
+    let id = pass.id.as_str();
+    let record = ConversationRecord {
+        id: id.to_owned(),
+        file: conversation_file(s, id),
+        title: js::trim(&pass.title).to_owned(),
+        opening: pass.opening.clone(),
+        status: ConversationStatus::Crashed,
+        spawned_by: None,
+        harness: pass.assign.harness.clone().unwrap_or_default(),
+        model: pass.assign.model.clone().unwrap_or_default(),
+        effort: pass.assign.effort.clone(),
+        drivers: pass.skill.clone().unwrap_or_default(),
+        enlisted: None,
+        role: None,
+        node: Some(pass.node.to_string()),
+    };
+    write_crashed(s, record, reason);
+}
+
+fn write_crashed(s: &Session, record: ConversationRecord, reason: &str) {
+    let record = ConversationRecord {
+        status: ConversationStatus::Crashed,
+        ..record
+    };
+    if write_conversation(&conversations_dir(s), &record).is_ok() {
+        event1(
+            s,
+            &record.id,
+            TicketEventKind::Crash,
+            json!({ "reason": reason }),
+        );
+    }
 }
 
 fn unreserve(s: &mut Session, id: &str) {
@@ -270,6 +360,13 @@ pub async fn start(
     req: StartConversationRequest,
 ) -> Result<ConversationView, EngineError> {
     let prepared = engine.call(move |s| prepare(s, &req)).await??;
+    launch_prepared(engine, prepared).await
+}
+
+pub(crate) async fn launch_prepared(
+    engine: &Engine,
+    prepared: Prepared,
+) -> Result<ConversationView, EngineError> {
     let id = prepared.id.clone();
     let view = launch(engine, prepared).await;
     engine.call(move |s| unreserve(s, &id)).await?;
@@ -326,13 +423,6 @@ fn after_launch(
     p: Prepared,
     launched: anyhow::Result<AttemptHandle>,
 ) -> Result<ConversationView, EngineError> {
-    let handle = match launched {
-        Ok(handle) => handle,
-        Err(err) => {
-            git::remove_worktree(&s.cwd, &p.worktree);
-            return Err(refused(format!("conversation start: {err}")));
-        }
-    };
     let record = ConversationRecord {
         id: p.id.clone(),
         file: p.file.clone(),
@@ -346,6 +436,19 @@ fn after_launch(
         drivers: p.assignment.drivers.clone(),
         enlisted: None,
         role: p.role,
+        node: p.node.clone(),
+    };
+    let handle = match launched {
+        Ok(handle) => handle,
+        Err(err) => {
+            git::remove_worktree(&s.cwd, &p.worktree);
+            let reason = format!("conversation start: {err}");
+            // In this job, before the id is let go, so no tick reads the pass unopened again.
+            if record.node.is_some() {
+                write_crashed(s, record, &reason);
+            }
+            return Err(refused(reason));
+        }
     };
     write_conversation(&conversations_dir(s), &record).map_err(|err| refused(err.to_string()))?;
     let id = p.id.clone();
@@ -420,6 +523,7 @@ fn after_launch(
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: p.role,
         told: Default::default(),
@@ -435,10 +539,6 @@ fn after_launch(
     // resolves the same way a grader or spawned ticket inherits from its own parent.
     record_assignment(s, &id, p.assignment.clone());
     super::tick::start_tick(s, &runtime);
-    // start is called directly off the handle (the server route, or a fire-and-forget spawn adoption),
-    // never through the drive loop, so nothing else emits a snapshot that would tell the socket this
-    // Conversation now exists; a pool with no other ticket activity in flight could otherwise go
-    // arbitrarily long before the next unrelated emit.
     publish(s);
     Ok(view_of(s, &record, &load(s)))
 }
@@ -722,6 +822,7 @@ fn enlist_record(
         drivers: DEFAULT_DRIVERS.to_owned(),
         enlisted: Some(found),
         role: req.role(),
+        node: None,
     };
     // The record lands before delivery: deliver reads it for the harness descriptor, and the card must
     // exist the moment the enlist does.

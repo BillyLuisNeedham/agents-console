@@ -23,7 +23,7 @@ import type {
   RequestPayload,
   ServerMessage,
 } from "../../protocol/protocol.ts";
-import type { EnrichedSnapshot, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
+import type { EnrichedSnapshot, PlanFile, PoolConfig, TicketLogResponse } from "../../protocol/wire.ts";
 import { openSocket, framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { PROTOCOL_VERSION, WS_PATH, applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { bootRecorder } from "../harness/boot-recorder.ts";
@@ -467,6 +467,23 @@ conformance("protocol", "requests › refuses with the HTTP twin's status, for e
   // Between them, only the malformed request's refusal and the sync's reply.
   const replies = client.frames.slice(from).filter((frame) => frame.type === "reply");
   expect(replies.map((frame) => (frame as { kind: string }).kind)).toEqual(["stop", "poolLog.read"]);
+});
+
+// Hold and Discard of a Pending spawn are retired (ADR-0043): their kinds are no request the socket knows,
+// so each frame is dropped unanswered as any other unknown frame is.
+conformance("protocol", "requests › drops the retired Pending spawn kinds as unknown requests", async (t) => {
+  const world = poolWorld(t, ["01"], CLAUDE);
+  const server = await t.start(world);
+  await interruptFor(server, REVIEW);
+  const client = await t.socket(server);
+  await client.sync();
+
+  const from = client.frames.length;
+  client.send({ type: "request", id: 81, kind: "spawns.pending.hold", payload: { id: "proposal-1" } } as never);
+  client.send({ type: "request", id: 82, kind: "spawns.pending.discard", payload: { id: "proposal-1" } } as never);
+  await client.sync();
+  const replies = client.frames.slice(from).filter((frame) => frame.type === "reply");
+  expect(replies.map((frame) => (frame as { kind: string }).kind)).toEqual(["poolLog.read"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +1022,10 @@ conformance("http", "GET /api/pool-log › serves the pool log's lines before a 
 // socket and HTTP parity
 // ---------------------------------------------------------------------------
 
-type Twin = { method: "GET" | "POST" | "PUT"; path: string; body?: unknown };
+type Twin = { method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown };
+
+// A draft that is no Plan at all, for the kinds whose answer does not depend on its content.
+const NO_PLAN = {} as PlanFile;
 
 /** One kind asked on the socket and over its HTTP twin, compared. */
 async function parity<K extends RequestKind>(
@@ -1073,11 +1093,6 @@ conformance(
       ],
       "spawns.held.adopt": [{ id: "nope" }, { method: "POST", path: "/api/spawns/held/adopt", body: { id: "nope" } }],
       "spawns.held.discard": [{ id: "nope" }, { method: "POST", path: "/api/spawns/held/discard", body: { id: "nope" } }],
-      "spawns.pending.hold": [{ id: "nope" }, { method: "POST", path: "/api/spawns/pending/hold", body: { id: "nope" } }],
-      "spawns.pending.discard": [
-        { id: "nope" },
-        { method: "POST", path: "/api/spawns/pending/discard", body: { id: "nope" } },
-      ],
       "conversations.start": [{ title: "talk" }, { method: "POST", path: "/api/conversations", body: { title: "talk" } }],
       "conversations.end": [{ id: "nope" }, { method: "POST", path: "/api/conversations/end", body: { id: "nope" } }],
       "settings.get": [{}, { method: "GET", path: "/api/settings" }],
@@ -1093,6 +1108,26 @@ conformance(
       "poolLog.read": [
         { before: logTotal, limit: 3 },
         { method: "GET", path: `/api/pool-log?before=${logTotal}&limit=3` },
+      ],
+      // The Plan kinds are asked only what writes nothing, so a parity run never saves a Plan or
+      // starts Boot.
+      "plans.list": [{}, { method: "GET", path: "/api/plans" }],
+      "plans.get": [{ slug: "no-such-plan" }, { method: "GET", path: "/api/plans/no-such-plan" }],
+      "plans.validate": [{ plan: NO_PLAN }, { method: "POST", path: "/api/plans/validate", body: { plan: {} } }],
+      "plans.save": [{ slug: "BAD", plan: NO_PLAN }, { method: "PUT", path: "/api/plans/BAD", body: {} }],
+      "plans.edit": [
+        { plan: NO_PLAN, edits: [{ edit: "removeNode", id: "nobody" }] },
+        { method: "POST", path: "/api/plans/edit", body: { plan: {}, edits: [{ edit: "removeNode", id: "nobody" }] } },
+      ],
+      "plans.delete": [{ slug: "factory-today" }, { method: "DELETE", path: "/api/plans/factory-today" }],
+      "plans.boot": [
+        { slug: "no-such-plan", work: "#1" },
+        { method: "POST", path: "/api/plans/boot", body: { slug: "no-such-plan", work: "#1" } },
+      ],
+      // This pool runs no Line, so the edit is refused on both paths.
+      "line.plan.edit": [
+        { baseRev: 0, edits: [] },
+        { method: "POST", path: "/api/line/plan", body: { baseRev: 0, edits: [] } },
       ],
     };
 

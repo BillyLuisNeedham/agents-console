@@ -6,6 +6,7 @@
 use ac_protocol::Outcome;
 
 use crate::outcome::SPAWN_BODY_MIN_CHARS;
+use crate::plan::{CheckpointPolicy, NodeBody, Opener};
 use crate::spawn_caps::SpawnCaps;
 
 // The Spawn ledger (issue #150): the path, never the contents, so the prompt stays short (issue #84)
@@ -107,7 +108,6 @@ pub struct PromptParts<'a> {
     pub agent_md: &'a str,
     pub upstream: &'a [Upstream<'a>],
     pub outcome_path: &'a str,
-    /// The pool's Spawn caps as this attempt's boundary left them (ADR-0029).
     pub spawn_caps: SpawnCaps,
     /// The pool's Spawn ledger (issue #150): read before proposing.
     pub ledger_path: &'a str,
@@ -204,8 +204,8 @@ pub fn build_prompt(parts: &PromptParts<'_>) -> String {
              {SPAWN_BODY_MIN_CHARS} characters of intent for a fresh agent to work from, blockedBy \
              optional and naming the ids the follow-up must wait for. {} {SPAWN_BLOCKS_TEACHING} \
              The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes \
-             07-spawn-1), writes the ticket files at the super-step boundary, and schedules them \
-             like any other ticket. Thin or out-of-pool proposals are dropped with the reason \
+             07-spawn-1), writes the ticket files at the next Tick, and schedules them like any \
+             other ticket. Thin or out-of-pool proposals are dropped with the reason \
              recorded in the ticket log, and a dropped proposal never costs your attempt its \
              result. {} You never write pool state: no ticket files, no ids, no statuses. You \
              propose; the engine writes.",
@@ -362,8 +362,9 @@ pub struct StewardTeaching<'a> {
     pub command: &'a str,
     pub budget: u64,
     pub may_close: bool,
-    /// A Factory pool (ADR-0037): the Steward is taught which of the Line's checkpoints are its.
-    pub factory: bool,
+    /// The pool's Line (ADR-0040): the Steward is taught its Plan and which of its checkpoints and
+    /// holds are its.
+    pub line: Option<&'a crate::line::run::LineRun>,
     /// `steward.mayAdoptLineSpawns`: whether it may decide Held spawns proposed from inside the Line.
     pub may_adopt_line_spawns: bool,
 }
@@ -389,8 +390,8 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
          Ticket Interrupt you may answer and have not left, and a Merge queue head that has stalled. \
          Items that arrive together come as one Turn. The same Turn also tells you, with nothing to \
          answer, which Tickets merged since your last Notice and when every Ticket is done and Review \
-         waits for the operator: that is how you know when orders like \"watch the next super-step, \
-         then finish\" are done, and can end yourself."
+         waits for the operator: that is how you know when orders like \"watch the next merge, then \
+         finish\" are done, and can end yourself."
             .to_owned(),
         String::new(),
         "Act with this command, run in your shell:".to_owned(),
@@ -421,8 +422,8 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
             .to_owned(),
         "- held adopt|discard <proposal-id>: decide a Held spawn.".to_owned(),
         "- reassign <ticket> field=value...: change a Ticket's Assignment (harness, model, effort, \
-         drivers, verify; field= clears one). The engine picks it up at the next boundary, so resume \
-         the Ticket after."
+         drivers, verify; field= clears one). The engine picks it up at the next Tick, so resume the \
+         Ticket after."
             .to_owned(),
         "- state: the pending Interrupts, the Merge queue, the Pending and Held spawns, your budget \
          left per Ticket, and whether the pool lets you Close now."
@@ -458,7 +459,7 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
             "{}Decide and talk, never do the work: make no edits in any Ticket's worktree or in the \
              pool checkout. Your only ways to change the code are an answer, a coaching message and \
              a Spawn.",
-            factory_steward_text(parts)
+            line_steward_text(parts)
         ),
         String::new(),
         "You may push, open pull requests or merge pull requests only if the operator's own words in \
@@ -487,11 +488,65 @@ pub fn build_steward_teaching(parts: &StewardTeaching<'_>) -> String {
     lines.join("\n")
 }
 
-// What a Factory pool's Steward is taught about its Line; nothing in any other pool.
-fn factory_steward_text(parts: &StewardTeaching<'_>) -> String {
-    if !parts.factory {
+// What a Line's Steward is taught about it, read off the frozen Plan; nothing in a pool with no Line.
+fn line_steward_text(parts: &StewardTeaching<'_>) -> String {
+    let Some(line) = parts.line else {
         return String::new();
+    };
+    let (plan, _) = line.plan();
+    let mut yours = Vec::new();
+    let checkpoints: Vec<String> = plan
+        .nodes()
+        .filter(
+            |n| matches!(&n.body, NodeBody::Ticket(t) if t.checkpoint == CheckpointPolicy::Steward),
+        )
+        .map(|n| n.id.to_string())
+        .collect();
+    if !checkpoints.is_empty() {
+        yours.push(format!(
+            "a checkpoint on a Ticket of {} (a \"no verdict\" one: resume, asking it to record its \
+             Outcome again with a valid verdict)",
+            checkpoints.join(", ")
+        ));
     }
+    let gates: Vec<String> = plan
+        .nodes()
+        .filter(|n| matches!(&n.body, NodeBody::Gate(g) if g.open == Opener::Steward))
+        .map(|n| n.id.to_string())
+        .collect();
+    if !gates.is_empty() {
+        yours.push(format!(
+            "the hold of the gate {} (resume opens it, resume with a note revises)",
+            gates.join(", ")
+        ));
+    }
+    let loops: Vec<String> = plan
+        .edges()
+        .iter()
+        .filter(|e| e.cap.as_ref().is_some_and(|cap| cap.steward_extra))
+        .map(|e| format!("{} --{}--> {}", e.key.from, e.key.on.as_str(), e.key.to))
+        .collect();
+    if !loops.is_empty() {
+        yours.push(format!(
+            "the hold of a spent loop on {}, once until that loop resets (resume buys one more \
+             traversal, and your note goes into it)",
+            loops.join(", ")
+        ));
+    }
+    let yours = if yours.is_empty() {
+        "None of its checkpoints or holds are yours.".to_owned()
+    } else {
+        format!("You may answer {}.", yours.join("; "))
+    };
+    let edits = if plan.meta().steward_edits {
+        "This Plan lets you edit it with plan <rev> <edits>: rev is the one state prints on its Line \
+         Plan line, beside each node's parked verdicts, and edits a JSON array of Plan edits, or \
+         \"-\" to read it from standard input. Edit it only when your orders call for it, such as \
+         linking a parked verdict onward; the engine refuses a stale rev (run state again), an edit that would orphan live run state, \
+         and any edit that gives you a power the operator did not."
+    } else {
+        "This Plan does not let you edit it."
+    };
     let spawns = if parts.may_adopt_line_spawns {
         "The operator lets you decide Held spawns proposed from inside the Line \
          (steward.mayAdoptLineSpawns): adopt one only when the Line needs it and its spec covers it, \
@@ -501,12 +556,11 @@ fn factory_steward_text(parts: &StewardTeaching<'_>) -> String {
          engine refuses you. Leave them held."
     };
     format!(
-        "This is a Factory pool: it runs one Line, and the engine routes its Stations (ADR-0037). \
-         You may answer two of the Line's checkpoints: \"no verdict\" (resume, asking the Station to \
-         record its Outcome again with a valid verdict) and the Prove limit (resume buys one more \
-         fix, and your note goes into it). The Finish checkpoint is never yours: approving the Line \
-         is the operator's, so you are not told about it and the engine refuses your answer. Never \
-         propose a Station yourself. {spawns}\n\n"
+        "This pool runs one Line on the Plan \"{}\" (ADR-0040): the engine writes its Tickets and \
+         holds from the Plan and routes each verdict. {yours} {edits} Nothing else of the Line is \
+         yours: the Finish hold and the Finish Ticket are the operator's, so you are not told of \
+         them and the engine refuses your answer. Never propose a node's work yourself. {spawns}\n\n",
+        plan.meta().name
     )
 }
 
@@ -605,6 +659,7 @@ mod tests {
             commit_sha: None,
             brief: None,
             spawn: None,
+            items: None,
             verdict: None,
         };
         let upstream = [Upstream {
@@ -619,7 +674,7 @@ mod tests {
             spawn_caps: DEFAULT_SPAWN_CAPS,
             ledger_path: LEDGER,
         });
-        let expected = "Standing instructions for this job:\n\n_(no AGENT.md in the pool directory)_\n\n---\n\nSkills for this Issue. When the driver skill's work is done, also use these skills, in this order: tdd, code-review.\n\n---\n\nOutcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:\n\n- 00: built it (commit none)\n\n---\n\nWhen you finish, record your outcome as JSON at /p/runs/01.outcome.json: {\"status\": \"done\" or \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the sha of your commit, or null\"}. On a checkpoint, add \"brief\": \"what the human has to do next\". The engine reads this file at your exit and writes the final status to the Issue itself. Never edit the Issue's line-1 status marker; the engine owns that write.\n\nFollow-up work you discover mid-attempt is proposed, never written: add an optional \"spawn\" array to that outcome JSON, one entry per follow-up, each shaped {\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...]}, the body carrying at least 20 characters of intent for a fresh agent to work from, blockedBy optional and naming the ids the follow-up must wait for. An entry may add \"assign\": {\"harness\": \"...\", \"model\": \"...\", \"effort\": \"...\", \"drivers\": \"...\"} with only the fields the follow-up needs different; when absent it inherits your own Assignment. \"assign\" takes harness, model, effort and drivers only; a verify in it is ignored, since grading is the operator's call. A follow-up that must run before other work may add \"blocks\": [\"id\", ...] to make those tickets wait for it, or \"blocks\": \"all\" to make every ticket that has not started yet wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), writes the ticket files at the super-step boundary, and schedules them like any other ticket. Thin or out-of-pool proposals are dropped with the reason recorded in the ticket log, and a dropped proposal never costs your attempt its result. Caps apply: 5 proposals honored per attempt and 20 per run, overflow held for the operator to adopt or discard, so order your proposals most important first. You never write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.\n\nBefore you propose anything, read the Spawn ledger at /tmp/pool/runs/spawn-ledger.md: every Ticket and Conversation in the pool, and every proposal still waiting to land or held for the operator. Do not propose work it already lists. If a proposal still overlaps something there, add \"overlaps\": [\"id\", ...] naming what it overlaps: it is then held for the operator to decide instead of landing.";
+        let expected = "Standing instructions for this job:\n\n_(no AGENT.md in the pool directory)_\n\n---\n\nSkills for this Issue. When the driver skill's work is done, also use these skills, in this order: tdd, code-review.\n\n---\n\nOutcomes from the tickets this ticket was blocked by. Build on what they did; do not rediscover it:\n\n- 00: built it (commit none)\n\n---\n\nWhen you finish, record your outcome as JSON at /p/runs/01.outcome.json: {\"status\": \"done\" or \"checkpoint\", \"summary\": \"what you did, in a sentence or two\", \"commitSha\": \"the sha of your commit, or null\"}. On a checkpoint, add \"brief\": \"what the human has to do next\". The engine reads this file at your exit and writes the final status to the Issue itself. Never edit the Issue's line-1 status marker; the engine owns that write.\n\nFollow-up work you discover mid-attempt is proposed, never written: add an optional \"spawn\" array to that outcome JSON, one entry per follow-up, each shaped {\"title\": \"...\", \"body\": \"...\", \"blockedBy\": [\"id\", ...]}, the body carrying at least 20 characters of intent for a fresh agent to work from, blockedBy optional and naming the ids the follow-up must wait for. An entry may add \"assign\": {\"harness\": \"...\", \"model\": \"...\", \"effort\": \"...\", \"drivers\": \"...\"} with only the fields the follow-up needs different; when absent it inherits your own Assignment. \"assign\" takes harness, model, effort and drivers only; a verify in it is ignored, since grading is the operator's call. A follow-up that must run before other work may add \"blocks\": [\"id\", ...] to make those tickets wait for it, or \"blocks\": \"all\" to make every ticket that has not started yet wait for it; a ticket already running is never interrupted, and blocks is only for a ticket. The engine assigns the ids (<parent>-spawn-N: ticket 07's first proposal becomes 07-spawn-1), writes the ticket files at the next Tick, and schedules them like any other ticket. Thin or out-of-pool proposals are dropped with the reason recorded in the ticket log, and a dropped proposal never costs your attempt its result. Caps apply: 5 proposals honored per attempt and 20 per run, overflow held for the operator to adopt or discard, so order your proposals most important first. You never write pool state: no ticket files, no ids, no statuses. You propose; the engine writes.\n\nBefore you propose anything, read the Spawn ledger at /tmp/pool/runs/spawn-ledger.md: every Ticket and Conversation in the pool, and every proposal still waiting to land or held for the operator. Do not propose work it already lists. If a proposal still overlaps something there, add \"overlaps\": [\"id\", ...] naming what it overlaps: it is then held for the operator to decide instead of landing.";
         assert_eq!(body, expected);
     }
 
@@ -760,7 +815,7 @@ mod tests {
                 command: "/bin/ac steward --pool /p --as conv-1",
                 budget,
                 may_close,
-                factory: false,
+                line: None,
                 may_adopt_line_spawns: false,
             })
         };

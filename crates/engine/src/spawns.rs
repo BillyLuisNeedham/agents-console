@@ -1,10 +1,3 @@
-//! Spawns (ADR-0010, ADR-0029, issue #150; engine.ts 10699-11616): Spawn counters, taking proposals,
-//! adoption at the boundary, the Spawn ledger refresh, and Held and Pending spawns.
-//!
-//! Every function here is the synchronous TypeScript segment it was: a plain function over the Session,
-//! called inside one actor job. Landing a Conversation Spawn is the one start that outlives its job: it
-//! is a task, as the TypeScript's un-awaited `conversations.start`.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -18,7 +11,8 @@ use ac_core::pool::{
 };
 use ac_core::spawn_caps::spawn_caps_of;
 use ac_core::spawn_ledger::{
-    LedgerEntry, SpawnLedgerInput, render_spawn_ledger, spawn_ledger_path, write_spawn_ledger,
+    LedgerEntry, SpawnLedgerInput, held_reason_text, render_spawn_ledger, spawn_ledger_path,
+    write_spawn_ledger,
 };
 use ac_core::spawn_proposals::{HeldSpawn, NewHeldSpawn, PendingSpawn, TakenProposal};
 use ac_protocol::{
@@ -162,10 +156,6 @@ fn join(ids: &[&String]) -> String {
         .join(", ")
 }
 
-// `spawnProposalProblem`: why a proposal cannot be adopted into the pool as it stands, or `None` when
-// it can: a blockedBy naming a Conversation or an id outside the pool, or an assign.harness the pool
-// does not know. The boundary's adoption drops a proposal on this reason, and an operator's Adopt of a
-// Held spawn is refused on it before anything is queued.
 fn spawn_proposal_problem(
     session: &Session,
     proposal: &SpawnProposal,
@@ -266,14 +256,27 @@ fn spawn_proposal_problem(
     None
 }
 
-// `applySpawnBlocks`: a just-adopted Spawn's blocks (ADR-0029), onto the pool: the Spawn joins each
-// target's blocked-by, through the same marker write the Enlist form's Blocks uses, with the in-memory
-// marker kept in step for the ready set this boundary computes next. "all" is every ticket not yet
-// started (ready) as the adoption lands, sibling Spawns included, excluding the Spawn itself,
-// everything it waits on, and engine-run tickets. A ticket already running is never a target and never
-// interrupted. Named targets were checked at validation; one an earlier Spawn of the same boundary
-// made a cycle of, or that the file refuses, is skipped with a log line rather than written. Returns
-// the tickets actually blocked.
+// Started means the scheduler launched it at least once. A Ticket can be a Checkpoint without ever
+// launching (a config gap, a held branch), so its status says nothing.
+fn has_started(session: &Session, id: &str) -> bool {
+    read_events(Path::new(&session.runs_dir), id)
+        .iter()
+        .any(|event| event.kind == TicketEventKind::Scheduled)
+}
+
+// The Tickets a proposal's named `blocks` reach that have already started (ADR-0041): their
+// blocked-by is not the proposal's to rewrite, so it waits for the operator instead.
+fn started_blocks(session: &Session, proposal: &SpawnProposal) -> Vec<String> {
+    match &proposal.blocks {
+        Some(SpawnBlocks::Ids(named)) => named
+            .iter()
+            .filter(|id| has_started(session, id))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn apply_spawn_blocks(
     session: &mut Session,
     spawn_id: &str,
@@ -309,6 +312,12 @@ fn apply_spawn_blocks(
         if waits_on.contains(&target_id) {
             log.push(format!(
                 "ticket {spawn_id}: not blocking {target_id}, which it already waits on"
+            ));
+            continue;
+        }
+        if has_started(session, &target_id) {
+            log.push(format!(
+                "ticket {spawn_id}: not blocking {target_id}, which has started"
             ));
             continue;
         }
@@ -366,18 +375,6 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// `takeSpawnProposals` (issue #150, on ADR-0010 and ADR-0029): the moment an Outcome becomes its
-/// ticket's, or a Conversation's spawn.json is read, each proposal is checked against the pool as it
-/// stands and settled on disk before anything else happens, so a restart before the boundary finds
-/// every one of them. A proposal the pool would reject is dropped with the reason on the parent's log
-/// (a spawn-rejected event), the parent's own result standing. One the agent marked as overlapping work
-/// in the pool is held for the operator, whatever ids the mark names. The rest meet the caps: the
-/// per-attempt cap takes the first ones in order, and the per-run cap, for a Ticket's own
-/// outcome.spawn only (a Conversation's spawn.json has none), takes what the run has room for once
-/// this run's landed Spawns and the Pending spawns already reserving room are counted. What a cap
-/// cannot take is held, in its place in the proposal's order; what it takes is a Pending spawn,
-/// landing at the next boundary unless the operator holds or discards it first. A cap of 0 holds
-/// everything.
 pub fn take_spawn_proposals(
     session: &mut Session,
     parent_id: &str,
@@ -390,11 +387,8 @@ pub fn take_spawn_proposals(
     let attempt = last_attempt(runs(session), parent_id);
     let mut log: Vec<String> = Vec::new();
     let mut taken: Vec<TakenProposal> = Vec::new();
-    // A Station Ticket or the Grill: both are inside the Line (ADR-0037).
-    let line_station = session
-        .marker(parent_id)
-        .is_some_and(|m| m.station.is_some())
-        || crate::conversations::grill_id(session).as_deref() == Some(parent_id);
+    // A Line Ticket or a Line Conversation pass: both are inside the Line (ADR-0037).
+    let inside_line = crate::line::holds_spawns(session, parent_id);
     // Room is counted in signed numbers, which a cap fits: `spawn_caps_of` holds one at `i64::MAX`.
     let mut attempt_room = caps.per_attempt as i64;
     // `None` is a Conversation's unbounded run room.
@@ -438,9 +432,10 @@ pub fn take_spawn_proposals(
             held,
             unknown_overlaps: unknown,
         };
-        if line_station {
-            // Anything a Station proposes merges into the Line's branch once it lands, so only the
-            // operator lands it (ADR-0037); it uses none of the caps' room.
+        if inside_line {
+            // Anything a Line Ticket proposes merges into the Line's branch once it lands, so only
+            // the operator lands it (ADR-0037) unless its node says `spawns: land`; it uses none of
+            // the caps' room.
             taken.push(entry(Some(HeldSpawnReason::Line), None));
         } else if !proposal.overlaps.as_deref().unwrap_or_default().is_empty() {
             taken.push(entry(
@@ -480,7 +475,7 @@ pub fn take_spawn_proposals(
             }),
         )?;
         log.push(format!(
-            "ticket {parent_id}: spawn proposal{} {} pending for the next boundary",
+            "ticket {parent_id}: spawn proposal{} {} pending for the next Tick",
             plural(pending.len()),
             pending
                 .iter()
@@ -565,9 +560,6 @@ pub fn take_spawn_proposals(
     Ok((pending, held))
 }
 
-// `heldEventEntry`: one held spawn as a spawn-held event names it: its id, title and reason, the ids
-// an overlaps hold named (and which of them the pool never knew), and why the boundary refused to land
-// a "refused" one.
 fn held_event_entry(held: &HeldSpawn) -> Value {
     let mut entry = Map::new();
     entry.insert("id".into(), json!(held.id));
@@ -582,6 +574,9 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
     if let Some(unknown) = &held.unknown_overlaps {
         entry.insert("unknownOverlaps".into(), json!(unknown));
     }
+    if let Some(started) = &held.started_ids {
+        entry.insert("startedIds".into(), json!(started));
+    }
     if held.reason == HeldSpawnReason::Refused
         && let Some(error) = &held.adopt_error
     {
@@ -590,14 +585,6 @@ fn held_event_entry(held: &HeldSpawn) -> Value {
     Value::Object(entry)
 }
 
-// `landSpawn`: landing one proposal under its minted id: a Conversation started, or a ticket file
-// written (true, so the caller reloads the pool's markers).
-//
-// A Conversation start is a task, as the TypeScript's fire-and-forget `start`: it opens a herdr tab
-// and waits for the TUI, and this boundary is synchronous by ADR-0010's own contract. A launch failure
-// is logged on the proposing parent, the same disposition a malformed proposal gets. The id is
-// reserved with the Conversation module at once, so a second adoption before the record reaches disk
-// cannot mint it again; the start gives it back once it resolves, refused or launched.
 fn land_spawn(
     session: &mut Session,
     parent_id: &str,
@@ -605,8 +592,6 @@ fn land_spawn(
     proposal: &SpawnProposal,
 ) -> anyhow::Result<bool> {
     if proposal.kind == Some(SpawnKind::Conversation) {
-        crate::conversations::reserve(session, id);
-        let engine = session.engine();
         let request = StartConversationRequest {
             title: js::trim(&proposal.title).to_owned(),
             opening: Some(proposal.body.clone()),
@@ -620,28 +605,41 @@ fn land_spawn(
             spawned_by: Some(parent_id.to_owned()),
             id: Some(id.to_owned()),
         };
-        let parent_id = parent_id.to_owned();
-        let title = proposal.title.clone();
-        tokio::spawn(async move {
-            let Err(error) = engine.start_conversation(request).await else {
-                return;
-            };
-            let reason = format!("conversation start failed: {}", error.message());
-            let _ = engine
-                .call(move |s| {
-                    let _ = append_now(
-                        s,
-                        &parent_id,
-                        TicketEventKind::SpawnRejected,
-                        json!({ "title": title, "reason": reason }),
-                    );
-                })
-                .await;
-        });
+        match crate::conversations::prepare_start(session, &request) {
+            Ok(prepared) => {
+                let engine = session.engine();
+                let (parent_id, title) = (parent_id.to_owned(), proposal.title.clone());
+                tokio::spawn(async move {
+                    let Err(error) = crate::conversations::launch_prepared(&engine, prepared).await
+                    else {
+                        return;
+                    };
+                    let _ = engine
+                        .call(move |s| reject_conversation_spawn(s, &parent_id, &title, &error))
+                        .await;
+                });
+            }
+            Err(error) => reject_conversation_spawn(session, parent_id, &proposal.title, &error),
+        }
         return Ok(false);
     }
     write_spawn_ticket(Path::new(&session.issues_dir), parent_id, id, proposal)?;
     Ok(true)
+}
+
+fn reject_conversation_spawn(
+    session: &mut Session,
+    parent_id: &str,
+    title: &str,
+    error: &EngineError,
+) {
+    let reason = format!("conversation start failed: {}", error.message());
+    let _ = append_now(
+        session,
+        parent_id,
+        TicketEventKind::SpawnRejected,
+        json!({ "title": title, "reason": reason }),
+    );
 }
 
 // A parent's adopted Spawns, each with the tickets it blocked.
@@ -659,23 +657,6 @@ struct Settled {
     at: String,
 }
 
-/// `adoptSpawnProposals`: the boundary's spawn landing (ADR-0010, extended by the Conversations ADR,
-/// ADR-0029 and issue #150): every Pending spawn, and every Held spawn the operator has adopted since,
-/// is checked again against the pool as the boundary found it, and the ones that pass are written as
-/// ordinary ticket files or started as Conversations, after which the pool's markers and assignments
-/// reload so the drive loop schedules the ticket ones like any other. Every aspect of that stays per
-/// proposal, never per batch.
-///
-/// The caps were met when each proposal was taken (`take_spawn_proposals`): a Pending spawn lands on
-/// the room it reserved, and an adopted Held spawn passes both caps, the Adopt being the decision the
-/// caps exist to ask for. A Pending spawn the pool can no longer take (a blocks target finished after
-/// it was taken) is held for "refused" instead, the reason on it, so the operator sees why and
-/// decides. A held one's Adopt is refused the same way: it stays held with the reason on it
-/// (ADR-0029).
-///
-/// Writing the files is the commit point. The Pending spawns' landing ids go on disk first, so a crash
-/// after a ticket file but before its Pending spawn is forgotten is settled at the next start
-/// (`settle_landing_spawns`) instead of landing it twice.
 pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     let pending: Vec<PendingSpawn> = session.spawn_proposals.pending().to_vec();
     let adopting: Vec<HeldSpawn> = session
@@ -687,8 +668,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     if pending.is_empty() && adopting.is_empty() {
         return Ok(());
     }
-    // Membership validates against the markers as the boundary found them, so a proposal naming
-    // another proposal's future id drops as unknown: the agent never proposes ids and cannot know one.
     let known = known_pool_ids(session)?;
     let mut counters = combined_spawn_counters(session)?;
     let mut log: Vec<String> = Vec::new();
@@ -704,7 +683,35 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     let mut landing: Vec<(String, String)> = Vec::new();
     for entry in &pending {
         match spawn_proposal_problem(session, &entry.proposal, &known) {
-            None => landing.push((entry.id.clone(), mint(&entry.parent_id))),
+            None => {
+                let started = started_blocks(session, &entry.proposal);
+                if started.is_empty() {
+                    landing.push((entry.id.clone(), mint(&entry.parent_id)));
+                    continue;
+                }
+                let Some(held) =
+                    session
+                        .spawn_proposals
+                        .hold_started(&entry.id, &started, &js::now_iso())?
+                else {
+                    continue;
+                };
+                append(
+                    session,
+                    &entry.parent_id,
+                    &held.at,
+                    last_attempt(runs(session), &entry.parent_id),
+                    TicketEventKind::SpawnHeld,
+                    json!({ "held": [held_event_entry(&held)] }),
+                )?;
+                log.push(format!(
+                    "ticket {}: {} ('{}') held: it {}",
+                    entry.parent_id,
+                    entry.id,
+                    entry.proposal.title,
+                    held_reason_text(HeldSpawnReason::Started, &[], &[], &started, None)
+                ));
+            }
             Some(reason) => {
                 let Some(held) =
                     session
@@ -851,8 +858,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
             },
         );
     }
-    // Blocks land once every Spawn of this boundary is in the pool, so "all" reaches a sibling adopted
-    // alongside, whichever order they came in.
     let mut blocked: Vec<(String, BlockedSpawns)> = Vec::new();
     for (parent_id, spawn_id, blocks) in &blocking {
         let targets = apply_spawn_blocks(session, spawn_id, blocks, &mut log)?;
@@ -914,11 +919,6 @@ pub fn adopt_spawn_proposals(session: &mut Session) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `settleLandingSpawns`: a crash between a Pending spawn's landing mark and its forgetting
-/// (`adopt_spawn_proposals`) leaves it pending with the id it was landing under. At boot the pool says
-/// which way it went: a ticket (or Conversation) under that id landed, and the Pending spawn is
-/// forgotten with its spawn-adopted event; otherwise the mark is cleared and it lands at the next
-/// boundary, as it would have.
 pub fn settle_landing_spawns(session: &mut Session) -> anyhow::Result<()> {
     let mut log: Vec<String> = Vec::new();
     let conversations = known_conversation_ids(Path::new(&session.pool_dir))?;
@@ -936,8 +936,6 @@ pub fn settle_landing_spawns(session: &mut Session) -> anyhow::Result<()> {
         session
             .spawn_proposals
             .landed(std::slice::from_ref(&entry.id))?;
-        // The crash may have come before the landing's blocks: they go on again, the way the boundary
-        // puts them on, and a target that already waits on the Spawn is left as it is.
         let blocked = match &entry.proposal.blocks {
             Some(blocks) => apply_spawn_blocks(session, &landing, blocks, &mut log)?,
             None => Vec::new(),
@@ -1021,9 +1019,7 @@ pub fn refresh_spawn_ledger_from_last(session: &mut Session) {
     refresh_spawn_ledger(session, &conversations);
 }
 
-/// `spawnsAwaitBoundary`: Pending spawns, and Held spawns an Adopt has queued, wait for a boundary to
-/// land them. A drive that closes with any leaves the next drive to land them.
-pub fn spawns_await_boundary(session: &Session) -> bool {
+pub fn spawns_await_tick(session: &Session) -> bool {
     !session.spawn_proposals.pending().is_empty() || !session.spawn_proposals.adopting().is_empty()
 }
 
@@ -1032,20 +1028,14 @@ pub fn ledger_path(session: &Session) -> String {
     js::path_text(&spawn_ledger_path(runs(session)))
 }
 
-fn emit_current(session: &mut Session) {
+// An operator's or Steward's answer on a spawn: shown at once, and the drive woken, since the
+// Line's Finish waits on every Held and Pending spawn.
+fn emit_and_wake(session: &mut Session) {
     let phase = session.current_phase();
     emit_snapshot(session, phase);
+    session.wake();
 }
 
-/// `adoptHeldSpawn`: the operator's Adopt of a Held spawn (ADR-0029). It is refused up front, the
-/// spawn staying held, when the pool as it stands would reject the proposal (a blocker gone from the
-/// pool, a harness no longer known) or when the pool has finished and its store is closed, since the
-/// drive that would schedule the new ticket could not record it; a Restart reopens the pool with the
-/// spawn still held. Otherwise it queues for the boundary, past the caps: at once when the engine is
-/// idle, the way a Conversation's spawn.json is adopted, and at the next boundary when a drive is in
-/// flight. A boundary that finds the pool has moved since and refuses it leaves it held with the
-/// reason (adoptError), which the next Adopt clears. An overlaps mark is not checked again: the Adopt
-/// is the operator's answer to it.
 pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
     let Some(held) = session.spawn_proposals.get_held(id).cloned() else {
         return Err(refused(format!("no held spawn {id}")));
@@ -1068,18 +1058,10 @@ pub fn adopt_held_spawn(session: &mut Session, id: &str) -> Result<(), EngineErr
         .spawn_proposals
         .begin_adopt(id)
         .map_err(|e| refused(e.to_string()))?;
-    if !session.driving {
-        adopt_spawn_proposals(session).map_err(|e| refused(e.to_string()))?;
-        crate::answers::kick_processing(session).map_err(|e| refused(e.to_string()))?;
-    } else {
-        emit_snapshot(session, ac_protocol::RunPhase::Running);
-    }
+    emit_and_wake(session);
     Ok(())
 }
 
-/// `discardHeldSpawn`: the operator's Discard of a Held spawn (ADR-0029): gone for good, the discard
-/// on the parent's log. One an Adopt has already queued is past discarding: the boundary is about to
-/// write it.
 pub fn discard_held_spawn(
     session: &mut Session,
     id: &str,
@@ -1122,78 +1104,7 @@ pub fn discard_held_spawn(
             }
         ),
     );
-    emit_current(session);
-    Ok(())
-}
-
-// Why a Pending spawn cannot be held or discarded: it is not pending. The boundary lands pending
-// spawns synchronously, so an operator's action that arrives after it finds the spawn gone rather
-// than half landed.
-fn not_pending(session: &Session, id: &str) -> EngineError {
-    refused(if session.spawn_proposals.get_held(id).is_some() {
-        format!("spawn {id} is already held")
-    } else {
-        format!("no pending spawn {id}: it has landed or been discarded")
-    })
-}
-
-/// `holdPendingSpawn`: the operator's Hold of a Pending spawn (issue #150): kept back from the
-/// boundary as a Held spawn, held by the operator, under the same id, so the Spawn ledger's name for
-/// it still holds. Its run room is free again until an Adopt lands it.
-pub fn hold_pending_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
-    if session.spawn_proposals.get_pending(id).is_none() {
-        return Err(not_pending(session, id));
-    }
-    let held = session
-        .spawn_proposals
-        .hold_pending(id, &js::now_iso())
-        .map_err(|e| refused(e.to_string()))?
-        .ok_or_else(|| not_pending(session, id))?;
-    append(
-        session,
-        &held.parent_id,
-        &held.at,
-        last_attempt(runs(session), &held.parent_id),
-        TicketEventKind::SpawnHeld,
-        json!({ "held": [held_event_entry(&held)] }),
-    )
-    .map_err(|e| refused(e.to_string()))?;
-    log_line(
-        session,
-        format!(
-            "ticket {}: pending spawn {id} ('{}') held by the operator",
-            held.parent_id, held.proposal.title
-        ),
-    );
-    emit_current(session);
-    Ok(())
-}
-
-/// `discardPendingSpawn`: the operator's Discard of a Pending spawn (issue #150): gone for good, the
-/// discard on the parent's log, its run room free again.
-pub fn discard_pending_spawn(session: &mut Session, id: &str) -> Result<(), EngineError> {
-    let Some(pending) = session.spawn_proposals.get_pending(id).cloned() else {
-        return Err(not_pending(session, id));
-    };
-    session
-        .spawn_proposals
-        .remove_pending(id)
-        .map_err(|e| refused(e.to_string()))?;
-    append_now(
-        session,
-        &pending.parent_id,
-        TicketEventKind::SpawnDiscarded,
-        json!({ "id": id, "title": pending.proposal.title, "pending": true }),
-    )
-    .map_err(|e| refused(e.to_string()))?;
-    log_line(
-        session,
-        format!(
-            "ticket {}: pending spawn {id} ('{}') discarded by the operator",
-            pending.parent_id, pending.proposal.title
-        ),
-    );
-    emit_current(session);
+    emit_and_wake(session);
     Ok(())
 }
 
@@ -1317,6 +1228,7 @@ pub fn recover_truncated_spawns(session: &mut Session) -> anyhow::Result<()> {
                 at: event.at.clone(),
                 adopt_error: None,
                 unknown_overlaps: None,
+                started_ids: None,
             })
             .collect();
         let held = session.spawn_proposals.recover(&key, entries)?;

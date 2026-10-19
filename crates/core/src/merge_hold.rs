@@ -1,4 +1,4 @@
-//! The Merge hold (ADR-0014, engine/merge-hold.ts): the one derivation of the done-but-unmerged ticket
+//! The unlanded list (ADR-0014, engine/merge-hold.ts): the one derivation of the done-but-unmerged ticket
 //! set, its memo, the watch's bookkeeping, and the Merge queue's line. Only the pure parts live here;
 //! the git probe, the watch's timer and the wait-and-recompute loop are the engine's.
 //!
@@ -18,10 +18,6 @@ use ac_protocol::{Interrupt, InterruptKind, MergeQueueEntry, MergeQueueState, Ti
 
 /// How often a held pool re-derives the hold looking for a merge done by hand, in milliseconds.
 pub const MERGE_HOLD_WATCH_MS: u64 = 2_000;
-
-/// The poll cadence of a waiting flow (ADR-0014), in milliseconds: the hold is re-derived on every
-/// tick, so a manual CLI merge is observed without any Console action.
-pub const MERGE_HOLD_POLL_MS: u64 = 250;
 
 /// The git facts the derivation reads.
 pub trait MergeHoldProbe {
@@ -512,6 +508,7 @@ mod tests {
             body: String::new(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         }
     }
 

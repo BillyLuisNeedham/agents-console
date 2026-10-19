@@ -195,9 +195,9 @@ describe("NeedsInputTray collapse", () => {
 });
 
 describe("NeedsInputTray waiting rows", () => {
-  // The engine's accept-now / drain-at-boundary contract (ADR-0004): an
+  // The engine's accept-now / drain-at-the-next-Tick contract (ADR-0004): an
   // answered interrupt stays listed with its queued flag set until the
-  // super-step boundary snapshot drops it.
+  // next Tick's snapshot drops it.
   function queuedAnswerSnapshot(): EnrichedSnapshot {
     return {
       seq: 0,
@@ -295,7 +295,7 @@ describe("NeedsInputTray waiting rows", () => {
     expect(el.querySelector('[data-key="ticket:A"] .needs-input-tick')).toBeNull();
   });
 
-  it("keeps a waiting row's draft pending until the boundary drains it", () => {
+  it("keeps a waiting row's draft pending until the next Tick drains it", () => {
     const drafts = new DraftAnswers();
     const tray = stateTray(drafts);
     tray.setNote("A", "clean the worktree first");
@@ -305,7 +305,7 @@ describe("NeedsInputTray waiting rows", () => {
     drafts.prune(new Set(waiting.map((row) => row.ticketId)));
     expect(tray.note("A")).toBe("clean the worktree first");
     expect(tray.note("B")).toBe("skip the flaky test");
-    // The boundary applies the queued answer and the row disappears; the
+    // The next Tick applies the queued answer and the row disappears; the
     // draft goes with it, and the still-open row's draft stands.
     const drained = projectNeedsInput(projectPool(drainedSnapshot()).cards);
     drafts.prune(new Set(drained.map((row) => row.ticketId)));

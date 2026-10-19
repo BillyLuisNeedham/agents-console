@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use ac_core::machine_defaults::default_machine_defaults_paths;
 use ac_engine::{Engine, PoolSnapshot, PoolState};
+use ac_protocol::PROTOCOL_VERSION;
 use ac_protocol::{RunPhase, SpawnUsage, StewardBudgetView, TicketStatus};
 
 use crate::push::Pushed;
@@ -93,6 +94,7 @@ struct Rig {
 
 struct RigOptions {
     coalesce: Duration,
+    line_boot: Option<crate::LineBootHandOff>,
     hand_off_stop: bool,
     start: bool,
     start_gate: Option<StartGate>,
@@ -102,6 +104,7 @@ impl Default for RigOptions {
     fn default() -> Self {
         RigOptions {
             coalesce: Duration::from_millis(50),
+            line_boot: None,
             hand_off_stop: false,
             start: true,
             start_gate: None,
@@ -169,6 +172,7 @@ async fn rig(options: RigOptions) -> Rig {
             }) as crate::StopHandOff
         }),
         on_restart_requested: None,
+        on_line_boot_requested: options.line_boot.clone(),
         machine_defaults_paths: default_machine_defaults_paths(&home),
         parent_env: Default::default(),
         home: home.clone(),
@@ -503,6 +507,36 @@ async fn reassigns_from_the_file_and_answers_with_the_fresh_snapshot() {
 }
 
 #[tokio::test]
+async fn wakes_the_drive_for_a_reassign_that_applied_and_not_for_one_refused() {
+    let rig = rig(RigOptions::default()).await;
+    let wakes = || async {
+        rig.engine()
+            .call(|session| session.wakes.rung())
+            .await
+            .unwrap()
+    };
+    let before = wakes().await;
+    let (status, _) = rig
+        .json(
+            "PUT",
+            "/api/reassign",
+            Some(r#"{"tickets":["zz"],"fields":{}}"#),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(wakes().await, before);
+    let (status, _) = rig
+        .json(
+            "PUT",
+            "/api/reassign",
+            Some(r#"{"tickets":["02"],"fields":{"model":"x-model"}}"#),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(wakes().await, before + 1);
+}
+
+#[tokio::test]
 async fn serves_the_page_with_the_boot_snapshot_the_socket_repeats() {
     let rig = rig(RigOptions::default()).await;
     let (status, headers, page) = rig.http("GET", "/", None).await;
@@ -519,7 +553,7 @@ async fn serves_the_page_with_the_boot_snapshot_the_socket_repeats() {
     let mut socket = rig.socket().await;
     let hello = socket.frame().await;
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["protocol"], PROTOCOL_VERSION);
     assert_eq!(hello["heartbeatMs"], 20000);
     assert_eq!(hello["epoch"], boot["epoch"]);
     let first = socket.frame().await;
@@ -1005,7 +1039,7 @@ async fn answers_before_the_pool_starts_without_tearing_anything_down() {
             boot["rev"].clone(),
             boot["snapshot"].clone()
         ),
-        (json!(1), json!(0), Value::Null)
+        (json!(PROTOCOL_VERSION), json!(0), Value::Null)
     );
     let mut socket = rig.socket().await;
     socket.frame_of("hello").await;
@@ -1499,5 +1533,167 @@ async fn answers_every_concurrent_machine_defaults_save_and_keeps_one_whole() {
     assert_eq!(
         temp_files_beside(&dir, "defaults.json"),
         Vec::<String>::new()
+    );
+}
+
+// A Plan library save goes through a temp file and a rename, so the last of several concurrent saves of
+// one slug wins whole. Each must answer 200 and leave one of the saved Plans on disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn answers_every_concurrent_plan_save_and_keeps_one_whole() {
+    let rig = rig(RigOptions::default()).await;
+    let dir = rig.dir.path().join("home/.agent-graphs/plans");
+    let plan = |name: &str| {
+        json!({
+            "horde": 1,
+            "name": name,
+            "nodes": [
+                { "kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0 },
+                { "kind": "finish", "id": "finish", "title": "Finish", "x": 300, "y": 0 },
+            ],
+            "edges": [{ "from": "build", "on": "done", "to": "finish" }],
+        })
+    };
+    for round in 0..5 {
+        let names: Vec<String> = (0..8).map(|n| format!("plan {round}-{n}")).collect();
+        let bodies: Vec<String> = names.iter().map(|name| plan(name).to_string()).collect();
+        let saved = futures::future::join_all(
+            bodies
+                .iter()
+                .map(|body| rig.json("PUT", "/api/plans/mine", Some(body))),
+        )
+        .await;
+        for (status, answer) in saved {
+            assert_eq!(status, 200, "round {round}: {answer}");
+        }
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("mine.json")).unwrap()).unwrap();
+        let name = on_disk["name"].as_str().unwrap();
+        assert!(
+            names.iter().any(|saved| saved == name),
+            "round {round}: {name} is none of the saves"
+        );
+    }
+    assert_eq!(temp_files_beside(&dir, "mine.json"), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn routes_every_plan_route_word_to_its_verb() {
+    let rig = rig(RigOptions::default()).await;
+    let (unknown, _) = rig.json("POST", "/api/no-such-route", Some("{}")).await;
+    let (slug, _) = rig.json("POST", "/api/plans/mine", Some("{}")).await;
+    assert_eq!(slug, unknown);
+    assert_ne!(unknown, 400);
+    for word in ac_core::plan::library::ROUTE_WORDS {
+        let (status, answer) = rig
+            .json("POST", &format!("/api/plans/{word}"), Some("{}"))
+            .await;
+        assert_eq!(status, 400, "{word}: {answer}");
+        assert!(
+            !answer.to_string().contains("is not a Plan slug"),
+            "{word}: {answer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn answers_a_drafts_edits_with_the_draft_its_problems_notes_and_verdicts() {
+    let rig = rig(RigOptions::default()).await;
+    let draft = json!({
+        "horde": 1,
+        "name": "Draft",
+        "nodes": [{ "kind": "finish", "id": "finish", "title": "Finish", "x": 0, "y": 0 }],
+        "edges": [],
+    });
+    let body =
+        json!({ "plan": draft, "edits": [{ "edit": "addNode", "kind": "prove", "x": 5, "y": 6 }] });
+    let (status, answer) = rig
+        .json("POST", "/api/plans/edit", Some(&body.to_string()))
+        .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["plan"]["nodes"][1]["id"], "prove");
+    assert_eq!(answer["notes"], json!([]));
+    assert_eq!(
+        answer["verdicts"],
+        json!([
+            { "id": "finish", "verdicts": ["revise"] },
+            { "id": "prove", "verdicts": ["pass", "fail", "closed"] },
+        ])
+    );
+    let (_, checked) = rig
+        .json(
+            "POST",
+            "/api/plans/validate",
+            Some(&json!({ "plan": answer["plan"] }).to_string()),
+        )
+        .await;
+    assert_eq!(answer["problems"], checked["problems"]);
+}
+
+fn recording_line_boot(calls: Arc<Mutex<Vec<crate::LineBoot>>>) -> crate::LineBootHandOff {
+    Arc::new(move |boot: &crate::LineBoot| {
+        calls.lock().unwrap().push(boot.clone());
+        Ok(ac_protocol::PlanBootResponse {
+            argv: vec!["--plan".to_owned(), boot.plan.clone()],
+            cwd: "/project".to_owned(),
+            log: "/pool/runs/boot.log".to_owned(),
+        })
+    })
+}
+
+#[tokio::test]
+async fn boots_a_line_through_the_hand_off_once_every_check_has_passed() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let rig = rig(RigOptions {
+        line_boot: Some(recording_line_boot(calls.clone())),
+        ..RigOptions::default()
+    })
+    .await;
+    let boot = |slug: &str, work: &str| json!({ "slug": slug, "work": work }).to_string();
+    for (body, status) in [
+        (boot("factory-today", "  "), 400),
+        (boot("factory-today", "--yes"), 400),
+        (boot("no-such-plan", "x"), 404),
+        (boot("BAD", "x"), 400),
+        ("{}".to_owned(), 400),
+    ] {
+        let (got, answer) = rig.json("POST", "/api/plans/boot", Some(&body)).await;
+        assert_eq!(got, status, "{body}: {answer}");
+    }
+    assert_eq!(calls.lock().unwrap().len(), 0);
+
+    let (status, answer) = rig
+        .json(
+            "POST",
+            "/api/plans/boot",
+            Some(&boot("factory-today", " 186 ")),
+        )
+        .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["argv"], json!(["--plan", "factory-today"]));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [crate::LineBoot {
+            plan: "factory-today".to_owned(),
+            work: "186".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn refuses_a_line_boot_on_a_server_that_cannot_start_boot() {
+    let rig = rig(RigOptions::default()).await;
+    let (status, answer) = rig
+        .json(
+            "POST",
+            "/api/plans/boot",
+            Some(&json!({ "slug": "factory-today", "work": "186" }).to_string()),
+        )
+        .await;
+    assert_eq!(status, 409, "{answer}");
+    assert!(
+        answer["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot start Boot")
     );
 }

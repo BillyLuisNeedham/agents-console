@@ -1,0 +1,29 @@
+{
+  "horde": 1,
+  "name": "Factory today",
+  "author": "Agent Console",
+  "source": "docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md",
+  "note": "This is ADR-0037's fixed Line as a Plan, with the Grill, then Implement, Prove, Review and Decide, then the Finish. Prove may fail twice per Round with the Steward allowed one more pass, Decide may ask for one extra Round, and notes on the Finish send the work back to Implement.",
+  "nodes": [
+    {"kind":"conversation","id":"grill","title":"Grill","x":40,"y":60,"skill":"my-grill-with-docs","assign":{"harness":"claude","model":"opus","effort":"high"}},
+    {"kind":"agent","id":"implement","title":"Implement","x":340,"y":60,"skill":"tdd","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"prove","id":"prove","title":"Prove","x":640,"y":60,"skill":"my-verify","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"review","id":"review","title":"Review","x":940,"y":60,"skill":"code-review","assign":{"harness":"claude","model":"opus","effort":"high"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"decide","id":"decide","title":"Decide","x":1240,"y":60,"skill":"html","assign":{"harness":"claude","model":"opus","effort":"medium"},"copies":"one","checkpoint":"steward","spawns":"hold"},
+    {"kind":"finish","id":"finish","title":"Finish","x":1540,"y":60,"act":"none"}
+  ],
+  "edges": [
+    {"from":"grill","on":"done","to":"implement"},
+    {"from":"implement","on":"done","to":"prove"},
+    {"from":"prove","on":"pass","to":"review"},
+    {"from":"prove","on":"fail","to":"implement","cap":{"max":2,"stewardExtra":true,"whenSpent":"hold"}},
+    {"from":"review","on":"clean","to":"decide"},
+    {"from":"review","on":"findings","to":"decide"},
+    {"from":"decide","on":"ship","to":"finish"},
+    {"from":"decide","on":"another-round","to":"implement","cap":{"max":1,"stewardExtra":false,"whenSpent":{"to":"finish"}}},
+    {"from":"finish","on":"revise","to":"implement"},
+    {"from":"implement","on":"closed","to":"decide"},
+    {"from":"prove","on":"closed","to":"decide"},
+    {"from":"review","on":"closed","to":"decide"}
+  ]
+}

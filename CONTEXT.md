@@ -13,12 +13,12 @@ The run's memory. Nodes return partial updates; channels merge those updates.
 _Avoid_: context window, conversation history (those may live *in* state, they are not state)
 
 **Node**:
-A function that reads state and returns a partial update. May be deterministic code or a model call.
-_Avoid_: agent (a node may *run* an agent; it is not itself the agent), step, stage
+A place in a Plan where work runs or waits: a Conversation node, a Ticket node, a Merger, a Gate or the Finish. Each pass of a node takes one handoff and hands on a typed verdict, which the Plan's edges route to the next nodes.
+_Avoid_: agent (a node may *run* an agent; it is not itself the agent), step, stage, Station (the fixed recipe's word, retired by ADR-0040)
 
 **Edge**:
-A routing rule from one node to the next. Fixed, or it inspects state.
-_Avoid_: handoff, transition (unless talking about the existing non-graph pipeline)
+A routing rule in a Plan: one verdict of one node, sent on to the next node. A verdict goes along every edge that matches it. An edge that closes a cycle is a loop edge, and either carries a Loop cap or leaves a person.
+_Avoid_: handoff (that is what travels along an edge), transition, link (the prototype's word)
 
 **Channel**:
 One keyed field in state, with its own merge rule.
@@ -27,15 +27,12 @@ _Avoid_: field, property (too generic)
 **Reducer**:
 The function `(current, update) => value` that merges one channel.
 
-**Super-step**:
-One coordinated round of node execution. Parallel nodes in the same super-step see the same starting snapshot.
-
-**Super-step boundary**:
-The pause between two super-steps, where the engine does what a super-step in flight must not: the Config reload, the Queued answer drain, Spawn adoption, the reconciles, and the check of the Merge hold. Only then is the ready set computed and the next super-step planned. While the Merge hold stands the boundary waits and recomputes; nothing is planned until it lifts.
-_Avoid_: tick (implies a clock; the boundary runs when the previous super-step ends), between-step
+**Tick**:
+One pass of the rolling scheduler, which runs every Pool: the Config reload, the Queued answer drain, the deadlock reconcile, the Line's advance and Spawn landing, then the launch of every Ticket that may start. A Ticket may start once each of its blockers is done and merged, and it runs in its own worktree cut at that moment. A Tick runs whenever something could change what may start, never on a clock, and a Ticket starts without waiting for any other to end. Introduced by ADR-0041 (`docs/adr/0041-one-rolling-scheduler-starts-each-ticket-once-its-blockers-merge.md`).
+_Avoid_: super-step and super-step boundary (retired by ADR-0041: nothing waits for a whole round to end), boundary, between-step, poll
 
 **Checkpoint**:
-A saved snapshot of state after a super-step. Makes a run pausable and resumable.
+A saved snapshot of the run's state after each change the engine makes. Makes a run pausable and resumable.
 
 **Thread**:
 One durable run of the graph, identified so later invokes resume the same checkpoints.
@@ -80,7 +77,7 @@ One line of free text the operator gives a Pool so that several running at once 
 _Avoid_: pool name, label
 
 **Seeded Pool**:
-A Pool that starts with no Tickets and grows from live work: the operator Enlists herdr panes into it as Conversations, and those Conversations Spawn the Tickets. It opts in by holding a `conversations/` directory, which may be empty; without that directory an empty ticket directory is the "no Tickets written yet" mistake and the Console refuses to start. Ordinary in every other respect, and seeded only at the beginning: the same config, the same server, the same super-steps and merges, and from its first Spawn it holds Tickets like any other Pool. Introduced by ADR-0024 (`docs/adr/0024-a-pool-may-start-with-no-tickets.md`).
+A Pool that starts with no Tickets and grows from live work: the operator Enlists herdr panes into it as Conversations, and those Conversations Spawn the Tickets. It opts in by holding a `conversations/` directory, which may be empty; without that directory an empty ticket directory is the "no Tickets written yet" mistake and the Console refuses to start. Ordinary in every other respect, and seeded only at the beginning: the same config, the same server, the same scheduler and merges, and from its first Spawn it holds Tickets like any other Pool. Introduced by ADR-0024 (`docs/adr/0024-a-pool-may-start-with-no-tickets.md`).
 _Avoid_: empty pool (it is empty only at the start), conversation-only pool (it stops being that at the first Spawn), scratch pool, sandbox
 
 **Console**:
@@ -99,7 +96,7 @@ A named, machine-local bundle of a pool's behavioural config — harness, model,
 _Avoid_: profile, template
 
 **Assignment**:
-The harness, model, effort, and drivers an Attempt runs on. Resolved by the engine field by field, the first layer that sets a field winning: the ticket's own assign entry (pinned); for a spawned ticket, the Assignment its Spawn proposal requested (requested), which may set any field but verify; what a grader, head-to-head, or spawned ticket inherits from its build or parent ticket or Conversation (inherited); then the pool defaults (default). An empty field falls through to the next layer (an enlisted Conversation names no model, so its children take the defaults' model). Reassign shows each field's layer beside its value. A ticket with nothing to fill a field from is unassigned; it renders that way and, when it would schedule, waits as a Config interrupt rather than launching. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the super-step boundary that plans the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at the next boundary, whether it is a fresh Spawn or a ticket about to run again. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
+The harness, model, effort, and drivers an Attempt runs on. Resolved by the engine field by field, the first layer that sets a field winning: the ticket's own assign entry (pinned); for a spawned ticket, the Assignment its Spawn proposal requested (requested), which may set any field but verify; what a grader, head-to-head, or spawned ticket inherits from its build or parent ticket or Conversation (inherited); then the pool defaults (default). An empty field falls through to the next layer (an enlisted Conversation names no model, so its children take the defaults' model). Reassign shows each field's layer beside its value. A ticket with nothing to fill a field from is unassigned; it renders that way and, when it would schedule, waits as a Config interrupt rather than launching. An Assignment belongs to an Attempt, not a ticket: it is resolved from the current Pool config at the Tick that launches the Attempt, and never changes while that Attempt is in flight. A ticket with no Attempt in flight takes whatever the config says at its next launch, whether it is a fresh Spawn or a ticket about to run again. A Line Ticket's requested layer is its node's Assignment in the Plan. Every ticket card shows the Assignment its next or current Attempt runs on. Introduced by ADR-0018 (`docs/adr/0018-assignments-belong-to-attempts-config-reloads-at-boundary.md`), closing issue #63.
 _Avoid_: config (that's the raw file the Assignment is resolved from), profile
 
 **Effort**:
@@ -107,15 +104,15 @@ How hard the harness thinks on an Attempt, as that harness names it (claude's lo
 _Avoid_: thinking, reasoning level, variant (opencode's word for it), ultrathink
 
 **Config interrupt**:
-The Interrupt the engine raises on a Ticket about to schedule with no harness or model, in the engine's own voice like a persistence interrupt, naming the missing field and the console.json fix. The Ticket waits as a checkpoint; resume returns it to ready, and the next super-step boundary's Config reload re-resolves its Assignment. Resuming with the file unchanged raises the same interrupt again. A pool-config gap pauses one Ticket and never ends the run. Introduced by ADR-0022 (`docs/adr/0022-a-config-gap-pauses-the-ticket-not-the-run.md`), closing issue #118.
+The Interrupt the engine raises on a Ticket about to schedule with no harness or model, in the engine's own voice like a persistence interrupt, naming the missing field and the console.json fix. The Ticket waits as a checkpoint; resume returns it to ready, and the next Tick's Config reload re-resolves its Assignment. Resuming with the file unchanged raises the same interrupt again. A pool-config gap pauses one Ticket and never ends the run. Introduced by ADR-0022 (`docs/adr/0022-a-config-gap-pauses-the-ticket-not-the-run.md`), closing issue #118.
 _Avoid_: dead drive (that was the old outcome), pool config error (the log line, not the pause)
 
 **Pool settings**:
-The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, Spawn caps, the Steward entry (its Assignment, its Steward budget, whether it may Close and whether it may Adopt a Line's Held spawns), the pool's layer of the Factory settings, terminal, port and selection. The Pool title shows as soon as it is saved; editing the assignment slice or the Spawn caps takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
+The operator's editable view of one Pool's config in the Console: Pool title, pool defaults, resolver, Spawn caps, maxLive, the Steward entry (its Assignment, its Steward budget, whether it may Close and whether it may Adopt a Line's Held spawns), terminal, port and selection. The Pool title shows as soon as it is saved; editing the assignment slice, the Spawn caps or maxLive takes effect through Config reload; the boot-only keys take effect on the next Restart, and the Console says so. Per-ticket assign entries are not Pool settings; they live with the Ticket.
 _Avoid_: config (that's the raw file), preferences, options
 
 **Machine defaults**:
-The per-machine harness, model, effort, drivers, terminal and engine path that a new Pool inherits when nothing more specific says otherwise, and the machine's layer of the Factory settings, kept in one file under `~/.agent-graphs/`. Editable from the Console beside the Pool settings. Not a Setup (a Setup is a named bundle you choose; Machine defaults apply without choosing).
+The per-machine harness, model, effort, drivers, terminal, engine path and maxLive that a Pool inherits when nothing more specific says otherwise, kept in one file under `~/.agent-graphs/`. Editable from the Console beside the Pool settings. Not a Setup (a Setup is a named bundle you choose; Machine defaults apply without choosing).
 _Avoid_: runner (there is no runner; the engine's term is harness), global config
 
 **Boot**:
@@ -131,7 +128,7 @@ The operator changing a Ticket's Assignment from the Console, one Ticket from it
 _Avoid_: change setup, switch runner, override (the file's word is assign)
 
 **Config reload**:
-The engine's re-read of the Pool config file at a super-step boundary, or at once when a Pool settings save finds no drive in flight. Only the assignment slice (defaults, assign, resolver) and the Spawn caps reload; selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
+The engine's re-read of the Pool config file at every Tick where the file has changed. Only the assignment slice (defaults, assign, resolver), the Spawn caps and maxLive reload; selection, terminal, and port stay as they were at boot. A reload is all or nothing: a file that fails to parse or would give any reassignable ticket an invalid Assignment is rejected whole, logged once, and the previous config stands.
 _Avoid_: hot reload (implies a watcher; there is none), restart
 
 **Detail**:
@@ -167,7 +164,7 @@ The one herdr workspace a Terminal-backed pool opens its attempt and Conversatio
 _Avoid_: workspace (banned as a Pool synonym; a herdr workspace is a container, a Pool is the work), window, project workspace
 
 **Outcome**:
-The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals, and a Station Ticket's Outcome carries the verdict the engine routes its Line from. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
+The JSON an attempt writes at exit to signal its result: done, or checkpoint with a Brief for the human. It may also carry Spawn proposals. A Line Ticket's Outcome carries the verdict its node's kind asks for, which the engine routes the Line on, and the Items its node is taught to make. The engine reads the Outcome and writes the ticket's final status itself; agents never write status. Introduced by ADR-0005 (`docs/adr/0005-engine-owns-final-status.md`), closing issue #18.
 _Avoid_: exit code (a crash signal, not a result), status marker (the engine owns that write)
 
 **Launch**:
@@ -194,13 +191,9 @@ _Avoid_: exit (one form of an ending, not the ending), timeout (there is none; l
 An Attempt whose engine stopped while it ran. A headless orphan is stopped by the engine: at shutdown when the engine can, or at the next boot when a recorded process is found still alive in the ticket's worktree. A terminal-backed orphan lives on in its herdr pane and is re-adopted at boot instead. The engine never schedules a new Attempt into a worktree an orphan is still writing. Introduced by ADR-0017 (`docs/adr/0017-headless-orphans-are-killed-not-adopted.md`), closing issue #65.
 _Avoid_: zombie (a zombie is dead; an orphan is alive and working), leaked process, stray agent
 
-**Merge hold**:
-The pool-wide pause the scheduler takes while any ticket is done-but-unmerged. No ready set is computed — nothing new spawns, in any flow that computes one — until every `done` ticket's branch has landed in its merge target or its merge has been rejected. Derived on demand from markers and branches, never persisted; the existing merge-approval interrupt is the signal, and a held ticket's card names where it stands in the Merge queue. Introduced by ADR-0014 (`docs/adr/0014-hold-super-step-until-done-tickets-merged.md`), closing issue #41.
-_Avoid_: block (that's a ticket dependency), gate (per-ticket gating was the rejected alternative)
-
 **Merge queue**:
-The ordered line of done-but-unmerged tickets the Merge hold is waiting on, in the order the engine takes their merges on. The ticket at the head is the one whose merge is moving: being merged, being resolved by a resolver Attempt, or waiting on the operator at a merge-approval or merge-conflict interrupt. A ticket left waiting on the operator keeps its place while the engine moves on to the next, so more than one ticket can be waiting on the operator at once. Every ticket behind the head is queued, with nothing running on its behalf. A head with no resolver running and no interrupt raised is stalled, which the Console names rather than hides. Derived by the engine alongside the Merge hold, never persisted. Every held ticket's card says which of these it is, and the pool header names the head and the tickets behind it while the hold stands. Amends ADR-0014, closing issue #129.
-_Avoid_: merge pending (it hid which of these a ticket was), backlog
+The ordered line of done-but-unmerged tickets, in the order the engine takes their merges on. Only a ticket that names one of them as a blocker waits for it; nothing else does. The ticket at the head is the one whose merge is moving: being merged, being resolved by a resolver Attempt, or waiting on the operator at a merge-approval or merge-conflict interrupt. A ticket left waiting on the operator keeps its place while the engine moves on to the next, so more than one ticket can be waiting on the operator at once. Every ticket behind the head is queued, with nothing running on its behalf. A head with no resolver running and no interrupt raised is stalled, which the Console names rather than hides. Derived by the engine, never persisted. Every ticket in it says on its card which of these it is, and the pool header names the head and the tickets behind it while the line is not empty. A merge-conflict Interrupt says how many tickets have started since the conflict was found, which on a resolver's path is before the resolver ran; a grader or judge the engine runs is not a ticket started. Amends ADR-0014, closing issue #129; per-ticket waiting by ADR-0041.
+_Avoid_: merge pending (it hid which of these a ticket was), backlog, Merge hold (retired by ADR-0041: no merge pauses the whole Pool any more)
 
 **Ticket log**:
 The complete record of a ticket's work — every attempt's log plus the lifecycle events (scheduled, spawned, exited, merged, interrupted) between them. Read from the ticket's Detail. Since ADR-0012 the per-attempt log is derived live from the attempt's Stream file, not raw harness bytes.
@@ -215,7 +208,7 @@ The compact liveness readout on a ticket card while an attempt runs — diff tot
 _Avoid_: activity (too generic), status (that's the ticket's lifecycle state), progress (implies a known finish line)
 
 **Queued answer**:
-An interrupt answer the Console has accepted and acknowledged but not yet processed, because a super-step is in flight. Visible on the ticket as a waiting state; processed at the next super-step boundary; survives a server restart.
+An interrupt answer the Console has accepted and acknowledged but not yet processed. Visible on the ticket as a waiting state; processed at the next Tick; survives a server restart.
 _Avoid_: pending answer (that's the interrupt, not the answer)
 
 **Dead drive**:
@@ -227,7 +220,7 @@ The terminal phase a pool server sends as its farewell on an orderly shutdown, w
 _Avoid_: killed, crashed, disconnected (those are the cases it exists to be told apart from)
 
 **Needs input**:
-The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the boundary drains their Queued answers. Each row carries the ticket's Draft answer and can open that ticket's Detail full size to write it; Resume all resumes every resumable row, each with its own Draft answer. The tray is widened by dragging its edge, and reset layout restores it.
+The Console surface listing every ticket with an unresolved Interrupt — the operator's work queue, shown as a tray with a count. Answered tickets appear greyed until the next Tick drains their Queued answers. Each row carries the ticket's Draft answer and can open that ticket's Detail full size to write it; Resume all resumes every resumable row, each with its own Draft answer. The tray is widened by dragging its edge, and reset layout restores it.
 _Avoid_: action items, task list, notification center
 
 **Draft answer**:
@@ -235,15 +228,15 @@ The operator's note for a ticket's pending Interrupt, typed but not yet sent. On
 _Avoid_: note (the form field, not the thing), Queued answer (that one has been sent)
 
 **Spawn**:
-A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the super-step boundary, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands: it schedules, assigns, verifies, and may itself Spawn. A proposal may say which tickets it blocks: named ones, or all that have not started, never one already running. A proposal may also request an Assignment for the follow-up (any field but verify), which it keeps across restarts and which the operator's own assign entry overrides field by field. Bounded by two Spawn caps that are Pool settings: per attempt, and per run, where a run is one Console boot and only Ticket-origin Spawns count. A proposal beyond a cap becomes a Held spawn. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32; caps, holding and blocks by ADR-0029, closing issue #149.
+A follow-up ticket an attempt proposes in its Outcome and the engine writes into the pool at the next Tick, under the id `<parent-id>-spawn-N`. Ordinary in every way from the moment it lands: it schedules, assigns, verifies, and may itself Spawn. A proposal may say which tickets it blocks: named ones, or all that have not started. Naming one that has already started holds the proposal for the operator instead. A proposal may also request an Assignment for the follow-up (any field but verify), which it keeps across restarts and which the operator's own assign entry overrides field by field. Bounded by two Spawn caps that are Pool settings: per attempt, and per run, where a run is one Console boot and only Ticket-origin Spawns count. A proposal beyond a cap becomes a Held spawn. The agent proposes; only the engine writes the pool. Introduced by ADR-0010 (`docs/adr/0010-agents-propose-spawn-engine-writes.md`), closing issue #32; caps, holding and blocks by ADR-0029, closing issue #149.
 _Avoid_: sub-ticket (no parent-child relationship after writing), dynamic ticket (describes the mechanism, not the thing)
 
 **Held spawn**:
-A Spawn proposal a cap had no room for, one the proposing agent marked as overlapping work already in the pool, one the operator held back, or any proposal made inside a Factory Line (by a Station Ticket or the Grill), kept for the operator instead of landing. It waits, across restarts, until the operator Adopts it (it lands past both caps) or Discards it (gone for good). Not a Spawn yet: it has no ticket and no id in the pool until it is adopted. A cap of 0 holds every proposal. Introduced by ADR-0029 (`docs/adr/0029-spawn-caps-are-pool-settings-and-hold-what-they-cannot-take.md`); overlap and operator holds by issue #150.
-_Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the boundary)
+A Spawn proposal a cap had no room for, one the proposing agent marked as overlapping work already in the pool, one that names a started ticket in its blocks, or any proposal made inside a Line by a node that holds its spawns (every node, unless its Plan says it may land them), kept for the operator instead of landing. It waits, across restarts, until the operator Adopts it (it lands past both caps) or Discards it (gone for good). Not a Spawn yet: it has no ticket and no id in the pool until it is adopted. A cap of 0 holds every proposal. Introduced by ADR-0029 (`docs/adr/0029-spawn-caps-are-pool-settings-and-hold-what-they-cannot-take.md`); overlap and operator holds by issue #150.
+_Avoid_: truncated spawn (nothing is truncated any more), queued spawn (it waits on the operator, not the scheduler)
 
 **Pending spawn**:
-A Spawn proposal within the caps, waiting for the next super-step boundary to land. Kept across restarts and visible before it lands, to the operator in the Console and to the pool's agents, so a second agent can see the work is already coming. Until the boundary the operator may Hold it (it becomes a Held spawn) or Discard it. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150.
+A Spawn proposal within the caps, taken and waiting for the next Tick to land, which follows at once. Kept across restarts, so a proposal taken just before a restart lands at the first Tick after it, and listed in the Spawn ledger. It has no operator verbs: it lands before anyone could act on it, and an operator who wants to review follow-ups first sets a Spawn cap to 0, which makes each one a Held spawn. Not a Spawn yet: it has no ticket and no id in the pool until it lands. Introduced by issue #150; its Hold and Discard retired by ADR-0043 (`docs/adr/0043-a-pending-spawn-lands-before-anyone-can-act-on-it.md`).
 _Avoid_: queued spawn (too close to the Merge queue), proposed spawn (a Held spawn is proposed too), draft ticket
 
 **Spawn ledger**:
@@ -251,12 +244,12 @@ The one file in a Pool that lists the work it has and the work on its way: every
 _Avoid_: pool index, backlog (it holds running and finished work too), spawn log (the parent's Ticket log records the events; the ledger is only the current state)
 
 **Conversation**:
-An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it, a Steward excepted. The Grill is a Conversation too, and the operator's Start the Line ends it. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
+An open-ended talk between the operator and one agent, living in a Pool beside its Tickets, or before there are any in a Seeded Pool. It has an Assignment fixed at start, its own worktree and branch, and no done condition: only the operator ends it, a Steward excepted. Each pass of a Conversation node is a Conversation too, and ending it hands the Line on. While it runs it may Spawn Tickets and other Conversations, and the engine posts a Turn into it when a Ticket it spawned ends. A Restart does not end it: the engine picks it up again while its pane still runs (ADR-0018's issue #140 amendment). Not a Ticket: a Ticket is one unit of work that must end in an Outcome; a Conversation has no finish line. Introduced toward issue #60.
 _Avoid_: chat (too generic), session (a harness's own resumable unit), open-ended ticket (a Ticket must end), handoff (the old file)
 
 **Turn**:
 One exchange in a Conversation: something said to the agent, or the agent's reply. The operator types Turns in the herdr tab; the engine types a Turn when a spawned Ticket ends. A Conversation is always either waiting on the operator or working on a Turn.
-_Avoid_: message (a chat term), prompt (that is only the first Turn), super-step (that is the engine's round, not the talk's)
+_Avoid_: message (a chat term), prompt (that is only the first Turn), Tick (that is the scheduler's, not the talk's)
 
 **Turn state**:
 Which side of its current Turn a Conversation is on: working (the agent is replying) or waiting (on the operator), with the last line the agent showed and, when waiting, since when. Read from the pane by the engine, never reported by the agent. A Notice is delivered only while the Conversation is waiting.
@@ -271,7 +264,7 @@ The Turn the engine types into a parent Conversation when something it spawned e
 _Avoid_: callback, event (that is the lifecycle log), result (an Outcome is the result; a Notice only reports it)
 
 **Steward**:
-A Conversation started, or Enlisted, in the role of keeping the Pool's Tickets moving while the operator is away. It is a role, not a new kind of citizen. The engine delivers it every pending Ticket Interrupt as a Notice, and also a stalled Merge queue head. It may answer them as the operator would, except Review and persistence. To answer a checkpoint it may Resume with a note or Keep talking with a message of its own, and it may Close a checkpoint or merge conflict only while the Pool setting "Steward may Close checkpoints" allows it, which is off unless the operator turns it on; closing a deadlocked Ticket stays the operator's, and so does Adopting a Candidate. It may also Adopt or Discard Held spawns and Reassign Tickets. On a Line it never answers the Finish checkpoint, and it Adopts or Discards a Held spawn proposed inside the Line only while the Pool setting allowing it is on. Every answer it gives is recorded as the Steward's, with its note. It decides and talks but never does the work itself: it answers, coaches agents, and may Spawn. A Ticket it cannot decide on sensibly, or one that has used up its Steward budget, it leaves to the operator with a Steward note. Conversations are outside its remit: it stewards Tickets, never talks. It watches the whole Pool, and a Pool has at most one Steward at a time. It answers at once; the operator starts one on leaving and ends it on returning, or the Steward ends itself when its orders are done. That is the one way a Conversation ends without the operator. Its Assignment comes from the Pool settings' Steward entry ahead of the pool defaults. It pushes, opens pull requests or merges them only when the operator's own words in that Steward allow it; the engine cannot enforce this.
+A Conversation started, or Enlisted, in the role of keeping the Pool's Tickets moving while the operator is away. It is a role, not a new kind of citizen. The engine delivers it every pending Ticket Interrupt as a Notice, and also a stalled Merge queue head. It may answer them as the operator would, except Review and persistence. To answer a checkpoint it may Resume with a note or Keep talking with a message of its own, and it may Close a checkpoint or merge conflict only while the Pool setting "Steward may Close checkpoints" allows it, which is off unless the operator turns it on; closing a deadlocked Ticket stays the operator's, and so does Adopting a Candidate. It may also Adopt or Discard Held spawns and Reassign Tickets. On a Line it answers only what the Plan hands it: a checkpoint on a node set to the Steward, a Gate the Steward may open, and one extra pass of a loop marked for it. It never answers the Finish, edits the running Plan only when that Plan allows it, and Adopts or Discards a Held spawn proposed inside the Line only while the Pool setting allowing it is on. Every answer it gives is recorded as the Steward's, with its note. It decides and talks but never does the work itself: it answers, coaches agents, and may Spawn. A Ticket it cannot decide on sensibly, or one that has used up its Steward budget, it leaves to the operator with a Steward note. Conversations are outside its remit: it stewards Tickets, never talks. It watches the whole Pool, and a Pool has at most one Steward at a time. It answers at once; the operator starts one on leaving and ends it on returning, or the Steward ends itself when its orders are done. That is the one way a Conversation ends without the operator. Its Assignment comes from the Pool settings' Steward entry ahead of the pool defaults. It pushes, opens pull requests or merges them only when the operator's own words in that Steward allow it; the engine cannot enforce this.
 _Avoid_: admin (suggests permissions or settings), supervisor, overseer, night watch, autopilot (that suggests an engine mode, not an agent)
 
 **Steward budget**:
@@ -284,7 +277,7 @@ _Avoid_: draft (the operator's own words, browser-only), suggestion, Brief (the 
 
 **Enlist**:
 The operator's act of making a live herdr pane they opened themselves a Pool citizen, as a Ticket or a Conversation, chosen at that moment and fixed from then on. The pane, its directory and its branch stay as found; the engine claims the pane, teaches its agent the protocol with a Turn, and from then on the result is an ordinary Ticket or Conversation. The engine never closes the enlisted tab, never removes its directory and never deletes its branch. Introduced by ADR-0021 (`docs/adr/0021-enlisted-panes-stay-in-place.md`), closing issue #101.
-_Avoid_: adopt (the engine's word for taking in Spawn proposals at the boundary and terminal attempts at boot), import, attach, claim (that is one step of an Enlist, not the act)
+_Avoid_: adopt (the engine's word for taking in Spawn proposals and terminal attempts at boot), import, attach, claim (that is one step of an Enlist, not the act)
 
 **Wire shape**:
 The declared shape of one message between engine and Console: the snapshot, a response envelope, a request body. Each is declared once, on the engine side; the Console type-imports it, so drift between the two is a compile error, not a silent copy.
@@ -344,33 +337,77 @@ _Avoid_: verdict (that's head-to-head grading), guess, prediction, score (say Je
 ## Factory
 
 **Factory**:
-The engine-owned recipe that carries one piece of work from its Grill to the operator's approval through a fixed run of Stations, routing each Station's Outcome to the next. Its settings live in the Machine defaults and the Pool settings.
-_Avoid_: pipeline, workflow, chain (all too generic), recipe (the plain-English gloss, not the name)
+The engine running a Line from a Plan: it reads each node's typed verdict, keeps the loop counts and writes the next Tickets, Conversations and Hold Tickets itself, so agents never choose what runs next. Introduced as a fixed recipe by ADR-0037; a Plan the operator builds since ADR-0040 (`docs/adr/0040-the-factory-runs-a-plan-the-operator-builds.md`).
+_Avoid_: pipeline, workflow, chain (all too generic), recipe (the fixed run it replaced)
+
+**Plan**:
+A graph of nodes and edges, saved as a file, that says how a Line carries one piece of work to its Finish. A Line freezes its own copy when it starts, so editing the original never changes a running Line; the running copy changes only by an edit made to it.
+_Avoid_: workflow, template, recipe, flow, horde (the file's format tag, not the thing)
+
+**Preset**:
+A Plan built into the Console and read-only: Factory today, and one for each author whose flow it follows, naming that author and the file the flow comes from. Saved under a new name it becomes a Plan in the Plan library.
+_Avoid_: template, built-in, example
+
+**Plan library**:
+The operator's own Plans on this machine, one file each under `~/.agent-graphs/plans/`, offered beside the Presets wherever a Plan is chosen.
+_Avoid_: plan store, catalogue, Setup (a Setup bundles a Pool's config, not a Plan)
 
 **Line**:
-One piece of work's pass through the Factory: its Grill, then Rounds until the Decide Station finishes it. A Factory pool runs exactly one Line, on its own branch.
+One piece of work's run through its Plan, from its entry nodes to its Finish. A Factory pool runs exactly one Line, on its own branch.
 _Avoid_: task, job, run (a run is one Console boot)
 
 **Line base**:
 The branch a Line was cut from and the commit it was cut at. Boot chooses it once, and it never changes. The Line's work is everything since that commit, and a PR Finish targets that branch.
 _Avoid_: trunk, main (the base is often neither), parent branch, upstream (git's own word for what a branch pushes to and pulls from)
 
-**Station**:
-The kind of work one Pool citizen does on a Line: the Grill, a Conversation; or Implement, Prove, Review or Decide, each a Ticket. Each Station has its own skills and Assignment.
-_Avoid_: stage, step (both collide with Node), phase
+**Conversation node**:
+A node whose every pass is a Conversation. It hands on when the operator ends it: done, once the Line brief it committed has merged, or closed. The Grill is one.
+_Avoid_: talk node, grill node, chat step
 
-**Round**:
-One Implement → Prove → Review → Decide pass on a Line. A Prove that fails sends the Round back to Implement without starting a new Round; only Decide starts another.
-_Avoid_: iteration, cycle, loop
+**Ticket node**:
+A node whose every pass is one Ticket, or one Copy per Item. Its kind fixes the verdicts its Tickets may give: Agent (done), Prove (pass or fail), Review (clean or findings) or Decide (ship or another round). Every Ticket node may also hand on closed.
+_Avoid_: agent node, builder (the prototype's word), Station
+
+**Pass**:
+One run of a node on one handoff: a Ticket, the Copies of its Items, a Conversation, or a Hold Ticket. A node handed more work while a pass is live runs it as a later pass, in order.
+_Avoid_: Round (retired with the fixed recipe), iteration, run
+
+**Item**:
+One piece of work an Outcome or a Line brief hands on, a title and a body, which a per-item Ticket node turns into one Copy.
+_Avoid_: slice, task, sub-ticket, chunk
+
+**Copy**:
+One Ticket of a per-item Ticket node's pass, working one Item. At most the node's cap run at once; the rest queue and start as Copies end. No two Copies build the same thing.
+_Avoid_: Candidate (that is Verify's, where several Attempts do the same work), replica, instance, worker
+
+**Merger**:
+The node after a per-item Ticket node that hands its pass on once every Copy is done and merged through the Merge queue, and holds the conflict setting for those merges: a resolver on its own Assignment, or a wait for the operator. It runs no agent. Placed automatically when a node goes per-item; removing it means each Copy hands on alone as it lands.
+_Avoid_: merge step, fan-in, join (a Gate joins edges; a Merger folds Copies)
+
+**Gate**:
+A node that runs no agent and waits to be opened, by the operator, by the Steward, or at once. It may wait for a handoff on every incoming edge before it opens, and the person opening it may send notes on instead.
+_Avoid_: approval, checkpoint (an Attempt's pause), barrier
+
+**Hold Ticket**:
+A Ticket no agent runs, written so a person can answer a Gate, a spent loop or the Finish the way any Interrupt is answered: Resume opens it, Resume with notes sends the notes on, Close closes it. It has no branch and never launches.
+_Avoid_: wait ticket, Finish checkpoint (its name before ADR-0040), placeholder
+
+**Loop cap**:
+How many times a loop edge may be crossed before the Line stops to ask the operator, or sends the work elsewhere when the Plan says so. Crossing an enclosing loop resets it, so a Prove limit counts per round of the loop around it. Each Resume of its Hold Ticket buys exactly one more crossing; the Steward may give one itself only on a loop marked for it.
+_Avoid_: retry limit, max rounds, budget (the Steward budget counts answers)
+
+**maxLive**:
+The Pool setting, with a Machine default, that bounds how many Ticket Attempts the engine runs at once. Unset means no bound. A per-item node's own cap bounds its Copies separately.
+_Avoid_: concurrency, slots, parallelism, cap (a node's cap counts its Copies)
 
 **Prove**:
-The Station that runs the change end to end after Implement merges and gathers evidence it works, failing the Round back to Implement when it does not. It checks the merged work; it is not Verify, which grades Candidate Attempts before they merge.
+The Ticket node kind that runs the change end to end after the work it proves has merged, and gathers evidence it works, failing back along its loop when it does not. It checks merged work; it is not Verify, which grades Candidate Attempts before they merge.
 _Avoid_: verify (that's the Candidate-grading machinery), test, QA
 
 **Line brief**:
-What the Grill hands its Line when the operator presses Start the Line: the path of the spec, the Finish, and any Station settings the Grill overrides for this one Line. Without it a Line cannot start.
-_Avoid_: handoff, packet (the Packet is the graph's Grill prose; this is the Factory's), ticket
+What a Conversation node commits when its talk is done, or what Boot's `--brief` names for the first one: the spec's path, Items, the Finish act, the pushBase grant and per-node overrides, any of them absent. The node hands on only once it has merged, and its overrides become edits to the Line's Plan.
+_Avoid_: handoff (what travels along an edge), packet (the Packet is the graph's Grill prose; this is the Factory's), ticket
 
 **Finish**:
-What the Decide Station does when it ends a Line instead of starting another Round, chosen once at the Grill: by default only the report and a checkpoint for the operator; otherwise also a draft PR, a PR, or some other named act.
+The one node every Line ends at. It waits until nothing in the Pool still runs, queues or waits, then asks the operator alone to approve at its Hold Ticket. Approval carries out its act, chosen in the Plan or by a Line brief: nothing, a draft PR, a PR, a fast-forward of the Line base, or some other named act, done by one Finish Ticket.
 _Avoid_: final action, deliver, ship

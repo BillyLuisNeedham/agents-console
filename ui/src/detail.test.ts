@@ -98,7 +98,7 @@ function detailView(overrides: Partial<TicketDetailView> = {}): TicketDetailView
     enlisted: false,
     hasLiveAttempt: false,
     stewardBudget: null,
-    station: null,
+    node: null,
     report: null,
     reassign: {
       eligible: true,
@@ -153,7 +153,6 @@ function rig(detail: TicketDetailView) {
     onUseStewardNote: () => {},
     onSelectTab: () => {},
     onEndConversation: () => {},
-    onStartLine: () => {},
     onFocusConversationTerminal: () => Promise.resolve(true),
     onFocusResolver: () => Promise.resolve(true),
     renderSpawnDecision: () => document.createElement("div"),
@@ -512,7 +511,6 @@ describe("Detail: Keep talking (issue #139)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -620,7 +618,6 @@ describe("Detail: Adopt (ADR-0035)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -746,7 +743,6 @@ describe("Detail: the shared Draft answer and writing it full size (issue #147)"
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -880,8 +876,7 @@ describe("Detail: Held spawn events on the timeline (issue #149)", () => {
             onUseStewardNote: () => {},
             onSelectTab: () => {},
             onEndConversation: () => {},
-            onStartLine: () => {},
-            onFocusConversationTerminal: () => Promise.resolve(true),
+                  onFocusConversationTerminal: () => Promise.resolve(true),
             onFocusResolver: () => Promise.resolve(true),
             renderSpawnDecision: () => document.createElement("div"),
             reassign: new ReassignStore({
@@ -914,7 +909,6 @@ describe("Detail: the Steward (ADR-0030)", () => {
       onUseStewardNote: (ticketId, text) => uses.push({ ticketId, text }),
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -970,15 +964,31 @@ describe("Detail: the Steward (ADR-0030)", () => {
     expect(r.answers).toEqual([]);
   });
 
+  it("says how many Tickets started since a merge conflict was raised, and nothing when none has", () => {
+    const conflict = (startedSince?: number): TicketDetailView["interrupt"] => ({
+      ...interrupt()!,
+      kind: "merge-conflict",
+      stewardNote: undefined,
+      startedSince,
+    });
+    const line = (startedSince?: number) =>
+      paintProgress(
+        detailView({ status: "checkpoint", interrupt: conflict(startedSince) }),
+      ).root.querySelector(".interrupt-started-since")?.textContent ?? null;
+    expect(line(1)).toBe("1 Ticket has started since this conflict was raised.");
+    expect(line(3)).toBe("3 Tickets have started since this conflict was raised.");
+    expect(line(undefined)).toBeNull();
+  });
+
   it("says a queued Close is closing in the waiting line (issue #154)", () => {
     const closing = { ...interrupt(true)!, closing: true };
     const r = paintProgress(detailView({ status: "checkpoint", interrupt: closing }));
     expect(r.root.querySelector(".interrupt-waiting")?.textContent).toBe(
-      "closing · waiting for the next super-step boundary",
+      "closing · waiting for the next Tick",
     );
     const plain = paintProgress(detailView({ status: "checkpoint", interrupt: interrupt(true) }));
     expect(plain.root.querySelector(".interrupt-waiting")?.textContent).toBe(
-      "answered · waiting for the next super-step boundary",
+      "answered · waiting for the next Tick",
     );
   });
 
@@ -1071,7 +1081,6 @@ describe("Detail: a long timeline (issue #161)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1288,7 +1297,6 @@ describe("Detail: a closed ticket (issue #154)", () => {
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1373,31 +1381,32 @@ describe("Detail: a closed ticket (issue #154)", () => {
   });
 });
 
-describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
-  function grillDetail(overrides: Partial<ConversationDetailView> = {}): ConversationDetailView {
+describe("Detail: a Line's Conversation (ADR-0040)", () => {
+  function lineConversation(
+    overrides: Partial<ConversationDetailView> = {},
+  ): ConversationDetailView {
     return {
       kind: "conversation",
-      conversationId: "conv-2",
+      conversationId: "grill-1",
       title: "grill the next feature",
       status: "live",
       spawnedBy: null,
       assignment: { harness: "claude", model: "opus", drivers: "implement" },
       paneId: null,
-      branch: "pool/x/conv-2",
+      branch: "pool/x/grill-1",
       turn: { state: "waiting", lastLine: "brief committed", idleSince: null },
       idleAge: null,
       terminal: null,
       endView: { ending: false, failure: null },
       steward: false,
-      grill: true,
-      lineStart: { starting: false, failure: null },
+      node: "grill",
       delivery: null,
       ...overrides,
     };
   }
 
   function paint(detail: ConversationDetailView) {
-    const starts: string[] = [];
+    const ends: [string, string | undefined, boolean | undefined][] = [];
     const pane = new Detail({ onClose: () => {}, drafts: new DraftAnswers() });
     const handlers: DetailHandlers = {
       onSelectAttempt: () => {},
@@ -1407,8 +1416,7 @@ describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
       onKeepTalking: () => {},
       onUseStewardNote: () => {},
       onSelectTab: () => {},
-      onEndConversation: () => {},
-      onStartLine: (grillId) => starts.push(grillId),
+      onEndConversation: (id, closing, close) => ends.push([id, closing, close]),
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1436,48 +1444,56 @@ describe("Detail: Start the Line on a Grill (ADR-0037)", () => {
       );
       return shell;
     });
-    return { root, starts };
+    return { root, ends };
   }
 
-  const button = (root: HTMLElement) =>
-    root.querySelector<HTMLButtonElement>(".conversation-start-line");
+  const closeButton = (root: HTMLElement) =>
+    root.querySelector<HTMLButtonElement>(".conversation-end-closed");
+  const REFUSED =
+    "grill-1's committed branch pool/x/grill-1 has no Line brief at docs/specs/main.grill-1.brief.json";
 
-  it("offers Start the Line on a live Grill, marked as the Grill", () => {
-    const { root } = paint(grillDetail());
-    expect(button(root)?.textContent).toBe("Start the Line");
-    expect(button(root)?.disabled).toBe(false);
-    expect(root.querySelector(".grill-badge")?.textContent).toBe("Grill");
+  it("names the node on the Detail and offers no Start the Line", () => {
+    const { root } = paint(lineConversation());
+    expect(root.querySelector(".node-badge")?.textContent).toBe("grill");
+    expect(root.querySelector(".conversation-start-line")).toBeNull();
+    expect(root.textContent).not.toContain("Start the Line");
   });
 
-  it("offers it on no other Conversation, and not on a Grill that is ending or ended", () => {
+  it("names no node on an ordinary Conversation or the Steward", () => {
     for (const detail of [
-      grillDetail({ grill: false }),
-      grillDetail({ steward: true, grill: false }),
-      grillDetail({ endView: { ending: true, failure: null } }),
-      grillDetail({ status: "ended" }),
+      lineConversation({ node: null }),
+      lineConversation({ node: null, steward: true }),
     ]) {
-      expect(button(paint(detail).root)).toBeNull();
+      expect(paint(detail).root.querySelector(".node-badge")).toBeNull();
     }
   });
 
-  it("sends the Grill's id when pressed", () => {
-    const { root, starts } = paint(grillDetail());
-    button(root)!.click();
-    expect(starts).toEqual(["conv-2"]);
+  it("shows a refused End and then offers End as closed, sending close with the closing note", () => {
+    const { root, ends } = paint(
+      lineConversation({ endView: { ending: false, failure: REFUSED } }),
+    );
+    expect(root.querySelector(".conversation-end-box .error-inline")?.textContent).toBe(REFUSED);
+    expect(closeButton(root)?.textContent).toBe("End as closed");
+    root.querySelector<HTMLTextAreaElement>(".conversation-end-box textarea")!.value =
+      " dropping it ";
+    closeButton(root)!.click();
+    expect(ends).toEqual([["grill-1", "dropping it", true]]);
   });
 
-  it("disables itself while the start is in flight", () => {
-    const { root } = paint(grillDetail({ lineStart: { starting: true, failure: null } }));
-    expect(button(root)?.disabled).toBe(true);
-    expect(button(root)?.textContent).toBe("starting...");
+  it("offers End as closed before an End is refused, on an ordinary Conversation, or while ending", () => {
+    for (const detail of [
+      lineConversation(),
+      lineConversation({ node: null, endView: { ending: false, failure: "boom" } }),
+      lineConversation({ endView: { ending: true, failure: REFUSED } }),
+    ]) {
+      expect(closeButton(paint(detail).root)).toBeNull();
+    }
   });
 
-  it("shows the refusal's reason beside the button", () => {
-    const reason =
-      "no Line brief: docs/specs/ in the Grill's committed branch pool/x/conv-2 holds no *.brief.json";
-    const { root } = paint(grillDetail({ lineStart: { starting: false, failure: reason } }));
-    expect(root.querySelector(".conversation-start-line-failure")?.textContent).toBe(reason);
-    expect(button(root)?.disabled).toBe(false);
+  it("leaves End sending no close", () => {
+    const { root, ends } = paint(lineConversation({ endView: { ending: false, failure: REFUSED } }));
+    root.querySelector<HTMLButtonElement>(".conversation-end-box .btn-danger")!.click();
+    expect(ends).toEqual([["grill-1", undefined, undefined]]);
   });
 });
 
@@ -1495,7 +1511,6 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
       onUseStewardNote: () => {},
       onSelectTab: () => {},
       onEndConversation: () => {},
-      onStartLine: () => {},
       onFocusConversationTerminal: () => Promise.resolve(true),
       onFocusResolver: () => Promise.resolve(true),
       renderSpawnDecision: () => document.createElement("div"),
@@ -1531,7 +1546,7 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
   }
 
   const checkpoint: TicketDetailView["interrupt"] = {
-    ticketId: "r2-finish",
+    ticketId: "decide-2",
     kind: "checkpoint",
     body: "the Line is finished: read the report",
     form: {
@@ -1549,11 +1564,11 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
 
   const finish = (overrides: Partial<TicketDetailView> = {}): TicketDetailView =>
     detailView({
-      ticketId: "r2-finish",
+      ticketId: "decide-2",
       status: "checkpoint",
-      station: "finish",
+      node: "decide",
       interrupt: checkpoint,
-      report: { written: true, round: 2 },
+      report: { written: true, node: "decide", pass: 2 },
       ...overrides,
     });
 
@@ -1563,30 +1578,30 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
     expect(section.previousElementSibling?.classList.contains("interrupt-box")).toBe(true);
     expect(section.querySelector(".detail-report-title")?.textContent).toBe("Report");
     const frame = section.querySelector<HTMLIFrameElement>('iframe[data-key="detail-report-frame"]')!;
-    expect(frame.getAttribute("src")).toBe("/api/line/report?round=2");
+    expect(frame.getAttribute("src")).toBe("/api/line/report?node=decide&pass=2");
     // The report is an agent's HTML: no script, not of the Console's origin.
     expect(frame.getAttribute("sandbox")).not.toContain("allow-scripts");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
     const open = section.querySelector<HTMLAnchorElement>("a.detail-report-open")!;
     expect(open.textContent).toBe("Open in browser");
-    expect(open.getAttribute("href")).toBe("/api/line/report?round=2");
+    expect(open.getAttribute("href")).toBe("/api/line/report?node=decide&pass=2");
     expect(open.getAttribute("target")).toBe("_blank");
     expect(open.getAttribute("rel")).toBe("noopener");
   });
 
-  it("keeps the frame's node across a render, and fetches a later Round's report afresh", () => {
+  it("keeps the frame's node across a render, and fetches a later pass's report afresh", () => {
     const { root, paint } = progress(finish());
     const frame = root.querySelector("iframe.detail-report-frame");
     paint(finish({ title: "Finish the Line (renamed)" }));
     expect(root.querySelector("iframe.detail-report-frame")).toBe(frame);
-    paint(finish({ report: { written: true, round: 3 } }));
+    paint(finish({ report: { written: true, node: "decide", pass: 3 } }));
     expect(root.querySelector("iframe.detail-report-frame")?.getAttribute("src")).toBe(
-      "/api/line/report?round=3",
+      "/api/line/report?node=decide&pass=3",
     );
   });
 
   it("says Decide wrote no report, with nothing to open", () => {
-    const { root } = progress(finish({ report: { written: false, round: 2 } }));
+    const { root } = progress(finish({ report: { written: false, node: "decide", pass: 2 } }));
     const section = root.querySelector('[data-key="detail-report"]')!;
     expect(section.querySelector(".detail-report-none")?.textContent).toBe(
       "No report: Decide did not write one.",
@@ -1596,7 +1611,7 @@ describe("Detail: the Line's report at the Finish checkpoint (#187, ADR-0037)", 
   });
 
   it("shows no report section on any other Ticket", () => {
-    const { root } = progress(detailView({ station: "decide", status: "in-progress" }));
+    const { root } = progress(detailView({ node: "implement", status: "in-progress" }));
     expect(root.querySelector(".detail-report")).toBeNull();
   });
 });

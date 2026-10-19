@@ -1,6 +1,6 @@
 //! Machine defaults (issue #121; machine-defaults.ts): the per-machine harness, model, effort, drivers,
 //! terminal and engine path a new Pool inherits when nothing more specific says otherwise, and the
-//! machine's layer of the Factory settings (issue #187), under every pool's. One JSON
+//! `maxLive` under every pool's own (ADR-0041). One JSON
 //! file under `~/.agent-graphs/`, edited from the Console's Settings pane and read by Boot and by the
 //! engine's resolver fallback.
 //!
@@ -19,11 +19,11 @@ use serde_json::{Map, Value};
 use crate::config::ConfigError;
 use crate::file_lock::{FileLock, write_through_own_temp};
 use crate::js;
-use crate::line::{factory_layer_of, normalise_factory};
+use crate::max_live::{is_max_live, max_live_value};
 
 /// The fields the file may hold.
 pub const MACHINE_DEFAULTS_KEYS: [&str; 7] = [
-    "harness", "model", "effort", "drivers", "terminal", "engine", "factory",
+    "harness", "model", "effort", "drivers", "terminal", "engine", "maxLive",
 ];
 
 // The string fields, in the order the file is written.
@@ -149,11 +149,13 @@ pub fn validate_machine_defaults(input: &Value) -> Result<MachineDefaults, Confi
             )));
         }
     }
-    // The machine's layer of the Factory settings (issue #187), checked as the pool's is.
-    if let Some(factory) = raw.get("factory").filter(|factory| !factory.is_null()) {
-        out.factory = normalise_factory(factory, "machine defaults: factory")
-            .map_err(ConfigError)?
-            .map(Box::new);
+    if let Some(max) = raw.get("maxLive").filter(|max| !max.is_null()) {
+        if !is_max_live(max) {
+            return Err(ConfigError::new(
+                "machine defaults: maxLive must be a whole number, 1 or more",
+            ));
+        }
+        out.max_live = max_live_value(Some(max));
     }
     Ok(out)
 }
@@ -175,7 +177,7 @@ fn sanitize_machine_defaults(parsed: &Value) -> MachineDefaults {
     if raw.get("terminal").and_then(Value::as_str) == Some("herdr") {
         out.terminal = Some(TerminalKind::Herdr);
     }
-    out.factory = factory_layer_of(raw.get("factory")).map(Box::new);
+    out.max_live = max_live_value(raw.get("maxLive"));
     out
 }
 
@@ -188,7 +190,7 @@ fn no_defaults() -> MachineDefaults {
         drivers: None,
         engine: None,
         terminal: None,
-        factory: None,
+        max_live: None,
     }
 }
 
@@ -202,7 +204,8 @@ fn string_field<'a>(defaults: &'a mut MachineDefaults, key: &str) -> &'a mut Opt
     }
 }
 
-// The file's object in the order the TypeScript builds it: the string fields, then terminal.
+// The file's object in the order the TypeScript builds it: the string fields, then terminal, then
+// maxLive.
 fn machine_defaults_value(defaults: &MachineDefaults) -> Value {
     let mut map = Map::new();
     for (key, value) in [
@@ -219,10 +222,8 @@ fn machine_defaults_value(defaults: &MachineDefaults) -> Value {
     if defaults.terminal.is_some() {
         map.insert("terminal".to_owned(), Value::String("herdr".to_owned()));
     }
-    if let Some(factory) = &defaults.factory
-        && let Ok(factory) = serde_json::to_value(factory)
-    {
-        map.insert("factory".to_owned(), factory);
+    if let Some(max) = defaults.max_live {
+        map.insert("maxLive".to_owned(), Value::from(max));
     }
     Value::Object(map)
 }
@@ -422,35 +423,53 @@ mod tests {
             defaults(json!({ "model": "m" }))
         );
     }
+
     #[test]
-    fn carries_the_factory_layer_through_a_write_and_a_read_and_drops_a_bad_one_on_read() {
+    fn writes_max_live_at_the_end_and_reads_it_back() {
         let home = home();
-        let file = paths(&home).file;
+        let paths = paths(&home);
         let written = write_machine_defaults(
-            &json!({ "model": "m", "factory": { "stations": { "review": { "enabled": false, "drivers": " " } }, "limits": { "extraRounds": 0 } } }),
-            &file,
+            &json!({ "maxLive": 3, "terminal": "herdr", "model": "m" }),
+            &paths.file,
         )
         .unwrap();
+        assert_eq!(written.max_live, Some(3));
         assert_eq!(
-            written,
-            defaults(
-                json!({ "model": "m", "factory": { "stations": { "review": { "enabled": false } }, "limits": { "extraRounds": 0 } } })
-            )
+            std::fs::read_to_string(&paths.file).unwrap(),
+            "{\n  \"model\": \"m\",\n  \"terminal\": \"herdr\",\n  \"maxLive\": 3\n}\n"
         );
-        assert_eq!(read_machine_defaults(&paths(&home)), written);
-        assert_eq!(
-            write_machine_defaults(
-                &json!({ "factory": { "stations": { "decide": { "enabled": false } } } }),
-                &file
-            )
-            .unwrap_err()
-            .0,
-            "machine defaults: factory: factory.stations.decide.enabled is false: only Prove and Review can be switched off"
-        );
-        std::fs::write(&file, r#"{"model": "m", "factory": {"finish": 3}}"#).unwrap();
-        assert_eq!(
-            read_machine_defaults_file(&file),
-            defaults(json!({ "model": "m" }))
-        );
+        assert_eq!(read_machine_defaults(&paths).max_live, Some(3));
+    }
+
+    #[test]
+    fn refuses_a_max_live_below_one_or_not_a_number_writing_nothing() {
+        let home = home();
+        let paths = paths(&home);
+        write_machine_defaults(&json!({ "maxLive": 2 }), &paths.file).unwrap();
+        for bad in [json!(0), json!(-1), json!(2.5), json!("3"), json!(true)] {
+            assert_eq!(
+                write_machine_defaults(&json!({ "maxLive": bad }), &paths.file)
+                    .unwrap_err()
+                    .0,
+                "machine defaults: maxLive must be a whole number, 1 or more",
+                "{bad}"
+            );
+        }
+        assert_eq!(read_machine_defaults(&paths).max_live, Some(2));
+    }
+
+    #[test]
+    fn skips_a_bad_max_live_on_read() {
+        let home = home();
+        let file = paths(&home).file;
+        std::fs::create_dir_all(home.path().join(".agent-graphs")).unwrap();
+        for bad in [r#"0"#, r#""4""#, r#"1.5"#] {
+            std::fs::write(&file, format!(r#"{{"model": "m", "maxLive": {bad}}}"#)).unwrap();
+            assert_eq!(
+                read_machine_defaults_file(&file),
+                defaults(json!({ "model": "m" })),
+                "{bad}"
+            );
+        }
     }
 }

@@ -23,7 +23,7 @@ wire_consts! {
     /// Bumped on every change to a message's shape. The server says its version
     /// in `hello`; a page that was built for another one reloads itself, which is
     /// how a Restart that rebuilt the UI reaches a tab left open across it.
-    pub const PROTOCOL_VERSION: u64 = 1;
+    pub const PROTOCOL_VERSION: u64 = 5;
 
     /// Where the socket is served.
     pub const WS_PATH: &str = "/api/ws";
@@ -250,7 +250,7 @@ wire_struct! {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steward_budget: Option<StewardBudgetView>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub line: Option<LineView>,
+        pub line: Option<LineGraphView>,
     }
 }
 
@@ -355,11 +355,14 @@ wire_struct! {
 }
 
 wire_struct! {
-    /// POST /api/conversations/end's body.
+    /// POST /api/conversations/end's body. `close: true` ends it as closed: nothing
+    /// merges, its branch stays, and a Line Conversation pass hands on `closed`.
     pub struct EndConversationRequest {
         pub id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub closing: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub close: Option<bool>,
     }
 }
 
@@ -562,10 +565,6 @@ requests! {
         HeldSpawnRequest => HeldSpawnResponse;
     SpawnsHeldDiscard = "spawns.held.discard", "POST /api/spawns/held/discard", true,
         HeldSpawnRequest => HeldSpawnResponse;
-    SpawnsPendingHold = "spawns.pending.hold", "POST /api/spawns/pending/hold", true,
-        PendingSpawnRequest => PendingSpawnResponse;
-    SpawnsPendingDiscard = "spawns.pending.discard", "POST /api/spawns/pending/discard", true,
-        PendingSpawnRequest => PendingSpawnResponse;
     ConversationsStart = "conversations.start", "POST /api/conversations", true,
         StartConversationRequest => ConversationStarted;
     ConversationsEnd = "conversations.end", "POST /api/conversations/end", true,
@@ -579,6 +578,16 @@ requests! {
     LogRead = "log.read", "GET /api/log", false, LogReadRequest => TicketLogResponse;
     LogFollow = "log.follow", "GET /api/log", false, LogFollowRequest => LogFollowResult;
     PoolLogRead = "poolLog.read", "GET /api/pool-log", false, PoolLogReadRequest => PoolLogRange;
+    PlansList = "plans.list", "GET /api/plans", false, Empty => PlansListResponse;
+    PlansGet = "plans.get", "GET /api/plans/<slug>", false, PlanSlugRequest => PlanResponse;
+    PlansValidate = "plans.validate", "POST /api/plans/validate", false,
+        PlanValidateRequest => PlanValidateResponse;
+    PlansEdit = "plans.edit", "POST /api/plans/edit", false, PlanEditRequest => PlanDraftResponse;
+    PlansSave = "plans.save", "PUT /api/plans/<slug>", true, PlanSaveRequest => PlanSaveResponse;
+    PlansDelete = "plans.delete", "DELETE /api/plans/<slug>", true, PlanSlugRequest => Empty;
+    PlansBoot = "plans.boot", "POST /api/plans/boot", true, PlanBootRequest => PlanBootResponse;
+    LinePlanEdit = "line.plan.edit", "POST /api/line/plan", true,
+        LinePlanEditRequest => LinePlanEditResponse;
 }
 
 /// The TypeScript `Requests` interface: each kind's payload and result.

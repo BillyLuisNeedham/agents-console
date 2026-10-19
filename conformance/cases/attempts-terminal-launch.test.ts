@@ -61,16 +61,16 @@ conformance(
     const herdr = await t.herdr(world, { rendered: READY.claude, swallowWrapper: 1 });
     await t.start(world, { herdr });
     await untilTicketStatus(world, "01", "done", 60_000);
+    await untilEvent(world, "01", "tab-closed", 60_000);
 
     const events = readEvents(world.pool, "01");
-    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited"]);
+    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited", "merged", "tab-closed"]);
     expect(events[1]!.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: LAUNCH_NEVER_RAN });
     expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2", terminal_id: "term-2" });
     expect(callsOf(herdr, "tab.create")).toHaveLength(2);
-    // The botched tab is closed; the one the launch ended up in is not.
     await herdr.waitForCall((call) => call.method === "tab.close");
     await herdr.settle();
-    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }]);
+    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }, { tab_id: "w1:t2" }]);
     // Each try's wrapper went as one send, and the prompt into the live pane only.
     const wrapper = wrapperFor(world, "01", interactiveArgv("claude"));
     expect(wrapperSends(herdr).map((call) => call.params)).toEqual([
@@ -131,6 +131,7 @@ conformance("attempts", "the wrapper waits for a fresh tab's shell to draw its p
   const herdr = await t.herdr(world, { rendered: READY.claude, shellPromptDelayMs: 300 });
   await t.start(world, { herdr });
   await untilTicketStatus(world, "01", "done");
+  await untilEvent(world, "01", "tab-closed");
 
   const tab = callsOf(herdr, "tab.create")[0]!;
   const wrapper = sends(herdr)[0]!;
@@ -140,7 +141,7 @@ conformance("attempts", "the wrapper waits for a fresh tab's shell to draw its p
   expect(reads.length).toBeGreaterThanOrEqual(2);
   expect(wrapper.at - tab.at).toBeGreaterThanOrEqual(300);
   expect(callsOf(herdr, "tab.create")).toHaveLength(1);
-  expect(readEvents(world.pool, "01").map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited"]);
+  expect(readEvents(world.pool, "01").map((event) => event.kind)).toEqual(["scheduled", "spawned", "exited", "merged", "tab-closed"]);
 });
 
 // Issue #179: a harness not found at launch is a Botched launch, retried after a backoff
@@ -156,15 +157,15 @@ conformance(
     const retried = await untilEvent(world, "01", "launch-retried");
     restore();
     await untilTicketStatus(world, "01", "done", 60_000);
+    await untilEvent(world, "01", "tab-closed", 60_000);
 
     const events = readEvents(world.pool, "01");
-    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited"]);
+    expect(events.map((event) => event.kind)).toEqual(["scheduled", "launch-retried", "spawned", "exited", "merged", "tab-closed"]);
     expect(retried.payload).toEqual({ try: 1, pane_id: "w1:p1", tab_id: "w1:t1", reason: HARNESS_NOT_FOUND });
     expect(events[2]!.payload).toMatchObject({ pane_id: "w1:p2", tab_id: "w1:t2", terminal_id: "term-2" });
-    // The botched tab is closed; the one the launch ended up in is not.
     await herdr.waitForCall((call) => call.method === "tab.close");
     await herdr.settle();
-    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }]);
+    expect(callsOf(herdr, "tab.close").map((call) => call.params)).toEqual([{ tab_id: "w1:t1" }, { tab_id: "w1:t2" }]);
     // The second tab opened only once the backoff had passed.
     const tabs = callsOf(herdr, "tab.create");
     expect(tabs).toHaveLength(2);

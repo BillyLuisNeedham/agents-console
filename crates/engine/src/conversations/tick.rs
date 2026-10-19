@@ -200,19 +200,9 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
         return;
     }
     let pending = s.spawn_proposals.pending().len() > before;
-    // Idle: land what is pending (write the files / start the child Conversations) and kick a drive at
-    // once, since nothing else will reach the boundary that does this. In flight: leave it pending: the
-    // driving super-step's own adoption at its next boundary picks it up, and landing here too would
-    // mutate the markers and the state concurrently with that in-flight work.
-    if !s.driving && pending {
-        let _ = crate::spawns::adopt_spawn_proposals(s);
-        let _ = crate::answers::kick_processing(s);
-    } else {
-        let phase = if s.driving {
-            ac_protocol::RunPhase::Running
-        } else {
-            s.idle_phase()
-        };
-        emit_snapshot(s, phase);
+    let phase = s.current_phase();
+    emit_snapshot(s, phase);
+    if pending {
+        s.wake();
     }
 }

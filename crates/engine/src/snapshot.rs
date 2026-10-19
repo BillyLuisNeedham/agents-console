@@ -73,7 +73,7 @@ pub struct PoolSnapshot {
     pub held_panes: IndexMap<String, HeldPaneRecord>,
     /// How many Finished terminals the pool has (issue #139).
     pub finished_terminals: u64,
-    /// The Merge hold (ADR-0014): the done-but-unmerged ticket ids, derived fresh at every emit.
+    /// The unlanded list (ADR-0014): the done-but-unmerged ticket ids, derived fresh at every emit.
     pub merge_hold: Vec<String>,
     /// The Merge queue (issue #129): the same ids in the order the engine works through them.
     pub merge_queue: Vec<MergeQueueEntry>,
@@ -85,14 +85,45 @@ pub struct PoolSnapshot {
     pub held_spawns: Vec<HeldSpawnView>,
     /// The Steward budget (ADR-0030).
     pub steward_budget: StewardBudgetView,
-    /// The Factory's Line for the header strip (ADR-0037); `None` until it starts.
-    pub line: Option<ac_protocol::LineView>,
+    /// The pool's Line, its frozen Plan with live state (ADR-0040); `None` in a pool that runs none.
+    pub line: Option<ac_protocol::LineGraphView>,
 }
 
 /// `emitSnapshot`: the one emit point for every snapshot the run produces. The hold is derived fresh
 /// here and nowhere persisted (ADR-0014); the watch notes what went out so a merge done by hand can
 /// move it. Each snapshot carries the store's pending answers at emit time.
 pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
+    let snapshot = build_snapshot(session, phase);
+    let hold = snapshot.merge_hold.clone();
+    // The Spawn ledger follows every emit, so what agents read there is never staler than what the
+    // Console shows (issue #150).
+    crate::spawns::refresh_spawn_ledger(session, &snapshot.conversations);
+    session.emitted += 1;
+    let snapshot = Arc::new(snapshot);
+    session.snapshots.push_back(snapshot.clone());
+    if let Some(history) = session.snapshot_history {
+        while session.snapshots.len() > history {
+            session.snapshots.pop_front();
+        }
+    }
+    hold_watch_emitted(session, &hold);
+    session.unpublished = Some(snapshot.clone());
+    if let Some(hook) = &session.on_snapshot {
+        hook(&snapshot);
+    }
+}
+
+pub fn emit_would_change(session: &mut Session, phase: RunPhase) -> bool {
+    let next = build_snapshot(session, phase);
+    session.snapshots.back().is_none_or(|last| {
+        PoolSnapshot {
+            seq: last.seq,
+            ..next
+        } != **last
+    })
+}
+
+fn build_snapshot(session: &mut Session, phase: RunPhase) -> PoolSnapshot {
     let hold = crate::merges::merge_hold(session);
     let live_attempts = {
         let conversations = &session.conversations;
@@ -101,7 +132,8 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
             .records(|id| conversations.is_live(id))
     };
     let listing_finished = crate::held::finished_terminals_now(session);
-    let state = crate::steward_actions::with_steward_notes(session);
+    let mut state = crate::steward_actions::with_steward_notes(session);
+    crate::merges::with_started_since(session, &mut state);
     let assignments = session
         .assignments
         .iter()
@@ -121,7 +153,7 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
         .merge_line
         .queue(&hold, &resolvers, &session.state.interrupts);
     let caps = spawn_caps_of(&session.state.config);
-    let snapshot = PoolSnapshot {
+    PoolSnapshot {
         seq: session.emitted,
         phase,
         state,
@@ -149,22 +181,6 @@ pub fn emit_snapshot(session: &mut Session, phase: RunPhase) {
                 .collect(),
         },
         line: crate::line::line_view(session),
-    };
-    // The Spawn ledger follows every emit, so what agents read there is never staler than what the
-    // Console shows (issue #150).
-    crate::spawns::refresh_spawn_ledger(session, &snapshot.conversations);
-    session.emitted += 1;
-    let snapshot = Arc::new(snapshot);
-    session.snapshots.push_back(snapshot.clone());
-    if let Some(history) = session.snapshot_history {
-        while session.snapshots.len() > history {
-            session.snapshots.pop_front();
-        }
-    }
-    hold_watch_emitted(session, &hold);
-    session.unpublished = Some(snapshot.clone());
-    if let Some(hook) = &session.on_snapshot {
-        hook(&snapshot);
     }
 }
 
@@ -192,8 +208,9 @@ fn hold_watch_emitted(session: &mut Session, hold: &[String]) {
                             }
                             let derived = crate::merges::merge_hold(s);
                             if s.hold_watch.changed(&derived) {
-                                let phase = s.idle_phase();
+                                let phase = s.current_phase();
                                 emit_snapshot(s, phase);
+                                s.wake();
                             }
                             s.hold_watch_timer == generation && s.hold_watch.ticking()
                         })

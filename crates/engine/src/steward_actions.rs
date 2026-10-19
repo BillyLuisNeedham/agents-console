@@ -2,11 +2,11 @@
 //! the operator's own paths, and the budget that bounds it.
 //!
 //! Every action is a plain function over the Session, run as one actor job (`check`, `answer`,
-//! `leave`, `adopt_held_spawn`, `discard_held_spawn`, `reassigned`, `state`) or, where it awaits
-//! (Keep talking, `end`), a flow over the [`Engine`] whose synchronous checks are one job. Every
-//! refusal is the TypeScript's `steward: <why>` text. The pieces the answer path and the snapshot read
-//! (`steward_answer_payload`, `note_answered`, `steward_used_at_boot`, `with_steward_notes`) sit
-//! beside them.
+//! `leave`, `adopt_held_spawn`, `discard_held_spawn`, `edit_plan`, `reassigned`, `state`) or,
+//! where it awaits (Keep talking, `end`), a flow over the [`Engine`] whose synchronous checks are
+//! one job. Every refusal is the TypeScript's `steward: <why>` text. The pieces the answer path and
+//! the snapshot read (`steward_answer_payload`, `note_answered`, `steward_used_at_boot`,
+//! `with_steward_notes`) sit beside them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -23,8 +23,8 @@ use ac_core::steward::{
 };
 use ac_protocol::{
     AnswerBy, Interrupt, InterruptKind, ResumeAction, StewardAnswerAction, StewardNote,
-    StewardStateHeld, StewardStateInterrupt, StewardStateMerge, StewardStatePending,
-    StewardStateResponse, TicketEvent, TicketEventKind,
+    StewardStateHeld, StewardStateInterrupt, StewardStateLine, StewardStateMerge,
+    StewardStateParked, StewardStatePending, StewardStateResponse, TicketEvent, TicketEventKind,
 };
 
 use crate::actor::Engine;
@@ -176,8 +176,10 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
             .iter()
             .filter(|marker| {
                 session.state.tickets.get(&marker.id) == Some(&ac_protocol::TicketStatus::Done)
+                    && !marker.hold
                     && !held.contains(marker.id.as_str())
                     && ac_core::assignment::engine_ticket_build_id(&marker.id).is_none()
+                    && crate::line::steward_kept_from(session, &marker.id).is_none()
             })
             .map(|marker| marker.id.clone())
             .collect(),
@@ -195,15 +197,22 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
     } else {
         None
     };
-    let merge_queue = last
-        .map(|snapshot| snapshot.merge_queue.clone())
+    let merge_queue: Vec<_> = last
+        .map(|snapshot| {
+            snapshot
+                .merge_queue
+                .iter()
+                .filter(|entry| crate::line::steward_kept_from(session, &entry.ticket_id).is_none())
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
-    // The Line's Finish checkpoint is the operator's approval (ADR-0037): the Steward never hears of it.
+    // The Steward hears only of the Line's Interrupts its Plan gives it (ADR-0040): never the Finish.
     let interrupts: Vec<Interrupt> = session
         .state
         .interrupts
         .iter()
-        .filter(|i| !is_finish_checkpoint(session, &i.ticket_id))
+        .filter(|i| crate::line::steward_may_answer(session, &i.ticket_id))
         .cloned()
         .collect();
     let title_of = |id: &str| titles.get(id).map(|title| (*title).to_owned());
@@ -226,12 +235,6 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
     })
 }
 
-/// Whether a Ticket is a Line's Finish checkpoint: approving the Line, the operator's alone.
-pub fn is_finish_checkpoint(session: &Session, ticket_id: &str) -> bool {
-    session.marker(ticket_id).and_then(|marker| marker.station)
-        == Some(ac_protocol::Station::Finish)
-}
-
 fn steward_refusal(why: impl AsRef<str>) -> EngineError {
     EngineError::refused(format!("steward: {}", why.as_ref()))
 }
@@ -249,6 +252,23 @@ pub fn check_steward(session: &Session, conversation: &str) -> Result<(), Engine
         )));
     }
     Ok(())
+}
+
+/// The check a Steward's reassign starts with, before its assign entries are written: none of the
+/// Tickets is one the Steward is kept from.
+pub fn check_steward_reassign(
+    session: &Session,
+    conversation: &str,
+    tickets: &[String],
+) -> Result<(), EngineError> {
+    check_steward(session, conversation)?;
+    match tickets
+        .iter()
+        .find_map(|ticket_id| crate::line::steward_kept_from(session, ticket_id))
+    {
+        Some(why) => Err(steward_refusal(why)),
+        None => Ok(()),
+    }
 }
 
 // The pending Interrupt a Steward action is about, refused when it is not the Steward's to touch:
@@ -282,10 +302,12 @@ fn steward_interrupt(
         }
         _ => {}
     }
-    if is_finish_checkpoint(session, ticket_id) {
+    if let Some(why) = crate::line::steward_kept_from(session, ticket_id) {
+        return Err(steward_refusal(why));
+    }
+    if !crate::line::steward_may_answer(session, ticket_id) {
         return Err(steward_refusal(format!(
-            "{ticket_id} is the Line's Finish checkpoint: approving the Line is the operator's, \
-             never the Steward's"
+            "{ticket_id} is the Line's, and its Plan leaves it to the operator"
         )));
     }
     if !steward_may_answer(
@@ -393,8 +415,15 @@ pub fn steward_answer(
         StewardAnswerAction::Reject => ResumeAction::Reject,
         StewardAnswerAction::Close => ResumeAction::Close,
     };
-    crate::answers::accept_answer(session, ticket_id, note, resume, None, Some(conversation))?;
-    crate::answers::kick_processing(session).map_err(|e| EngineError::refused(e.to_string()))
+    crate::answers::submit_answer(
+        session,
+        ticket_id,
+        note,
+        resume,
+        None,
+        Some(conversation),
+        None,
+    )
 }
 
 /// The checks `stewardKeepTalking` makes before it calls Keep talking, all synchronous: the
@@ -523,6 +552,24 @@ pub fn steward_adopt_held_spawn(
     adopted
 }
 
+/// The Steward's edit to the running Line's Plan: refused in its `steward: ` words unless the frozen
+/// Plan says `stewardEdits`. An edit is no answer, so it spends no budget.
+pub fn steward_edit_plan(
+    session: &mut Session,
+    conversation: &str,
+    base_rev: u64,
+    edits: &[ac_core::plan::PlanEdit],
+) -> Result<ac_protocol::LinePlanEditResponse, EngineError> {
+    check_steward(session, conversation)?;
+    crate::line::edit_plan(
+        session,
+        ac_core::line::run::Editor::Steward,
+        base_rev,
+        edits,
+    )
+    .map_err(|err| steward_refusal(err.message()))
+}
+
 /// `stewardReassigned`: a Reassign by the Steward is the Console's own write of console.json (the
 /// server's, reassign.ts); the engine records whose it was on each Ticket's log, since its own
 /// `reassigned` follows only at the next Config reload.
@@ -594,7 +641,7 @@ pub fn steward_state(
                         &interrupt.ticket_id,
                         interrupt.kind.as_str(),
                         &conversations,
-                    ) && !is_finish_checkpoint(session, &interrupt.ticket_id),
+                    ) && crate::line::steward_may_answer(session, &interrupt.ticket_id),
                     keep_talking: interrupt.kind == InterruptKind::Checkpoint
                         && session.held.contains_key(&interrupt.ticket_id),
                     queued: queued.contains(&interrupt.ticket_id),
@@ -642,6 +689,18 @@ pub fn steward_state(
                 reason: view.reason.as_str().to_owned(),
             })
             .collect(),
+        line: crate::line::line_view(session).map(|view| StewardStateLine {
+            rev: view.rev,
+            parked: view
+                .nodes
+                .into_iter()
+                .filter(|node| !node.parked.is_empty())
+                .map(|node| StewardStateParked {
+                    node: node.id,
+                    verdicts: node.parked,
+                })
+                .collect(),
+        }),
         ledger: crate::spawns::ledger_path(session),
     })
 }
@@ -677,7 +736,7 @@ pub async fn steward_end(
 ) -> Result<(), EngineError> {
     let c = conversation.clone();
     engine.call(move |s| check_steward(s, &c)).await??;
-    crate::conversations::end(engine, &conversation, closing, AnswerBy::Steward).await
+    crate::conversations::end(engine, &conversation, closing, false, AnswerBy::Steward).await
 }
 
 #[cfg(test)]
@@ -774,6 +833,7 @@ mod tests {
                 drivers: String::new(),
                 enlisted: None,
                 role: Some(ConversationRole::Steward),
+                node: None,
             },
         )
         .unwrap();
@@ -787,6 +847,7 @@ mod tests {
             body: "b".into(),
             candidates: None,
             steward_note: None,
+            started_since: None,
         }
     }
 
@@ -812,6 +873,7 @@ mod tests {
                 drivers: String::new(),
                 enlisted: None,
                 role: None,
+                node: None,
             },
         )
         .unwrap();
@@ -829,6 +891,58 @@ mod tests {
             refusal.message(),
             "steward: conv-2 is a Conversation: the Steward stewards Tickets, never talks"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_a_steward_answer_to_a_ticket_with_an_answer_queued() {
+        let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let refusal = engine
+            .call(|s| {
+                s.state.interrupts.push(pending("01", InterruptKind::Crash));
+                crate::answers::accept_answer(s, "01", None, ResumeAction::Resume, None, None)
+                    .unwrap();
+                steward_answer(s, "conv-1", "01", StewardAnswerAction::Resume, None)
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refusal.message(),
+            "steward: ticket 01 already has an answer queued"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tells_the_steward_of_an_interrupt_with_no_answer_queued_and_not_of_one_with() {
+        let (_pool, engine) = steward_on_duty_over_a_settled_pool().await;
+        let (before, after, state) = engine
+            .call(|s| {
+                s.state.interrupts.push(pending("01", InterruptKind::Crash));
+                s.state.interrupts.push(pending("02", InterruptKind::Crash));
+                let keys = |s: &Session| {
+                    steward_items_of(s)
+                        .into_iter()
+                        .map(|item| item.key)
+                        .filter(|key| key.starts_with("interrupt:"))
+                        .collect::<Vec<_>>()
+                };
+                let before = keys(s);
+                crate::answers::accept_answer(s, "01", None, ResumeAction::Resume, None, None)
+                    .unwrap();
+                let queued: Vec<(String, bool)> = steward_state(s, "conv-1")
+                    .unwrap()
+                    .interrupts
+                    .into_iter()
+                    .map(|i| (i.ticket_id, i.queued))
+                    .collect();
+                (before, keys(s), queued)
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, ["interrupt:01:crash", "interrupt:02:crash"]);
+        assert_eq!(after, ["interrupt:02:crash"]);
+        assert!(state.contains(&("01".to_owned(), true)));
+        assert!(state.contains(&("02".to_owned(), false)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

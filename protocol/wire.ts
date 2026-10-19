@@ -46,25 +46,37 @@ export type TicketEventKind =
   | "deadlock"
   | "deadlock-cleared"
   | "answered"
+  /**
+   * A queued answer on a Line hold the Line refused as it drained (ADR-0040):
+   * the Finish gained a blocker since it was accepted. Its reason; the
+   * Interrupt stays.
+   */
+  | "answer-refused"
   | "review-reject"
   | "spawn-adopted"
   | "spawn-rejected"
   /**
+   * An Outcome `items` entry dropped for being outside the bounds, by reason
+   * and index (no index when the key itself was malformed). The attempt
+   * still ends as its Outcome says.
+   */
+  | "item-rejected"
+  /**
    * Proposals within the caps, taken from the attempt and waiting for the
-   * next boundary to land (issue #150): each one's proposal id and title.
+   * next Tick to land (issue #150): each one's proposal id and title.
    */
   | "spawn-pending"
   /**
    * Proposals held for the operator rather than landed (ADR-0029, issue
    * #150): each one's proposal id, title and reason, a cap that had no room
    * (`per-attempt`, `per-run`), the agent's own `overlaps` mark (with the
-   * ids it named) or the operator's Hold (`operator`); `recovered` when
-   * boot held proposals a pre-ADR cap had truncated.
+   * ids it named); `recovered` when boot held proposals a pre-ADR cap had
+   * truncated. An older pool's operator Hold reads as `operator`.
    */
   | "spawn-held"
   /**
-   * A Held or Pending spawn the operator discarded (ADR-0029, issue #150),
-   * by id and title, `pending` when it had not yet been held.
+   * A Held spawn the operator discarded (ADR-0029, issue #150), by id and
+   * title. An older pool's Discard of a Pending spawn carries `pending`.
    */
   | "spawn-discarded"
   | "reassigned"
@@ -130,12 +142,6 @@ export type TicketEventKind =
    */
   | "end-requested"
   /**
-   * A merge a shutdown dropped while it waited at the pool checkout's gate
-   * (issue #139, ADR-0027): the worktree and branch it would have merged,
-   * so the next boot chains it again through the ordinary merge path.
-   */
-  | "merge-deferred"
-  /**
    * The Steward (ADR-0030) left a pending Interrupt to the operator: the
    * Interrupt's kind and the Steward note, its recommendation, with `by`
    * and the Steward's `conversation`. Never counts against its budget.
@@ -158,12 +164,8 @@ export type ConversationStatus = "live" | "ended" | "crashed";
 /** Which side of its Turn a Conversation is on. */
 export type TurnSide = "working" | "waiting";
 
-/**
- * The roles a Conversation may carry. Absent is an ordinary Conversation.
- * The Grill (ADR-0037) is the Factory Line's first Station, the one
- * Start the Line hands off from.
- */
-export type ConversationRole = "steward" | "grill";
+/** The roles a Conversation may carry. Absent is an ordinary Conversation. */
+export type ConversationRole = "steward";
 
 /** A Conversation as the snapshot carries it (conversations.ts's viewOf). */
 export interface ConversationView {
@@ -190,6 +192,11 @@ export interface ConversationView {
   ending: boolean;
   /** The Steward (ADR-0030): present only on a Conversation in that role. */
   role?: ConversationRole;
+  /**
+   * The Line's Conversation node this is a pass of (ADR-0040), its id the
+   * pass's (`grill-1`): present only on a Conversation the Line opened.
+   */
+  node?: string;
   /**
    * Notices are not reaching this pane: present from the first failed
    * delivery until one lands. The Turn state may still read waiting, since
@@ -280,6 +287,12 @@ export interface Interrupt {
    * Never persisted with the Interrupt; steward.ts's store keeps it.
    */
   stewardNote?: StewardNote;
+  /**
+   * A Ticket's merge-conflict Interrupt, on the snapshot's copy only: how
+   * many other Tickets have started since it was raised (ADR-0041),
+   * derived from their events and absent while none has.
+   */
+  startedSince?: number;
 }
 
 /** What an Interrupt asks. */
@@ -305,16 +318,22 @@ export interface Outcome {
   brief?: string;
   /**
    * Follow-up ticket proposals (ADR-0010): the agent proposes in its Outcome,
-   * the engine writes the pool at the super-step boundary. Three states:
+   * the engine writes the pool at a Tick. Three states:
    * absent, the attempt proposed nothing; present and empty, the key was
    * there and nothing survived schema validation; populated, the
-   * well-formed proposals riding to the boundary.
+   * well-formed proposals riding to a Tick.
    */
   spawn?: SpawnProposal[];
   /**
-   * A Station Ticket's typed verdict on a Line (ADR-0037), kept as the
-   * agent wrote it: Prove's ProveVerdict, Review's ReviewVerdict or
-   * Decide's DecideVerdict. Absent when the Outcome carried none.
+   * The pieces of work a Line node taught to make Items hands on, one Copy
+   * each downstream. Absent, present and empty, and populated mean what
+   * they do for `spawn`; entries outside the bounds were dropped.
+   */
+  items?: LineItem[];
+  /**
+   * A Line Ticket's typed verdict (ADR-0037, ADR-0040), kept as the agent
+   * wrote it: Prove's ProveVerdict, Review's ReviewVerdict, Decide's
+   * choice, or the Finish Ticket's PR url. Absent when the Outcome carried none.
    */
   verdict?: unknown;
 }
@@ -418,6 +437,12 @@ export interface PoolConfig {
    */
   spawnCaps?: SpawnCapsConfig;
   /**
+   * How many Ticket Attempts the engine runs at once (ADR-0041), a whole
+   * number of 1 or more; absent falls back to the Machine default, and
+   * absent there means no bound.
+   */
+  maxLive?: number;
+  /**
    * Who picks the winner of a verify fan-out: the engine's arithmetic rule
    * (default) or the human, via a selection interrupt carrying the grades.
    */
@@ -447,21 +472,9 @@ export interface PoolConfig {
    */
   steward?: StewardConfig;
   /**
-   * The Factory settings (issue #187, ADR-0037): this pool's layer, over the
-   * Machine defaults' and under a Line brief's, each field falling through
-   * on its own. Reloaded at the super-step boundary.
-   */
-  factory?: FactorySettings;
-  /**
-   * Boot's Factory mode marks the pool it makes (ADR-0037): a Factory pool
-   * raises no run-wide Review, before its Line starts as after. A pool whose
-   * Line has started is a Factory pool without it.
-   */
-  factoryPool?: boolean;
-  /**
-   * The Line base (issue #193): the branch Boot's Factory mode cut the
-   * Line from and the commit it was cut at. Start the Line copies it into
-   * the Line's state.
+   * The Line base (issue #193): the branch Boot's Line mode cut the Line
+   * from and the commit it was cut at. The Line copies it into its places
+   * when it begins.
    */
   lineBase?: LineBase;
 }
@@ -553,9 +566,11 @@ export interface HeldPaneRecord {
 /**
  * Why a proposal is held: which cap had no room (the attempt's, or a
  * spawn.json's, own; or the run's), the proposing agent's own `overlaps`
- * mark (the ids ride on the proposal), the operator's Hold of a Pending
- * spawn, or a Pending spawn the boundary refused to land because the pool
- * moved after it was taken (the reason rides as `adoptError`).
+ * mark (the ids ride on the proposal), a Pending spawn a Tick refused to
+ * land because the pool moved after it was taken (the reason rides as
+ * `adoptError`), a Pending spawn whose named `blocks` reached a Ticket
+ * that had already started (ADR-0041), or an older pool's operator Hold
+ * of a Pending spawn.
  */
 export type HeldSpawnReason =
   | "per-attempt"
@@ -567,12 +582,13 @@ export type HeldSpawnReason =
    * Proposed from inside a Line (ADR-0037): anything that lands merges
    * into the Line's branch, so only the operator lands it.
    */
-  | "line";
+  | "line"
+  | "started";
 
 /**
- * One Pending spawn as the Console shows it: a proposal within the caps that
- * lands at the next super-step boundary unless the operator Holds or
- * Discards it first.
+ * One Pending spawn as the Console shows it: a proposal within the caps
+ * that lands at the next Tick. A Tick lands it as soon as its Attempt
+ * exits, so it is seen across a restart or while a stopping drive waits.
  */
 export interface PendingSpawnView {
   id: string;
@@ -624,12 +640,17 @@ export interface HeldSpawnView {
    */
   unknownOverlaps: string[];
   /**
-   * An Adopt is on its way to the boundary: the spawn is still held until
+   * The Tickets a "started" hold found already started; empty for every
+   * other reason.
+   */
+  startedIds: string[];
+  /**
+   * An Adopt is on its way to a Tick: the spawn is still held until
    * the engine writes it, so a restart before then loses nothing.
    */
   adopting: boolean;
   /**
-   * Why the boundary refused to land it (a blocker gone, a blocks target
+   * Why a Tick refused to land it (a blocker gone, a blocks target
    * finished while it waited): the spawn stayed held, or, for "refused",
    * was held instead of landing. Absent until a refusal, and cleared by
    * the next Adopt.
@@ -663,7 +684,7 @@ export type MergeQueueState =
   | "queued"
   | "stalled";
 
-/** An accepted answer waiting for processing at the next super-step boundary (a Queued answer). */
+/** An accepted answer waiting for processing at the next Tick (a Queued answer). */
 export interface QueuedAnswer {
   ticketId: string;
   /** The interrupt identity: the kind of interrupt this answer addresses. */
@@ -902,6 +923,13 @@ export interface StewardStateResponse {
   mergeQueue: { ticketId: string; state: string }[];
   pendingSpawns: { id: string; parentId: string; title: string }[];
   heldSpawns: { id: string; parentId: string; title: string; reason: string }[];
+  /** The Line's Plan rev and parked verdicts, in a pool running a Line, for `plan <rev> <edits>`. */
+  line?: {
+    /** The Plan's rev, which an edit must name. */
+    rev: number;
+    /** Every node holding a verdict with no out edge, waiting to be linked onward. */
+    parked: { node: string; verdicts: string[] }[];
+  };
   /** The Spawn ledger, for the whole pool's state in one file. */
   ledger: string;
 }
@@ -937,11 +965,8 @@ export interface MachineDefaults {
   engine?: string;
   /** Terminal backing every new pool starts with; the only legal value is "herdr". */
   terminal?: "herdr";
-  /**
-   * The machine's layer of the Factory settings (issue #187), under every
-   * pool's; the engine reads it afresh at each super-step boundary.
-   */
-  factory?: FactorySettings;
+  /** The machine's maxLive, under every pool's own; read afresh at each Tick. */
+  maxLive?: number;
 }
 
 /**
@@ -1055,7 +1080,7 @@ export interface ReassignResponse {
  * The per-ticket Reassign view the snapshot carries on every ordinary
  * ticket (grader and head-to-head tickets are never reassignable and carry
  * `eligible: false` with a reason). `eligible` is the server's judgement
- * that a write would take effect at the next boundary: no Attempt in
+ * that a write would take effect at the next Tick: no Attempt in
  * flight and not done. `reason` explains a false `eligible` in one line
  * for the Detail pane. `verify` is the ticket's own verify count, which
  * has no default and so is pinned or absent. `sources` explains the
@@ -1066,6 +1091,547 @@ export interface TicketReassignView {
   reason: string | null;
   verify: number | null;
   sources: AssignmentSources;
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+/**
+ * A Plan file: `~/.agent-graphs/plans/<slug>.json`, a compiled-in Preset, or a Line's frozen
+ * copy. The engine's `ac_core::plan` is the only reader that decides whether one is valid.
+ */
+export interface PlanFile {
+  /** The format tag, 1. */
+  horde: number;
+  name: string;
+  author?: string;
+  /** The author's own file the flow comes from. Every Preset has one. */
+  source?: string;
+  note?: string;
+  /** The Steward may edit a Line running this Plan. Off unless set. */
+  stewardEdits?: boolean;
+  nodes: PlanNodeFile[];
+  edges: PlanEdgeFile[];
+}
+
+/**
+ * One node of a Plan file, told apart by `kind`. Agent, Prove, Review and Decide are Ticket
+ * nodes, and the kind fixes the verdicts their edges may route.
+ */
+export type PlanNodeFile =
+  | {
+      kind: "conversation";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      note?: string;
+    }
+  | {
+      kind: "agent";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "prove";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "review";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "decide";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      skill?: string;
+      assign?: PlanAssign;
+      /** Absent, one copy. */
+      copies?: PlanCopies;
+      /** Taught to return `items` in its Outcome. */
+      makesItems?: boolean;
+      /** Absent, the operator. */
+      checkpoint?: PlanCheckpoint;
+      /** Absent, hold. */
+      spawns?: PlanSpawns;
+      /** Added to every Ticket body this node writes. */
+      note?: string;
+    }
+  | {
+      kind: "merger";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** The per-item Ticket node this Merger folds. */
+      of: string;
+      /** Absent, a resolver on the pool's own resolver settings. */
+      conflict?: PlanConflict;
+    }
+  | {
+      kind: "gate";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** Absent, the operator. */
+      open?: PlanOpener;
+      /** Absent, any. */
+      join?: PlanJoin;
+    }
+  | {
+      kind: "finish";
+      id: string;
+      title: string;
+      x: number;
+      y: number;
+      /** Absent, none. */
+      act?: PlanFinishAct;
+      assign?: PlanAssign;
+    };
+
+/** A node's harness, model and effort. An absent field falls through to the pool defaults. */
+export interface PlanAssign {
+  harness?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** One copy per pass, or one per item under a cap. */
+export type PlanCopies = "one" | { perItem: PlanCap };
+
+/** At most this many copies live at once, or every item at once. */
+export type PlanCap = number | "all";
+
+/** Who answers a checkpoint a node's Tickets raise. */
+export type PlanCheckpoint = "operator" | "steward";
+
+/**
+ * What happens to the Spawns a node's Tickets propose: held for the operator, or landed under
+ * the Spawn caps.
+ */
+export type PlanSpawns = "hold" | "land";
+
+/** A merge conflict on a copy: a resolver on this Assignment, or a wait for the operator. */
+export type PlanConflict = "wait" | { resolver: PlanAssign };
+
+/** Who opens a Gate. `auto` opens it at once, with no hold. */
+export type PlanOpener = "operator" | "steward" | "auto";
+
+/** A Gate opens on a handoff from any incoming edge, or waits for all of them. */
+export type PlanJoin = "any" | "all";
+
+/**
+ * What the Finish does once approved: one of the named acts, or free text the Finish Ticket's
+ * agent carries out.
+ */
+export type PlanFinishAct = "none" | "draft-pr" | "pr" | "fast-forward" | { other: string };
+
+/** An edge: `from`'s verdict `on` goes to `to`. `(from, on, to)` is unique in a Plan. */
+export interface PlanEdgeFile {
+  from: string;
+  on: string;
+  to: string;
+  /** Present on a capped loop edge. */
+  cap?: PlanLoopCap;
+}
+
+/** A loop edge's limit. */
+export interface PlanLoopCap {
+  max: number;
+  /** The Steward may buy one more pass once the loop is spent. */
+  stewardExtra?: boolean;
+  /** Absent, a loop hold for the operator. */
+  whenSpent?: PlanWhenSpent;
+}
+
+/** A spent loop raises a hold, or hands on to another node instead. */
+export type PlanWhenSpent = "hold" | { to: string };
+
+/** One thing wrong with a Plan, on what the editor marks. */
+export interface PlanProblem {
+  at: PlanProblemAt;
+  message: string;
+}
+
+/** What a problem is on: the Plan as a whole, one node, or one edge. */
+export type PlanProblemAt =
+  | { kind: "plan" }
+  | { kind: "node"; id: string }
+  | { kind: "edge"; from: string; on: string; to: string };
+
+/**
+ * A Plan as `plans.list` names it: a Preset, or a file in the Plan library with whatever is
+ * wrong with it.
+ */
+export interface PlanSummary {
+  slug: string;
+  preset: boolean;
+  name: string;
+  author?: string;
+  source?: string;
+  note?: string;
+  problems: PlanProblem[];
+}
+
+/** GET /api/plans: the Presets, then the Plan library by slug. */
+export interface PlansListResponse {
+  plans: PlanSummary[];
+}
+
+/** A Plan named by its slug: the socket form of a /api/plans/<slug> path. */
+export interface PlanSlugRequest {
+  slug: string;
+}
+
+/** GET /api/plans/<slug>: the Plan's file as it stands, and what is wrong with it. */
+export interface PlanResponse {
+  slug: string;
+  preset: boolean;
+  plan: PlanFile;
+  problems: PlanProblem[];
+}
+
+/** POST /api/plans/validate's body: a draft Plan, checked whole. */
+export interface PlanValidateRequest {
+  plan: PlanFile;
+}
+
+/** Every problem with the draft, none when it is valid. */
+export interface PlanValidateResponse {
+  problems: PlanProblem[];
+}
+
+/** PUT /api/plans/<slug>: the body is `plan`; the socket form carries `slug` beside it. */
+export interface PlanSaveRequest {
+  slug: string;
+  plan: PlanFile;
+}
+
+/** The Plan as saved, in its canonical form. */
+export interface PlanSaveResponse {
+  slug: string;
+  plan: PlanFile;
+}
+
+/** A node the editor puts down. A Merger is not among them: making a node per-item places one. */
+export type PlanNodeKind =
+  | "conversation"
+  | "agent"
+  | "prove"
+  | "review"
+  | "decide"
+  | "gate"
+  | "finish";
+
+/**
+ * One typed edit to a Plan, the wire form of `ac_core::plan::PlanEdit`. `plans.edit` applies a
+ * list of them to a draft, and a running Line's edits carry the same list.
+ */
+export type PlanEditFile =
+  /** A new node of `kind` at `(x, y)`, with its kind's defaults; the core names it. */
+  | { edit: "addNode"; kind: PlanNodeKind; x: number; y: number }
+  | { edit: "removeNode"; id: string }
+  /**
+   * Replace a node's title and fields, kind kept. Its id is `node`'s; its place stays where
+   * the draft has it, since `move` owns place.
+   */
+  | { edit: "setNode"; node: PlanNodeFile }
+  | { edit: "link"; edge: PlanEdgeFile }
+  | { edit: "unlink"; from: string; on: string; to: string }
+  /** An absent `cap` uncaps the edge. */
+  | { edit: "setCap"; from: string; on: string; to: string; cap?: PlanLoopCap }
+  | {
+      edit: "setMeta";
+      name: string;
+      author?: string;
+      source?: string;
+      note?: string;
+      stewardEdits?: boolean;
+    }
+  | { edit: "move"; id: string; x: number; y: number };
+
+/**
+ * POST /api/plans/edit's body: a draft, valid or not, and the edits to apply to it in order.
+ * No edits answers the draft as it stands, which is how the editor opens one.
+ */
+export interface PlanEditRequest {
+  plan: PlanFile;
+  edits: PlanEditFile[];
+}
+
+/**
+ * The draft after the edits: the whole file, everything wrong with it (what `plans.validate`
+ * says of `plan`), what the edits moved on their own (a Merger placed or lifted, a Link made
+ * from a Merger), and each node's verdicts in file order, which the editor draws as ports.
+ */
+export interface PlanDraftResponse {
+  plan: PlanFile;
+  problems: PlanProblem[];
+  notes: string[];
+  verdicts: PlanNodeVerdicts[];
+}
+
+/** A node's verdicts: its kind's, or for a Merger its `of` node's. */
+export interface PlanNodeVerdicts {
+  id: string;
+  verdicts: string[];
+}
+
+/**
+ * POST /api/plans/boot: boot a new Line on a saved Plan (a Preset or a library slug) for a
+ * piece of work, as `boot --plan <slug> --work <work> --yes` would.
+ */
+export interface PlanBootRequest {
+  slug: string;
+  /** An issue number or free text. */
+  work: string;
+}
+
+/**
+ * The Boot started detached: its arguments after the program and `boot`, the directory it
+ * runs in, and the log its output is appended to.
+ */
+export interface PlanBootResponse {
+  argv: string[];
+  cwd: string;
+  log: string;
+}
+
+// ---------------------------------------------------------------------------
+// A Line running a Plan (line.json, Snapshot.line, GET /api/line)
+// ---------------------------------------------------------------------------
+
+/**
+ * `line.json` in the pool directory: the frozen Plan, its rev, where the Line lives, and what
+ * the run has absorbed. `ac_core::line::run` is the only reader that decides whether one is
+ * valid; a file without `horde` is from before Plans and is refused.
+ */
+export interface LineFile {
+  /** The format tag, 1. */
+  horde: number;
+  plan: PlanFile;
+  /** Bumped by every applied plan edit. */
+  rev: number;
+  places: LinePlacesFile;
+  run: LineRunFile;
+}
+
+/**
+ * Where a Line lives: its branch, the Line base it was cut from, the spec and `pushBase` the
+ * Line brief set, and the work Boot was given.
+ */
+export interface LinePlacesFile {
+  branch: string;
+  base?: LineBase;
+  spec?: string;
+  pushBase?: boolean;
+  work?: string;
+}
+
+/**
+ * Where a running Line stands. `acting` means the Finish was approved and its Finish Ticket is
+ * owed or running.
+ */
+export type LineRunStatus = "running" | "finishing" | "acting" | "done" | "closed";
+
+/** The run state a Line has absorbed. Ticket statuses and merged-ness are never stored here. */
+export interface LineRunFile {
+  status: LineRunStatus;
+  /** The Finish Ticket while `acting`. */
+  act?: string;
+  nodes: LineNodeRunFile[];
+  edges: LineEdgeRunFile[];
+  /** Every done Ticket the run absorbed, in the order it settled. */
+  settled: string[];
+}
+
+/** One item of work: from an Outcome's `items` or a Line brief's. */
+export interface LineItem {
+  title: string;
+  body: string;
+}
+
+/** What travels along an edge. */
+export interface LineHandoffFile {
+  /** Absent for what the Line started with. */
+  from?: string;
+  verdict: string;
+  items?: LineItem[];
+  after?: string[];
+  notes?: string;
+  halted?: string;
+}
+
+/** An edge named by its unique `(from, on, to)`. */
+export interface LineEdgeKey {
+  from: string;
+  on: string;
+  to: string;
+}
+
+/** A `join: all` Gate's arrival on one incoming edge. */
+export interface LineArrivalFile {
+  edge: LineEdgeKey;
+  handoff: LineHandoffFile;
+}
+
+/** One node's run state. */
+export interface LineNodeRunFile {
+  id: string;
+  passes: number;
+  current?: LinePassFile;
+  inbox?: LineHandoffFile[];
+  /** Handoffs on verdicts with no out edge, one per verdict. */
+  parked?: LineHandoffFile[];
+  arrived?: LineArrivalFile[];
+}
+
+/** A node's live pass. */
+export interface LinePassFile {
+  n: number;
+  input: LineHandoffFile;
+  work: LinePassWorkFile;
+  /** A Decide pass's Prove and Review Tickets, fixed when the pass started. */
+  reads?: string[];
+}
+
+/** What a pass runs, told apart by `kind`. */
+export type LinePassWorkFile =
+  | {
+      kind: "tickets";
+      copies: LineCopyFile[];
+      queue?: LineItem[];
+      cap: PlanCap;
+      nextSeq: number;
+    }
+  | { kind: "conversation"; id: string }
+  | { kind: "hold"; ticket: string }
+  | { kind: "finish"; hold?: string };
+
+/** One copy of a pass. */
+export interface LineCopyFile {
+  ticket: string;
+  item?: LineItem;
+  freed: boolean;
+  settled?: LineSettledFile;
+}
+
+/** A copy's verdict, once it is done and merged or closed. */
+export interface LineSettledFile {
+  verdict: string;
+  done: boolean;
+  items?: LineItem[];
+}
+
+/** One loop edge's counts. `traversals` never resets, so a loop hold's id is never reused. */
+export interface LineEdgeRunFile {
+  edge: LineEdgeKey;
+  count: number;
+  traversals: number;
+  bought: number;
+  stewardUsed: boolean;
+  held?: LineHeldFile;
+}
+
+/** A spent loop's handoff, waiting on its hold Ticket. */
+export interface LineHeldFile {
+  ticket: string;
+  handoff: LineHandoffFile;
+}
+
+/**
+ * The Console's live Line graph (`Snapshot.line`, GET /api/line): the frozen Plan with what
+ * the run holds on each node and loop edge. Ticket statuses join from the snapshot's tickets.
+ */
+export interface LineGraphView {
+  plan: PlanFile;
+  rev: number;
+  status: LineRunStatus;
+  /** What the Finish waits for, as the refusal names it. */
+  waitingFor: string[];
+  act?: string;
+  nodes: LineNodeView[];
+  edges: LineEdgeView[];
+}
+
+/** One node of the live graph, every Plan node listed. */
+export interface LineNodeView {
+  id: string;
+  /** The verdicts an edge out of it may route on, for its ports. */
+  verdicts: string[];
+  passes: number;
+  /** The live pass, if any. */
+  pass?: number;
+  /** The live pass's copies, or its Conversation. */
+  tickets: string[];
+  queued: number;
+  inbox: number;
+  /** Verdicts with no out edge, waiting for one. */
+  parked: string[];
+  /** A `join: all` Gate's arrivals so far. */
+  arrived: LineEdgeKey[];
+  /** A Gate's or the Finish's hold Ticket. */
+  hold?: string;
+}
+
+/** One capped loop edge of the live graph. */
+export interface LineEdgeView {
+  edge: LineEdgeKey;
+  count: number;
+  max: number;
+  bought: number;
+  /** The spent loop's hold Ticket. */
+  hold?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,19 +1697,19 @@ export interface EnrichedTicketState {
   enlisted: boolean;
   /**
    * Reassign (issue #126): whether a write to this ticket's assign entry
-   * would take effect at the next boundary, why not when it would not, the
+   * would take effect at the next Tick, why not when it would not, the
    * ticket's own verify count, and where each field of `assignment` came
    * from. For a ticket with no Attempt in flight, `assignment` is resolved
    * from the config file as it stands now, so a Reassign shows on the card
-   * at once rather than at the next boundary; an in-flight ticket keeps
+   * at once rather than at the next Tick; an in-flight ticket keeps
    * the engine's frozen record.
    */
   reassign: TicketReassignView;
   /**
-   * The Station of a Line's Ticket (ADR-0037), from the marker's durable
-   * `station` field; absent on every other Ticket.
+   * The Plan node a Line's Ticket belongs to (ADR-0040), from the marker's
+   * durable `node` field; absent on every other Ticket.
    */
-  station?: Station;
+  node?: string;
 }
 
 /** The pool's state as the Console sees it: the engine's snapshot enriched by the server. */
@@ -1180,7 +1746,7 @@ export interface EnrichedSnapshot {
   /**
    * The Pending spawns (issue #150), oldest first, from the engine's
    * snapshot verbatim: proposals within the caps that land at the next
-   * super-step boundary unless the operator Holds or Discards them first.
+   * Tick.
    */
   pendingSpawns: PendingSpawnView[];
   /**
@@ -1200,10 +1766,10 @@ export interface EnrichedSnapshot {
    */
   stewardBudget?: StewardBudgetView;
   /**
-   * The Factory's Line (ADR-0037) for the header strip, absent until the
-   * pool's Line starts.
+   * The pool's Line (ADR-0040): its frozen Plan with live state, absent in
+   * a pool that runs no Line.
    */
-  line?: LineView;
+  line?: LineGraphView;
   state: {
     tickets: EnrichedTicketState[];
     /**
@@ -1328,8 +1894,8 @@ export interface TicketBodyResponse {
 
 /**
  * Keep talking (issue #139): continue a ticket's checkpointed Attempt in its
- * Held pane. Not a resume action: it is never queued for the super-step
- * boundary (ADR-0004's exception, as Enlist is), so it has its own route.
+ * Held pane. Not a resume action: it is never queued for a Tick
+ * (ADR-0004's exception, as Enlist is), so it has its own route.
  */
 export interface KeepTalkingRequest {
   ticketId: string;
@@ -1360,7 +1926,7 @@ export interface CloseFinishedTerminalsResponse {
 /**
  * Adopt or Discard one Held spawn (issue #149, ADR-0029), by its id. Adopt
  * answers 202 once the adoption is queued (written at once on an idle pool,
- * at the next boundary otherwise); Discard answers 200 once it is gone. A
+ * at the next Tick otherwise); Discard answers 200 once it is gone. A
  * refusal is the 409 `reason` envelope the keep-talking route answers with.
  */
 export interface HeldSpawnRequest {
@@ -1369,26 +1935,6 @@ export interface HeldSpawnRequest {
 
 /** The Held spawn an Adopt or Discard acted on. */
 export interface HeldSpawnResponse {
-  id: string;
-}
-
-// ---------------------------------------------------------------------------
-// Pending spawns (POST /api/spawns/pending/hold, /api/spawns/pending/discard)
-// ---------------------------------------------------------------------------
-
-/**
- * Hold or Discard one Pending spawn before the boundary lands it (issue
- * #150), by its id. Hold answers 200 once it is a Held spawn (held by the
- * operator, same id); Discard answers 200 once it is gone. One that has
- * already landed, or is not pending, is refused with the 409 `reason`
- * envelope.
- */
-export interface PendingSpawnRequest {
-  id: string;
-}
-
-/** The Pending spawn a Hold or Discard acted on. */
-export interface PendingSpawnResponse {
   id: string;
 }
 
@@ -1411,20 +1957,13 @@ export interface TerminalPeekResponse {
 }
 
 // ---------------------------------------------------------------------------
-// The Factory's Line (POST /api/line/start, GET /api/line, line.json)
+// A Line's verdicts and verbs (POST /api/line, POST /api/line/plan, GET /api/line)
 // ---------------------------------------------------------------------------
-
-/**
- * The kind of work a Station Ticket does on a Line. `finish` tags the Finish
- * checkpoint: an engine-written Ticket no agent runs, which waits for the
- * operator's approval at the end of the Line.
- */
-export type Station = "implement" | "prove" | "review" | "decide" | "finish";
 
 /** Prove's verdict: the merged work runs end to end, or it does not. */
 export type ProveResult = "pass" | "fail";
 
-/** The `verdict` a Prove Station's Outcome carries. */
+/** The `verdict` a Prove Ticket's Outcome carries. */
 export interface ProveVerdict {
   prove: ProveResult;
   /** Where the evidence is: a path the operator can open. */
@@ -1441,78 +1980,15 @@ export interface ReviewFinding {
   detail: string;
 }
 
-/** The `verdict` a Review Station's Outcome carries: its findings, possibly none. */
+/** The `verdict` a Review Ticket's Outcome carries: its findings, possibly none. */
 export interface ReviewVerdict {
   findings: ReviewFinding[];
 }
 
-/** Decide's choice: another Round, or the Finish. */
-export type DecideChoice = "round" | "finish";
-
-/** One finding Decide fixes in the next Round or drops, and why. */
+/** One finding Decide fixes in another round or drops, and why. */
 export interface DecideItem {
   title: string;
   reason: string;
-}
-
-/**
- * The `verdict` a Decide Station's Outcome carries. Every must finding is in
- * `fixes` (only on a Round) or in `dropped`.
- */
-export interface DecideVerdict {
-  decide: DecideChoice;
-  fixes: DecideItem[];
-  dropped: DecideItem[];
-}
-
-/** One Station's settings, each field optional and falling through on its own. */
-export interface StationSettings {
-  /** Only Prove and Review may be switched off. */
-  enabled?: boolean;
-  /** The Station's skills: the driver first. */
-  drivers?: string;
-  assign?: { harness?: string; model?: string; effort?: string };
-  /** An extra instruction the engine writes into every Ticket of the Station. */
-  note?: string;
-}
-
-/** The settings of each Station. */
-export interface FactoryStations {
-  implement?: StationSettings;
-  prove?: StationSettings;
-  review?: StationSettings;
-  decide?: StationSettings;
-  grill?: StationSettings;
-}
-
-/** The Line's two limits. */
-export interface FactoryLimits {
-  /** Prove failures a Round takes before the Line checkpoints (default 2). */
-  proveFailsPerRound?: number;
-  /** Rounds Decide may start after the first (default 1). */
-  extraRounds?: number;
-}
-
-/** The Factory settings, a layer of them: every field optional. */
-export interface FactorySettings {
-  stations?: FactoryStations;
-  limits?: FactoryLimits;
-  finish?: string;
-}
-
-/**
- * The Line brief: the spec's path in the pool checkout, the Finish, and the
- * settings this Line overrides.
- */
-export interface LineBrief {
-  spec: string;
-  finish?: string;
-  factory?: FactorySettings;
-  /**
-   * Whether the Finish may push the Line base to origin, only to create
-   * or fast-forward it, never forcing (issue #193). False when absent.
-   */
-  pushBase?: boolean;
 }
 
 /**
@@ -1525,111 +2001,37 @@ export interface LineBase {
   commit: string;
 }
 
-/**
- * Where a Line stands: running its Stations, waiting at the Finish
- * checkpoint, approved, or closed at its Finish checkpoint.
- */
-export type LineStatus = "running" | "finish" | "done" | "closed";
-
-/** One Prove run of a Round. */
-export interface LineProve {
-  ticket: string;
-  prove: ProveResult;
-  evidence: string;
-}
-
-/** What one Round did, kept for the Decide Station and the report. */
-export interface LineRound {
-  round: number;
-  proves: LineProve[];
-  findings: ReviewFinding[];
-  decide: DecideVerdict | null;
-}
+/** The Plan a Line runs, as `POST /api/line` names it: a Preset or library slug, or a Plan file. */
+export type LinePlanSource = string | PlanFile;
 
 /**
- * The Line's state (`line.json` in the pool directory): what the engine
- * routes from, re-read at every boot.
+ * POST /api/line's body, sent once by Boot: the Plan to freeze and exactly one of the Line's
+ * work or the path of a Line brief in the pool checkout. Answers 202 with the Line, or the 409
+ * `reason` envelope when the Plan is invalid or not runnable yet, or a Line exists.
  */
-export interface LineState {
-  brief: LineBrief;
-  /** Where the brief was read from, relative to the pool checkout. */
-  briefPath: string;
-  status: LineStatus;
-  round: number;
-  /** The current Station and its Ticket. */
-  station: Station;
-  ticket: string;
-  /** Prove failures in this Round. */
-  proveFails: number;
-  /** Fixes past the Prove limit that Resume bought in this Round. */
-  fixesBought: number;
-  /** The current Ticket is a fix the Prove limit checkpointed. */
-  gated: boolean;
-  /** Rounds Decide has started past the first. */
-  extraRounds: number;
-  /** Why the Line halted (a Close of a Station Ticket); null while it runs. */
-  halted: string | null;
-  rounds: LineRound[];
-  /**
-   * The Line's branch, the pool's target branch as the Line started: a
-   * Finish that opens a PR opens it from this branch.
-   */
-  branch: string;
-  /**
-   * The Line base, copied from console.json's `lineBase` as the Line
-   * started (issue #193). Absent for a Line with none, which reads as
-   * cut from `main` at no known commit.
-   */
-  base?: LineBase;
-  /**
-   * The report Decide writes at the Finish, `runs/<line>-report.html` in
-   * the pool directory, as an absolute path.
-   */
-  report: string;
-}
-
-/**
- * The Line as the Console's header strip and cards read it (ADR-0037), on
- * the snapshot from Start the Line on: "Round 2 · Prove · fails 1/2 ·
- * Finish: draft PR".
- */
-export interface LineView {
-  round: number;
-  /** The current Station and its Ticket. */
-  station: Station;
-  ticket: string;
-  status: LineStatus;
-  /** Prove failures in this Round. */
-  proveFails: number;
-  /**
-   * The failures this Round takes before the Line checkpoints: the
-   * `proveFailsPerRound` in force plus the fixes Resume bought.
-   */
-  proveFailsAllowed: number;
-  /** The Finish in force: none, draft-pr, pr, or the act it names. */
-  finish: string;
-  /** Decide has written the report: GET /api/line/report serves it. */
-  report: boolean;
-  /** Why the Line halted (a Close of a Station Ticket); null while it runs. */
-  halted: string | null;
-}
-
-/**
- * POST /api/line/start's body: start the Line from its brief. `brief` is the
- * brief's path in the pool checkout; absent, the one `docs/specs/*.brief.json`
- * there. Answers 202 with the first Ticket, or the 409 `reason` envelope when
- * the brief is missing or invalid or the Line has already started.
- */
-export interface LineStartRequest {
+export interface LineBeginRequest {
+  plan: LinePlanSource;
+  work?: string;
   brief?: string;
 }
 
-/** The Line just started: its first Ticket. */
-export interface LineStartResponse {
-  ticketId: string;
+/** GET /api/line: the pool's Line as the engine runs it, null when the pool has none. */
+export interface LineResponse {
+  line: LineGraphView | null;
 }
 
-/** GET /api/line: the pool's Line, null when none has started. */
-export interface LineResponse {
-  line: LineState | null;
+/**
+ * POST /api/line/plan's body (`line.plan.edit`), and the Steward's POST /api/steward/plan with
+ * its `conversation`: typed edits to the running Line's frozen Plan, made against the rev they
+ * were read at.
+ */
+export interface LinePlanEditRequest {
+  baseRev: number;
+  edits: PlanEditFile[];
+}
+
+/** An applied edit: the Plan's rev now, and what the edits moved on their own. */
+export interface LinePlanEditResponse {
+  rev: number;
+  notes: string[];
 }

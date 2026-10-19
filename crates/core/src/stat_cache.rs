@@ -1,5 +1,5 @@
 //! File reads the engine repeats on every snapshot (issue #157): the Ticket and Conversation files, the
-//! events files, the git refs behind the Merge hold. Each is re-derived from disk on purpose, so a file
+//! events files, the git refs behind the unlanded list. Each is re-derived from disk on purpose, so a file
 //! written by hand or by another process is seen at the next read; what this module saves is the re-read
 //! and re-parse of a file that has not changed since.
 //!

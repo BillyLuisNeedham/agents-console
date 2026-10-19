@@ -1,17 +1,3 @@
-/**
- * Scheduling and status, seen from outside the server (ADR-0036): pool
- * loading, the ready set and blocked-by, super-steps, the outcomes and
- * config channels, checkpoints per super-step, the Outcome contract and the
- * engine's own status writes, lifecycle events, adding blockers, the final
- * Review and deadlock. Ticket C07 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over, or the uncovered behaviour it pins.
- *
- * The stubs on PATH play the agents. A sibling held open waits on a release
- * file the case writes (the stub gives up after ten seconds), which is how a
- * case observes the pool mid-super-step without racing it.
- */
-
 import { expect } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -79,6 +65,9 @@ async function approve(server: CaseServer): Promise<EnrichedSnapshot> {
 const launches = (world: World): string[] => world.stubs.calls().map((call) => call.key);
 const eventKinds = (world: World, id: string): string[] => readEvents(world.pool, id).map((e) => e.kind);
 
+const mainTip = (world: World): string => world.git(["rev-parse", "main"]).trim().slice(0, 7);
+const startLines = (log: string[]): string[] => log.filter((line) => line.startsWith("start "));
+
 /** The prompt a launch carried: the argument after `-p`. */
 function promptOf(world: World, key: string): string {
   const call = world.stubs.calls().find((c) => c.key === key);
@@ -142,18 +131,15 @@ conformance("scheduling", "two Ticket files carrying one id refuse to start", as
   expect(world.stubs.calls()).toEqual([]);
 });
 
-// ---------------------------------------------------------------------------
-// Super-steps and the ready set
-// ---------------------------------------------------------------------------
-
 // engine.test.ts:3427
-conformance("scheduling", "independent ready Tickets run as one super-step and the run ends done", async (t) => {
+conformance("scheduling", "independent ready Tickets each start from main's tip and the run ends done", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b")], config: CONFIG });
+  const base = mainTip(world);
   const server = await t.start(world);
   await settle(server, "the Review", onlyReview);
   const done = await approve(server);
 
-  expect(done.state.log).toContain("super-step 1: 01, 02");
+  expect(startLines(done.state.log).sort()).toEqual([`start 01 at ${base}`, `start 02 at ${base}`]);
   expect(done.state.log.at(-1)).toBe("pool done: every ticket reached done");
   expect(done.state.interrupts).toEqual([]);
   expect(launches(world).sort()).toEqual(["01", "02"]);
@@ -162,10 +148,11 @@ conformance("scheduling", "independent ready Tickets run as one super-step and t
 });
 
 // engine.test.ts:3466
-conformance("scheduling", "a Ticket waits until every blocker is done", async (t) => {
+conformance("scheduling", "a Ticket waits until its blocker is done and merged, then starts from the merged tip", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" })], config: CONFIG });
   const release = join(world.root, "release-01");
-  world.stubs.script("01", { waitFor: release });
+  world.stubs.script("01", { waitFor: release, work: { file: "one.txt", line: "one", message: "work-01" } });
+  const base = mainTip(world);
   const server = await t.start(world);
   const socket = await t.socket(server, { visible: true });
 
@@ -177,21 +164,28 @@ conformance("scheduling", "a Ticket waits until every blocker is done", async (t
 
   await settle(server, "the Review", onlyReview);
   const done = await approve(server);
-  expect(done.state.log).toContain("super-step 1: 01");
-  expect(done.state.log).toContain("super-step 2: 02");
+  const merged = mainTip(world);
+  expect(merged).not.toBe(base);
+  expect(startLines(done.state.log)).toEqual([`start 01 at ${base}`, `start 02 at ${merged}`]);
+  const log = done.state.log;
+  const mergedAt = log.findIndex((line) => line.startsWith("ticket 01: merged "));
+  expect(mergedAt).toBeGreaterThan(-1);
+  expect(log.indexOf(`start 02 at ${merged}`)).toBeGreaterThan(mergedAt);
   expect(launches(world)).toEqual(["01", "02"]);
 });
 
 // engine.test.ts:3498
-conformance("scheduling", "the ready set runs against one shared starting snapshot", async (t) => {
+conformance("scheduling", "Tickets one merge releases start together from one tip, each prompt frozen at its launch", async (t) => {
   const world = t.world({
     tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" }), ticket("03", "c", { blockedBy: "01" })],
     config: CONFIG,
   });
+  world.stubs.script("01", { work: { file: "one.txt", line: "one", message: "work-01" } });
   const server = await t.start(world);
   const settled = await settle(server, "the Review", onlyReview);
 
-  expect(settled.state.log).toContain("super-step 2: 02, 03");
+  const merged = mainTip(world);
+  expect(startLines(settled.state.log).slice(1).sort()).toEqual([`start 02 at ${merged}`, `start 03 at ${merged}`]);
   for (const id of ["02", "03"]) {
     expect(promptOf(world, id)).toContain("\n- 01: summary-01 (commit none)\n");
   }
@@ -227,6 +221,7 @@ conformance("scheduling", "a checkpoint and its resume land in order, attempts n
     [2, "scheduled"],
     [2, "spawned"],
     [2, "exited"],
+    [2, "merged"],
   ]);
   expect(events.filter((e) => e.kind === "exited").map((e) => e.payload)).toEqual([
     { code: 0, status: "checkpoint", logTail: [], outcomeExists: true },
@@ -236,6 +231,7 @@ conformance("scheduling", "a checkpoint and its resume land in order, attempts n
     [1, "scheduled"],
     [1, "spawned"],
     [1, "exited"],
+    [1, "merged"],
   ]);
 });
 
@@ -265,6 +261,7 @@ conformance("scheduling", "a crash and its answer land in order, carrying the ex
     "scheduled",
     "spawned",
     "exited",
+    "merged",
   ]);
 });
 
@@ -289,7 +286,9 @@ conformance("scheduling", "a blocked-by cycle raises a deadlock per Ticket and c
   await post(server, { ticketId: "02", note: "broke the cycle" });
   const done = await settle(server, "the Review", onlyReview);
 
-  expect(eventKinds(world, "01")).toEqual(["deadlock", "scheduled", "spawned", "exited", "deadlock-cleared"]);
+  const kinds01 = eventKinds(world, "01");
+  expect(kinds01.filter((kind) => kind !== "deadlock-cleared")).toEqual(["deadlock", "scheduled", "spawned", "exited", "merged"]);
+  expect(kinds01.filter((kind) => kind === "deadlock-cleared")).toHaveLength(1);
   expect(done.state.log).toContain("interrupt cleared for 01 (deadlock): blockers can complete again");
   expect(launches(world)).toEqual(["02", "01"]);
 });
@@ -306,10 +305,12 @@ conformance("scheduling", "a Review reject lands a review-reject event on the re
     "scheduled",
     "spawned",
     "exited",
+    "merged",
     "review-reject",
     "scheduled",
     "spawned",
     "exited",
+    "merged",
   ]);
 });
 
@@ -332,8 +333,8 @@ conformance("scheduling", "a Review reject drops the rejected Tickets' outcomes 
   expect(between.state.outcomes).toEqual({});
   expect(existsSync(join(world.pool, "runs", "01.outcome.json"))).toBe(false);
   expect(existsSync(join(world.pool, "runs", "02.outcome.json"))).toBe(false);
-  expect(eventKinds(world, "01").slice(3, 4)).toEqual(["review-reject"]);
-  expect(eventKinds(world, "02")).toEqual(["scheduled", "spawned", "exited", "review-reject"]);
+  expect(eventKinds(world, "01").slice(0, 5)).toEqual(["scheduled", "spawned", "exited", "merged", "review-reject"]);
+  expect(eventKinds(world, "02")).toEqual(["scheduled", "spawned", "exited", "merged", "review-reject"]);
 
   writeFileSync(release, "go");
   const again = await settle(server, "a fresh Review", (s) => onlyReview(s) && launches(world).length === 4);
@@ -359,15 +360,14 @@ conformance("scheduling", "an outcome lands in the outcomes channel and in its d
 });
 
 // engine.test.ts:3905
-conformance("scheduling", "the pool log gains one super-step line per super-step", async (t) => {
+conformance("scheduling", "the pool log gains one start line per launch, naming the tip it was cut from", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" })], config: CONFIG });
+  world.stubs.script("01", { work: { file: "one.txt", line: "one", message: "work-01" } });
+  const base = mainTip(world);
   const server = await t.start(world);
   const settled = await settle(server, "the Review", onlyReview);
 
-  expect(settled.state.log.filter((line) => line.startsWith("super-step"))).toEqual([
-    "super-step 1: 01",
-    "super-step 2: 02",
-  ]);
+  expect(startLines(settled.state.log)).toEqual([`start 01 at ${base}`, `start 02 at ${mainTip(world)}`]);
 });
 
 // engine.test.ts:3929
@@ -385,17 +385,14 @@ conformance("scheduling", "console.json is the snapshot's config channel, verbat
 // ---------------------------------------------------------------------------
 
 // engine.test.ts:6947
-conformance("scheduling", "console.db gains a checkpoint at every super-step, the Review and its approval", async (t) => {
+conformance("scheduling", "console.db gains checkpoint rows as the run moves, through the Review and its approval", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" })], config: CONFIG });
   const server = await t.start(world);
   await settle(server, "the Review", onlyReview);
   await approve(server);
 
-  // Two super-step joins, the review gate, the quiescent final, the
-  // approval's own persist and the approval's done final.
   const rows = readCheckpoints(world.pool);
   expect(rows.map((row) => row.seq)).toEqual([...rows.map((row) => row.seq)].sort((a, b) => a - b));
-  expect(rows).toHaveLength(6);
   const state = rows.map(
     (row) =>
       row.state as {
@@ -406,13 +403,17 @@ conformance("scheduling", "console.db gains a checkpoint at every super-step, th
         log: string[];
       },
   );
-  expect(state[0]!.tickets).toEqual({ "01": "done", "02": "ready" });
-  expect(state[1]!.tickets).toEqual({ "01": "done", "02": "done" });
-  expect(state[1]!.outcomes["01"]!.summary).toBe("summary-01");
-  expect(state[4]!.interrupts).toEqual([]);
-  expect(state[4]!.reviewApproved).toBe(true);
-  expect(state[5]!.log.at(-1)).toBe("pool done: every ticket reached done");
-  expect(state[5]!.reviewApproved).toBe(true);
+  const firstDone = state.findIndex((row) => row.tickets["01"] === "done");
+  const bothDone = state.findIndex((row) => row.tickets["01"] === "done" && row.tickets["02"] === "done");
+  expect(firstDone).toBeGreaterThan(-1);
+  expect(state[firstDone]!.tickets["02"]).not.toBe("done");
+  expect(bothDone).toBeGreaterThan(firstDone);
+  expect(state[bothDone]!.outcomes["01"]!.summary).toBe("summary-01");
+  const reviewUp = (row: (typeof state)[number]) => row.interrupts.some((i) => (i as { kind?: string }).kind === "review");
+  expect(state.some((row) => reviewUp(row) && row.reviewApproved !== true)).toBe(true);
+  expect(state.some((row) => row.interrupts.length === 0 && row.reviewApproved === true)).toBe(true);
+  expect(state.at(-1)!.log.at(-1)).toBe("pool done: every ticket reached done");
+  expect(state.at(-1)!.reviewApproved).toBe(true);
 });
 
 // ---------------------------------------------------------------------------
@@ -463,12 +464,18 @@ conformance("scheduling", "ready siblings keep running while a Ticket is interru
     config: CONFIG,
   });
   world.stubs.script("01", { status: "checkpoint" });
+  world.stubs.script("02", { work: { file: "two.txt", line: "two", message: "work-02" } });
+  const base = mainTip(world);
   const server = await t.start(world);
   const settled = await settle(server, "03 done", (s) => statusOf(s, "03") === "done");
 
   expect(settled.phase).toBe("quiescent");
-  expect(settled.state.log).toContain("super-step 1: 01, 02");
-  expect(settled.state.log).toContain("super-step 2: 03");
+  const log = settled.state.log;
+  const merged = mainTip(world);
+  expect(startLines(log).sort()).toEqual([`start 01 at ${base}`, `start 02 at ${base}`, `start 03 at ${merged}`]);
+  const mergedAt = log.findIndex((line) => line.startsWith("ticket 02: merged "));
+  expect(mergedAt).toBeGreaterThan(-1);
+  expect(log.indexOf(`start 03 at ${merged}`)).toBeGreaterThan(mergedAt);
   expect(statuses(settled)).toEqual({ "01": "checkpoint", "02": "done", "03": "done" });
   expect(settled.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "checkpoint"]]);
 });
@@ -767,9 +774,9 @@ conformance("scheduling", "a Ticket an enlisted Ticket blocks waits until the en
   await until(() => eventKinds(world, "01"), (got) => got.includes("scheduled"), { what: "01 to be scheduled" });
   expect(eventKinds(world, "enlist-1").slice(0, 3)).toEqual(["scheduled", "spawned", "exited"]);
   const order = (await snapshotOf(server)).state.log;
-  expect(order.indexOf("super-step 2: 01")).toBeGreaterThan(
-    order.indexOf("ticket enlist-1: enlisted attempt 1 exited 0, marker done"),
-  );
+  const exitedAt = order.indexOf("ticket enlist-1: enlisted attempt 1 exited 0, marker done");
+  expect(exitedAt).toBeGreaterThan(-1);
+  expect(order.findIndex((line) => line.startsWith("start 01 at "))).toBeGreaterThan(exitedAt);
 });
 
 // ---------------------------------------------------------------------------
@@ -913,12 +920,8 @@ conformance("scheduling", "the Review waits while another Interrupt is pending",
   expect(kinds(resumed)).toEqual(["review"]);
 });
 
-// ---------------------------------------------------------------------------
-// Accepting a result at the Attempt's exit, before its super-step ends
-// ---------------------------------------------------------------------------
-
 // engine.test.ts:12710
-conformance("scheduling", "a crash is recorded at the Attempt's exit, while a slow sibling holds the super-step", async (t) => {
+conformance("scheduling", "a crash and its Interrupt land at the Attempt's exit, while a slow sibling still runs", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b")], config: CONFIG });
   const release01 = join(world.root, "release-01");
   const release = join(world.root, "release-02");
@@ -934,15 +937,11 @@ conformance("scheduling", "a crash is recorded at the Attempt's exit, while a sl
   expect(eventKinds(world, "01")).toEqual(["scheduled", "spawned", "exited", "crash"]);
   expect(crashPayload(world)).toEqual({ code: 3, reason: "harness exited 3", logTail: [], outcomeExists: false });
   expectSameBytes(readStateLine(world.pool, "01-a.md").line, "<!-- state: id=01 blocked-by=none status=in-progress -->");
-  // Pushed at the crash: 01 is no longer live while 02 still runs, its
-  // state line still in-progress, and the Interrupt waits for the
-  // super-step boundary.
-  const pushed = await pushedWhen(socket, "a frame with 01 no longer live", (s) => !live(s, "01"));
+  const pushed = await pushedWhen(socket, "a frame with 01's crash Interrupt", (s) => !live(s, "01") && kinds(s).includes("crash"));
   expect(statusOf(pushed, "01")).toBe("in-progress");
   expect(statusOf(pushed, "02")).toBe("in-progress");
   expect(live(pushed, "02")).toBe(true);
-  expect(pushed.state.interrupts).toEqual([]);
-  expect((await snapshotOf(server)).state.interrupts).toEqual([]);
+  expect(pushed.state.interrupts.map((i) => [i.ticketId, i.kind])).toEqual([["01", "crash"]]);
 
   writeFileSync(release, "go");
   const settled = await settle(server, "the crash Interrupt", (s) => statusOf(s, "02") === "done");

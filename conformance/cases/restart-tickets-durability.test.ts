@@ -242,8 +242,6 @@ restartCase("a checkpoint Interrupt is raised again from the engine-written Brie
     "<!-- state: id=01 blocked-by=none status=checkpoint -->\n\n# 01\n\nWork on 01.\n\n---\n\n## Brief\n\npick a name\n",
   );
 
-  // Killed before the boundary's write, say: no stored checkpoint survives,
-  // but the state line and the Brief the engine landed are on disk.
   rmSync(join(world.pool, "console.db"), { force: true });
   const second = await startLeg(t, world, 1);
   const raised = await settle(second, "01's checkpoint raised again", quiescentWith("01:checkpoint"));
@@ -332,7 +330,7 @@ takeover("restart", "a Ticket Closed at its checkpoint stays closed across each 
 // ---------------------------------------------------------------------------
 
 // engine/engine.test.ts:10346
-restartCase("a server killed mid-super-step leaves its done Ticket done, and the next server runs only the other", async (t) => {
+restartCase("a server killed while one Ticket runs leaves the other done, and the next server runs only the one", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b")], config: CONFIG });
   world.stubs.script("01", { outcome: { summary: "recovered-01", commitSha: "sha-01" } });
   const second02 = world.stubs.hold("02");
@@ -357,16 +355,12 @@ restartCase("a server killed mid-super-step leaves its done Ticket done, and the
     `ticket 02: marker was in-progress and attempt 1 (pid ${orphan}) is still running from the previous engine process; ` +
       "stopping it before scheduling, ticket back to ready",
   );
-  // 01 finished before the kill, but no boundary wrote it: its Outcome file
-  // on disk is what the next server reads.
   expect(done.state.outcomes["01"]).toEqual({ status: "done", summary: "recovered-01", commitSha: "sha-01" });
 });
 
 // engine/engine.test.ts:7226
 restartCase("a pool whose drive died on a missing harness binary runs from disk on the next server", async (t) => {
   const world = t.world({ tickets: [ticket("01", "a", { body: "# 01\n\nDo 01." })], config: CONFIG });
-  // No claude on the first server's PATH: the launch inside the first
-  // super-step fails and kills the drive.
   const path = world.env("").PATH!.split(":").filter((dir) => dir !== world.stubs.bin).join(":");
   if (Bun.which("claude", { PATH: path }) !== null) {
     throw new Error(`a claude outside the stubs is on ${path}; this case needs none`);
@@ -392,7 +386,10 @@ restartCase("a pool whose drive died on a missing harness binary runs from disk 
 
 // engine/engine.test.ts:7114
 restartCase("a pool whose store kept refusing resumes from its state lines on the next server, and 01 never runs again", async (t) => {
-  const world = t.world({ tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" })], config: CONFIG });
+  const world = t.world({
+    tickets: [ticket("01", "a"), ticket("02", "b", { blockedBy: "01" }), ticket("03", "c", { blockedBy: "02" })],
+    config: CONFIG,
+  });
   const held = world.stubs.hold("01");
   const first = await startLeg(t, world, 0);
   await untilLaunched(world, "01", 1);
@@ -401,18 +398,21 @@ restartCase("a pool whose store kept refusing resumes from its state lines on th
   const lock = lockStore(t, world);
   await held.release();
   const stuck = await settle(first, "the persistence Interrupt", quiescentWith(`${PERSISTENCE}:persistence`));
-  expect(statusesOf(stuck)).toEqual({ "01": "done", "02": "ready" });
+  const atStop = statusesOf(stuck);
+  expect(atStop["01"]).toBe("done");
+  expect(["ready", "done"]).toContain(atStop["02"]);
+  expect(atStop["03"]).toBe("ready");
+  expect(launchKeys(world)).not.toContain("03");
   await first.stop();
   lock.release();
 
-  // The state lines were written before the store refused, so disk already
-  // says 01 is done: restarting from disk is the way out.
-  expect(diskStatuses(world)).toEqual({ "01": "done", "02": "ready" });
-  expect(readCheckpoints(world.pool)).toEqual([]);
+  expect(diskStatuses(world)).toEqual(atStop);
+  const stored = readCheckpoints(world.pool).map((row) => (row.state as { tickets: Record<string, string> }).tickets["01"]);
+  expect(stored).not.toContain("done");
   const second = await startLeg(t, world, 1);
   const done = await approveReview(second);
-  expect(statusesOf(done)).toEqual({ "01": "done", "02": "done" });
-  expect(launchKeys(world)).toEqual(["01", "02"]);
+  expect(statusesOf(done)).toEqual({ "01": "done", "02": "done", "03": "done" });
+  expect(launchKeys(world).sort()).toEqual(["01", "02", "03"]);
 });
 
 // ---------------------------------------------------------------------------

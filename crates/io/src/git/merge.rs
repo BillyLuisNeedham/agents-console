@@ -307,6 +307,8 @@ pub fn merge_in_place(
     branch: &str,
 ) -> Result<MergedTicketFile> {
     let aside = format!("{ticket_file}.pool-aside");
+    // Git refuses the merge with the file in place, so a reader outside the engine's pool-files gate can
+    // find it missing for the merge's length; the server's readers hold the gate and never do.
     fs::rename(ticket_file, &aside)
         .map_err(|err| anyhow!(js::FsError::rename(&err, ticket_file, &aside)))?;
     let result = merge_branch(pool_checkout, branch)?;

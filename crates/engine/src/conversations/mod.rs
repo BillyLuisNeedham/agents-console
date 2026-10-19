@@ -59,10 +59,12 @@ use crate::snapshot::emit_snapshot;
 pub use adopt::{
     adopt_enlisted_at_boot, adopt_started_at_boot, crash_stale_at_boot, readopt_pending,
 };
-pub(crate) use end::merge_into_target;
 pub use end::{answer_merge, end, end_conversation_by_steward};
 pub use notices::{ticket_checkpointed, ticket_closed, ticket_ended};
 pub use start::{EnlistConversationRegistration, EnlistConversationResult, enlist, start};
+pub(crate) use start::{
+    launch_prepared, prepare as prepare_start, prepare_pass, record_refused_pass,
+};
 
 /// How often a live Conversation's tick re-reads its pane unless a test shortens it.
 pub const CONVERSATION_POLL_MS: u64 = 2_000;
@@ -100,6 +102,8 @@ pub struct Runtime {
     /// already knows about.
     pub ending: bool,
     pub closing: Option<String>,
+    /// Ended as closed: the End merges nothing, and its branch stays as it is.
+    pub close: bool,
     /// Who asked for the End: the operator, or a Steward ending itself (ADR-0030).
     pub ended_by: Option<AnswerBy>,
     /// The Steward role (ADR-0030), from the record.
@@ -204,11 +208,6 @@ impl Conversations {
     pub fn reserved_ids(&self) -> Vec<String> {
         self.reserved.iter().cloned().collect()
     }
-
-    /// Reserve an id for a start about to be fired (idempotent). The start releases it when it ends.
-    pub fn reserve(&mut self, id: &str) {
-        self.reserved.insert(id.to_owned());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +231,7 @@ pub(crate) fn load(s: &Session) -> Vec<ConversationRecord> {
     load_conversations(&conversations_dir(s)).unwrap_or_default()
 }
 
-fn record_of(s: &Session, id: &str) -> Option<ConversationRecord> {
+pub(crate) fn record_of(s: &Session, id: &str) -> Option<ConversationRecord> {
     load(s).into_iter().find(|rec| rec.id == id)
 }
 
@@ -465,6 +464,7 @@ fn view_of(
         enlisted: rec.enlisted.is_some(),
         ending,
         role: rec.role,
+        node: rec.node.clone(),
         delivery: runtime.and_then(|rt| rt.with(|r| r.delivery.clone())),
     }
 }
@@ -537,10 +537,20 @@ pub fn reserved_ids(s: &Session) -> Vec<String> {
     s.conversations.reserved_ids()
 }
 
-/// Reserve an id for a start about to be fired (idempotent): Spawn adoption reserves the id it mints
-/// in its own job, so a second adoption before the start's own job runs cannot mint it again.
 pub fn reserve(s: &mut Session, id: &str) {
     s.conversations.reserved.insert(id.to_owned());
+}
+
+/// A Line Conversation pass has ended or crashed: the drive wakes so the Line reads its end.
+pub(crate) fn wake_line(s: &mut Session, id: &str) {
+    if record_of(s, id).is_some_and(|rec| rec.node.is_some()) {
+        s.wake();
+    }
+}
+
+/// Whether a start holding this id is still in flight.
+pub(crate) fn is_reserved(s: &Session, id: &str) -> bool {
+    s.conversations.reserved.contains(id)
 }
 
 /// The live Steward's id (ADR-0030), adopted or not yet; `None` when none is on duty.
@@ -549,16 +559,6 @@ pub fn steward_id(s: &Session) -> Option<String> {
         .into_iter()
         .find(|rec| {
             rec.role == Some(ConversationRole::Steward) && rec.status == ConversationStatus::Live
-        })
-        .map(|rec| rec.id)
-}
-
-/// The live Grill's id (ADR-0037); `None` when the pool has none.
-pub fn grill_id(s: &Session) -> Option<String> {
-    load(s)
-        .into_iter()
-        .find(|rec| {
-            rec.role == Some(ConversationRole::Grill) && rec.status == ConversationStatus::Live
         })
         .map(|rec| rec.id)
 }
@@ -713,19 +713,13 @@ pub(crate) fn teaching_for(
     let ledger = js::path_text(&ac_core::spawn_ledger::spawn_ledger_path(runs_dir(s)));
     let defaults = defaults_teaching(config);
     if role != Some(ConversationRole::Steward) {
-        let teaching = ac_core::prompt::build_conversation_teaching(
+        return ac_core::prompt::build_conversation_teaching(
             &spawn_path,
             &own,
             &defaults,
             per_file,
             &ledger,
         );
-        if role != Some(ConversationRole::Grill) {
-            return teaching;
-        }
-        let line = ac_core::line::line_name_of(&crate::merges::merge_target_branch(s));
-        let grill = ac_core::line::grill_teaching(&line, own.drivers.as_deref().unwrap_or(""));
-        return format!("{teaching}\n\n{grill}");
     }
     stewards::steward_teaching(s, id, &spawn_path, &own, &defaults, per_file, &ledger)
 }
@@ -790,7 +784,7 @@ pub(crate) mod stewards {
             command: &command,
             budget: steward_budget_of(&s.state.config),
             may_close: steward_may_close_of(&s.state.config),
-            factory: crate::line::is_factory_pool(s),
+            line: s.line.as_ref(),
             may_adopt_line_spawns: ac_core::steward::steward_may_adopt_line_spawns_of(
                 &s.state.config,
             ),
@@ -876,6 +870,7 @@ pub(crate) fn enlisted_runtime(s: &Session, facts: EnlistedFacts<'_>) -> Rt {
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: facts.role,
         told: HashSet::new(),
@@ -916,6 +911,7 @@ pub(crate) fn started_runtime(s: &Session, rec: &ConversationRecord, tab_id: Opt
         delivery: None,
         ending: false,
         closing: None,
+        close: false,
         ended_by: None,
         role: rec.role,
         told: HashSet::new(),
@@ -946,6 +942,7 @@ pub(crate) fn marker_of_conversation(id: &str, file: &Path) -> TicketMarker {
         spawned_by: None,
         enlisted_from: None,
         spawn_assign: None,
-        station: None,
+        node: None,
+        hold: false,
     }
 }

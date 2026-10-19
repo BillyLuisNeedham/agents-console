@@ -11,6 +11,9 @@
  * snapshot only when something rebuilds it. These cases rebuild it as the
  * inventory's rows say, with a Reassign: it rebuilds the snapshot from the
  * files as they stand, and pushes the change ahead of its reply.
+ *
+ * A Line's graph (`line`) rides a delta whole under `set`, only when it
+ * changed, and a pool running no Line never sends it.
  */
 
 import { expect } from "bun:test";
@@ -22,6 +25,8 @@ import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import { snapshotOf, ticket, ticketOf, untilSnapshot } from "./config-support.ts";
+import { copyIds, finishWaitsOnBuild, liveCopies, untilLaunched } from "./line-copies-support.ts";
+import { begun, lineOf, lineWorld } from "./line-support.ts";
 import {
   CLAUDE,
   REVIEW,
@@ -86,10 +91,19 @@ conformance(
     // One delta, ahead of the reply: 01 whole under upsert, no order since no
     // id moved, and nothing of 02 or 03. Keeping the neighbours by reference
     // is the Console's apply (ui/src/protocol.ts); not resending them is the
-    // server's half.
+    // server's half. The Reassign's config reload rides in the same delta.
     expectParsedEqual(
       deltasFrom(client, from),
-      [{ base: held, rev: held + 1, tickets: { upsert: [ticketOf(after, "01")] } }],
+      [
+        {
+          base: held,
+          rev: held + 1,
+          tickets: { upsert: [ticketOf(after, "01")] },
+          state: { config: after.state.config },
+          log: { append: ["config reloaded: assign"], total: after.state.log.length },
+          set: { seq: expect.any(Number) },
+        },
+      ],
       "the deltas",
     );
     expect(client.pushed?.snapshot).toEqual(after);
@@ -321,4 +335,111 @@ conformance("protocol", "diffSnapshot and applyDelta › chain over many version
     { rev: whole.rev, logTotal: whole.logTotal, snapshot: whole.snapshot },
     "what the deltas built",
   );
+});
+
+conformance("protocol", "the live Line graph › rides a delta whole, only when it changed, and the deltas build what a late socket is sent", async (t) => {
+  const { world, server, first, second } = await liveCopies(t);
+  // The third copy is held too, so the version after the release is steady.
+  const third = world.stubs.hold("build-1.3");
+  const early = await t.socket(server);
+  await settledOn(server, early, finishWaitsOnBuild, "the Finish to wait on build");
+  const from = early.frames.length;
+  let version = early.pushed!;
+
+  // One copy ends: its slot goes to the next Item, so the pass lists a third Ticket and queues one fewer.
+  await first.release();
+  const settled = await settledOn(
+    server,
+    early,
+    (snap) => snap.line?.nodes.find((n) => n.id === "build")?.tickets.includes("build-1.3") === true,
+    "build-1.3 to launch",
+  );
+  const build = settled.line?.nodes.find((n) => n.id === "build");
+  expect(build).toMatchObject({ pass: 1, tickets: copyIds(3), queued: 2 });
+  expect(settled.line?.waitingFor).toEqual(["build-1.2", "build-1.3", "2 queued items on build"]);
+
+  // Each graph a delta carries is the whole of it, and differs from the one the socket held before.
+  const deltas = deltasFrom(early, from);
+  const sent = deltas.flatMap((delta) => (delta.set?.line ? [delta.set.line] : []));
+  expect(sent.length).toBeGreaterThan(0);
+  for (const delta of deltas) {
+    if (delta.set?.line) {
+      expect(delta.set.line.plan.name).toBe("Forked");
+      expect(delta.set.line.nodes).toHaveLength(4);
+      expect(delta.set.line).not.toEqual(version.snapshot.line);
+    }
+    expect(delta.unset ?? []).not.toContain("line");
+    version = applySnapshotDelta(version, delta);
+  }
+  expect(sent.at(-1)).toEqual(settled.line!);
+  expect(version.snapshot.line).toEqual(settled.line!);
+
+  // A socket opened now is sent the whole snapshot, graph included, and the deltas built the same.
+  const late = await t.socket(server);
+  const whole = await late.waitFor<SnapshotFrame>((frame) => frame.type === "snapshot", { what: "the late socket's snapshot" });
+  await early.sync();
+  expect(whole.snapshot?.line).toEqual(settled.line!);
+  expectParsedEqual(
+    early.pushed,
+    { rev: whole.rev, logTotal: whole.logTotal, snapshot: whole.snapshot },
+    "what the deltas built",
+  );
+
+  await second.release();
+  await third.release();
+});
+
+conformance("protocol", "the live Line graph › a line.plan.edit rides a delta carrying the new rev and the edited Plan, and the deltas build what the server holds", async (t) => {
+  const world = lineWorld(t);
+  const hold = world.stubs.hold("implement-1");
+  const server = await t.start(world);
+  await begun(server);
+  await untilLaunched(world, ["implement-1"]);
+  const client = await t.socket(server);
+  await client.sync();
+  const from = client.frames.length;
+  const before = client.pushed!.snapshot.line!;
+  expect(before.rev).toBe(0);
+
+  const moved = await client.request("line.plan.edit", { baseRev: 0, edits: [{ edit: "move", id: "prove", x: 1234, y: 56 }] });
+  if (!moved.ok) throw new Error(`line.plan.edit was refused: ${JSON.stringify(moved.refusal)}`);
+  expect(moved.result).toEqual({ rev: 1, notes: [] });
+
+  const frame = await client.waitFor<Extract<ServerMessage, { type: "delta" }>>(
+    (f) => f.type === "delta" && f.delta.set?.line?.rev === 1,
+    { from, what: "the delta carrying the edited Line" },
+  );
+  const sent = frame.delta.set!.line!;
+  expect(sent.plan.nodes.find((n) => n.id === "prove")).toMatchObject({ x: 1234, y: 56 });
+  expect(sent.plan.nodes.find((n) => n.id === "prove")).not.toEqual(before.plan.nodes.find((n) => n.id === "prove"));
+  expect(frame.delta.unset ?? []).not.toContain("line");
+  expect(sent).toEqual((await lineOf(server))!);
+
+  await client.sync();
+  const whole = (await snapshotOf(server)).line;
+  expect(client.pushed?.snapshot.line).toEqual(whole!);
+  await hold.release();
+});
+
+conformance("protocol", "the live Line graph › a pool running no Line never sends one, in set or unset", async (t) => {
+  const world = t.world({ tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })], config: CLAUDE });
+  const held = world.stubs.hold("01");
+  const server = await t.start(world);
+  await untilSnapshot(server, (snap) => ticketOf(snap, "01").liveAttempt !== null, "01's Attempt to be in flight", 30_000);
+  const client = await t.socket(server);
+  await client.sync();
+  const from = client.frames.length;
+  expect(client.pushed?.snapshot.line).toBeUndefined();
+
+  await held.release(30_000);
+  const settled = await settledOn(server, client, atReview, "the final Review");
+  const deltas = deltasFrom(client, from);
+  expect(deltas.length).toBeGreaterThan(0);
+  for (const delta of deltas) {
+    expect(Object.keys(delta.set ?? {})).not.toContain("line");
+    expect(delta.unset ?? []).not.toContain("line");
+  }
+  expect(settled.line).toBeUndefined();
+  expect(client.pushed?.snapshot.line).toBeUndefined();
+  expect((await server.http.get("/api/line")).json<{ line: unknown }>().line).toBeNull();
 });

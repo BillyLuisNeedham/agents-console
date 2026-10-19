@@ -109,6 +109,24 @@ conformance("config", "a Machine defaults save refuses a terminal other than her
   expect(JSON.parse(readFileSync(defaultsFile(world), "utf8"))).toEqual({ harness: "claude" });
 });
 
+// ADR-0041: the machine's maxLive, under every pool's own.
+conformance("config", "a Machine defaults save writes maxLive in the whole file, and refuses one below 1, fractional or text, writing nothing", async (t) => {
+  const { world, server } = await settledPool(t);
+
+  for (const maxLive of [0, -2, 1.5, "3", true]) {
+    const answer = await putMachine(server, { harness: "claude", maxLive });
+    expect([maxLive, answer.status]).toEqual([maxLive, 400]);
+    expect(errorOf(answer)).toBe("machine defaults: maxLive must be a whole number, 1 or more");
+    expect(existsSync(defaultsFile(world))).toBe(false);
+  }
+
+  const answer = await putMachine(server, { harness: "claude", maxLive: 3, terminal: "herdr" });
+  expect(answer.status, answer.text).toBe(200);
+  const written = { harness: "claude", terminal: "herdr", maxLive: 3 } as const;
+  expect(answer.json<SettingsResponse>().machine.own).toEqual(written);
+  expect(readFileSync(defaultsFile(world), "utf8")).toBe(`${JSON.stringify(written, null, 2)}\n`);
+});
+
 // Visible behaviour no engine test covered: the server answers requests on several threads, and the
 // TypeScript one never met two writes of the Machine defaults at once.
 

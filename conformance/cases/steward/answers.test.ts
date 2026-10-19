@@ -628,7 +628,7 @@ conformance(
     driveOutcomes(sw.herdr, { "01": [checkpoint("ask me")] });
     const server = await sw.start();
     const id = await enlistSteward(server);
-    const closing = "Super-step done; 01 waits for you.";
+    const closing = "Merge done; 01 waits for you.";
 
     expectAnswer(
       await post(server, "/api/steward/end", { conversation: id, closing }),
@@ -801,12 +801,10 @@ conformance(
 
 conformance(
   "steward",
-  "an answer is refused for a Ticket with no pending Interrupt and for one whose answer is already queued",
+  "an answer is refused for a Ticket with no pending Interrupt, at work or answered by the operator",
   async (t) => {
     const { server, id } = await stewardAtCheckpoint(
       t,
-      // 02 gets no Outcome, so its Attempt stays at work and the pool never
-      // reaches the boundary where a queued answer is taken.
       { "01": [checkpoint("ask me")] },
       {
         tickets: [
@@ -823,13 +821,13 @@ conformance(
     expect((await server.http.post("/api/resume", { ticketId: "01" })).status).toBe(202);
     await untilSnapshot(
       server,
-      (snap) => snap.state.queuedAnswers.some((answer) => answer.ticketId === "01"),
-      "the operator's answer to 01 queued",
+      (snap) => !snap.state.interrupts.some((i) => i.ticketId === "01"),
+      "the operator's answer to 01 processed",
     );
     expectRefused(
       await post(server, "/api/steward/answer", { conversation: id, ticketId: "01", action: "resume" }),
-      "ticket 01 already has an answer queued",
-      "an answer on 01 with one queued",
+      "ticket 01 has no pending Interrupt",
+      "an answer on 01 the operator answered",
     );
   },
   { timeoutMs: 120_000 },

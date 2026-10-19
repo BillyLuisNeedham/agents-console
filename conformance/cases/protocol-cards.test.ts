@@ -3,8 +3,10 @@
  * (ADR-0036): the inventory's gaps beside engine/ws.ts that no engine test
  * drives. A card with no Attempt yet, then a window on each Attempt as it
  * starts; a Conversation's card; the 64 KiB window and appends and the
- * 256 KiB gap past which a card gets a fresh window; and the grades a hidden
- * tab is still sent.
+ * 256 KiB gap past which a card gets a fresh window; the grades a hidden
+ * tab is still sent; and the live Line graph a snapshot carries (ADR-0040,
+ * ADR-0041): a per-item pass's running copies, its queued Items and what the
+ * Finish waits for, with each node's verdicts.
  */
 
 import { expect } from "bun:test";
@@ -16,8 +18,10 @@ import { framesOf, type SocketClient } from "../fixtures/socket-fixture.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import { until } from "../harness/pool-files.ts";
+import { statuses } from "../harness/pool-run.ts";
 import { doneTicket, ticket, ticketOf, untilSnapshot } from "./config-support.ts";
-import { CLAUDE, REVIEW, interruptFor, startConversation, terminalPool } from "./protocol-support.ts";
+import { copyIds, finishWaitsOnBuild, forkedPlan, liveCopies } from "./line-copies-support.ts";
+import { CLAUDE, REVIEW, interruptFor, settledOn, startConversation, terminalPool } from "./protocol-support.ts";
 
 type Card = Extract<ServerMessage, { type: "card" }>;
 type Live = Extract<ServerMessage, { type: "live" }>;
@@ -246,4 +250,45 @@ conformance(
     await interruptFor(server, REVIEW);
   },
   { timeoutMs: 90_000 },
+);
+
+conformance(
+  "protocol",
+  "the live Line graph › a five-Item pass under cap 2 shows two copies running, three queued and the Finish waiting on them",
+  async (t) => {
+    const { server, first, second } = await liveCopies(t);
+    const client = await t.socket(server);
+    const snap = await settledOn(server, client, finishWaitsOnBuild, "the Finish to wait on build");
+
+    // The socket holds what GET /api/state serves, the graph included.
+    const line = client.pushed?.snapshot.line;
+    expect(line).toEqual(snap.line);
+    expect(line).toMatchObject({
+      plan: { name: "Forked", edges: forkedPlan().edges },
+      status: "finishing",
+      waitingFor: ["build-1.1", "build-1.2", "3 queued items on build"],
+      edges: [],
+    });
+    // Every Plan node is listed, with the verdicts its out edges may route on.
+    expect(line?.nodes.map((n) => [n.id, n.verdicts])).toEqual([
+      ["tasks", ["done", "closed"]],
+      ["build", ["done", "closed"]],
+      ["build-merge", ["done", "closed"]],
+      ["finish", ["revise"]],
+    ]);
+    const nodeOf = (id: string) => line?.nodes.find((n) => n.id === id);
+    // build's live pass runs the first two Items under the cap and queues the rest.
+    expect(nodeOf("build")).toMatchObject({ passes: 1, pass: 1, tickets: copyIds(2), queued: 3, inbox: 0, parked: [], arrived: [] });
+    expect(nodeOf("tasks")).toMatchObject({ passes: 1, tickets: [], queued: 0 });
+    expect(nodeOf("tasks")?.pass).toBeUndefined();
+    expect(nodeOf("build-merge")).toMatchObject({ passes: 0, tickets: [], queued: 0 });
+    expect(nodeOf("finish")).toMatchObject({ passes: 1, pass: 1, tickets: [], queued: 0 });
+    expect(nodeOf("finish")?.hold).toBeUndefined();
+    // The copies' Tickets, which the graph joins its statuses from, are live; the queued Items have none yet.
+    expect(statuses(snap)).toEqual({ "tasks-1": "done", "build-1.1": "in-progress", "build-1.2": "in-progress" });
+    expect(snap.state.tickets.filter((ticket) => ticket.node === "build").map((ticket) => ticket.id)).toEqual(copyIds(2));
+
+    await first.release();
+    await second.release();
+  },
 );

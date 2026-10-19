@@ -9,3 +9,5 @@ A file watcher was rejected: the repo already chose polling over `fs.watch` for 
 **Consequences**: a reload is atomic. The new file is dry-run against every reassignable ticket; a parse error, unknown harness, or bad `verify` rejects the whole reload with one pool-log line naming the cause, and the previous config stands. The same bad content is logged once, not every boundary. A ticket whose next Attempt resolves to a different Assignment than its previous one gets a `reassigned` event in its Ticket log, so a run that changed model halfway is visible in forensics. A ticket edited while its Attempt is in flight sees nothing until that Attempt ends, by design.
 
 **Amended by ADR-0029 (issue #149)**: the Spawn caps (`spawnCaps`) reload with the assignment slice. A Pool settings save on a pool with no drive in flight runs the reload at once, since an idle pool reaches no boundary.
+
+**Amended by ADR-0041**: "the super-step boundary that plans the Attempt" is now the tick that launches it, and the assignment slice reloads at every tick whose `console.json` stamp moved. An Attempt in flight still never changes. `maxLive` reloads with the slice.

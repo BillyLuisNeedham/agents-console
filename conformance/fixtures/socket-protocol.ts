@@ -24,7 +24,7 @@ import type { EnrichedSnapshot } from "../../protocol/wire.ts";
 export const WS_PATH = "/api/ws";
 
 /** The protocol version a client says in its hello. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 5;
 
 /** How many of the pool log's last lines a pushed snapshot carries. */
 export const POOL_LOG_WINDOW = 500;
@@ -55,8 +55,6 @@ const REQUEST_KINDS: Record<RequestKind, true> = {
   reassign: true,
   "spawns.held.adopt": true,
   "spawns.held.discard": true,
-  "spawns.pending.hold": true,
-  "spawns.pending.discard": true,
   "conversations.start": true,
   "conversations.end": true,
   "settings.get": true,
@@ -66,6 +64,14 @@ const REQUEST_KINDS: Record<RequestKind, true> = {
   "log.read": true,
   "log.follow": true,
   "poolLog.read": true,
+  "plans.list": true,
+  "plans.get": true,
+  "plans.validate": true,
+  "plans.save": true,
+  "plans.edit": true,
+  "plans.delete": true,
+  "plans.boot": true,
+  "line.plan.edit": true,
 };
 
 /** A frame that is not this protocol's, or a delta that does not fit. */

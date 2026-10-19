@@ -60,7 +60,6 @@ const SNAPSHOT: EnrichedSnapshot = {
 function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
   const answers: { ticketId: string; action: ResumeAction; note?: string }[] = [];
   const adopted: string[] = [];
-  const held: string[] = [];
   // One Console on the page at a time: the Detail's fullscreen writes find
   // the page's panel by class, as they do in the app.
   document.body.replaceChildren();
@@ -85,7 +84,6 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     onChange: () => render(),
     onStart: () => new Promise(() => {}),
     onEnd: () => new Promise(() => {}),
-    onStartLine: () => new Promise(() => {}),
     onFocusTerminal: () => Promise.resolve(true),
     onListPanes: () => new Promise(() => {}),
     onEnlist: () => new Promise(() => {}),
@@ -98,11 +96,13 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
       return new Promise(() => {});
     },
     onDiscardHeldSpawn: () => new Promise(() => {}),
-    onHoldPendingSpawn: (id) => {
-      held.push(id);
-      return new Promise(() => {});
-    },
-    onDiscardPendingSpawn: () => new Promise(() => {}),
+    onListPlans: () => new Promise(() => {}),
+    onGetPlan: () => new Promise(() => {}),
+    onEditPlan: () => new Promise(() => {}),
+    onSavePlan: () => new Promise(() => {}),
+    onDeletePlan: () => new Promise(() => {}),
+    onBootPlan: () => new Promise(() => {}),
+    onEditLine: () => new Promise(() => {}),
   });
   const handlers: Handlers = {
     onToggleLog: () => session.toggleLog(),
@@ -138,7 +138,7 @@ function mountConsole(snapshot: EnrichedSnapshot = SNAPSHOT) {
     el.value = value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
-  return { root, session, render, answers, adopted, held, q, trayNote, detailNote, type };
+  return { root, session, render, answers, adopted, q, trayNote, detailNote, type };
 }
 
 describe("ConsoleView: one Draft answer per ticket (issue #147)", () => {
@@ -251,6 +251,7 @@ describe("ConsoleView: the Held spawns list (issue #149)", () => {
         blocks: "all",
         overlaps: [],
         unknownOverlaps: [],
+        startedIds: [],
         reason: "per-run",
         at: "2026-09-29T10:00:00Z",
         adopting: false,
@@ -267,18 +268,18 @@ describe("ConsoleView: the Held spawns list (issue #149)", () => {
     line.click();
     c.q<HTMLButtonElement>('[data-key="held-spawn-held-1"] .held-spawn-adopt')!.click();
     expect(c.adopted).toEqual(["held-1"]);
-    // Once the boundary writes it, the row goes with the snapshot.
+    // Once the next Tick writes it, the row goes with the snapshot.
     c.session.setSnapshot({ ...HELD, seq: 2, heldSpawns: [] });
     expect(c.q('[data-key="held-spawn-held-1"]')).toBeNull();
     expect(c.q(".held-spawns-empty")).not.toBeNull();
   });
 });
 
-describe("ConsoleView: Pending spawns in the list, on the canvas and in the Detail (issue #150)", () => {
-  const PENDING: EnrichedSnapshot = {
+describe("ConsoleView: a Held spawn's faded card and its Detail (issue #150)", () => {
+  const HELD: EnrichedSnapshot = {
     ...SNAPSHOT,
-    spawnUsage: { spawnedThisRun: 2, perAttempt: 5, perRun: 20 },
-    pendingSpawns: [
+    spawnUsage: { spawnedThisRun: 20, perAttempt: 5, perRun: 20 },
+    heldSpawns: [
       {
         id: "proposal-1",
         parentId: "A",
@@ -289,38 +290,33 @@ describe("ConsoleView: Pending spawns in the list, on the canvas and in the Deta
         blockedBy: [],
         blocks: ["B"],
         overlaps: [],
+        unknownOverlaps: [],
+        startedIds: [],
+        reason: "per-run",
         at: "2026-09-29T10:00:00Z",
+        adopting: false,
       },
     ],
   };
 
-  it("counts it on the header line and holds it from the list", () => {
-    const c = mountConsole(PENDING);
-    const line = c.q<HTMLButtonElement>(".canvas-spawn-line")!;
-    expect(line.textContent).toBe("Spawns 2/20 this run · 5 per attempt · 1 pending");
-    line.click();
-    c.q<HTMLButtonElement>('[data-key="pending-spawn-proposal-1"] .held-spawn-hold')!.click();
-    expect(c.held).toEqual(["proposal-1"]);
-  });
-
   it("draws a faded card whose Detail shows the proposal and shares the list's decisions", () => {
-    const c = mountConsole(PENDING);
+    const c = mountConsole(HELD);
     const card = c.q<HTMLElement>('.spawn-card[data-key="spawn:proposal-1"]')!;
-    expect(card.textContent).toContain("lands next boundary");
+    expect(card.textContent).toContain("held · per-run cap");
     c.session.select("spawn:proposal-1");
     expect(c.q(".detail-title")?.textContent).toBe("proposal-1");
     const detail = c.q<HTMLElement>(".spawn-detail")!;
     expect(detail.textContent).toContain("Document every renamed flag.");
     expect(detail.textContent).toContain("blocks");
     expect(detail.querySelector(".peek, .log-pane")).toBeNull();
-    detail.querySelector<HTMLButtonElement>(".held-spawn-hold")!.click();
-    expect(c.held).toEqual(["proposal-1"]);
+    detail.querySelector<HTMLButtonElement>(".held-spawn-adopt")!.click();
+    expect(c.adopted).toEqual(["proposal-1"]);
     c.q<HTMLButtonElement>(".canvas-spawn-line")!.click();
     expect(
-      c.q<HTMLButtonElement>('[data-key="pending-spawn-proposal-1"] .held-spawn-hold')!.disabled,
+      c.q<HTMLButtonElement>('[data-key="held-spawn-proposal-1"] .held-spawn-adopt')!.disabled,
     ).toBe(true);
-    // Once it lands the faded card and its Detail go with the snapshot.
-    c.session.setSnapshot({ ...PENDING, seq: 2, pendingSpawns: [] });
+    // Once the Tick lands it the faded card and its Detail go with the snapshot.
+    c.session.setSnapshot({ ...HELD, seq: 2, heldSpawns: [] });
     expect(c.q('[data-key="spawn:proposal-1"]')).toBeNull();
     expect(c.q(".spawn-detail")).toBeNull();
   });
@@ -436,5 +432,105 @@ describe("ConsoleView: Notices not landing", () => {
       "Notices not reaching this pane",
     );
     expect(c.q(".detail-open .conversation-delivery-error")?.textContent).toBe("a dialog is open");
+  });
+});
+
+describe("ConsoleView: the Line view (ADR-0040)", () => {
+  const LINE_SNAPSHOT: EnrichedSnapshot = {
+    ...SNAPSHOT,
+    line: {
+      plan: {
+        horde: 1,
+        name: "Factory today",
+        nodes: [
+          { kind: "agent", id: "build", title: "Build", x: 0, y: 0, copies: { perItem: 2 } },
+          { kind: "finish", id: "finish", title: "Finish", x: 300, y: 0 },
+        ],
+        edges: [{ from: "build", on: "done", to: "finish" }],
+      },
+      rev: 1,
+      status: "finishing",
+      waitingFor: ["A", "B"],
+      nodes: [
+        {
+          id: "build",
+          verdicts: ["done"],
+          passes: 1,
+          pass: 1,
+          tickets: ["A", "B"],
+          queued: 3,
+          inbox: 0,
+          parked: [],
+          arrived: [],
+        },
+        { id: "finish", verdicts: [], passes: 0, tickets: [], queued: 0, inbox: 0, parked: [], arrived: [] },
+      ],
+      edges: [],
+    },
+  };
+  const dot = (c: ReturnType<typeof mountConsole>, id: string) =>
+    c.q<HTMLButtonElement>(`.line-pane .plan-dot[data-card="ticket:${id}"]`)!;
+
+  it("offers the Line from the header and keeps the view shut until it is asked for", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    expect(c.q(".canvas-line-open")?.textContent).toBe("Factory today · finishing");
+    expect(c.q(".line-pane")).toBeNull();
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(c.q(".line-pane .line-headline")?.textContent).toBe("Factory today · finishing");
+    expect(c.q(".line-pane .line-waiting")?.textContent).toBe("Finish waiting for A, B");
+    expect(c.root.querySelectorAll(".line-pane .plan-node").length).toBe(2);
+  });
+
+  it("draws each node's state, its copy dots by status and the queue as hollow dots", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    const build = c.q<HTMLElement>('.line-pane .plan-node[data-node="build"]')!;
+    expect(build.querySelector(".plan-node-state")?.textContent).toBe("needs you");
+    expect(build.querySelectorAll(".plan-dot-checkpoint").length).toBe(2);
+    expect(build.querySelectorAll(".plan-dot-queued").length).toBe(3);
+    expect(build.querySelector(".plan-node-line")?.textContent).toBe("pass 1 · 0 running · 3 queued");
+    const finish = c.q<HTMLElement>('.line-pane .plan-node[data-node="finish"]')!;
+    expect(finish.querySelector(".plan-node-state")?.textContent).toBe("waiting for 2");
+  });
+
+  it("opens a copy's Detail beside the open view, selects its card, and a second tap keeps it open", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    dot(c, "B").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("B");
+    expect(c.q(".line-pane")).not.toBeNull();
+    expect(c.q('.node-card[data-node-id="ticket:B"]')?.classList.contains("node-card-selected")).toBe(true);
+    expect(dot(c, "B").classList.contains("plan-dot-selected")).toBe(true);
+    dot(c, "B").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("B");
+    dot(c, "A").click();
+    expect(c.q(".detail-open .detail-title")?.textContent).toBe("A");
+  });
+
+  it("does not pan the graph when a copy dot is pressed", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    const world = c.q<HTMLElement>(".line-pane .plan-world")!;
+    const before = world.style.transform;
+    const target = dot(c, "A");
+    for (const [type, x] of [["pointerdown", 10], ["pointermove", 60], ["pointerup", 60]] as const) {
+      target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, clientX: x, clientY: 10 }));
+    }
+    expect(world.style.transform).toBe(before);
+    expect(c.q(".line-pane .plan-panning")).toBeNull();
+  });
+
+  it("closes back to the Ticket canvas, and closes by itself when the Line goes away", () => {
+    const c = mountConsole(LINE_SNAPSHOT);
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    c.q<HTMLButtonElement>(".line-close")!.click();
+    expect(c.q(".line-pane")).toBeNull();
+    c.q<HTMLButtonElement>(".canvas-line-open")!.click();
+    expect(c.q(".line-pane")).not.toBeNull();
+    c.session.setSnapshot(SNAPSHOT);
+    expect(c.q(".line-pane")).toBeNull();
+    expect(c.q(".canvas-line-open")).toBeNull();
+    c.session.setSnapshot(LINE_SNAPSHOT);
+    expect(c.q(".line-pane")).toBeNull();
   });
 });

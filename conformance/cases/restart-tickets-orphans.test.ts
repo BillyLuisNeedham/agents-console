@@ -461,9 +461,9 @@ restartCase(
     expect(phases.at(-1)!.seq).toBeGreaterThan(phases.at(-2)!.seq);
     const farewell = lastPushed(socket);
     expect(farewell.state.interrupts).toEqual([]);
-    expect(farewell.state.log).toContain(
-      "engine shutdown: super-step joined; no crash interrupts raised and nothing more scheduled",
-    );
+    expect(farewell.state.log.filter((line) => line.startsWith("engine shutdown:"))).toEqual([
+      "engine shutdown: no crash interrupts raised and nothing more launched",
+    ]);
     // The group went with the harness.
     expect(running(pid)).toBe(false);
     await untilGone(grandchild, "the grandchild");
@@ -512,6 +512,7 @@ restartCase(
       "2 scheduled",
       "2 spawned",
       "2 exited",
+      "2 merged",
     ]);
     expect(eventsOf(world, "01", "crash")[0]!.payload).toEqual({
       code: null,
@@ -548,7 +549,7 @@ conformance(
 
     expect(running(reused)).toBe(true);
     expect(eventsOf(world, "01", "crash")).toEqual([]);
-    expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "2 scheduled", "2 spawned", "2 exited"]);
+    expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "2 scheduled", "2 spawned", "2 exited", "2 merged"]);
     expect(await poolLog(server)).toContain("ticket 01: marker was in-progress with no live agent; back to ready");
     expect(launchKeys(world)).toEqual(["01"]);
     expectSameBytes(readTicketFile(world.pool, "01-a.md"), `${stateLine("01", "done")}\n\n${body("01")}\n${ENGINE_RESET_NOTE}`);

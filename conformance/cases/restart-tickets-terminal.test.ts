@@ -188,8 +188,6 @@ restartCase("a re-adopted Attempt whose TUI exited 7 while no server ran is deci
 
 // engine/attempt-ending.test.ts:405
 restartCase("a re-adopted Attempt whose TUI wrote a done Outcome while no server ran ends clean at boot and merges", async (t) => {
-  // Two Tickets in one super-step, so each Attempt works in a worktree of
-  // its own and its done ending has a branch to merge.
   const world = t.world({
     tickets: [ticket("01", "a", { body: BODY }), ticket("02", "b", { body: "# 02\n\nWork on 02." })],
     config: TERMINAL,
@@ -244,11 +242,6 @@ function writeEvents(world: World, id: string, events: TicketEvent[]): void {
   writeFileSync(join(runsOf(world), `${id}.events.jsonl`), events.map((each) => `${JSON.stringify(each)}\n`).join(""));
 }
 
-/**
- * The spawned event's payload for a terminal-backed claude launch in the
- * pool checkout, as the engine records one (engine/attempt-run.ts
- * spawnedPayload) from a herdr that reports no terminal id.
- */
 function spawnedInPane(world: World, paneId: string, tabId: string, cwd = world.repo, branch: string | null = null): Record<string, unknown> {
   return {
     argv: ["claude", "--model", "m", "--permission-mode", "auto"],
@@ -315,7 +308,8 @@ conformance("restart", "a live orphan pane of a resolver's Attempt keeps the hea
   // Not adopted: 01 ran again as attempt 2 in a tab of its own, and the
   // orphan's pane was never reported, typed into or closed.
   expect(cardOf(done, "01").status).toBe("done");
-  expect(eventLine(world, "01")).toEqual(["1 spawned", "1 resolver", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual(["1 spawned", "1 resolver", "2 scheduled", "2 spawned", "2 exited", "2 merged", "2 tab-closed"]);
   expect(eventsOf(world, "01", "spawned")[1]!.payload.pane_id).toBe(`${LAUNCH}:p1`);
   await herdr.settle();
   const onGhost = herdr.calls.filter((call) => call.params.pane_id === "pane-ghost").map((call) => call.method);
@@ -331,7 +325,17 @@ conformance("restart", "an orphan Attempt whose pane is gone at boot crashes on 
   const done = await approveReview(server);
   expect(cardOf(done, "01").status).toBe("done");
   expect(await poolLog(server)).toContain("ticket 01: attempt 1's pane is gone at boot; the attempt crashed and the ticket re-runs");
-  expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 crash", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual([
+    "1 scheduled",
+    "1 spawned",
+    "1 crash",
+    "2 scheduled",
+    "2 spawned",
+    "2 exited",
+    "2 merged",
+    "2 tab-closed",
+  ]);
   expect(eventsOf(world, "01", "crash")[0]!.payload).toEqual({
     code: null,
     reason: "attempt pane gone at boot reconciliation",
@@ -407,10 +411,45 @@ conformance("restart", "answering the adoption checkpoint closes the re-adopted 
   expect(eventsOf(world, "01", "exited").map((each) => each.attempt)).toEqual([2]);
   await herdr.settle();
   expect(callsOf(herdr, "pane.close").map((call) => call.params.pane_id)).toEqual(["pane-ghost"]);
-  expect(eventLine(world, "01")).toEqual(["1 scheduled", "1 spawned", "1 answered", "2 scheduled", "2 spawned", "2 exited"]);
+  await until(() => eventLine(world, "01"), (lines) => lines.includes("2 tab-closed"), { what: "01's tab-closed" });
+  expect(eventLine(world, "01")).toEqual([
+    "1 scheduled",
+    "1 spawned",
+    "1 answered",
+    "2 scheduled",
+    "2 spawned",
+    "2 exited",
+    "2 merged",
+    "2 tab-closed",
+  ]);
   // The re-adoption took the boot's reset note back off, and the abandon
   // wrote none of its own.
   expectSameBytes(readTicketFile(world.pool, "01-a.md"), `${stateLine("01", "done")}\n\n${BODY}\n`);
+});
+
+// ADR-0041: a re-adopted Attempt is a live Ticket Attempt, and its ending frees the slot.
+conformance("restart", "under maxLive 1 a re-adopted Attempt holds a Ready Ticket back until its pane ends", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01", "a", { status: "in-progress", body: BODY }), ticket("02", "b")],
+    config: { ...TERMINAL, maxLive: 1 },
+  });
+  const herdr = await t.herdr(world, { ...HERDR, workspaces: [LAUNCH] });
+  orphanedIn(world, "pane-ghost", "tab-ghost");
+  await herdr.control("injectPane", "pane-ghost", { tabId: "tab-ghost", cwd: world.repo });
+  const server = await startInLaunch(t, world, herdr);
+
+  const adopted = await settle(server, "the adoption checkpoint", quiescentWith("01:checkpoint"));
+  expect(cardOf(adopted, "01").liveAttempt).toMatchObject({ attempt: 1, paneId: "pane-ghost" });
+  expect(cardOf(adopted, "02").status).toBe("ready");
+  expect(readEvents(world.pool, "02")).toEqual([]);
+
+  writeFileSync(join(runsOf(world), "01.outcome.json"), JSON.stringify({ status: "done", summary: "adopted", commitSha: null }));
+  writeFileSync(join(runsOf(world), "01.exitcode"), "0\n");
+  await herdr.control("endPane", "pane-ghost");
+  const review = await settle(server, "02 run and the Review raised", quiescentWith("REVIEW:review"));
+  expect(cardOf(review, "02").status).toBe("done");
+  const exited = eventsOf(world, "01", "exited")[0]!;
+  expect(eventsOf(world, "02", "scheduled")[0]!.at >= exited.at).toBe(true);
 });
 
 // ---------------------------------------------------------------------------

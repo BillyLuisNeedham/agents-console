@@ -1,29 +1,25 @@
-//! Merges (engine.ts 749-890, 5887-6560, 11616-11732): the Merge hold over the engine's git probe and
-//! the wait-and-recompute rule, the merge target and its checkout, the Ticket file reconcile at merge,
-//! `mergeTicket`, the failed-merge records and Interrupts, resuming a conflicted merge, and the merge
-//! resolver with its approval.
-
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::Path;
-use std::sync::LazyLock;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock};
 
+use futures::FutureExt;
 use regex::Regex;
 use serde_json::{Map, Value};
 
 use ac_core::assignment::engine_ticket_build_id;
 use ac_core::events::{
     append_event, attempt_log_name, attempt_outcome_name, event_now, last_attempt, next_attempt,
-    ticket_seed_name,
+    read_events, ticket_seed_name,
 };
 use ac_core::js;
+use ac_core::line::run::TicketId;
 use ac_core::machine_defaults::read_machine_defaults;
-use ac_core::merge_hold::{MERGE_HOLD_POLL_MS, MergeHoldProbe};
+use ac_core::merge_hold::MergeHoldProbe;
+use ac_core::plan::{Assign, Conflict};
 use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_core::prompt::{ResolverPromptParts, build_resolver_prompt};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
-use ac_protocol::{Interrupt, InterruptKind, RunPhase, TicketEventKind, TicketStatus};
+use ac_protocol::{Interrupt, InterruptKind, TicketEvent, TicketEventKind, TicketStatus};
 
 use crate::actor::Engine;
 use crate::attempt_run::{
@@ -32,12 +28,12 @@ use crate::attempt_run::{
 };
 use crate::checkout_gate::{hold_pool_checkout, release_pool_checkout};
 use crate::interrupts::{interrupt, raise_interrupt, without};
-use crate::session::{EnlistedWork, PoolUpdate, Session};
+use crate::session::{EnlistedWork, PoolState, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::tickets::{attempt_env_of, close_attempt_tabs};
+use crate::tickets::{attempt_env_of, close_attempt_tab, close_attempt_tabs};
 
 // ---------------------------------------------------------------------------------------------------
-// The Merge hold (ADR-0014)
+// The unlanded list and the Merge queue (ADR-0014)
 // ---------------------------------------------------------------------------------------------------
 
 /// The engine's git probe (merge-hold.ts `gitMergeHoldProbe`, with engine.ts's overrides): the
@@ -82,8 +78,6 @@ impl MergeHoldProbe for EngineHoldProbe<'_> {
     }
 }
 
-/// `mergeHold`: the ids of done tickets whose branch has not landed in the merge target, derived on
-/// demand and never persisted. A git-less pool holds nothing; engine-run tickets never hold.
 pub fn merge_hold(session: &mut Session) -> Vec<String> {
     if !session.git {
         return Vec::new();
@@ -107,87 +101,6 @@ pub fn merge_hold(session: &mut Session) -> Vec<String> {
         &|id| engine_ticket_build_id(id).is_some(),
         Some(&probe),
     )
-}
-
-/// What the wait-and-recompute rule needs of a session: the hold derived fresh, the queued-answer
-/// drain (true when it applied any), the log line that says the pool paused and why, and the emit.
-pub trait HoldHost: Sync {
-    fn derive(&self) -> impl Future<Output = anyhow::Result<Vec<String>>> + Send;
-    fn drain(&self) -> impl Future<Output = anyhow::Result<bool>> + Send;
-    fn engaged(&self, hold: Vec<String>) -> impl Future<Output = anyhow::Result<()>> + Send;
-    fn emit(&self) -> impl Future<Output = anyhow::Result<()>> + Send;
-}
-
-/// The engine as a [`HoldHost`] (engine.ts `holdHost`).
-pub struct EngineHoldHost<'a>(pub &'a Engine);
-
-impl HoldHost for EngineHoldHost<'_> {
-    async fn derive(&self) -> anyhow::Result<Vec<String>> {
-        Ok(self.0.call(merge_hold).await?)
-    }
-
-    async fn drain(&self) -> anyhow::Result<bool> {
-        self.0
-            .call(|s| {
-                let before = s.answers.pending().len();
-                crate::answers::drain_answers(s)?;
-                // The drive waits on the hold from here.
-                crate::drive::drive_turned(s);
-                Ok(s.answers.pending().len() != before)
-            })
-            .await?
-    }
-
-    async fn engaged(&self, hold: Vec<String>) -> anyhow::Result<()> {
-        self.0
-            .call(move |s| {
-                s.log(format!(
-                    "merge hold (ADR-0014): pool paused; awaiting the merge of {}",
-                    hold.join(", ")
-                ))
-            })
-            .await?;
-        Ok(())
-    }
-
-    async fn emit(&self) -> anyhow::Result<()> {
-        self.0.call(|s| emit_snapshot(s, RunPhase::Running)).await?;
-        Ok(())
-    }
-}
-
-/// `throughMergeHold`, the one wait-and-recompute rule: recompute; if the recompute saw the hold
-/// standing, wait the hold out (draining queued answers on every tick) and recompute again; hand back
-/// the first value a recompute produced with nothing held. The engagement is logged once per wait.
-pub async fn through_merge_hold<T, H, F, Fut>(
-    host: &H,
-    mut recompute: F,
-    interval: Duration,
-) -> anyhow::Result<T>
-where
-    H: HoldHost,
-    F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<(T, Vec<String>)>>,
-{
-    loop {
-        let (value, hold) = recompute().await?;
-        if hold.is_empty() {
-            return Ok(value);
-        }
-        host.engaged(hold).await?;
-        host.emit().await?;
-        while !host.derive().await?.is_empty() {
-            if host.drain().await? {
-                host.emit().await?;
-            }
-            tokio::time::sleep(interval).await;
-        }
-    }
-}
-
-/// The poll cadence of a waiting flow.
-pub fn hold_poll() -> Duration {
-    Duration::from_millis(MERGE_HOLD_POLL_MS)
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -233,13 +146,23 @@ pub fn merge_target_branch(session: &Session) -> String {
         .unwrap_or_else(|| git::current_branch(&session.cwd))
 }
 
-/// `mergeTargetSha`: the merge target's commit, captured just before a merge for the range a
-/// done-Notice's diff summary covers; empty in a git-less pool.
 pub fn merge_target_sha(session: &Session) -> String {
     if session.git {
         git::rev_parse(&session.cwd, &merge_target_ref(session))
     } else {
         String::new()
+    }
+}
+
+pub struct TipMerge {
+    pub result: MergeResult,
+    pub before_sha: String,
+}
+
+impl TipMerge {
+    pub fn range(&self, session: &Session) -> Option<String> {
+        (!self.before_sha.is_empty())
+            .then(|| format!("{}..{}", self.before_sha, merge_target_ref(session)))
     }
 }
 
@@ -265,7 +188,8 @@ pub fn merge_with_issue_aside(
     session: &mut Session,
     marker: &TicketMarker,
     branch: &str,
-) -> anyhow::Result<MergeResult> {
+) -> anyhow::Result<TipMerge> {
+    let before_sha = merge_target_sha(session);
     let ours = js::read_text(&marker.file)?;
     let file = file_text(marker);
     // The base for the reconcile's fallback, taken before the merge lands: once the branch is merged,
@@ -281,11 +205,16 @@ pub fn merge_with_issue_aside(
     });
     let merged = match merged {
         Ok(merged) => merged,
-        Err(err) => return Ok(blocked(err.to_string())),
+        Err(err) => {
+            return Ok(TipMerge {
+                result: blocked(err.to_string()),
+                before_sha,
+            });
+        }
     };
     let (result, theirs) = (merged.result, merged.theirs);
     let Some(theirs) = theirs.filter(|_| result.ok) else {
-        return Ok(result);
+        return Ok(TipMerge { result, before_sha });
     };
     let (content, conflicted) = reconcile_ticket_file(
         session,
@@ -295,11 +224,11 @@ pub fn merge_with_issue_aside(
         &ours,
         &theirs,
     )?;
-    js::write_file(&marker.file, &content)?;
+    js::write_through_rename(&marker.file, marker.file.with_extension("md.tmp"), &content)?;
     if conflicted {
         record_ticket_file_conflict(session, marker, branch)?;
     }
-    Ok(result)
+    Ok(TipMerge { result, before_sha })
 }
 
 /// The two copies of a ticket file changed the same lines: the conflict markers stay in the file of
@@ -435,12 +364,12 @@ pub fn merge_ticket(
     session: &mut Session,
     marker: &TicketMarker,
     worktree: &WorktreeInfo,
-) -> anyhow::Result<MergeResult> {
-    let result = merge_with_issue_aside(session, marker, &worktree.branch)?;
-    if result.ok {
+) -> anyhow::Result<TipMerge> {
+    let merge = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    if merge.result.ok {
         remove_merge_worktree(session, marker, worktree);
     }
-    Ok(result)
+    Ok(merge)
 }
 
 /// `removeMergeWorktree`: never for an enlisted ticket (issue #101), whose checkout and branch are the
@@ -450,6 +379,112 @@ pub fn remove_merge_worktree(session: &Session, marker: &TicketMarker, worktree:
         return;
     }
     git::remove_worktree(&session.cwd, worktree);
+}
+
+pub async fn in_merge_chain<T: Send + 'static>(
+    engine: &Engine,
+    job: impl FnOnce(&mut Session) -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    let (done, result) = tokio::sync::oneshot::channel();
+    let link_engine = engine.clone();
+    engine
+        .call(move |s| {
+            chain_link(s, async move {
+                let _ = done.send(link_engine.call(job).await);
+            });
+        })
+        .await?;
+    result
+        .await
+        .map_err(|_| anyhow::anyhow!("the merge chain dropped a link"))??
+}
+
+pub fn chain_ticket_merge(
+    session: &mut Session,
+    marker: TicketMarker,
+    worktree: WorktreeInfo,
+    attempt: u64,
+    what: Option<&str>,
+) {
+    session.merge_line.taken(&marker.id);
+    let engine = session.engine();
+    let what = what.map(str::to_owned);
+    chain_link(session, async move {
+        let merged = merge_link(&engine, marker, worktree, attempt, what).await;
+        let _ = engine
+            .call(move |s| {
+                if let Err(error) = merged {
+                    s.drive_failure.get_or_insert(error.to_string());
+                }
+                crate::restart::finish_adopted_finalize(s);
+            })
+            .await;
+    });
+}
+
+pub fn chain_link(
+    session: &mut Session,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let previous = session.merge_chain.clone();
+    let engine = session.engine();
+    let link = async move {
+        previous.await;
+        work.await;
+        crate::persist::persist_after_flow(&engine).await;
+    }
+    .boxed()
+    .shared();
+    session.merge_chain = link.clone();
+    tokio::spawn(link);
+}
+
+async fn merge_link(
+    engine: &Engine,
+    marker: TicketMarker,
+    worktree: WorktreeInfo,
+    attempt: u64,
+    what: Option<String>,
+) -> anyhow::Result<()> {
+    let (merge_marker, merge_worktree) = (marker.clone(), worktree);
+    let conflict = engine
+        .call(move |s| {
+            let (marker, worktree) = (merge_marker, merge_worktree);
+            let merge = merge_ticket(s, &marker, &worktree)?;
+            if !merge.result.ok {
+                return Ok(Some(merge.result));
+            }
+            let id = &marker.id;
+            s.merge_line.settled(id);
+            append_event(
+                Path::new(&s.runs_dir),
+                id,
+                &event_now(
+                    attempt,
+                    TicketEventKind::Merged,
+                    merged_payload(&merge.result),
+                ),
+            )?;
+            close_attempt_tab(s, id, attempt);
+            let range = merge.range(s);
+            crate::conversations::ticket_ended(s, &marker, &worktree.branch, range);
+            let branch = &worktree.branch;
+            s.log(match &what {
+                Some(what) => {
+                    format!("ticket {id}: {what} {attempt} merged {branch} onto the working branch")
+                }
+                None => format!(
+                    "ticket {id}: merged {branch} onto the working branch{}",
+                    landed_detail(&merge.result)
+                ),
+            });
+            anyhow::Ok(None)
+        })
+        .await??;
+    if let Some(conflict) = conflict {
+        handle_merge_conflict(engine, marker, conflict, attempt).await?;
+    }
+    Ok(())
 }
 
 /// `recordFailedMerge`: merge-blocked names the files in the way of a merge git refused to start (#92),
@@ -481,6 +516,59 @@ pub fn record_failed_merge(
         &event_now(attempt, kind, payload),
     )?;
     Ok(())
+}
+
+/// How many other Tickets have started since a Ticket's merge-conflict Interrupt was raised: the
+/// distinct ones with a `scheduled` event after the Ticket's latest `merge-conflict` or
+/// `merge-blocked` event. That event is written when the conflict is found, before a resolver runs,
+/// so a Ticket that starts while the resolver works counts. A failed Resume appends a fresh one, so
+/// the baseline moves with the re-raised Interrupt. `None` while none has, or when the Ticket has no
+/// such event.
+fn started_since_conflict(
+    conflicted: &[Arc<TicketEvent>],
+    others: impl Iterator<Item = Vec<Arc<TicketEvent>>>,
+) -> Option<u64> {
+    let baseline = conflicted
+        .iter()
+        .rfind(|e| {
+            matches!(
+                e.kind,
+                TicketEventKind::MergeConflict | TicketEventKind::MergeBlocked
+            )
+        })?
+        .at
+        .as_str();
+    let started = others
+        .filter(|events| {
+            events
+                .iter()
+                .any(|e| e.kind == TicketEventKind::Scheduled && e.at.as_str() > baseline)
+        })
+        .count() as u64;
+    (started > 0).then_some(started)
+}
+
+/// The state a snapshot carries, with each Ticket merge-conflict Interrupt's copy saying how many
+/// other Tickets started since it was raised (ADR-0041). Derived from the Tickets' events at each
+/// build, never persisted, so it survives a restart; nothing is read while no such Interrupt waits.
+/// Engine-run Tickets (graders and judges) are in the markers but were never started by the
+/// scheduler, and Conversations are not in the markers, so neither counts.
+pub fn with_started_since(session: &Session, state: &mut PoolState) {
+    let runs = Path::new(&session.runs_dir);
+    for interrupt in &mut state.interrupts {
+        if interrupt.kind != InterruptKind::MergeConflict
+            || !session.markers.iter().any(|m| m.id == interrupt.ticket_id)
+        {
+            continue;
+        }
+        let own = read_events(runs, &interrupt.ticket_id);
+        let others = session
+            .markers
+            .iter()
+            .filter(|m| m.id != interrupt.ticket_id && engine_ticket_build_id(&m.id).is_none())
+            .map(|m| read_events(runs, &m.id));
+        interrupt.started_since = started_since_conflict(&own, others);
+    }
 }
 
 /// `mergedPayload`: the untracked pool copies the merge deleted because they matched the branch's
@@ -576,21 +664,23 @@ fn record_answer_merge(
     session: &mut Session,
     marker: &TicketMarker,
     worktree: &WorktreeInfo,
-    result: &MergeResult,
-    before_sha: &str,
+    merge: &TipMerge,
 ) -> anyhow::Result<()> {
     remove_merge_worktree(session, marker, worktree);
     let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
     append_event(
         Path::new(&session.runs_dir),
         &marker.id,
-        &event_now(attempt, TicketEventKind::Merged, merged_payload(result)),
+        &event_now(
+            attempt,
+            TicketEventKind::Merged,
+            merged_payload(&merge.result),
+        ),
     )?;
     if !session.enlisted_work.contains_key(&marker.id) {
         close_attempt_tabs(session, &marker.id);
     }
-    let range =
-        (!before_sha.is_empty()).then(|| format!("{before_sha}..{}", merge_target_ref(session)));
+    let range = merge.range(session);
     crate::conversations::ticket_ended(session, marker, &worktree.branch, range);
     Ok(())
 }
@@ -605,14 +695,14 @@ pub fn resume_merge(
 ) -> anyhow::Result<()> {
     let worktree = ticket_worktree(session, marker, None);
     let branch = worktree.branch.clone();
-    let before_sha = merge_target_sha(session);
-    let result = merge_with_issue_aside(session, marker, &branch)?;
+    let merge = merge_with_issue_aside(session, marker, &branch)?;
+    let result = &merge.result;
     append_resume_note(marker, note)?;
     if !result.ok {
         let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
-        record_failed_merge(session, &marker.id, attempt, &result)?;
+        record_failed_merge(session, &marker.id, attempt, result)?;
         let mut interrupts = without(&session.state.interrupts, pending);
-        interrupts.push(merge_conflict_interrupt(session, marker, &result));
+        interrupts.push(merge_conflict_interrupt(session, marker, result));
         session.apply(PoolUpdate {
             interrupts: Some(interrupts),
             log: Some(vec![format!(
@@ -628,14 +718,14 @@ pub fn resume_merge(
         });
         return Ok(());
     }
-    record_answer_merge(session, marker, &worktree, &result, &before_sha)?;
+    record_answer_merge(session, marker, &worktree, &merge)?;
     let interrupts = without(&session.state.interrupts, pending);
     session.apply(PoolUpdate {
         interrupts: Some(interrupts),
         log: Some(vec![format!(
             "interrupt answered for {} (merge-conflict): merge landed{}",
             marker.id,
-            landed_detail(&result)
+            landed_detail(result)
         )]),
         ..PoolUpdate::default()
     });
@@ -652,16 +742,16 @@ pub fn approve_merge(
     let worktree = ticket_worktree(session, marker, None);
     git::commit_merge(&worktree);
     append_resume_note(marker, note)?;
-    let before_sha = merge_target_sha(session);
-    let result = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    let merge = merge_with_issue_aside(session, marker, &worktree.branch)?;
+    let result = &merge.result;
     if !result.ok {
         let attempt = last_attempt(Path::new(&session.runs_dir), &marker.id);
-        record_failed_merge(session, &marker.id, attempt, &result)?;
+        record_failed_merge(session, &marker.id, attempt, result)?;
         let mut interrupts = without(&session.state.interrupts, pending);
         interrupts.push(manual_merge_interrupt(
             session,
             marker,
-            &result,
+            result,
             "the resolver's resolution did not merge cleanly on approval",
         ));
         session.apply(PoolUpdate {
@@ -679,7 +769,7 @@ pub fn approve_merge(
         });
         return Ok(());
     }
-    record_answer_merge(session, marker, &worktree, &result, &before_sha)?;
+    record_answer_merge(session, marker, &worktree, &merge)?;
     let interrupts = without(&session.state.interrupts, pending);
     session.apply(PoolUpdate {
         interrupts: Some(interrupts),
@@ -693,7 +783,7 @@ pub fn approve_merge(
 }
 
 /// `rejectMerge`: the staged resolution is discarded and the ticket reopens (ADR-0014), which lifts
-/// the merge hold.
+/// the unlanded list.
 pub fn reject_merge(
     session: &mut Session,
     marker: &TicketMarker,
@@ -747,9 +837,9 @@ fn non_empty(text: Option<String>) -> Option<String> {
 }
 
 /// `resolveResolver`: console.json's resolver (a harness name, "none", or `{ harness, model, effort }`)
-/// over the pool defaults and the Machine defaults. `None` takes the manual path; an explicit resolver
-/// naming an unknown harness fails.
-pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec>> {
+/// over the pool defaults and the Machine defaults, with a Merger's own non-empty fields ahead of all
+/// of them. `None` takes the manual path; an explicit resolver naming an unknown harness fails.
+fn resolve_resolver(session: &Session, merger: &Assign) -> anyhow::Result<Option<ResolverSpec>> {
     let config = &session.state.config;
     let (harness, model, effort) = match config.resolver() {
         Some(Value::Object(_)) => {
@@ -763,6 +853,14 @@ pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec
         Some(Value::String(name)) => (Some(name.clone()), None, None),
         _ => (None, None, None),
     };
+    let ahead = |own: &Option<String>, config: Option<String>| {
+        own.clone().filter(|t| !js::trim(t).is_empty()).or(config)
+    };
+    let (harness, model, effort) = (
+        ahead(&merger.harness, harness),
+        ahead(&merger.model, model),
+        ahead(&merger.effort, effort),
+    );
     let explicit = harness.as_deref().map(|h| js::trim(h).to_owned());
     if matches!(explicit.as_deref(), Some("" | "none")) {
         return Ok(None);
@@ -796,6 +894,35 @@ pub fn resolve_resolver(session: &Session) -> anyhow::Result<Option<ResolverSpec
         model,
         effort,
     }))
+}
+
+/// What a conflicting merge does for one Ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// The Merger says wait: the operator's merge-conflict Interrupt, no resolver.
+    Wait,
+    Resolve(ResolverSpec),
+    /// No resolver is configured, so the manual path.
+    NoResolver,
+}
+
+/// The conflict policy for `ticket`, read from the frozen Plan at conflict time so it holds across a
+/// restart: its node's Merger when it has one, else the pool's own resolver.
+pub fn conflict_policy(session: &Session, ticket: &str) -> anyhow::Result<ConflictPolicy> {
+    let merger = session.line.as_ref().and_then(|line| {
+        let node = line.node_of(&TicketId::new(ticket))?;
+        line.plan().0.conflict_for(node)
+    });
+    let own = Assign::default();
+    let assign = match merger {
+        Some(Conflict::Wait) => return Ok(ConflictPolicy::Wait),
+        Some(Conflict::Resolver(assign)) => assign,
+        None => &own,
+    };
+    Ok(match resolve_resolver(session, assign)? {
+        Some(resolver) => ConflictPolicy::Resolve(resolver),
+        None => ConflictPolicy::NoResolver,
+    })
 }
 
 /// The resolver's result: whether it staged a resolution, and its note.
@@ -883,16 +1010,24 @@ async fn route_merge_conflict(
                     return Ok(Route::Done);
                 }
                 let worktree = ticket_worktree(s, &marker, None);
-                let Some(resolver) = resolve_resolver(s)? else {
-                    let manual = manual_merge_interrupt(
-                        s,
-                        &marker,
-                        &result,
-                        "no resolver harness available (set console.json resolver= or a \
-                         ~/.issue-runner default)",
-                    );
-                    raise_interrupt(s, manual);
-                    return Ok(Route::Done);
+                let resolver = match conflict_policy(s, &marker.id)? {
+                    ConflictPolicy::Wait => {
+                        let conflict = merge_conflict_interrupt(s, &marker, &result);
+                        raise_interrupt(s, conflict);
+                        return Ok(Route::Done);
+                    }
+                    ConflictPolicy::NoResolver => {
+                        let manual = manual_merge_interrupt(
+                            s,
+                            &marker,
+                            &result,
+                            "no resolver harness available (set console.json resolver= or a \
+                             ~/.issue-runner default)",
+                        );
+                        raise_interrupt(s, manual);
+                        return Ok(Route::Done);
+                    }
+                    ConflictPolicy::Resolve(resolver) => resolver,
                 };
                 // The head of the Merge queue is resolving from here, before the resolver is live.
                 s.merge_line.resolving(&marker.id);
@@ -1040,114 +1175,6 @@ async fn run_resolver_attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // A host over a scripted sequence of derived holds, recording what the rule did.
-    struct ScriptedHost {
-        derived: Mutex<Vec<Vec<String>>>,
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl ScriptedHost {
-        fn new(derived: Vec<Vec<&str>>) -> Self {
-            ScriptedHost {
-                derived: Mutex::new(
-                    derived
-                        .into_iter()
-                        .map(|d| d.into_iter().map(str::to_owned).collect())
-                        .collect(),
-                ),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl HoldHost for ScriptedHost {
-        async fn derive(&self) -> anyhow::Result<Vec<String>> {
-            self.calls.lock().unwrap().push("derive".into());
-            let mut derived = self.derived.lock().unwrap();
-            Ok(if derived.is_empty() {
-                Vec::new()
-            } else {
-                derived.remove(0)
-            })
-        }
-        async fn drain(&self) -> anyhow::Result<bool> {
-            self.calls.lock().unwrap().push("drain".into());
-            Ok(false)
-        }
-        async fn engaged(&self, hold: Vec<String>) -> anyhow::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("engaged {}", hold.join(",")));
-            Ok(())
-        }
-        async fn emit(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("emit".into());
-            Ok(())
-        }
-    }
-
-    // merge-hold.test.ts:418
-    #[tokio::test]
-    async fn hands_back_the_first_recompute_when_nothing_holds_without_a_wait() {
-        let host = ScriptedHost::new(vec![]);
-        let value = through_merge_hold(
-            &host,
-            || async { Ok((7, Vec::new())) },
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(value, 7);
-        assert!(host.calls().is_empty());
-    }
-
-    // merge-hold.test.ts:431
-    #[tokio::test]
-    async fn re_waits_a_hold_that_re_engages_between_the_wait_and_the_recompute() {
-        // The first recompute sees 01 held; the wait sees it lift; the second recompute sees 02 held
-        // (re-engaged), so a second wait starts, logged again; the third recompute is clear.
-        let host = ScriptedHost::new(vec![vec!["01"], vec![], vec!["02"], vec![]]);
-        let holds = Mutex::new(vec![vec!["01"], vec!["02"], vec![]]);
-        let value = through_merge_hold(
-            &host,
-            || {
-                let hold: Vec<String> = holds
-                    .lock()
-                    .unwrap()
-                    .remove(0)
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect();
-                async move { Ok((hold.is_empty(), hold)) }
-            },
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
-        assert!(value);
-        assert_eq!(
-            host.calls(),
-            [
-                "engaged 01",
-                "emit",
-                "derive",
-                "drain",
-                "derive",
-                "engaged 02",
-                "emit",
-                "derive",
-                "drain",
-                "derive"
-            ]
-        );
-    }
 
     #[test]
     fn a_resolution_needs_a_resolved_boolean() {
@@ -1161,6 +1188,191 @@ mod tests {
                 resolved: true,
                 note: None
             }
+        );
+    }
+
+    fn event_at(at: &str, kind: TicketEventKind) -> Arc<TicketEvent> {
+        Arc::new(TicketEvent {
+            at: at.to_owned(),
+            attempt: 1,
+            kind,
+            payload: Map::new(),
+        })
+    }
+
+    #[test]
+    fn counts_each_other_ticket_that_started_after_the_latest_conflict_once() {
+        let conflicted = vec![
+            event_at("2026-10-18T10:00:00.000Z", TicketEventKind::MergeConflict),
+            event_at("2026-10-18T10:05:00.000Z", TicketEventKind::MergeBlocked),
+        ];
+        let verify_round = vec![
+            event_at("2026-10-18T10:06:00.000Z", TicketEventKind::Scheduled),
+            event_at("2026-10-18T10:06:00.000Z", TicketEventKind::Scheduled),
+        ];
+        let before_the_conflict = vec![event_at(
+            "2026-10-18T10:04:00.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        let never_started = vec![event_at(
+            "2026-10-18T10:07:00.000Z",
+            TicketEventKind::Merged,
+        )];
+        let others = vec![verify_round, before_the_conflict, never_started];
+        assert_eq!(
+            started_since_conflict(&conflicted, others.into_iter()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_start_while_the_resolver_works_counts_from_the_conflict_not_the_resolver() {
+        let conflicted = vec![
+            event_at("2026-10-18T10:00:00.000Z", TicketEventKind::MergeConflict),
+            event_at("2026-10-18T10:00:01.000Z", TicketEventKind::Resolver),
+            event_at("2026-10-18T10:00:02.000Z", TicketEventKind::Spawned),
+        ];
+        let during_the_resolver = vec![event_at(
+            "2026-10-18T10:00:03.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        assert_eq!(
+            started_since_conflict(&conflicted, vec![during_the_resolver].into_iter()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_conflict_nobody_started_after_has_no_count() {
+        let conflicted = vec![event_at(
+            "2026-10-18T10:00:00.000Z",
+            TicketEventKind::MergeConflict,
+        )];
+        let earlier = vec![event_at(
+            "2026-10-18T09:00:00.000Z",
+            TicketEventKind::Scheduled,
+        )];
+        assert_eq!(
+            started_since_conflict(&conflicted, vec![earlier].into_iter()),
+            None
+        );
+        assert_eq!(started_since_conflict(&[], std::iter::empty()), None);
+    }
+
+    // A pool whose Line has opened `build` with two Items, so `build-1.1` and `build-1.2` are the
+    // Line's Tickets, under the given Merger conflict setting.
+    fn pool_with_line(conflict: Option<Value>, resolver: Value) -> Session {
+        use ac_core::line::run::{LineBrief, LinePlaces, LineRun, LineStart};
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.state.config = ac_core::config::PoolConfig::from_map(
+            serde_json::json!({
+                "resolver": resolver,
+                "defaults": {"harness": "claude", "model": "sonnet"}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let mut nodes = vec![
+            serde_json::json!({"kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0,
+                "copies": {"perItem": 2}}),
+            serde_json::json!({"kind": "agent", "id": "plain", "title": "Plain", "x": 0, "y": 0}),
+            serde_json::json!({"kind": "finish", "id": "finish", "title": "Finish", "x": 0, "y": 0}),
+        ];
+        let mut edges = vec![serde_json::json!({"from": "plain", "on": "done", "to": "finish"})];
+        match conflict {
+            Some(conflict) => {
+                nodes.push(
+                    serde_json::json!({"kind": "merger", "id": "build-merge", "title": "M",
+                    "x": 0, "y": 0, "of": "build", "conflict": conflict}),
+                );
+                edges.push(serde_json::json!({"from": "build", "on": "done", "to": "build-merge"}));
+                edges
+                    .push(serde_json::json!({"from": "build-merge", "on": "done", "to": "finish"}));
+            }
+            None => edges.push(serde_json::json!({"from": "build", "on": "done", "to": "finish"})),
+        }
+        let plan = ac_core::plan::Plan::from_value(
+            &serde_json::json!({"horde": 1, "name": "p", "nodes": nodes, "edges": edges}),
+        )
+        .unwrap();
+        let brief = LineBrief::parse(
+            r#"{"items": [{"title": "a", "body": "A"}, {"title": "b", "body": "B"}]}"#,
+        )
+        .unwrap();
+        session.line =
+            Some(LineRun::start(plan, LinePlaces::default(), LineStart::Brief(brief)).unwrap());
+        session
+    }
+
+    fn resolver(harness: &str, model: &str, effort: Option<&str>) -> ConflictPolicy {
+        ConflictPolicy::Resolve(ResolverSpec {
+            harness: harness.to_owned(),
+            model: model.to_owned(),
+            effort: effort.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_merger_set_to_wait_holds_its_copies_for_the_operator() {
+        let session = pool_with_line(Some(Value::from("wait")), Value::from("claude"));
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            ConflictPolicy::Wait
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.2").unwrap(),
+            ConflictPolicy::Wait
+        );
+    }
+
+    #[test]
+    fn a_mergers_resolver_fields_win_and_each_empty_one_falls_through_to_the_pool() {
+        let pool = serde_json::json!({"harness": "claude", "model": "sonnet", "effort": "low"});
+        let merger = |assign: Value| Some(serde_json::json!({"resolver": assign}));
+        let session = pool_with_line(
+            merger(serde_json::json!({"harness": "opencode", "model": "gpt-5"})),
+            pool.clone(),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("opencode", "gpt-5", Some("low"))
+        );
+        let session = pool_with_line(merger(serde_json::json!({"effort": "high"})), pool);
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("claude", "sonnet", Some("high"))
+        );
+    }
+
+    #[test]
+    fn a_merger_can_name_a_resolver_when_the_pool_has_none() {
+        let session = pool_with_line(
+            Some(serde_json::json!({"resolver": {"harness": "opencode", "model": "gpt-5"}})),
+            Value::from("none"),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("opencode", "gpt-5", None)
+        );
+    }
+
+    #[test]
+    fn a_ticket_with_no_merger_takes_the_pools_own_resolver() {
+        let pool = serde_json::json!({"harness": "claude", "model": "sonnet", "effort": "low"});
+        let session = pool_with_line(None, pool.clone());
+        for ticket in ["build-1.1", "plain-1", "01"] {
+            assert_eq!(
+                conflict_policy(&session, ticket).unwrap(),
+                resolver("claude", "sonnet", Some("low")),
+                "{ticket}"
+            );
+        }
+        let none = pool_with_line(None, Value::from("none"));
+        assert_eq!(
+            conflict_policy(&none, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
         );
     }
 

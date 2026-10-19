@@ -25,9 +25,10 @@ pub const STEWARD_USAGE: &str = "usage: agent-console steward --pool <pool-dir> 
   leave <ticket> <note>
   held adopt|discard <proposal-id>
   reassign <ticket> field=value...   (harness, model, effort, drivers, verify; field= clears)
+  plan <rev> <edits>   (a JSON array of Plan edits; only while the Line's Plan lets the Steward edit it)
   state
   end [closing line]
-A note, message or closing line of \"-\" is read from standard input.";
+A note, message, closing line or edits of \"-\" is read from standard input.";
 
 /// The options (anywhere on the line) and the verb with its words.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -237,6 +238,24 @@ pub fn steward_call(
                 ],
             ))
         }
+        "plan" => {
+            let plan_usage = || {
+                usage(
+                    "plan <rev> <edits>: the rev a whole number, the edits a JSON array of Plan edits",
+                )
+            };
+            let Some(rev) = word(words, 0).and_then(|rev| rev.parse::<u64>().ok()) else {
+                return Err(plan_usage());
+            };
+            let text = free_text(words.get(1..).unwrap_or_default(), stdin);
+            let Ok(edits @ Value::Array(_)) = serde_json::from_str::<Value>(&text) else {
+                return Err(plan_usage());
+            };
+            Ok(post(
+                "/api/steward/plan",
+                vec![("baseRev", Value::from(rev)), ("edits", edits)],
+            ))
+        }
         "state" => Ok(StewardCall::Get {
             path: format!(
                 "/api/steward/state?conversation={}",
@@ -410,6 +429,33 @@ pub fn format_steward_state(state: &Value) -> String {
             ))
         )
     });
+    if let Some(line) = state.get("line").filter(|line| line.is_object()) {
+        let parked = items(line, "parked");
+        lines.push(format!(
+            "Line Plan: rev {}; {}",
+            printed(line, "rev"),
+            if parked.is_empty() {
+                "no parked verdicts.".to_owned()
+            } else {
+                format!(
+                    "parked verdicts: {}.",
+                    parked
+                        .iter()
+                        .map(|node| format!(
+                            "{} {}",
+                            printed(node, "node"),
+                            items(node, "verdicts")
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }
+        ));
+    }
     lines.push(format!("Spawn ledger: {}", printed(state, "ledger")));
     lines.join("\n")
 }
@@ -673,6 +719,23 @@ mod tests {
             r#"{"conversation":"conv-1","tickets":["01"],"fields":{"model":"big","effort":null,"verify":2}}"#
         );
         assert_eq!(
+            call("plan", &["3", r#"[{"edit":"removeNode","id":"x"}]"#]),
+            Ok(post(
+                "/api/steward/plan",
+                json!({ "conversation": "conv-1", "baseRev": 3, "edits": [{ "edit": "removeNode", "id": "x" }] })
+            ))
+        );
+        let edits = steward_call("conv-1", "plan", &strings(&["0", "-"]), &mut || {
+            r#"[{"edit": "unlink", "from": "a", "on": "done", "to": "b"}]"#.to_owned()
+        });
+        assert_eq!(
+            edits,
+            Ok(post(
+                "/api/steward/plan",
+                json!({ "conversation": "conv-1", "baseRev": 0, "edits": [{ "edit": "unlink", "from": "a", "on": "done", "to": "b" }] })
+            ))
+        );
+        assert_eq!(
             call("state", &[]),
             Ok(StewardCall::Get {
                 path: "/api/steward/state?conversation=conv-1".to_owned()
@@ -750,6 +813,12 @@ mod tests {
             refused("keep-talking", &["01"]),
             "keep-talking <ticket> <message>"
         );
+        for words in [&["x", "[]"][..], &["1", "{}"], &["1", "not json"], &["1"]] {
+            assert_eq!(
+                refused("plan", words),
+                "plan <rev> <edits>: the rev a whole number, the edits a JSON array of Plan edits"
+            );
+        }
         assert_eq!(refused("dance", &[]), "unknown verb 'dance'");
     }
 
@@ -799,6 +868,7 @@ mod tests {
         let quiet = json!({
             "steward": "conv-2", "budget": 3, "mayClose": true, "phase": "done", "interrupts": [],
             "mergeQueue": [], "pendingSpawns": [], "heldSpawns": [], "ledger": "/l",
+            "line": { "rev": 2, "parked": [{ "node": "test", "verdicts": ["fail", "blocked"] }, { "node": "ship", "verdicts": ["ok"] }] },
         });
         assert_eq!(
             format_steward_state(&quiet),
@@ -808,6 +878,7 @@ mod tests {
                 "Merge queue: empty.",
                 "Pending spawns: none.",
                 "Held spawns: none.",
+                "Line Plan: rev 2; parked verdicts: test fail, blocked; ship ok.",
                 "Spawn ledger: /l",
             ]
             .join("\n")

@@ -1,30 +1,16 @@
-/**
- * Verify rounds across a stop and start, seen from outside the server
- * (ADR-0036): a paused round's Candidates, a human selection Interrupt and a
- * grader's complaint all come back at the next boot and stay answerable,
- * and a grader Ticket an earlier run left on disk resolves from its build
- * Ticket's Assignment at boot. Ticket C05 of the inventory's split
- * (docs/research/rust-port/test-inventory.md): each case names the engine
- * test it carries over.
- *
- * A round that stops at an Interrupt and resumes with nothing changed
- * between servers runs on the takeover harness (harness/takeover.ts), so it
- * is also matched against the same round run uninterrupted. Every Attempt,
- * grader and judge is the claude stub on PATH, and no server holds a
- * TypeSafe key, so grading goes through grader Tickets.
- */
-
 import { expect } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
-import { readEvents, readStateLine } from "../harness/pool-files.ts";
+import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { takeover } from "../harness/takeover.ts";
 import type { World } from "../harness/world.ts";
 import {
   answer,
   approveReview,
+  launchKeys,
+  poolLog,
   quiescentWith,
   restartCase,
   settle,
@@ -87,7 +73,7 @@ takeover(
         run: after(world, "exited", 1),
         work: { file: "cand-2.txt", message: "cand-2" },
       });
-      world.stubs.script("01-grader-2", { grade: { score: 7, verdict: "pass", reasons: "fine" } });
+      world.stubs.script("01-grader-2", { run: after(world, "graded", 1), grade: { score: 7, verdict: "pass", reasons: "fine" } });
     },
     // Nothing to drive: the round pauses on its own, and stopPoint waits for it.
     async reach() {},
@@ -154,8 +140,6 @@ restartCase("a grader's complaint is raised again from the Ticket file's Brief w
   expect(flagged.state.interrupts[0]!.body).toContain("work is incomplete");
   await first.stop();
 
-  // Killed before the boundary write, say: the state line and the Brief the
-  // engine wrote into the Ticket file are all there is.
   rmSync(join(world.pool, "console.db"), { force: true });
   const launched = world.stubs.calls().length;
   const second = await startLeg(t, world, 1);
@@ -164,6 +148,94 @@ restartCase("a grader's complaint is raised again from the Ticket file's Brief w
   expect(raised.state.interrupts).toEqual(flagged.state.interrupts);
   expect(statusesOf(raised)["01"]).toBe("checkpoint");
   expect(world.stubs.calls()).toHaveLength(launched);
+});
+
+restartCase("a round stopped after every Candidate exited is graded once at the next boot, not fanned out again", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(2) });
+  world.stubs.script("01.attempt-1", { work: { file: "cand-1.txt", message: "cand-1" } });
+  world.stubs.script("01.attempt-2", { work: { file: "cand-2.txt", message: "cand-2" } });
+  const graders = ["01-grader-1", "01-grader-2"].map((key) => world.stubs.hold(key, grade(8)));
+  const first = await startLeg(t, world, 0);
+  await until(
+    () => world.stubs.calls().map((call) => call.key),
+    (keys) => keys.includes("01-grader-1") && keys.includes("01-grader-2"),
+    { what: "both graders launched", ms: 30_000 },
+  );
+  expect(eventsOf(world, "01", "exited").map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+  await first.stop();
+  const before = world.stubs.calls().length;
+  const scheduled = eventsOf(world, "01", "scheduled");
+  expect(scheduled.map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+
+  const second = await startLeg(t, world, 1);
+  for (const held of graders) await held.release(30_000);
+  await approveReview(second);
+
+  expect(await poolLog(second)).toContain(
+    "ticket 01: every candidate of its verify round ended before a restart; the round is graded, not fanned out again",
+  );
+  const rerun = world.stubs.calls().slice(before).map((call) => call.key);
+  expect(rerun.filter((key) => key.startsWith("01.attempt-"))).toEqual([]);
+  expect(rerun.filter((key) => key.includes("-grader-")).sort()).toEqual(["01-grader-1", "01-grader-2"]);
+  expect(eventsOf(world, "01", "scheduled")).toEqual(scheduled);
+  expect(eventsOf(world, "01", "graded").map(([attempt]) => attempt).sort()).toEqual([1, 2]);
+  expect(eventsOf(world, "01", "merged").map(([attempt]) => attempt)).toEqual([1]);
+  expect(inCheckout(world, "cand-1.txt")).toBe(true);
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+}, { timeoutMs: 120_000 });
+
+// The judge is killed with the engine, so the round that wrote its card is over; the next boot judges afresh.
+restartCase("a head-to-head judge a kill interrupted has its card closed done at the next boot, and its round judged afresh to the Review", async (t) => {
+  const world = t.world({ tickets: [ready("01")], config: verifyConfig(2) });
+  for (const n of [1, 2]) world.stubs.script(`01.attempt-${n}`, { work: { file: `cand-${n}.txt`, message: `cand-${n}` } });
+  world.stubs.script("01-grader-1", grade(9));
+  world.stubs.script("01-grader-2", grade(8));
+  const judge = world.stubs.hold("01-head-to-head", { winner: 1 });
+  const first = await startLeg(t, world, 0);
+  await until(() => launchKeys(world), (keys) => keys.includes("01-head-to-head"), {
+    what: "the head-to-head judge launched",
+    ms: 30_000,
+  });
+  expect(readStateLine(world.pool, "01-head-to-head.md").status).toBe("in-progress");
+  await first.kill();
+
+  const second = await startLeg(t, world, 1);
+  await judge.release(30_000);
+  await approveReview(second);
+
+  const log = await poolLog(second);
+  expect(log).toContain(
+    "ticket 01-head-to-head: head-to-head card was in-progress at boot; its round is over and the card closes done",
+  );
+  expect(log.some((line) => line.startsWith("ticket 01-head-to-head: orphan attempt 1 (pid "))).toBe(true);
+  expect(launchKeys(world).filter((key) => key === "01-head-to-head")).toHaveLength(2);
+  expect(readStateLine(world.pool, "01-head-to-head.md").line).toContain("id=01-head-to-head blocked-by=01 status=done");
+  expect(eventsOf(world, "01", "selected")).toEqual([[1, { score: 9, margin: 1, rule: "head-to-head" }]]);
+  expect(readStateLine(world.pool, "01-t.md").status).toBe("done");
+}, { timeoutMs: 120_000 });
+
+// A card still in-progress beside a done build Ticket is a round the engine died in; it must not hold the Review back.
+conformance("restart", "an in-progress head-to-head card beside a done build Ticket closes done at boot and the Review is raised", async (t) => {
+  const world = t.world({
+    tickets: [
+      { file: "01-t.md", marker: "<!-- state: id=01 blocked-by=none status=done -->" },
+      {
+        file: "01-head-to-head.md",
+        content: "<!-- state: id=01-head-to-head blocked-by=01 status=in-progress -->\n\n# 01-head-to-head\n",
+      },
+    ],
+    config: verifyConfig(2),
+  });
+  const server = await t.start(world);
+
+  const done = await approveReview(server);
+
+  expect(statusesOf(done)).toEqual({ "01": "done", "01-head-to-head": "done" });
+  expect(readStateLine(world.pool, "01-head-to-head.md").line).toContain("id=01-head-to-head blocked-by=01 status=done");
+  expect(await poolLog(server)).toContain(
+    "ticket 01-head-to-head: head-to-head card was in-progress at boot; its round is over and the card closes done",
+  );
+  expect(launchKeys(world)).toEqual([]);
 });
 
 // engine/engine.test.ts:3354

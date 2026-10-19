@@ -507,8 +507,8 @@ pub fn resolve_ticket_assignment(
 ) -> Result<Assignment, ConfigError> {
     let request = assign_request(config, marker.id());
     let defaults = defaults_layer(config);
-    // A Line's Station Ticket carries its Station's Assignment the way a spawned ticket carries its
-    // request (ADR-0037), ranking under the operator's assign entry for the id.
+    // A Line's Ticket carries its node's Assignment the way a spawned ticket carries its request
+    // (ADR-0040), ranking under the operator's assign entry for the id.
     let requested = marker.spawn_assign().map(AssignmentLayer::from);
     resolve_assignment(ResolveAssignmentParams {
         subject: &ticket_subject(marker.id()),

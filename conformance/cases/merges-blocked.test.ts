@@ -1,20 +1,3 @@
-/**
- * Merges git refuses before starting, seen from outside the server
- * (ADR-0036, issue #92): an untracked file in the pool checkout that a
- * Ticket's branch would write, or a tracked file with uncommitted changes
- * there. A byte-identical untracked copy is deleted and the merge lands; a
- * differing one blocks the merge without starting it, raises a manual
- * merge-conflict Interrupt and spawns no resolver; a merge git started and
- * could not finish stays a conflict. Also the Keep talking merges (ADR-0027):
- * a Continued attempt in the pool checkout holds merges into it, and one
- * that ends done in a worktree merges onto the target.
- *
- * The pool lives at <repo>/.scratch/pool, so "the pool checkout" is the
- * world's repository checkout, world.repo. Two Tickets are ready in each
- * world so each runs in its own worktree and merges at the boundary; a lone
- * Ticket runs in the checkout itself.
- */
-
 import { expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +10,7 @@ import {
   gitOk,
   poolKey,
   resume,
+  stateOf,
   ticketWorktree,
   untilState,
   worktreeList,
@@ -405,31 +389,40 @@ const CHECKPOINT = { status: "checkpoint", summary: "paused", commitSha: null, b
 
 conformance(
   "merges",
-  "a Continued attempt in the pool checkout holds merges into it until it ends",
+  "a Continued attempt in a pane enlisted in the pool checkout holds no merge: a Conversation's lands on the target while it talks, the checkout untouched",
   async (t) => {
-    const world = t.world({
-      tickets: [{ file: "01-a.md", marker: marker("01"), body: "# Talk it through\n\nbody" }],
-      config: TERMINAL,
-    });
+    const world = t.world({ tickets: [{ file: "01-a.md", marker: marker("01", "done") }], config: TERMINAL });
     const quit = stayAlive(world);
     const herdr = await t.herdr(world, { rendered: READY_FRAME });
+    await herdr.control("seedAgent", {
+      paneId: "pane-main",
+      agent: "claude",
+      cwd: world.repo,
+      title: "CC on main",
+      status: "idle",
+      rendered: READY_FRAME,
+      tabId: "tab-main",
+    });
     const server = await t.start(world, { herdr });
     try {
-      // 01 runs alone, so in the pool checkout.
-      await untilSubmitted(herdr, 1);
-      const spawned = readEvents(world.pool, "01").find((event) => event.kind === "spawned")!;
-      expect(spawned.payload.cwd).toBe(world.repo);
-      writeOutcome(world, "01", CHECKPOINT);
-      await untilState(server, (s) => s.state.tickets.find((x) => x.id === "01")?.heldPane != null, {
-        ms: 20_000,
-        what: "01's Held pane",
+      const enlisted = await server.http.post("/api/enlist", {
+        becomes: "ticket",
+        paneId: "pane-main",
+        title: "Talk it through",
+        spec: "",
       });
-
-      const talk = await server.http.post("/api/keep-talking", { ticketId: "01" });
+      expect(enlisted.status).toBe(201);
+      const moved = ticketWorktree(world.repo, "enlist-1").branch;
+      expect(gitIn(world.repo, ["branch", "--show-current"]).trim()).toBe(moved);
+      writeOutcome(world, "enlist-1", CHECKPOINT);
+      await untilState(server, (s) => s.state.tickets.find((x) => x.id === "enlist-1")?.heldPane != null, {
+        ms: 45_000,
+        what: "enlist-1's Held pane",
+      });
+      const talk = await server.http.post("/api/keep-talking", { ticketId: "enlist-1" });
       expect(talk.status).toBe(202);
-      expect(talk.json<unknown>()).toEqual({ ticketId: "01", attempt: 2 });
+      expect(talk.json<unknown>()).toEqual({ ticketId: "enlist-1", attempt: 2 });
 
-      // A Conversation works in its own worktree meanwhile.
       const started = await server.http.post("/api/conversations", { title: "Side work" });
       expect(started.status).toBeLessThan(300);
       const id = started.json<{ conversation: { id: string } }>().conversation.id;
@@ -438,34 +431,31 @@ conformance(
       commitIn(worktree, "side.txt");
       const ended = await server.http.post("/api/conversations/end", { id });
       expect(ended.status).toBeLessThan(300);
-      // Its merge waits at the pool checkout's gate while 01 talks there.
-      // A Conversation's End records no merge-deferred event (a Ticket's
-      // held merge does), so the case looks for the merge after a while.
-      await until(() => readEvents(world.pool, id), (events) => events.some((e) => e.kind === "end-requested"), {
-        what: "the Conversation's end-requested event",
-      });
-      await Bun.sleep(500);
-      expect(existsSync(join(world.repo, "side.txt"))).toBe(false);
-      expect(readEvents(world.pool, id).some((e) => e.kind === "merged")).toBe(false);
-
-      writeOutcome(world, "01", { status: "done", summary: "talked", commitSha: null });
       await until(() => readEvents(world.pool, id), (events) => events.some((e) => e.kind === "ended"), {
         ms: 20_000,
-        what: "the Conversation's held merge and ending",
+        what: "the Conversation's merge and ending",
       });
-      expect(existsSync(join(world.repo, "side.txt"))).toBe(true);
       const ending = readEvents(world.pool, id).filter((e) => e.kind === "merged" || e.kind === "ended");
       expect(ending.map((e) => [e.kind, e.payload])).toEqual([
         ["merged", {}],
         ["ended", { closing: null, by: "operator", merged: true }],
       ]);
-      await untilState(server, (s) => s.state.tickets.find((x) => x.id === "01")?.status === "done", {
-        what: "01 done",
+      expect(gitIn(world.repo, ["show", "main:side.txt"])).toBe("work\n");
+      expect(existsSync(join(world.repo, "side.txt"))).toBe(false);
+      expect(gitIn(world.repo, ["branch", "--show-current"]).trim()).toBe(moved);
+      const talking = await stateOf(server);
+      expect(talking.state.tickets.find((x) => x.id === "enlist-1")?.liveAttempt?.attempt).toBe(2);
+
+      writeOutcome(world, "enlist-1", { status: "done", summary: "talked", commitSha: null });
+      await untilState(server, (s) => s.state.tickets.find((x) => x.id === "enlist-1")?.status === "done", {
+        ms: 20_000,
+        what: "enlist-1 done",
       });
     } finally {
       writeFileSync(quit, "");
     }
   },
+  { timeoutMs: 90_000 },
 );
 
 conformance(

@@ -1,19 +1,3 @@
-/**
- * How a Notice reaches its parent Conversation (ADR-0018, ADR-0030), seen
- * from outside the server (ADR-0036): queued while the parent's Turn reads
- * working, typed as its own Turn once it reads waiting, kept and retried
- * when herdr refuses or the pane swallows it, and dropped, logged on the
- * child's own file, when the parent is not live or ends first. Rows of the
- * `conversations` area, ticket C17, in the Rust port inventory
- * (docs/research/rust-port/test-inventory.md), and the area's gap on a
- * Notice dropped for a parent that ended before delivery.
- *
- * Each Notice typed or dropped is pinned byte for byte (the inventory's
- * Decided 4). A lone spawned Ticket runs in the pool checkout, on no branch
- * of its own, yet its Notice names the branch a worktree of it would have
- * had, as the Bun server writes it.
- */
-
 import { expect } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -55,7 +39,6 @@ import {
   untilSnapshot,
 } from "./steward/pool.ts";
 
-/** The checkpoint Notice of the lone spawned Ticket these cases run. */
 function childCheckpointText(world: World, brief: string): string {
   return ticketEndedText({
     id: "conv-1-spawn-1",

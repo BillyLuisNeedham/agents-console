@@ -1,19 +1,14 @@
-//! Folder trust for claude (issue #127, ADR-0025; claude-trust.ts): the engine vouches for the
-//! directories it makes, so an interactive claude never meets its workspace trust dialog in a pool
-//! worktree.
-//!
-//! claude keeps a per-directory record of the operator having accepted that dialog,
+//! claude keeps a per-directory record of the operator having accepted its workspace trust dialog,
 //! `projects[<absolute path>].hasTrustDialogAccepted` in `~/.claude.json`, and skips the dialog when it
-//! is true. Every pool worktree is a directory claude has never seen, so without a seed every
-//! terminal-backed claude Attempt starts on the dialog, inside the readiness wait's budget.
+//! is true.
 //!
-//! The write is add-only and mirrors claude's own: the whole file re-read, the one entry set, the result
-//! written to a sibling temp file and renamed over the original. Two-space indent and no trailing
-//! newline match claude's output, so a diff of the file shows only the entry. A seed can in principle be
-//! lost to another claude session that read the file before it and wrote after; the pane's dialog
-//! handler (`pane_session`) remains behind the seed for that case. Nothing is ever removed.
+//! The write mirrors claude's own: the whole file re-read, the one entry set, the result written to a
+//! sibling temp file and renamed over the original. Two-space indent and no trailing newline match
+//! claude's output, so a diff of the file shows only the entry. A seed can still be lost to another
+//! claude session that read the file before it and wrote after.
 
 use std::io::Read;
+use std::sync::Mutex;
 
 use serde_json::{Map, Value, json};
 
@@ -32,6 +27,8 @@ pub fn default_claude_config_path(claude_config_dir: Option<&str>, home: &str) -
     };
     js::path_join(&[dir, ".claude.json"])
 }
+
+static CLAUDE_JSON_READ_MODIFY_WRITE: Mutex<()> = Mutex::new(());
 
 /// What one seed did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +80,9 @@ fn is_trusted(entry: Option<&Value>) -> bool {
 /// machine) or one that does not parse is left alone: a seed is never worth corrupting the operator's
 /// config, and the dialog handler covers the launch.
 pub fn seed_claude_folder_trust(cwd: &str, config_path: &str) -> FolderTrustSeed {
+    let _turn = CLAUDE_JSON_READ_MODIFY_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !js::exists(config_path) {
         return FolderTrustSeed::Skipped {
             reason: format!("{config_path} does not exist"),
@@ -336,6 +336,40 @@ mod tests {
         assert_eq!(
             read(&target)["projects"][&s.worktree]["hasTrustDialogAccepted"],
             true
+        );
+    }
+
+    #[test]
+    fn seeds_made_at_once_all_land() {
+        let s = scratch();
+        fs::write(&s.config, realistic_config(None)).unwrap();
+        let worktrees: Vec<String> = (0..16)
+            .map(|n| {
+                let worktree = format!("{}/pool-worktrees/abcd1234/t{n:02}", s.dir);
+                fs::create_dir_all(&worktree).unwrap();
+                worktree
+            })
+            .collect();
+        let start = std::sync::Barrier::new(worktrees.len());
+        std::thread::scope(|scope| {
+            for worktree in &worktrees {
+                let (start, config) = (&start, &s.config);
+                scope.spawn(move || {
+                    start.wait();
+                    seed_claude_folder_trust(worktree, config);
+                });
+            }
+        });
+        let config = read(&s.config);
+        for worktree in &worktrees {
+            assert_eq!(
+                config["projects"][worktree]["hasTrustDialogAccepted"], true,
+                "{worktree}"
+            );
+        }
+        assert_eq!(
+            config["projects"]["/home/op/repos/other"]["lastSessionId"],
+            "6f1c"
         );
     }
 

@@ -107,7 +107,7 @@ that is not a plain passing case.
   CONTEXT.md says of a ticket left waiting on the operator. The case
   (`merges-queue.test.ts`) pins that, and that a landed ticket leaves the queue. Joining the back happens
   only on the paths that take a merge again (the drive's merge chain, an adopted or Continued attempt ending,
-  the boot re-chain of a merge dropped at shutdown, an enlisted ticket's merge), none of which re-takes a
+  an enlisted ticket's merge), none of which re-takes a
   merge already in the line from outside today.
   Rust unit test: *merge line: a ticket taken again after it left the line joins the back, behind tickets
   taken since; one resumed in place keeps its place.* It is
@@ -359,13 +359,11 @@ the store still refuses). What follows is the part that is not a plain passing c
 
 - **A refused checkpoint write's retry** (`engine.test.ts:7033`). The row's seam, a store that fails exactly
   one write, does not exist. The case makes the store refuse from outside instead: it holds an exclusive SQLite
-  lock on `console.db` from the test process, lets 01 finish, and lets go once the server answers a request sent
-  after 01's `exited` event is on disk. On the Bun server 01's exit and the boundary write run in one stretch of
-  the event loop, so that request is answered only in the backoff after the first write, which the lock refused:
-  in the runs measured, the first checkpoint row landed about 50 ms after the release. What a case cannot show
-  from outside is that a write failed at all: a server that answers HTTP while its boundary write is still to
-  come passes it without retrying anything. The case pins what it can: no persistence Interrupt, 02 launched
-  after 01, and the first row holding `{01: done, 02: ready}`. Rust unit tests: *persist retry: a boundary
+  lock on `console.db` from the test process, lets 01 finish, and lets go once 02 has launched. The Tick that
+  starts 02 tries its row write as it hands the launch off, before 02's stub can record itself, so the release
+  comes in the backoff after a write the lock refused. What a case cannot show from outside is that a write
+  failed at all: a server that wrote its row only after 02's stub started passes it without retrying anything.
+  The case pins what it can: no persistence Interrupt, 02 launched after 01, and a row holding 01 done. Rust unit tests: *persist retry: a boundary
   checkpoint write that fails once is retried after the backoff, the next Ticket is scheduled and no persistence
   Interrupt is raised; a run to done makes seven write attempts, the failed one and six rows*, and *persistence
   Interrupt: with a store that always fails, the boundary write and the closing write each make four attempts,
@@ -548,7 +546,7 @@ all; nothing malformed).
 
 ### Where the cases reach a row differently from its wording
 
-- `engine.test.ts:7183`: a drive that dies in its first super-step is dead before a socket can open, so the
+- `engine.test.ts:7183`: a drive that dies at its first Tick is dead before a socket can open, so the
   case runs 01 on the opencode stub, held until a socket watches, and kills the drive with 02's launch on
   claude. The server coalesces frames (seen: one running snapshot, then one delta straight to dead), so the
   case asks for at least one running frame before the dead one, and nothing else.
@@ -597,8 +595,8 @@ How the cases come by a listing, which binds the Rust server:
 
 Where the cases reach a row differently from its wording:
 
-- `finished-terminals.test.ts:52`: the crash Interrupts of 01, 04 and 05 wait for their super-step, which the
-  Live attempt holds open, so the case waits for the three Attempts to end rather than for their Interrupts.
+- `finished-terminals.test.ts:52`: the case waits for the Attempts of 01, 04 and 05 to end, while the Live
+  attempt stays open, rather than for their crash Interrupts, which are raised at each exit (ADR-0041).
 - `held-panes.test.ts:78`: the headless attempt, the resolver attempt and the attempt never spawned are
   booted from events written by hand, since a terminal-backed pool runs nothing headless but a fallback and a
   resolver never checkpoints its Ticket. The fallback is a real run with `tab.create` refused.
@@ -691,19 +689,13 @@ remembered Pool workspace (`engine/engine.ts:3039`, the relabel at boot, and `en
 
 ### Where the cases reach a row differently from its wording
 
-- **`engine.test.ts:10346`** (a SIGKILL mid-super-step). A SIGKILL stops nothing, so 02's held stub outlives the
+- **`engine.test.ts:10346`** (a SIGKILL while a Ticket runs). A SIGKILL stops nothing, so 02's held stub outlives the
   server in its worktree, and the next boot stops it as an orphan before it puts 02 back to ready: the "back to
   ready" line the row names is the orphan line (`... is still running from the previous engine process; stopping
   it before scheduling, ticket back to ready`), which the case pins with the stub's pid.
 - **`engine.test.ts:12561`** (an answered Interrupt across a SIGKILL). The resumed attempt the kill left running is
   let go and waited out before the restart, so the boot finds no agent alive and takes the plain reset; left
   running, it would take the orphan path of `engine.test.ts:13174` instead.
-- **`merge-hold.test.ts:526`** (a restart's merge queue). The one merge the restart takes on must stay queued long
-  enough to read, and a merge is one synchronous git run inside the server. The only thing that holds one from
-  outside is the pool checkout's gate: the case continues Ticket 01 in the pool checkout by Keep talking, stops,
-  writes 03, 07 and 09 done on branches main lacks with 07's events ending in `merge-deferred`, and restarts. The
-  re-adopted Continued attempt holds 07's re-chained merge at the gate, so the queue reads 07 queued, then 03 and
-  09 stalled, beside the Continued attempt's adoption checkpoint, the one Interrupt up.
 - **`children.test.ts:62`** (a harness that ignores TERM). The stub is made to ignore TERM by its own wrapper
   (`trap '' TERM` before its exec), since the stop signals the whole process group and the stub script itself
   must outlive the TERM for the KILL to be what ends it (exit 137).
@@ -796,10 +788,9 @@ Where the cases reach a row differently from its wording:
 - **`notices.test.ts:139`'s seam** (a diff git cannot compute) is reached without one: the case plays an agent that
   renames its own branch before it pauses, so the branch the server names in `git diff --stat
   <target>...<branch>` no longer exists and git refuses the diff.
-- **`notices.test.ts:44`, `:130`**: a lone spawned Ticket runs in the pool checkout and never merges (see below),
-  so the case spawns two at once, which gives each a worktree, and pauses the second. Its done and checkpoint
-  Notices are each matched whole, in either order: the pause is told at its exit and the merge at the end of the
-  super-step.
+- **`notices.test.ts:44`, `:130`**: the case spawns two at once and pauses the second. Its done and checkpoint
+  Notices are each matched whole, in either order: the pause is told at the second's exit and the done at the
+  first's merge, whichever comes first (ADR-0041).
 - **`notices.test.ts:86`** and every other spawned Ticket's Notice: the title is the heading the server writes into
   a spawned Ticket's file, which leads with its id (`conv-1-spawn-2: Old idea`), not the proposal's title alone.
 - **`notices.test.ts:668`, `:744`, `:813`**: the spawned Ticket runs in a pane on the claude TUI stand-in like its
@@ -816,18 +807,17 @@ Behaviour of the TypeScript server the cases pin as it is today, each worth a lo
 
 - A spawned Ticket's Notice repeats its id inside the title, `Ticket conv-1-spawn-1 ("conv-1-spawn-1: Checkpointing
   child") ended: checkpoint.`, since the title is the file's heading.
-- A lone spawned Ticket runs in the pool checkout, on no branch of its own, yet its checkpoint Notice names
-  `Branch: pool/<key>/<id>`, a branch that does not exist, and `(no changes)` as its diff, because git cannot
-  compute one against a missing branch.
+- Retired by ADR-0041: a lone spawned Ticket no longer runs in the pool checkout. Every Ticket has its own worktree
+  and branch, so its checkpoint Notice names a branch that exists and a diff that can be computed. The row
+  described the TypeScript server, where a lone Ticket ran in the pool checkout on no branch and its Notice named
+  `Branch: pool/<key>/<id>` with `(no changes)`.
 
 Observed while writing these, not pinned:
 
-- **A lone spawned Ticket that finishes done tells its parent nothing.** It ran in the pool checkout, so nothing
-  merges, and only the merge paths call `ticketEnded` (`engine/engine.ts`). No Notice is queued, typed or dropped:
-  a run with the parent waiting saw none in twelve seconds after the Ticket's done. The teaching tells the agent a
-  spawned Ticket reports back once it ends, done included. Intended behaviour (inference): a done Notice whose
-  diff is the range the Attempt added to the working branch. Rust unit test, once decided: *a spawned Ticket that
-  ends done in the pool checkout queues a ticket-ended Notice to its parent.*
+- **Retired by ADR-0041: a lone spawned Ticket that finished done told its parent nothing.** It ran in the pool
+  checkout, so nothing merged, and only the merge paths call `ticketEnded` (`engine/engine.ts`). Every Ticket now
+  runs in its own worktree and merges, so its done Notice goes out at the merge like any other's. The Rust unit
+  test the row implied is not needed.
 - **The third drop reason**, `parent conversation is ending`, needs a child's Notice raised after its parent's End
   began and before it finished, and an End with nothing to merge takes no time a case can hold open from outside.
   Rust unit test: *Notice queue: a Notice for a parent whose End is under way is dropped at once, logged on the
@@ -974,9 +964,9 @@ left out, and no harness or fixture changed.
   server; HTTP reaches it only while the first End's claim awaits its listing, which the second request almost always
   lands in. Rust unit test: *Conversation claims: two Ends, or an End and the boot's adoption pass, racing on a live
   record with no runtime build one runtime, and the ending is recorded once.*
-- **`keep-talking.test.ts:832`**: the first server boots on 02's orphan written by hand in its worktree, as the engine
-  test does, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arises only from a
-  restart; the stop and start that follow are real.
+- **`keep-talking.test.ts:832`** (retired by ADR-0041): the first server booted on 02's orphan written by hand in its
+  worktree, since a Ticket working in a worktree beside a lone Ticket in the pool checkout arose only from a
+  restart. No Ticket runs in the pool checkout any more, and every Ticket has its own worktree.
 - **`keep-talking.test.ts:889`**: the Conversation runs on opencode and the Ticket it proposes names claude in its
   `assign`. Once `_claude` is scripted the stub keys every claude launch `_claude`, so a Conversation on claude could
   not be told apart from the Tickets' launches.
@@ -997,15 +987,9 @@ left out, and no harness or fixture changed.
   `releaseOrphanAgent` in `reconcileTerminalAttempts` (`engine/engine.ts`) says the pane may still be alive. Intended
   behaviour (inference): an orphan's pane is looked for daemon-wide by its recorded ids before it is called gone, as a
   Conversation's is and as an enlisted Ticket's already is.
-- **A merge redone at boot is recorded deferred a second time** (`keep-talking.test.ts:832`, `:889`): meeting the
-  pool checkout's gate again, the redo appends another `merge-deferred`, so the Ticket's events read `merge-deferred`
-  twice before `merged`. The cases pin the whole list.
 
 ### Observed while writing these, not pinned
 
-- While a merge redone at boot waits at the pool checkout's gate, the drive's phase stays `running` until the Continued
-  attempt ends (inference: the merge hold stands at the first boundary). The cases wait for the redo's pool log line
-  (`ticket <id>: merge dropped at the last shutdown chained again`) and the Ticket's `mergeState: queued` instead.
 - A started Conversation's TUI counts as exited at boot only when its exit-code file is no older than its launch's
   `spawned` event, so a stale file never crashes a live talk. No case makes a stale file appear after a launch. Rust
   unit test: *Conversation boot adoption: an exit-code file older than the recorded launch is not read as the TUI
@@ -1115,9 +1099,9 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
   can time it; the Peek would otherwise answer a pane nothing watches.
 - **A conflicted enlisted merge keeps its writer mark.** `chainEnlistedMerge` handles the conflict (the
   resolver run included) inside the pool checkout's gate, so the merge counts as a writer there until it is
-  settled and Keep talking refuses beside it. The Rust gate runs one synchronous merge, so the port re-takes
-  the same mark inside the merge's own job and releases it when the conflict handling ends. Same words, same
-  span.
+  settled and Keep talking refuses beside it. The Rust port has no gate (ADR-0027's wait is gone) and runs one
+  synchronous merge, so it takes the same mark inside the merge's own job and releases it when the conflict
+  handling ends. Same words, same span.
 - **The enlist teaching's paste check** reads `recent` 200 lines of the operator's pane (`type_verified`), which
   moves their viewport; copied as the TypeScript has it (see `herdr` panes above).
 - **A refused `tab.close` outside the bulk close** writes its pool-log line and a `tab-close-failed` event with no
@@ -1145,19 +1129,14 @@ Where the Rust port differs from the TypeScript on purpose, or copied what looks
 
 ## `restart`: what the Rust port does differently (r-restart)
 
-- **The tab of a boot-adopted or boot-redone merge's attempt is recorded closed sooner in Rust.** Two cases read
-  a Ticket's events right after its `merged` event, and expect them to end there: the one for
-  `attempt-ending.test.ts:405` (a re-adopted attempt that wrote a done Outcome while no server ran; read at the
-  Review) and the one for `keep-talking.test.ts:832` (a merge held at the gate and redone after a restart; read
-  as soon as `merged` shows). On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after
-  `merged` in a world with a fake herdr: the close is a round trip over a fresh socket that waits behind the
-  synchronous merges of the same burst. In Rust the close runs on its own task, and its event follows `merged` by
-  a few milliseconds. Nothing about the Ticket differs, only when the event is written. The three cases that read
-  there now wait for the `tab-closed` event and expect it last, so they pin the same events on both servers
-  without racing the close.
-- **A merge a boot takes on holds the pool checkout for the merge only.** On Bun the checkout is held across the
-  resolver a conflict starts; the Rust gate's closure cannot await. Keep talking's refusal beside a boot-adopted
-  merge's resolver names a different writer.
+- **The tab of a boot-adopted merge's attempt is recorded closed sooner in Rust.** Cases read a Ticket's events right
+  after its `merged` event, and expect them to end there: the one for `attempt-ending.test.ts:405` (a re-adopted
+  attempt that wrote a done Outcome while no server ran; read at the Review) and the others that adopt a pair of
+  Tickets at boot. On Bun the `tab-closed` event lands later than the read, 200 to 400 ms after `merged` in a world
+  with a fake herdr: the close is a round trip over a fresh socket that waits behind the synchronous merges of the
+  same burst. In Rust the close runs on its own task, and its event follows `merged` by a few milliseconds. Nothing
+  about the Ticket differs, only when the event is written. The cases that read there now wait for the `tab-closed`
+  event and expect it last, so they pin the same events on both servers without racing the close.
 - **A recorded pid of 1 or less, or one that is not a whole number, names no process.** The boot's orphan scan reads
   each unfinished headless attempt's `spawned` pid. The TypeScript passed 0, 1 and negatives through
   (`engine/engine.ts:2762`, `engine/children.ts:77`): `kill(0, 0)` succeeds, and with no `/proc/<pid>/cwd` to compare

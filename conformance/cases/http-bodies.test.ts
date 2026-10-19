@@ -65,8 +65,6 @@ conformance("http", "request bodies › answers a body that is not JSON in each 
     ["POST", "/api/keep-talking", 400, invalid],
     ["POST", "/api/spawns/held/adopt", 400, invalid],
     ["POST", "/api/spawns/held/discard", 400, invalid],
-    ["POST", "/api/spawns/pending/hold", 400, invalid],
-    ["POST", "/api/spawns/pending/discard", 400, invalid],
   ];
   for (const [method, path, status, body] of routes) {
     expect([method, path, await send(server, method, path, "not json")]).toEqual([method, path, { status, body }]);
@@ -88,7 +86,7 @@ conformance("http", "request bodies › refuses a body missing the field each ro
     ["POST", "/api/enlist", { becomes: "ticket" }, { reason: "paneId is required" }],
     ["POST", "/api/keep-talking", {}, { reason: "ticketId is required" }],
     ["POST", "/api/conversations/end", {}, { reason: "id is required" }],
-    ["POST", "/api/conversations", { title: "t", role: "admin" }, { reason: 'role must be "steward" or "grill" when given' }],
+    ["POST", "/api/conversations", { title: "t", role: "admin" }, { reason: 'role must be "steward" when given' }],
     ["PUT", "/api/settings/machine", { defaults: [] }, { error: "settings: defaults must be an object" }],
   ];
   for (const [method, path, body, refusal] of refusals) {

@@ -18,10 +18,8 @@ import {
   adoptingSpawn,
   discardedSpawn,
   endingConversation,
-  heldSpawn,
 } from "./optimistic";
 import type { PoolConfigPatch } from "./project";
-import { postStartLine } from "./conversations";
 import { ConsoleSession } from "./session";
 import {
   ConsoleSocket,
@@ -161,20 +159,23 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     onAdoptHeldSpawn: (id) => session.optimistic("spawns.held.adopt", { id }, adoptingSpawn(id)),
     onDiscardHeldSpawn: (id) =>
       session.optimistic("spawns.held.discard", { id }, discardedSpawn(id)),
-    onHoldPendingSpawn: (id) => session.optimistic("spawns.pending.hold", { id }, heldSpawn(id)),
-    onDiscardPendingSpawn: (id) =>
-      session.optimistic("spawns.pending.discard", { id }, discardedSpawn(id)),
     onStart: (request) =>
       socket.request("conversations.start", request).then((result) => result.conversation),
-    onEnd: (id, closing) =>
+    onEnd: (id, closing, close) =>
       session
         .optimistic(
           "conversations.end",
-          closing ? { id, closing } : { id },
+          { id, closing, close },
           endingConversation(id),
         )
         .then(() => undefined),
-    onStartLine: (grillId) => postStartLine(grillId),
+    onListPlans: () => socket.request("plans.list", {}),
+    onGetPlan: (slug) => socket.request("plans.get", { slug }),
+    onEditPlan: (plan, edits) => socket.request("plans.edit", { plan, edits }),
+    onSavePlan: (slug, plan) => socket.request("plans.save", { slug, plan }),
+    onDeletePlan: (slug) => socket.request("plans.delete", { slug }).then(() => undefined),
+    onBootPlan: (slug, work) => socket.request("plans.boot", { slug, work }),
+    onEditLine: (baseRev, edits) => socket.request("line.plan.edit", { baseRev, edits }),
   });
 
   const handlers: Handlers = {
@@ -237,11 +238,7 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     renders,
     handlers,
     draw() {
-      view.render(
-        root,
-        session.model(view.conversationEndState(), view.conversationLineStartState()),
-        handlers,
-      );
+      view.render(root, session.model(view.conversationEndState()), handlers);
     },
     start() {
       // A render the operator's own press asked for is not left for the

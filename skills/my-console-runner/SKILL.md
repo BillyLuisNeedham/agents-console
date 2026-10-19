@@ -73,7 +73,7 @@ activated per ticket by a `verify: N` key on that ticket's entry under `assign` 
 set by hand when a ticket is wanted verified. If `verify.md` is already there, leave it alone:
 criteria tuned by hand must not be clobbered.
 
-## Check the drivers before the first super-step
+## Check the drivers before the first ticket starts
 
 The one detection worth doing by hand, because it needs skill frontmatter read and a harness's
 command directory checked.
@@ -103,18 +103,23 @@ command on whatever harness the ticket is assigned:
   `~/.claude/commands/scripts/link-skills.sh`, also the skills repo's linker, for the same drivers.
 
 Every harness named in the config must be on PATH. The script warns when one is not; the engine
-fails fast on an unknown harness at run start, so getting this right means the first super-step
+fails fast on an unknown harness at run start, so getting this right means the first ticket
 does not stop for it.
 
 ## How a Console run works
 
-One server process per pool. Tickets whose blockers are all `done` run as one super-step, each in
-its own git worktree, on the harness and model `console.json` assigns. Anything that needs a human
+One server process per pool. A rolling scheduler runs it in Ticks (ADR-0041). A Tick runs whenever
+something could change what may start, never on a clock, and launches every ticket whose blockers
+are each `done` and merged, without waiting for any other ticket to end. Each ticket runs in its own
+git worktree, cut from the target's tip at its launch, on the harness and model `console.json`
+assigns. Only a ticket's own blockers hold it back: an unmerged branch elsewhere holds nothing
+else. Queued answers, Pending spawns and Config reloads are processed at the next Tick, which runs
+at once unless a job is mid-flight. Anything that needs a human
 becomes an interrupt on that ticket's card: a checkpoint Brief, a merge-approval, a crash, a
-deadlock, the final Review. Answering an interrupt resumes the pool.
+deadlock, the final Review. Answering an interrupt resumes that ticket.
 
-A Conversation runs beside all that and holds nothing up: it has no blockers, never joins a
-super-step, is never verified or graded, and ends only when the human ends it (ADR-0018).
+A Conversation runs beside all that and holds nothing up: it has no blockers, never gates a
+Tick, is never verified or graded, and ends only when the human ends it (ADR-0018).
 
 A **Seeded Pool** holds no tickets at the start and grows from live work: the operator Enlists
 herdr panes into it as Conversations, and those Conversations Spawn the tickets (ADR-0024). The
@@ -127,9 +132,9 @@ The pool's ticket directory is called `issues/` on disk, a legacy name; prose sa
 them; on a Seeded Pool the engine writes them when a Conversation Spawns one, and when a pane is
 enlisted as a ticket.
 
-If the pool's own checkout is dirty, recommend committing before launch: tickets commit to the
-current branch, and an unattended agent can sweep unrelated changes into a commit that says it is
-the work of a ticket. A herdr pane the human means to Enlist is the exception and keeps its
+If the pool's own checkout is dirty, recommend committing before launch: every ticket's worktree is
+cut from the committed tip of the current branch and merges back into it, so uncommitted changes
+are invisible to the tickets and can stand in the way of a merge. A herdr pane the human means to Enlist is the exception and keeps its
 uncommitted work. That work is usually why the pane is worth enlisting, and the engine records the
 pane's directory and branch as found and writes into neither (ADR-0021).
 
@@ -164,8 +169,8 @@ Leave these alone rather than rediscovering them:
   the directory and never deletes the branch. The Console drives all of this from its own surface.
 - Per-ticket logs land in the pool's `runs/` directory.
 - The pool config's assignment slice (`defaults`, `assign`, `resolver`) re-reads at every
-  super-step boundary (ADR-0018): an edit lands on any ticket with no Attempt in flight at its
-  next boundary, no restart needed. `selection`, `terminal` and `port` stay exactly as they were
+  Tick (ADR-0041): an edit lands on any ticket with no Attempt in flight at the next Tick, no
+  restart needed. `selection`, `terminal` and `port` stay exactly as they were
   at boot; an edit to any of those takes effect on a Restart, which the
   Console offers and which hands back to `agent-console --relaunch`. A restart is otherwise
   cheap: markers and the checkpoint are the truth, so ticket state and a pending interrupt both
