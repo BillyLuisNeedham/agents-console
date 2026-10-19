@@ -69,7 +69,7 @@ describe("projectLine's node state", () => {
       [ticket("b-1", "in-progress"), ticket("b-2", "ready")],
     );
     expect(node.state).toEqual({ tone: "running", text: "2 running · 3 queued" });
-    expect(node.summary).toBe("pass 2 · 2 running · 3 queued");
+    expect(node.summary).toEqual(["pass 2 · 2 running · 3 queued", "2 running · 3 queued"]);
     expect(node.queued).toBe(3);
     expect(node.copies.map((c) => [c.id, c.card, c.tone])).toEqual([
       ["b-1", "ticket:b-1", "running"],
@@ -92,10 +92,10 @@ describe("projectLine's node state", () => {
       ticket("b-2", "in-progress"),
     ]);
     expect(perItem.state.text).toBe("running 2");
-    expect(perItem.summary).toBe("pass 1 · 2 running");
+    expect(perItem.summary).toEqual(["pass 1 · 2 running", "2 running"]);
     const single = state({ id: "review", pass: 4, tickets: ["r-4"] }, [ticket("r-4", "in-progress")]);
     expect(single.state.text).toBe("running 1");
-    expect(single.summary).toBe("pass 4");
+    expect(single.summary).toEqual(["pass 4"]);
   });
 
   it("treats a copy the snapshot has not got yet as pending", () => {

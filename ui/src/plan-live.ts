@@ -32,6 +32,13 @@ export function copyRoom(hold: Pick<LiveCopy, "id"> | null): number {
   return Math.floor((BODY_WIDTH - holdWidth - COPIES_PADDING + DOT_GAP) / SLOT);
 }
 
+const SUMMARY_CHAR = 6.3;
+
+/** The longest of a summary's wordings that fits the card body, else the shortest. */
+export function fitSummary(wordings: readonly string[]): string {
+  return wordings.find((wording) => wording.length * SUMMARY_CHAR <= BODY_WIDTH) ?? wordings[wordings.length - 1]!;
+}
+
 const pillSlots = (text: string): number => Math.ceil((text.length * MONO_CHAR + PILL_CHROME + DOT_GAP) / SLOT);
 
 export interface CopyRow {
@@ -165,7 +172,7 @@ export function liveBody(drawn: DrawnNode, live: LiveNode): HTMLElement {
           `waiting for ${live.waitingFor.join(", ")}`,
         )
       : live.summary
-        ? h("div", { class: "plan-node-line plan-live-summary", title: live.summary }, live.summary)
+        ? h("div", { class: "plan-node-line plan-live-summary", title: live.summary[0] }, fitSummary(live.summary))
         : null,
   );
 }
