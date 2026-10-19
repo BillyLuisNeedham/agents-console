@@ -1001,6 +1001,34 @@ fn line_json_round_trips_and_the_old_shape_is_refused() {
     );
 }
 
+#[test]
+fn a_plan_claims_the_ids_its_line_writes_and_no_others() {
+    let plan = factory_today();
+    for id in [
+        "implement-1",
+        "implement-12",
+        "implement-1.2",
+        "grill-1",
+        "decide-3",
+        "finish-1",
+        "finish-2-act",
+        "prove-fail-implement-3",
+    ] {
+        assert!(plan_claims_id(&plan, id), "{id}");
+    }
+    for id in [
+        "implement",
+        "implement-x",
+        "implement-1-b",
+        "finish-1-actor",
+        "tidy",
+        "01",
+        "conv-1-spawn-1",
+    ] {
+        assert!(!plan_claims_id(&plan, id), "{id}");
+    }
+}
+
 // -------------------------------------------------------------------------------------------------
 // Briefs, verdicts and what Line start refuses
 // -------------------------------------------------------------------------------------------------

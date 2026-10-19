@@ -7,11 +7,11 @@
  */
 
 import { expect } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { answer, resume, settle, snapshot, statuses, ticketOf } from "../harness/pool-run.ts";
-import { readStateLine, until } from "../harness/pool-files.ts";
+import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import {
   REPORT_HTML,
   SHIP,
@@ -192,4 +192,47 @@ conformance("line", "a PR Finish on a pool whose branch is no Line branch tells 
   const closed = await settle(server, (s) => s.phase === "done", { what: "the run to be done" });
   expect(closed.line?.status).toBe("closed");
   expect(closed.state.interrupts).toEqual([]);
+});
+
+conformance("line", "an approval queued on disk before a Ticket joined the pool is dropped when it drains, with an answer-refused event, and the Finish waits for the Ticket", async (t) => {
+  const world = lineWorld(t);
+  passPath(world);
+  const first = await t.start(world);
+  await begun(first);
+  await atCheckpoint(first, "finish-1");
+  await first.stop();
+
+  const attempt = Math.max(0, ...readEvents(world.pool, "finish-1").map((event) => event.attempt));
+  const answered = { at: new Date().toISOString(), attempt, kind: "answered", payload: { kind: "checkpoint" } };
+  appendFileSync(join(world.pool, "runs", "finish-1.events.jsonl"), `${JSON.stringify(answered)}\n`);
+  const record = { ticketId: "finish-1", kind: "checkpoint", note: "approved", at: new Date().toISOString(), seq: 1, processedAt: null };
+  writeFileSync(join(world.pool, "runs", "queued-answers.json"), JSON.stringify({ nextSeq: 2, answers: [record] }));
+  writeFileSync(
+    join(world.pool, "issues", "tidy.md"),
+    "<!-- state: id=tidy blocked-by=none status=ready -->\n\n# tidy: Tidy the pool log\n\nTidy the pool log lines the Line writes, they repeat.\n",
+  );
+  const tidy = world.stubs.hold("tidy");
+
+  const second = await t.start(world);
+  await until(
+    () => readStateLine(world.pool, "tidy.md").line,
+    (line) => line.includes("status=in-progress"),
+    { what: "tidy to launch" },
+  );
+  const refused = readEvents(world.pool, "finish-1").filter((event) => event.kind === "answer-refused");
+  expect(refused.map((event) => event.payload)).toEqual([{ reason: "the Finish is waiting for: tidy" }]);
+  const queue = JSON.parse(readFileSync(join(world.pool, "runs", "queued-answers.json"), "utf8")) as {
+    answers: { processedAt: string | null }[];
+  };
+  expect(queue.answers.map((a) => a.processedAt !== null)).toEqual([true]);
+  const dropped = await snapshot(second);
+  expect(dropped.state.log).toContain("line: the answer on finish-1 was dropped: the Finish is waiting for: tidy");
+  expect(statuses(dropped)["finish-1"]).toBe("checkpoint");
+  expect(dropped.state.interrupts.map((i) => i.ticketId)).toEqual(["finish-1"]);
+  expect(launches(world)).not.toContain("finish-1-act");
+
+  await tidy.release();
+  await settle(second, (s) => statuses(s).tidy === "done", { what: "tidy to be done" });
+  const done = await approveFinish(second, "finish-1");
+  expect(done.line?.status).toBe("done");
 });

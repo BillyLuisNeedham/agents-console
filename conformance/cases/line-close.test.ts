@@ -57,3 +57,26 @@ conformance("line", "a closed with no edge of its own reaches the Finish with th
   expect(interruptOn(atFinish, "finish-1")).toContain("Work upstream halted: decide-1 was closed.");
   expect(atFinish.line?.nodes.find((n) => n.id === "decide")?.parked).toEqual([]);
 });
+
+for (const node of ["prove", "review"] as const) {
+  conformance("line", `closing ${node}-1 runs decide with the halt, whose body and brief name it`, async (t) => {
+    const world = lineWorld(t);
+    if (node === "review") world.stubs.script("prove-1", PASS);
+    world.stubs.script(`${node}-1`, { status: "checkpoint", brief: "cannot judge" });
+    world.stubs.script("decide-1", SHIP);
+    const server = await t.start(world);
+    await begun(server);
+
+    await atCheckpoint(server, `${node}-1`);
+    await answer(server, { ticketId: `${node}-1`, action: "close" });
+    const halted = await atCheckpoint(server, "finish-1");
+    expect(statuses(halted)[`${node}-1`]).toBe("closed");
+    expect(statuses(halted)["decide-1"]).toBe("done");
+    expect(launches(world)).toEqual(
+      node === "prove" ? ["implement-1", "prove-1", "decide-1"] : ["implement-1", "prove-1", "review-1", "decide-1"],
+    );
+    const decide = issue(world, "decide-1");
+    expect(decide).toContain(`## Halted upstream\n\nWork upstream halted: ${node}-1 was closed.`);
+    expect(decide).toContain(`Decide how this pass ends. Work upstream halted (${node}-1 was closed). Record "ship"`);
+  });
+}

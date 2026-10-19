@@ -1845,6 +1845,40 @@ fn pass_number(id: &str, prefix: &str) -> Option<u32> {
     digits(id.strip_prefix(prefix)?.strip_prefix('-')?)
 }
 
+/// Whether `id` has one of the shapes this Plan's Line writes its Tickets and Conversations under
+/// (see `TicketId`), at any pass. A Merger writes nothing, so its id claims nothing. The Line
+/// writes every id create-if-absent, so a pool that already holds one would be read as the Line's own.
+pub fn plan_claims_id(plan: &Plan, id: &str) -> bool {
+    let finish = plan.finish();
+    if id
+        .strip_suffix("-act")
+        .is_some_and(|rest| pass_number(rest, finish.as_str()).is_some())
+    {
+        return true;
+    }
+    let loop_hold = plan.edges().iter().any(|edge| {
+        let key = &edge.key;
+        let prefix = format!("{}-{}-{}", key.from, key.on.as_str(), key.to);
+        pass_number(id, &prefix).is_some()
+    });
+    loop_hold
+        || plan
+            .nodes()
+            .filter(|node| !matches!(node.body, NodeBody::Merger(_)))
+            .any(|node| {
+                let Some(rest) = id
+                    .strip_prefix(node.id.as_str())
+                    .and_then(|r| r.strip_prefix('-'))
+                else {
+                    return false;
+                };
+                let (pass, seq) = rest
+                    .split_once('.')
+                    .map_or((rest, None), |(p, s)| (p, Some(s)));
+                digits(pass).is_some() && seq.is_none_or(|s| digits(s).is_some())
+            })
+}
+
 fn hold_event(ticket: &TicketId, facts: &dyn LineFacts) -> Option<LineEvent> {
     let (answer, by) = match facts.ticket(ticket) {
         TicketFact::Answered { note, by_steward } => (

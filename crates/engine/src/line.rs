@@ -15,7 +15,7 @@ use ac_core::js;
 use ac_core::line::run::{
     Blocker, ConversationFact, Editor, HoldAnswer, Item, LineBrief, LineFacts, LinePlaces, LineRun,
     LineStart, LineStatus, OutcomeCheck, TicketFact, TicketId, brief_problem, hold_text,
-    ticket_text, verdict_of,
+    plan_claims_id, ticket_text, verdict_of,
 };
 use ac_core::line::{brief_path, line_base_of, save_line};
 use ac_core::outcome::ValidOutcome;
@@ -523,6 +523,13 @@ pub fn begin_line(
             "the Line cannot begin: {problem}"
         )));
     }
+    let taken = ids_the_line_would_write(session, &plan);
+    if !taken.is_empty() {
+        return Err(EngineError::refused(format!(
+            "the Line cannot begin: the pool already holds {}, which the Line would write as its own",
+            taken.join(", ")
+        )));
+    }
     let places = LinePlaces {
         branch: target_branch(session),
         base: line_base(session)?,
@@ -597,6 +604,19 @@ pub fn edit_plan(
         crate::snapshot::emit_snapshot(session, session.current_phase());
     }
     Ok(LinePlanEditResponse { rev, notes })
+}
+
+// The Tickets and Conversations already in the pool under an id the Line writes create-if-absent,
+// which the Line would take for its own pass.
+fn ids_the_line_would_write(session: &Session, plan: &Plan) -> Vec<String> {
+    let tickets = session.markers.iter().map(|marker| marker.id.clone());
+    let conversations = crate::conversations::load(session)
+        .into_iter()
+        .map(|record| record.id);
+    tickets
+        .chain(conversations)
+        .filter(|id| plan_claims_id(plan, id))
+        .collect()
 }
 
 // Every harness a node names must be one this machine knows: a Ticket written on an unknown one

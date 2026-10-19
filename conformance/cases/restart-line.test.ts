@@ -12,7 +12,9 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, LineFile } from "../../protocol/wire.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
+import { conformance } from "../harness/case.ts";
 import { answer, settle, snapshot, statuses } from "../harness/pool-run.ts";
+import { refusedAtLoad } from "./config-support.ts";
 import { copiesPlan, copyIds, makingItems, pieces, untilLaunched } from "./line-copies-support.ts";
 import { PASS, approveFinish, atCheckpoint, begun, launches, lineOf, lineWorld, passPath, verdict } from "./line-support.ts";
 import { poolLog, restartCase, startLeg, untilState } from "./restart-support.ts";
@@ -142,4 +144,33 @@ restartCase("a stop with two copies live and three queued writes no copy twice a
   ]);
   expect(launches(world).filter((key) => key === "check-1")).toEqual(["check-1"]);
   expect(readStateLine(world.pool, "check-1.md").blockedBy).toEqual(copyIds(5));
+});
+
+conformance("restart", "a line.json from before Plans is refused at boot with the message to start a new Line, and is left as it was", async (t) => {
+  const world = lineWorld(t);
+  const server = await t.start(world);
+  await begun(server);
+  await server.stop();
+
+  const old = JSON.stringify({
+    brief: { spec: "docs/specs/line.md" },
+    briefPath: "docs/specs/line.brief.json",
+    status: "running",
+    round: 1,
+    station: "implement",
+    ticket: "r1-implement",
+    proveFails: 0,
+    fixesBought: 0,
+    gated: false,
+    extraRounds: 0,
+    halted: null,
+    rounds: [],
+  });
+  const file = join(world.pool, "line.json");
+  writeFileSync(file, old);
+
+  const refused = await refusedAtLoad(world);
+  expect(refused.code).not.toBe(0);
+  expect(refused.output).toContain("line.json is from before Plans (ADR-0039); start a new Line");
+  expect(readFileSync(file, "utf8")).toBe(old);
 });

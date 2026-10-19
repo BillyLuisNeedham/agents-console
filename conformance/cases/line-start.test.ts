@@ -3,7 +3,8 @@
  * slug or as a file, into line.json with the Line brief or the work it is given, writes no Ticket
  * itself, and the first tick writes the entry node's Ticket with its node and Assignment on the
  * state line. It refuses with the reason, writing nothing, a Plan that is invalid, a harness the
- * machine lacks (a node's, or a Merger's resolver), a missing or invalid brief, and a second Line.
+ * machine lacks (a node's, or a Merger's resolver), a missing or invalid brief, a pool that already
+ * holds an id the Line would write, and a second Line.
  * A Conversation node anywhere in the Plan begins, and so does a per-item node with its Merger.
  *
  * The stubs on PATH play the Ticket nodes.
@@ -16,7 +17,8 @@ import type { LineFile, PlanFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { snapshot, ticketOf } from "../harness/pool-run.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
-import { BRIEF, SPEC, beginLine, begun, issue, lineOf, lineWorld, reason } from "./line-support.ts";
+import { flagValue, launchesOf } from "./config-support.ts";
+import { BRIEF, SPEC, atCheckpoint, beginLine, begun, issue, lineOf, lineWorld, reason } from "./line-support.ts";
 
 /** A two-node Plan: one Agent node, then the Finish. */
 function buildThenFinish(build: Record<string, unknown> = {}): PlanFile {
@@ -110,6 +112,7 @@ conformance("line", "POST /api/line freezes Factory today with the brief in line
   const saved = JSON.parse(readFileSync(join(world.pool, "line.json"), "utf8")) as LineFile;
   expect(saved).toMatchObject({ horde: 1, rev: 1, places: { branch: "main", spec: SPEC } });
   expect(saved.plan).toEqual(line!.plan);
+  expect(saved.places).not.toHaveProperty("base");
   expect(saved.run.status).toBe("running");
 
   const card = ticketOf(await snapshot(server), "implement-1");
@@ -142,6 +145,69 @@ conformance("line", "a Plan file whose entry is a Ticket node begins on the work
   expect(file).toContain("## Note for this node\n\none small step");
   expect(file).not.toContain("## The spec");
   await hold.release();
+});
+
+conformance("line", "a Ticket node's empty or partial assign falls through per field to console.json, and the resolved model and effort reach the harness", async (t) => {
+  const world = lineWorld(t, null, {}, {
+    defaults: { harness: "claude", model: "pool-model", effort: "low", drivers: "pool-drivers" },
+    assign: { "effort-1": { model: "operator-model" } },
+  });
+  const server = await t.start(world);
+  const plan = {
+    horde: 1,
+    name: "Three assigns",
+    nodes: [
+      { kind: "agent", id: "bare", title: "Bare", x: 0, y: 0, assign: {} },
+      { kind: "agent", id: "model", title: "Model", x: 0, y: 0, assign: { model: "plan-model" } },
+      { kind: "agent", id: "effort", title: "Effort", x: 0, y: 0, assign: { effort: "high" } },
+      { kind: "finish", id: "finish", title: "Finish", x: 0, y: 0, act: "none" },
+    ],
+    edges: [
+      { from: "bare", on: "done", to: "model" },
+      { from: "model", on: "done", to: "effort" },
+      { from: "effort", on: "done", to: "finish" },
+    ],
+  } as PlanFile;
+  await begun(server, { plan, work: "#1" });
+
+  const atFinish = await atCheckpoint(server, "finish-1");
+  const flag = (id: string, name: string) => flagValue(launchesOf(world, id)[0]!.argv, name);
+  const resolved = (id: string) => ticketOf(atFinish, id).assignment;
+  // The operator's assign entry for the id wins, then the node's field, then the pool's defaults.
+  expect(resolved("bare-1")).toMatchObject({ harness: "claude", model: "pool-model", effort: "low", drivers: "pool-drivers" });
+  expect(resolved("model-1")).toMatchObject({ model: "plan-model", effort: "low" });
+  expect(resolved("effort-1")).toMatchObject({ model: "operator-model", effort: "high" });
+  expect([flag("bare-1", "--model"), flag("bare-1", "--effort")]).toEqual(["pool-model", "low"]);
+  expect([flag("model-1", "--model"), flag("model-1", "--effort")]).toEqual(["plan-model", "low"]);
+  expect([flag("effort-1", "--model"), flag("effort-1", "--effort")]).toEqual(["operator-model", "high"]);
+});
+
+conformance("line", "a pool that already holds a Ticket or Conversation under an id the Line writes refuses the Line, naming it, and writes nothing", async (t) => {
+  const world = lineWorld(t);
+  writeFileSync(
+    join(world.pool, "issues", "implement-1.md"),
+    "<!-- state: id=implement-1 blocked-by=none status=done -->\n\n# implement-1: A plain Ticket\n\nWork somebody else began.\n",
+  );
+  writeFileSync(
+    join(world.pool, "conversations", "grill-1.md"),
+    "<!-- conversation: id=grill-1 status=ended spawned-by=none harness=claude model=m drivers=implement -->\n\n# Talk\n\n\n",
+  );
+  writeFileSync(
+    join(world.pool, "issues", "tidy.md"),
+    "<!-- state: id=tidy blocked-by=none status=done -->\n\n# tidy: Tidy\n\nNot the Line's id.\n",
+  );
+  const server = await t.start(world);
+
+  const taken = await beginLine(server);
+  expect(taken.status).toBe(409);
+  expect(reason(taken)).toBe(
+    "the Line cannot begin: the pool already holds implement-1, grill-1, which the Line would write as its own",
+  );
+  expect(await lineOf(server)).toBeNull();
+  expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+  expect(readFileSync(join(world.pool, "issues", "implement-1.md"), "utf8")).toContain("Work somebody else began.");
+  expect(existsSync(join(world.pool, "issues", "decide-1.md"))).toBe(false);
+  expect((await snapshot(server)).state.tickets.map((ticket) => ticket.id)).toEqual(["implement-1", "tidy"]);
 });
 
 conformance("line", "a Conversation node after the start of a Plan begins, and a pass the pool cannot host is recorded crashed and hands on closed", async (t) => {

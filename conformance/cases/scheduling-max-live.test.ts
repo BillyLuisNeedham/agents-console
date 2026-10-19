@@ -18,6 +18,8 @@ import { answer, settle, snapshot, statuses, ticketOf } from "../harness/pool-ru
 import { readEvents, until } from "../harness/pool-files.ts";
 import type { StubHold } from "../harness/stubs.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
+import { copiesPlan, makingItems, pieces } from "./line-copies-support.ts";
+import { begun, lineWorld } from "./line-support.ts";
 
 const CONFIG = { defaults: { harness: "claude", model: "m" } } satisfies PoolConfig;
 
@@ -254,5 +256,50 @@ conformance(
     const rested = await settle(server, (s) => statuses(s)["02"] === "done", { what: "02 to run again to done" });
     expect(statuses(rested)["01"]).toBe("done");
     expect(scheduledAt(world, "02", 2) >= exitedAt(world, "01", 2)).toBe(true);
+  },
+);
+
+conformance(
+  "scheduling",
+  "a Line Merger's resolver runs while the pool is at its maxLive, and a queued copy still waits for it",
+  async (t) => {
+    const world = lineWorld(t, null, { "shared.txt": "base\n" }, { ...CONFIG, maxLive: 2, resolver: "claude" });
+    world.stubs.script("tasks-1", makingItems(pieces(3)));
+    const first = holdStub(t, world, "build-1.1", {
+      run: "echo from-1 > shared.txt\ngit add -A\ngit commit -qm work-1",
+    });
+    const second = holdStub(t, world, "build-1.2");
+    const resolver = holdStub(t, world, "build-1.1.resolver", {
+      outcomeRaw: JSON.stringify({ resolved: false, note: "left for the operator" }),
+    });
+    const third = holdStub(t, world, "build-1.3");
+    const server = await t.start(world);
+    await begun(server, { plan: copiesPlan({ cap: 2, merger: true }), work: "#1" });
+
+    await untilLaunched(world, ["build-1.1", "build-1.2"]);
+    const lowered = await server.http.put("/api/settings/pool", { config: { maxLive: 1 } });
+    expect(lowered.status, lowered.text).toBe(200);
+    await until(() => snapshot(server), (s) => s.state.log.includes("config reloaded: maxLive"), {
+      what: "the reload of maxLive",
+      ms: 30_000,
+    });
+
+    writeFileSync(join(world.repo, "shared.txt"), "from-main\n");
+    gitIn(world.repo, ["commit", "-qm", "hand edit", "--", "shared.txt"]);
+    await first.release();
+    await untilLaunched(world, ["build-1.1.resolver"]);
+    const resolving = await snapshot(server);
+    expect(ticketOf(resolving, "build-1.1").liveAttempt?.role).toBe("resolver");
+    expect(ticketOf(resolving, "build-1.2").liveAttempt).not.toBeNull();
+    expect(started(resolving)).toEqual(["tasks-1", "build-1.1", "build-1.2"]);
+    expect(launches(world)).not.toContain("build-1.3");
+
+    await second.release();
+    await until(() => snapshot(server), (s) => statuses(s)["build-1.2"] === "done", { what: "build-1.2 to end", ms: 30_000 });
+    expect(launches(world)).not.toContain("build-1.3");
+    await resolver.release();
+    await untilLaunched(world, ["build-1.3"]);
+    expect(started(await snapshot(server))).toEqual(["tasks-1", "build-1.1", "build-1.2", "build-1.3"]);
+    await third.release();
   },
 );

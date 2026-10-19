@@ -25,7 +25,8 @@ import { applySnapshotDelta } from "../fixtures/socket-protocol.ts";
 import { conformance } from "../harness/case.ts";
 import { expectParsedEqual } from "../harness/equal.ts";
 import { snapshotOf, ticket, ticketOf, untilSnapshot } from "./config-support.ts";
-import { copyIds, finishWaitsOnBuild, liveCopies } from "./line-copies-support.ts";
+import { copyIds, finishWaitsOnBuild, liveCopies, untilLaunched } from "./line-copies-support.ts";
+import { begun, lineOf, lineWorld } from "./line-support.ts";
 import {
   CLAUDE,
   REVIEW,
@@ -386,6 +387,38 @@ conformance("protocol", "the live Line graph › rides a delta whole, only when 
 
   await second.release();
   await third.release();
+});
+
+conformance("protocol", "the live Line graph › a line.plan.edit rides a delta carrying the new rev and the edited Plan, and the deltas build what the server holds", async (t) => {
+  const world = lineWorld(t);
+  const hold = world.stubs.hold("implement-1");
+  const server = await t.start(world);
+  await begun(server);
+  await untilLaunched(world, ["implement-1"]);
+  const client = await t.socket(server);
+  await client.sync();
+  const from = client.frames.length;
+  const before = client.pushed!.snapshot.line!;
+  expect(before.rev).toBe(0);
+
+  const moved = await client.request("line.plan.edit", { baseRev: 0, edits: [{ edit: "move", id: "prove", x: 1234, y: 56 }] });
+  if (!moved.ok) throw new Error(`line.plan.edit was refused: ${JSON.stringify(moved.refusal)}`);
+  expect(moved.result).toEqual({ rev: 1, notes: [] });
+
+  const frame = await client.waitFor<Extract<ServerMessage, { type: "delta" }>>(
+    (f) => f.type === "delta" && f.delta.set?.line?.rev === 1,
+    { from, what: "the delta carrying the edited Line" },
+  );
+  const sent = frame.delta.set!.line!;
+  expect(sent.plan.nodes.find((n) => n.id === "prove")).toMatchObject({ x: 1234, y: 56 });
+  expect(sent.plan.nodes.find((n) => n.id === "prove")).not.toEqual(before.plan.nodes.find((n) => n.id === "prove"));
+  expect(frame.delta.unset ?? []).not.toContain("line");
+  expect(sent).toEqual((await lineOf(server))!);
+
+  await client.sync();
+  const whole = (await snapshotOf(server)).line;
+  expect(client.pushed?.snapshot.line).toEqual(whole!);
+  await hold.release();
 });
 
 conformance("protocol", "the live Line graph › a pool running no Line never sends one, in set or unset", async (t) => {
