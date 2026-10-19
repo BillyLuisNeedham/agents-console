@@ -558,7 +558,7 @@ conformance("attempts", "the exited and crash events carry the log tail and outc
   });
   // A crash leaves the marker in progress; the done Ticket's is written by the engine.
   expect(readStateLine(world.pool, "02-t.md").status).toBe("in-progress");
-  expect(readStateLine(world.pool, "03-t.md").status).toBe("done");
+  await until(() => readStateLine(world.pool, "03-t.md").status, (status) => status === "done", { what: "03's done marker" });
   expect(readTicketFile(world.pool, "03-t.md")).toBe("<!-- state: id=03 blocked-by=none status=done -->\n\n# Ticket 03\n\nDo 03.\n");
 
   // The retry crashes the other way: the file exists but is not JSON.

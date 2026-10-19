@@ -134,7 +134,10 @@ restartCase("a stop with two copies live and three queued writes no copy twice a
   expect((await lineOf(second))?.nodes.find((n) => n.id === "build")).toMatchObject({ tickets: ["build-1.1", "build-1.2"], queued: 3 });
   for (const id of copyIds(5).slice(2)) expect(existsSync(issuePath(world.pool, id)), `${id} is not written early`).toBe(false);
 
-  for (const hold of holds) await hold.release();
+  // One hold at a time: while build-1.2 is held there is one free slot, so the queued copies take it in order.
+  await holds[0]!.release();
+  await untilLaunched(world, ["build-1.5"]);
+  await holds[1]!.release();
   await atCheckpoint(second, "finish-1");
   expect(wroteIds(await poolLog(second))).toEqual(["tasks-1", ...copyIds(5), "check-1", "finish-1"]);
   expect(launches(world).filter((key) => key.startsWith("build-1.") && !["build-1.1", "build-1.2"].includes(key))).toEqual([

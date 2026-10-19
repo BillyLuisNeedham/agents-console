@@ -59,8 +59,16 @@ the reply alone, and the snapshot at the next rev must draw it and stop the
 verdict parking. A card drag that core refuses must leave its long reason
 inside the view and the card back where it was. At the narrow window the
 layout run opens the view and checks its head holds one line, each live
-card's text, state word and pass summary stay inside the card, uncut, and a
-refused edit's reason wraps inside the view.
+card's text, state word and pass summary stay inside the card, uncut, a
+refused edit's reason wraps inside the view, and that every edge label, here
+and in the Plans view, clears every card and every other label as drawn. It
+then pushes a crowded Line, a forked Plan whose `build` holds forty copies
+(done, running, pending and one checkpointed late in the list), and checks that
+the done copies fold into a count, the checkpointed copy is still a dot, every
+dot and pill stays inside its card's copy row, every copy the row hides opens
+by tapping `+N` again and again (the same pointer pair and click as a dot), and
+the fork's two `done` labels out of `tasks` are both drawn and clear. The
+previous snapshot is put back afterwards.
 One more presses End on a Line's Conversation pass whose End the fixture
 refuses with a long reason: the reason and End as closed must stay inside the
 card, and inside the Detail's End box once it opens, and an ordinary
