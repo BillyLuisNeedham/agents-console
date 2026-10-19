@@ -7,7 +7,7 @@
  * here reads or writes the operator's library. The socket's `plans.*` verbs
  * are driven in one case, on the same library.
  *
- * Origin: docs/specs/build-your-own-factory.md, Slices item 3 ("New
+ * Origin: docs/specs/build-your-own-factory.md (last tracked at 5182816), Slices item 3 ("New
  * `plans-library` (fenced HOME: save writes the file, a Preset slug is
  * refused, a broken file is listed with its problems)") and "Wire: verbs and
  * snapshot". The refusal words are the ones the core was told to use.

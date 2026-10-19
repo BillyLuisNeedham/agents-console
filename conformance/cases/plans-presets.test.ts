@@ -4,7 +4,7 @@
  * source file it comes from, each a Plan the validator accepts, and Factory
  * today as ADR-0037's fixed Line, edge for edge.
  *
- * Origin: docs/specs/build-your-own-factory.md, Slices item 3 ("New
+ * Origin: docs/specs/build-your-own-factory.md (last tracked at 5182816), Slices item 3 ("New
  * `plans-presets` (each validates and has `author` and `source`)") and
  * "Presets", whose table gives each slug's author and source and whose list
  * gives Factory today's twelve edges.

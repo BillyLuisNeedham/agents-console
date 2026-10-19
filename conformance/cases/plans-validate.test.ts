@@ -6,7 +6,7 @@
  * asked over `POST /api/plans/validate` and on the socket's `plans.validate`,
  * whose answers must be the same.
  *
- * Origin: docs/specs/build-your-own-factory.md, Slices item 3 ("New
+ * Origin: docs/specs/build-your-own-factory.md (last tracked at 5182816), Slices item 3 ("New
  * `plans-validate`: each rule refuses with its node or edge, all problems
  * together, an uncapped cycle through an operator gate accepted") and the
  * rules listed under "The Plan". The words pinned are the keywords the core
