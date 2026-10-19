@@ -389,8 +389,8 @@ conformance(
       baseRev: 0,
       edits: [
         { edit: "addNode", kind: "agent", x: 600, y: 300 },
-        { edit: "link", edge: edge("test", "fail", "agent") },
-        { edit: "link", edge: edge("agent", "done", "finish") },
+        { edit: "link", edge: edge("test", "fail", "agent", { max: 1, stewardExtra: false, whenSpent: "hold" }) },
+        { edit: "link", edge: edge("agent", "done", "test") },
       ],
     });
     expect(linked).toEqual({ status: 200, body: { ok: true, message: "edited the Plan: now at rev 1" } });
