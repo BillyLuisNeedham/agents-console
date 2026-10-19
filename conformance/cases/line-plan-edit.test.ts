@@ -72,6 +72,8 @@ conformance("line", "an edit bumps the Plan's rev in GET /api/line and line.json
 conformance("line", "linking a parked verdict hands it on, and the next tick writes the downstream Ticket blocked by the one that parked it", async (t) => {
   const world = lineWorld(t);
   world.stubs.script("test-1", FAIL);
+  // Held, so agent-1 cannot finish and merge in place, which steps its Ticket file aside, while the case reads it.
+  const agent = world.stubs.hold("agent-1");
   const server = await t.start(world);
   await begun(server, { plan: TESTED, work: "#1" });
   const parked = await until(
@@ -94,6 +96,7 @@ conformance("line", "linking a parked verdict hands it on, and the next tick wri
   await untilLaunched(world, ["agent-1"]);
   expect(readStateLine(world.pool, "agent-1.md").line).toContain("blocked-by=test-1");
   expect((await lineOf(server))?.nodes.find((n) => n.id === "test")?.parked).toEqual([]);
+  await agent.release();
 });
 
 conformance("line", "unlinking and relinking a spent loop edge that a Resume bought past keeps its count, so its next spend raises a fresh hold", async (t) => {
