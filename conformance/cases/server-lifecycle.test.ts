@@ -491,8 +491,8 @@ async function finish(server: CaseServer): Promise<void> {
   await until(() => snapshot(server), (got) => got?.phase === "done", { ms: 30_000, what: "the pool to finish" });
 }
 
-// engine/server.test.ts:3335
-lifecycle("stop from the Console (#97) › refuses a stop while the pool is running and lets the attempt finish", async (t) => {
+// engine/server.test.ts:3335, turned round by ADR-0039: Stop is offered in every phase.
+lifecycle("stop from the Console (#97) › stops a running pool: 202, one `stopped` farewell, the headless attempt stopped, the port closed", async (t) => {
   const world = t.world({ tickets: [{ file: "01-a.md", marker: READY }], config: CONFIG });
   const sentinel = join(world.root, "go");
   world.stubs.script("01", { waitFor: sentinel });
@@ -502,23 +502,29 @@ lifecycle("stop from the Console (#97) › refuses a stop while the pool is runn
     (got) => got.phase === "running" && got.launched > 0,
     { what: "the pool running with 01's attempt in flight" },
   );
+  const client = await t.socket(server);
+  await client.waitFor((frame) => frame.type === "snapshot" && frame.snapshot !== null);
 
   const stop = await server.http.post("/api/stop");
-  expect(stop.status).toBe(409);
-  const error = stop.json<{ error: string }>().error;
-  expect(error).toContain("not done");
-  expect(error).toContain("running");
+  expect(stop.status).toBe(202);
+  expect(stop.json<unknown>()).toEqual({ stopping: true });
 
-  // Nothing was torn down: the server still serves, still running.
-  const state = await server.http.get("/api/state");
-  expect(state.status).toBe(200);
-  expect(state.json<{ snapshot: Served }>().snapshot.phase).toBe("running");
+  // Exactly one farewell, then the clean close.
+  expect(await client.closed).toEqual(CLOSE_STOPPED);
+  const farewells = client.frames.filter((frame) => frame.type === "delta" && frame.delta.set?.phase === "stopped");
+  expect(farewells).toHaveLength(1);
+  expect(client.pushed?.snapshot.phase).toBe("stopped");
 
-  writeFileSync(sentinel, "go");
-  await until(() => readStateLine(world.pool, "01-a.md").status, (status) => status === "done", {
-    ms: 20_000,
-    what: "01's marker to say done",
-  });
+  await until(() => server.exited(), (gone) => gone, { ms: 20_000, what: "the server to exit" });
+  await server.stop();
+  expect(existsSync(lockPath(world.pool))).toBe(false);
+  await expect(fetch(`${server.url}/api/state`)).rejects.toThrow();
+  // A headless attempt cannot outlive its engine (ADR-0017): it was stopped,
+  // not let finish, and its Ticket is left in-progress for the next boot.
+  expect(readFileSync(join(world.pool, "runs", "01.events.jsonl"), "utf8")).toContain(
+    "harness stopped by engine shutdown",
+  );
+  expect(readStateLine(world.pool, "01-a.md").status).toBe("in-progress");
 });
 
 // engine/server.test.ts:3369
@@ -629,8 +635,8 @@ lifecycle("server shutdown on signal › SIGTERM stops the running attempt and i
   }
 });
 
-// engine/server.test.ts:3582
-lifecycle("server shutdown on signal › POST /api/stop exits the CLI process once the pool is done, and refuses before it", async (t) => {
+// engine/server.test.ts:3582, turned round by ADR-0039: the stop no longer waits for done.
+lifecycle("server shutdown on signal › POST /api/stop exits the CLI process while the pool waits at its review gate", async (t) => {
   const world = t.world({ tickets: [{ file: "01-a.md", marker: DONE }], config: CONFIG });
   const server = await t.start(world);
   await until(
@@ -638,16 +644,7 @@ lifecycle("server shutdown on signal › POST /api/stop exits the CLI process on
     (got) => got?.state.interrupts.some((interrupt) => interrupt.kind === "review") ?? false,
     { ms: 30_000, what: "the pool to reach its review gate" },
   );
-
-  // Held at the review gate, the pool is not done: the stop is refused.
-  const early = await server.http.post("/api/stop");
-  expect(early.status).toBe(409);
-  expect(early.json<{ error: string }>().error).toContain("not done");
-  expect((await snapshot(server))?.phase).not.toBe("stopped");
-
-  const approve = await server.http.post("/api/resume", { ticketId: REVIEW, action: "approve" });
-  expect(approve.status).toBe(202);
-  await until(() => snapshot(server), (got) => got?.phase === "done", { ms: 30_000, what: "the pool to finish" });
+  expect((await snapshot(server))?.phase).not.toBe("done");
 
   const tab = await t.socket(server);
   await tab.waitFor((frame) => frame.type === "snapshot" && frame.snapshot !== null);

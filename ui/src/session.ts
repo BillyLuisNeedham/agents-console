@@ -45,6 +45,7 @@ import {
   projectNeedsInput,
   projectPool,
   projectTimeline,
+  stopPrompt,
   type ConversationEndView,
   type DetailTab,
   type EnrichedSnapshot,
@@ -364,12 +365,6 @@ export class ConsoleSession {
       this.restartState = "idle";
       this.restartFailure = null;
       if (handOver !== null) this.onRelaunched?.(handOver);
-    } else if (this.stopState === "armed" && snapshot.phase !== "done") {
-      // Stop is offered only on a done pool, so a phase that moved off done
-      // withdraws the offer and the armed confirmation goes with it. A
-      // request already in flight keeps its label until the farewell lands.
-      this.stopState = "idle";
-      this.stopFailure = null;
     }
     if (this.closeTerminalsState === "armed" && snapshot.finishedTerminals === 0) {
       // Nothing left to close (another tab closed them, or a pane went on
@@ -1025,12 +1020,14 @@ export class ConsoleSession {
       seq: this.snapshot?.seq ?? 0,
       error: this.versionStale ? VERSION_BANNER : this.error,
       stop: {
-        // Offered only on a done pool over a live socket (issue #97): there
-        // is nothing to interrupt, and a request down a dead socket would go
-        // nowhere. The relaunch command is Boot on the pool directory
-        // verbatim, as the snapshot carries it.
-        offered: this.view?.phase === "done" && this.connected,
+        // Offered on a live socket in any phase but the farewell (ADR-0039):
+        // a request down a dead socket would go nowhere, and a stopped
+        // server has nothing left to stop. The armed prompt names what keeps
+        // running in herdr. The relaunch command is Boot on the pool
+        // directory verbatim, as the snapshot carries it.
+        offered: this.connected && this.view?.phase !== "stopped",
         state: this.stopState,
+        prompt: stopPrompt(this.snapshot),
         failure: this.stopFailure,
         stoppedFromHere: this.stoppedFromHere,
         relaunch: this.snapshot

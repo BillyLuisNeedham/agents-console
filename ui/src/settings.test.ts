@@ -12,7 +12,7 @@ import {
 } from "./settings";
 import { commit } from "./morph";
 import { useDom } from "./test-dom";
-import type { RestartView } from "./view";
+import type { RestartView, StopView } from "./view";
 import {
   projectRestartBadges,
   type MachineDefaults,
@@ -123,6 +123,25 @@ async function opened(
 }
 
 const EMPTY: PoolDraft = poolDraftFrom({});
+
+/** The footer's Stop as a connected tab sees it before any press (ADR-0039). */
+const IDLE_STOP: StopView = {
+  offered: true,
+  state: "idle",
+  prompt: "Really stop?",
+  failure: null,
+  stoppedFromHere: false,
+  relaunch: null,
+};
+
+const FOOT_HANDLERS = {
+  onArmRestart: () => {},
+  onCancelRestart: () => {},
+  onConfirmRestart: () => {},
+  onArmStop: () => {},
+  onCancelStop: () => {},
+  onConfirmStop: () => {},
+};
 
 describe("poolDraftFrom", () => {
   it("seeds every field from the config, absent keys as empty", () => {
@@ -577,18 +596,13 @@ describe("SettingsStore.render", () => {
     failure: null,
     waiting: false,
   };
-  const HANDLERS = {
-    onArmRestart: () => {},
-    onCancelRestart: () => {},
-    onConfirmRestart: () => {},
-  };
 
   function mount(store: SettingsStore): { root: HTMLElement; paint(): void } {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const paint = () =>
       commit(root, () => {
-        const pane = store.render(RESTART, HANDLERS);
+        const pane = store.render(RESTART, IDLE_STOP, FOOT_HANDLERS);
         const shell = document.createElement("div");
         shell.className = "shell";
         if (pane) shell.appendChild(pane);
@@ -782,6 +796,72 @@ describe("SettingsStore.render", () => {
   });
 });
 
+describe("the footer's Stop control (ADR-0039)", () => {
+  const RESTART: RestartView = { offered: true, state: "idle", failure: null, waiting: false };
+
+  async function mountStop(stop: Partial<StopView>) {
+    const rig = await opened();
+    const intents: string[] = [];
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    commit(root, () => {
+      const shell = document.createElement("div");
+      shell.appendChild(
+        rig.store.render(
+          RESTART,
+          { ...IDLE_STOP, ...stop },
+          {
+            ...FOOT_HANDLERS,
+            onArmStop: () => intents.push("arm"),
+            onCancelStop: () => intents.push("cancel"),
+            onConfirmStop: () => intents.push("confirm"),
+          },
+        )!,
+      );
+      return shell;
+    });
+    return { foot: root.querySelector<HTMLElement>(".settings-foot")!, intents };
+  }
+
+  it("sits first in the footer, ahead of Restart, and arms on a click", async () => {
+    const { foot, intents } = await mountStop({});
+    const [stop, restart] = [...foot.children];
+    expect(stop?.getAttribute("data-key")).toBe("settings-stop");
+    expect(restart?.getAttribute("data-key")).toBe("settings-restart");
+    const button = foot.querySelector<HTMLButtonElement>(".settings-stop-server")!;
+    expect(button.textContent).toBe("Stop server");
+    button.click();
+    expect(intents).toEqual(["arm"]);
+  });
+
+  it("asks the session's prompt inline, then confirms or cancels", async () => {
+    const prompt =
+      "Stop server? 3 Tickets and 1 Conversation keep running in herdr; relaunching picks them up.";
+    const { foot, intents } = await mountStop({ state: "armed", prompt });
+    expect(foot.querySelector(".settings-stop-prompt")?.textContent).toBe(prompt);
+    const [confirm, cancel] = [...foot.querySelectorAll<HTMLButtonElement>(".settings-stop button")];
+    expect(confirm!.textContent).toBe("Stop");
+    confirm!.click();
+    cancel!.click();
+    expect(intents).toEqual(["confirm", "cancel"]);
+  });
+
+  it("disables itself while the request is out, and shows a refusal beside the button", async () => {
+    const requesting = await mountStop({ state: "requesting" });
+    const button = requesting.foot.querySelector<HTMLButtonElement>(".settings-stop button")!;
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("stopping...");
+    const refused = await mountStop({ failure: "socket closed" });
+    expect(refused.foot.querySelector(".settings-stop-failure")?.textContent).toBe("socket closed");
+  });
+
+  it("is hidden while not offered, leaving the footer to Restart", async () => {
+    const { foot } = await mountStop({ offered: false });
+    expect(foot.querySelector(".settings-stop")).toBeNull();
+    expect(foot.querySelector(".settings-restart-server")).not.toBeNull();
+  });
+});
+
 describe("the Steward entry (ADR-0030)", () => {
   it("seeds the budget and the Assignment from the file, absent as empty", () => {
     const draft = poolDraftFrom({
@@ -854,7 +934,8 @@ describe("the Steward entry (ADR-0030)", () => {
       shell.appendChild(
         rig.store.render(
           { offered: true, state: "idle", failure: null, waiting: false },
-          { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+          IDLE_STOP,
+          FOOT_HANDLERS,
         )!,
       );
       return shell;
@@ -912,7 +993,8 @@ describe("Steward may Close checkpoints (issue #154)", () => {
         shell.appendChild(
           rig.store.render(
             { offered: true, state: "idle", failure: null, waiting: false },
-            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+            IDLE_STOP,
+            FOOT_HANDLERS,
           )!,
         );
         return shell;
@@ -979,7 +1061,8 @@ describe("Steward may adopt Line spawns (#187, ADR-0037)", () => {
         shell.appendChild(
           rig.store.render(
             { offered: true, state: "idle", failure: null, waiting: false },
-            { onArmRestart: () => {}, onCancelRestart: () => {}, onConfirmRestart: () => {} },
+            IDLE_STOP,
+            FOOT_HANDLERS,
           )!,
         );
         return shell;

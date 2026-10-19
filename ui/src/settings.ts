@@ -25,7 +25,7 @@ import {
   type PoolConfigPatch,
   type SettingsResponse,
 } from "./project";
-import type { RestartView } from "./view";
+import type { RestartView, StopView } from "./view";
 
 export type GetSettingsHandler = () => Promise<SettingsResponse>;
 export type SavePoolHandler = (config: PoolConfigPatch) => Promise<SettingsResponse>;
@@ -38,6 +38,14 @@ export interface RestartHandlers {
   onArmRestart: () => void;
   onCancelRestart: () => void;
   onConfirmRestart: () => void;
+}
+
+/** The Stop control's three intents (issue #97): arm the inline
+ *  confirmation, drop it (nothing is sent), and send the stop. */
+export interface StopHandlers {
+  onArmStop: () => void;
+  onCancelStop: () => void;
+  onConfirmStop: () => void;
 }
 
 export interface SettingsOptions {
@@ -640,7 +648,11 @@ export class SettingsStore {
   // -------------------------------------------------------------------------
 
   /** The pane, or null while it is closed. */
-  render(restart: RestartView, handlers: RestartHandlers): HTMLElement | null {
+  render(
+    restart: RestartView,
+    stop: StopView,
+    handlers: RestartHandlers & StopHandlers,
+  ): HTMLElement | null {
     if (!this.isPaneOpen) return null;
     const body = this.inFlight
       ? h("div", { class: "settings-empty" }, "reading settings…")
@@ -673,6 +685,7 @@ export class SettingsStore {
       h(
         "div",
         { class: "settings-foot" },
+        this.renderStopControl(stop, handlers),
         this.renderRestartControl(restart, handlers),
       ),
     );
@@ -1300,6 +1313,69 @@ export class SettingsStore {
   }
 
   /**
+   * The Stop control (issue #97, ADR-0039), on the footer's left opposite
+   * Restart: offered in any phase while the stream is live, behind one
+   * inline confirmation that names what keeps running in herdr. It sits
+   * apart from Restart on purpose, so a press meant for one never lands on
+   * the other. Hidden on a dead socket, where Restart already says why
+   * neither can be asked. Cancel sends nothing, and a refusal shows beside
+   * the button, never on the global banner.
+   */
+  private renderStopControl(stop: StopView, handlers: StopHandlers): HTMLElement | null {
+    if (!stop.offered) return null;
+    if (stop.state === "requesting") {
+      return h(
+        "div",
+        { class: "settings-stop", key: "settings-stop" },
+        h(
+          "button",
+          { class: "btn btn-danger", type: "button", disabled: true },
+          "stopping...",
+        ),
+      );
+    }
+    if (stop.state === "armed") {
+      return h(
+        "div",
+        { class: "settings-stop settings-stop-armed", key: "settings-stop" },
+        h("span", { class: "settings-stop-prompt" }, stop.prompt),
+        h(
+          "button",
+          {
+            class: "btn btn-danger",
+            type: "button",
+            title: "stop this pool's server",
+            onclick: () => handlers.onConfirmStop(),
+          },
+          "Stop",
+        ),
+        h(
+          "button",
+          { class: "btn", type: "button", onclick: () => handlers.onCancelStop() },
+          "Cancel",
+        ),
+      );
+    }
+    return h(
+      "div",
+      { class: "settings-stop", key: "settings-stop" },
+      h(
+        "button",
+        {
+          class: "btn btn-danger settings-stop-server",
+          type: "button",
+          title: "stop this pool's server",
+          onclick: () => handlers.onArmStop(),
+        },
+        "Stop server",
+      ),
+      stop.failure
+        ? h("span", { class: "error-inline settings-stop-failure" }, stop.failure)
+        : null,
+    );
+  }
+
+  /**
    * The Restart control (ADR-0026), the Stop control's three states exactly,
    * but offered in any phase while the stream is live: a restart is how a
    * boot-only key takes effect, and waiting for the pool to finish first
@@ -1314,14 +1390,14 @@ export class SettingsStore {
     if (!restart.offered) {
       return h(
         "span",
-        { class: "settings-restart-off dim" },
+        { class: "settings-restart-off dim", key: "settings-restart" },
         "restart needs a live connection",
       );
     }
     if (restart.state === "requesting") {
       return h(
         "div",
-        { class: "settings-restart" },
+        { class: "settings-restart", key: "settings-restart" },
         h(
           "button",
           { class: "btn btn-danger", type: "button", disabled: true },
@@ -1332,7 +1408,7 @@ export class SettingsStore {
     if (restart.state === "armed") {
       return h(
         "div",
-        { class: "settings-restart settings-restart-armed" },
+        { class: "settings-restart settings-restart-armed", key: "settings-restart" },
         h("span", { class: "settings-restart-prompt" }, "Really restart?"),
         h(
           "button",
@@ -1353,7 +1429,7 @@ export class SettingsStore {
     }
     return h(
       "div",
-      { class: "settings-restart" },
+      { class: "settings-restart", key: "settings-restart" },
       h(
         "button",
         {

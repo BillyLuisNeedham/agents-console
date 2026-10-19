@@ -63,16 +63,19 @@ import { h } from "./dom";
 export type StopState = "idle" | "armed" | "requesting";
 
 /**
- * The Stop control's view slice (issue #97). `offered` gates the button on a
- * done pool over a live stream; `state` is the inline confirmation's state
- * machine; `failure` is a refused or failed request's reason, shown beside
- * the button rather than on the global banner; `stoppedFromHere` marks the
- * tab that asked for the stop; `relaunch` is the command the stopped notice
- * prints for getting the server back.
+ * The Stop control's view slice (issue #97, ADR-0039). `offered` gates the
+ * button on a live stream, in any phase; `state` is the inline
+ * confirmation's state machine; `prompt` is what the armed confirmation
+ * asks, naming what stays running in herdr; `failure` is a refused or
+ * failed request's reason, shown beside the button rather than on the
+ * global banner; `stoppedFromHere` marks the tab that asked for the stop;
+ * `relaunch` is the command the stopped notice prints for getting the
+ * server back.
  */
 export interface StopView {
   offered: boolean;
   state: StopState;
+  prompt: string;
   failure: string | null;
   stoppedFromHere: boolean;
   relaunch: string | null;
@@ -131,7 +134,8 @@ export interface AppModel {
   connected: boolean;
   seq: number;
   error: string | null;
-  /** The Stop control and the stopped-server notice (issue #97). */
+  /** The Settings pane's Stop control and the stopped-server notice
+   *  (issue #97, ADR-0039). */
   stop: StopView;
   /** The Settings pane's Restart control and the restarting notice (ADR-0026). */
   restart: RestartView;
@@ -289,16 +293,12 @@ export class ConsoleView {
   // highlight instead of stripping it.
   private selectedNodeId: string | null = null;
   private onSelectNode: ((nodeId: string | null) => void) | null = null;
-  // The canvas header's Stop and close-finished-terminals controls are
-  // built once with the canvas, but their intents belong to the render
-  // handlers, so they land through the latest render's set, the way the
-  // selection does.
+  // The canvas header's close-finished-terminals control is built once
+  // with the canvas, but its intents belong to the render handlers, so they
+  // land through the latest render's set, the way the selection does.
   private headerHandlers: Pick<
     Handlers,
     | "onHoverNode"
-    | "onArmStop"
-    | "onCancelStop"
-    | "onConfirmStop"
     | "onArmCloseTerminals"
     | "onCancelCloseTerminals"
     | "onConfirmCloseTerminals"
@@ -368,9 +368,6 @@ export class ConsoleView {
       onEndConversation: (conversationId, close) => {
         void this.conversationsTray.endConversation(conversationId, undefined, close);
       },
-      onArmStop: () => this.headerHandlers?.onArmStop(),
-      onCancelStop: () => this.headerHandlers?.onCancelStop(),
-      onConfirmStop: () => this.headerHandlers?.onConfirmStop(),
       onArmCloseTerminals: () => this.headerHandlers?.onArmCloseTerminals(),
       onCancelCloseTerminals: () => this.headerHandlers?.onCancelCloseTerminals(),
       onConfirmCloseTerminals: () => this.headerHandlers?.onConfirmCloseTerminals(),
@@ -451,7 +448,7 @@ export class ConsoleView {
         { onDuty: model.steward, defaults: model.stewardDefaults },
       ),
       this.enlist.render(model.enlistBlocks, model.steward),
-      this.settings.render(model.restart, handlers),
+      this.settings.render(model.restart, model.stop, handlers),
       this.reassign.render(model.reassignTickets),
       model.spawnLine
         ? this.heldSpawns.render(model.heldSpawns, model.spawnLine)

@@ -202,7 +202,8 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
       void session.keepTalking(ticketId);
     },
     onSelectTab: (ticketId, tab) => session.selectTab(ticketId, tab),
-    // The Stop control (issue #97). `confirmStop` catches its own failures
+    // The Stop control (issue #97), in the Settings pane's footer opposite
+    // Restart (ADR-0039). `confirmStop` catches its own failures
     // into the inline message beside the button: a refused stop is not a
     // broken pool.
     onArmStop: () => session.armStop(),
@@ -217,8 +218,8 @@ export function createConsole(options: ConsoleOptions): ConsoleApp {
     onConfirmRestart: () => {
       void session.confirmRestart();
     },
-    // Close finished terminals (issue #139), in the pool header beside
-    // Stop, and the same shape again.
+    // Close finished terminals (issue #139), in the pool header, the same
+    // shape again.
     onArmCloseTerminals: () => session.armCloseTerminals(),
     onCancelCloseTerminals: () => session.cancelCloseTerminals(),
     onConfirmCloseTerminals: () => {

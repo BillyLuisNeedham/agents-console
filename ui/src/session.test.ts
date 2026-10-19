@@ -18,6 +18,7 @@ import { RequestRefused } from "./socket";
 import { answered } from "./optimistic";
 import {
   projectPool,
+  stopPrompt,
   type ConversationView,
   type EnrichedSnapshot,
   type EnrichedTicketState,
@@ -943,22 +944,74 @@ describe("the connection banner", () => {
   });
 });
 
-describe("stop control (issue #97)", () => {
-  /** A connected session sitting on a done pool: the one state that offers Stop. */
+/** A ticket with a Live attempt in pane `p-<id>`. */
+function live(id: string): EnrichedTicketState {
+  return ticket(id, {
+    status: "in-progress",
+    liveAttempt: { attempt: 1, paneId: `p-${id}`, role: "agent", startedAt: "2026-10-16T10:00:00Z" },
+  });
+}
+
+describe("stopPrompt (ADR-0039)", () => {
+  const herdr = { terminal: "herdr" };
+
+  it("keeps the plain prompt when nothing is live", () => {
+    expect(stopPrompt(null)).toBe("Really stop?");
+    expect(stopPrompt(snapshot({ phase: "done" }))).toBe("Really stop?");
+    expect(
+      stopPrompt(snapshot({ state: { conversations: [conversation("c1", { status: "ended" })] } })),
+    ).toBe("Really stop?");
+  });
+
+  it("names what keeps running in herdr, zero parts left out", () => {
+    const tickets = [live("01"), live("02"), live("03"), ticket("04")];
+    expect(
+      stopPrompt(snapshot({ state: { config: herdr, tickets, conversations: [conversation("c1")] } })),
+    ).toBe(
+      "Stop server? 3 Tickets and 1 Conversation keep running in herdr; relaunching picks them up.",
+    );
+    expect(stopPrompt(snapshot({ state: { config: herdr, tickets } }))).toBe(
+      "Stop server? 3 Tickets keep running in herdr; relaunching picks them up.",
+    );
+    expect(
+      stopPrompt(
+        snapshot({
+          state: { conversations: [conversation("c1"), conversation("c2"), conversation("c3", { ending: true })] },
+        }),
+      ),
+    ).toBe("Stop server? 2 Conversations keep running in herdr; relaunching picks them up.");
+  });
+
+  it("says a headless pool's Live attempts stop and run again", () => {
+    expect(stopPrompt(snapshot({ state: { tickets: [live("01")] } }))).toBe(
+      "Stop server? 1 running Ticket stops and runs again on relaunch.",
+    );
+    expect(
+      stopPrompt(
+        snapshot({ state: { tickets: [live("01"), live("02")], conversations: [conversation("c1")] } }),
+      ),
+    ).toBe(
+      "Stop server? 1 Conversation keeps running in herdr; relaunching picks it up. 2 running Tickets stop and run again on relaunch.",
+    );
+  });
+});
+
+describe("stop control (issue #97, ADR-0039)", () => {
+  /** A connected session sitting on a done pool. */
   function doneSession() {
     const { r, session } = sessionOver(snapshot({ phase: "done" }));
     session.connection({ up: true });
     return { r, session };
   }
 
-  it("offers Stop only while the pool is done and the socket is connected", () => {
+  it("offers Stop in any phase while the socket is connected", () => {
     const timers = captureTimers();
     try {
       const { session } = doneSession();
       expect(session.model({}).stop.offered).toBe(true);
       session.setSnapshot(snapshot({ phase: "running" }));
-      expect(session.model({}).stop.offered).toBe(false);
-      session.setSnapshot(snapshot({ phase: "done" }));
+      expect(session.model({}).stop.offered).toBe(true);
+      session.setSnapshot(snapshot({ phase: "quiescent" }));
       expect(session.model({}).stop.offered).toBe(true);
       // A dropped socket takes the offer with it: a request down a dead
       // connection would go nowhere.
@@ -979,12 +1032,20 @@ describe("stop control (issue #97)", () => {
     expect(r.requests).toHaveLength(0);
   });
 
-  it("disarms when a snapshot moves the pool off done", () => {
+  it("stays armed when a snapshot moves the phase, and its prompt follows the snapshot", () => {
     const { session } = doneSession();
     session.armStop();
-    session.setSnapshot(snapshot({ phase: "running" }));
-    expect(session.model({}).stop.state).toBe("idle");
-    expect(session.model({}).stop.offered).toBe(false);
+    expect(session.model({}).stop.prompt).toBe("Really stop?");
+    session.setSnapshot(
+      snapshot({
+        phase: "running",
+        state: { config: { terminal: "herdr" }, tickets: [live("01")] },
+      }),
+    );
+    expect(session.model({}).stop.state).toBe("armed");
+    expect(session.model({}).stop.prompt).toBe(
+      "Stop server? 1 Ticket keeps running in herdr; relaunching picks it up.",
+    );
   });
 
   it("holds 'stopping...' until the accept, then marks the stop as this page's", async () => {
@@ -1019,11 +1080,11 @@ describe("stop control (issue #97)", () => {
     const { r, session } = doneSession();
     session.armStop();
     const settled = session.confirmStop();
-    r.last("stop").deferred.reject(refused("pool is running, not done: stop refused"));
+    r.last("stop").deferred.reject(refused("socket closed before the reply"));
     await settled;
     const model = session.model({});
     expect(model.stop.state).toBe("idle");
-    expect(model.stop.failure).toBe("pool is running, not done: stop refused");
+    expect(model.stop.failure).toBe("socket closed before the reply");
     expect(model.stop.stoppedFromHere).toBe(false);
     expect(model.error).toBeNull();
   });
@@ -1080,10 +1141,10 @@ describe("restart control (ADR-0026)", () => {
     return { r, session };
   }
 
-  it("offers Restart in any phase, unlike Stop", () => {
+  it("offers Restart in any phase, as Stop is", () => {
     const { session } = connected("running");
     expect(session.model({}).restart.offered).toBe(true);
-    expect(session.model({}).stop.offered).toBe(false);
+    expect(session.model({}).stop.offered).toBe(true);
     session.setSnapshot(snapshot({ phase: "done" }));
     expect(session.model({}).restart.offered).toBe(true);
   });

@@ -11,7 +11,7 @@
  * Adopt shows as the engine's `adopting` until the next Tick writes the
  * ticket and the row goes, and a Discard shows with the snapshot the engine
  * pushes once it is done. Discard is final, so it asks first, inline, the
- * way the header's Stop does (issue #97). The Detail of a held spawn's faded
+ * way Stop does (issue #97). The Detail of a held spawn's faded
  * card offers the same decisions through `renderDecision`, so the list and
  * the Detail can never disagree about a spawn in flight.
  */

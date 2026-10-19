@@ -2187,6 +2187,47 @@ export function isTerminalBacked(config: Record<string, unknown>): boolean {
   return config.terminal === "herdr";
 }
 
+/**
+ * What the Stop control's inline confirmation asks (ADR-0039). A pool with
+ * nothing live keeps the plain "Really stop?". Otherwise it names what the
+ * stop leaves behind, zero parts left out: a Terminal-backed pool's Live
+ * attempts and every live Conversation keep running in herdr for the
+ * relaunch to pick up, while a headless pool's Live attempts stop and run
+ * again on relaunch (ADR-0017).
+ */
+export function stopPrompt(snapshot: EnrichedSnapshot | null): string {
+  if (!snapshot) return "Really stop?";
+  const tickets = snapshot.state.tickets.filter((t) => t.liveAttempt !== null).length;
+  const conversations = snapshot.state.conversations.filter(
+    (c) => c.status === "live" && !c.ending,
+  ).length;
+  const terminal = isTerminalBacked(snapshot.state.config);
+  const counted = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+  const sentences: string[] = [];
+  const kept: string[] = [];
+  let keptCount = 0;
+  const keep = (n: number, noun: string) => {
+    if (n === 0) return;
+    kept.push(counted(n, noun));
+    keptCount += n;
+  };
+  if (terminal) keep(tickets, "Ticket");
+  keep(conversations, "Conversation");
+  if (kept.length > 0) {
+    const one = keptCount === 1;
+    sentences.push(
+      `${kept.join(" and ")} ${one ? "keeps" : "keep"} running in herdr; relaunching picks ${one ? "it" : "them"} up.`,
+    );
+  }
+  if (!terminal && tickets > 0) {
+    const one = tickets === 1;
+    sentences.push(
+      `${counted(tickets, "running Ticket")} ${one ? "stops" : "stop"} and ${one ? "runs" : "run"} again on relaunch.`,
+    );
+  }
+  return sentences.length === 0 ? "Really stop?" : `Stop server? ${sentences.join(" ")}`;
+}
+
 // ---------------------------------------------------------------------------
 // The Steward (ADR-0030; CONTEXT.md: Steward, Steward budget, Steward note):
 // a Conversation in a role, one live per Pool. The engine's shapes carry the

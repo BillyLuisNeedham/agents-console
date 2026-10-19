@@ -23,7 +23,7 @@ use ac_protocol::{
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
     LinePlanEditRequest, LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest,
     PlanDraftResponse, PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse,
-    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, RunPhase,
+    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction,
     StartConversationRequest,
 };
 
@@ -165,22 +165,12 @@ pub async fn start_request(server: &Server) -> Answer {
     }
 }
 
-/// Stop this server from the Console (issue #97): only a finished pool may be stopped this way, and a
-/// stop already under way is acknowledged again rather than started twice.
+/// Stop this server from the Console (issue #97): allowed in any phase, a pool not yet started too
+/// (ADR-0039). It leaves the world as a Restart does before its relaunch: terminal-backed attempts and
+/// Conversations keep running in their herdr panes for the next boot to re-adopt. A stop already under
+/// way is acknowledged again rather than started twice.
 pub fn stop_request(server: &Server, inner: &mut Inner) -> Answer {
-    let phase = server.current(inner).map(|snapshot| snapshot.phase);
-    let under_way = server.stop_under_way(inner);
-    if !under_way && phase != Some(RunPhase::Done) {
-        return Answer::refused(
-            409,
-            Field::Error,
-            match phase {
-                None => "pool not started: nothing to stop".to_owned(),
-                Some(phase) => format!("pool is {}, not done: stop refused", phase.as_str()),
-            },
-        );
-    }
-    if !under_way {
+    if !server.stop_under_way(inner) {
         inner.stop_requested = true;
         // Off the request's own turn, so the answer is on the wire before serving stops under it.
         let owner = server.clone();

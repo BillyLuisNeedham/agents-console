@@ -260,8 +260,8 @@ interface CanvasBind {
 
 /** The slice of the app model the canvas renders from. */
 /**
- * The header's inline confirmation (issue #97's Stop, reused by issue #139's
- * close-finished-terminals): the control's button, then on a click a prompt
+ * The header's inline confirmation (issue #139's close-finished-terminals,
+ * in the shape issue #97's Stop set): the control's button, then on a click a prompt
  * with the confirming action and Cancel beside it, then a disabled
  * requesting label while the POST is out. The session owns the state
  * machine; this only draws it. Cancel sends nothing, and a refusal's reason
@@ -453,9 +453,6 @@ export class Canvas {
   private readonly onOpenHeldSpawns: () => void;
   private readonly onResetLayout: () => void;
   private readonly onEndConversation: (conversationId: string, close?: boolean) => void;
-  private readonly onArmStop: () => void;
-  private readonly onCancelStop: () => void;
-  private readonly onConfirmStop: () => void;
   private readonly onArmCloseTerminals: () => void;
   private readonly onCancelCloseTerminals: () => void;
   private readonly onConfirmCloseTerminals: () => void;
@@ -490,13 +487,9 @@ export class Canvas {
      *  Fire-and-forget: the Conversations store tracks the in-flight/failure
      *  state the card reads back. */
     onEndConversation: (conversationId: string, close?: boolean) => void;
-    /** The header's Stop control (issue #97): arm the inline confirmation,
-     *  drop it, and send the stop. Cancel sends nothing. */
-    onArmStop: () => void;
-    onCancelStop: () => void;
-    onConfirmStop: () => void;
-    /** The header's close-finished-terminals control (issue #139), the Stop
-     *  control's three intents again. Cancel sends nothing. */
+    /** The header's close-finished-terminals control (issue #139): arm the
+     *  inline confirmation, drop it, and send the close. Cancel sends
+     *  nothing. */
     onArmCloseTerminals: () => void;
     onCancelCloseTerminals: () => void;
     onConfirmCloseTerminals: () => void;
@@ -513,9 +506,6 @@ export class Canvas {
     this.onOpenHeldSpawns = options.onOpenHeldSpawns;
     this.onResetLayout = options.onResetLayout;
     this.onEndConversation = options.onEndConversation;
-    this.onArmStop = options.onArmStop;
-    this.onCancelStop = options.onCancelStop;
-    this.onConfirmStop = options.onConfirmStop;
     this.onArmCloseTerminals = options.onArmCloseTerminals;
     this.onCancelCloseTerminals = options.onCancelCloseTerminals;
     this.onConfirmCloseTerminals = options.onConfirmCloseTerminals;
@@ -1131,7 +1121,6 @@ export class Canvas {
           "Plans",
         ),
         this.renderCloseTerminalsControl(model.closeTerminals),
-        this.renderStopControl(model.stop),
       ),
     );
   }
@@ -1153,36 +1142,10 @@ export class Canvas {
   }
 
   /**
-   * The Stop control (issue #97), offered only while the pool is done and
-   * the stream is live. The confirmation is inline on the button rather than
-   * a modal, the way a Conversation's End button swaps its own label:
-   * "Really stop?" with Stop and Cancel beside it, then a disabled
-   * "stopping..." while the POST is out. Cancel sends nothing, and a refusal
-   * shows beside the button, not on the global banner.
-   */
-  private renderStopControl(stop: StopView): HTMLElement | null {
-    if (!stop.offered) return null;
-    return renderInlineConfirm({
-      base: "canvas-stop",
-      openClass: "btn-danger canvas-stop-server",
-      label: "Stop server",
-      title: "stop this pool's server",
-      prompt: "Really stop?",
-      confirmLabel: "Stop",
-      requestingLabel: "stopping...",
-      state: stop.state,
-      failure: stop.failure,
-      onArm: () => this.onArmStop(),
-      onCancel: () => this.onCancelStop(),
-      onConfirm: () => this.onConfirmStop(),
-    });
-  }
-
-  /**
    * "Close N finished terminals" (issue #139): the herdr tabs this pool
    * opened whose Attempt or Conversation has ended, which the engine never
-   * closes on its own. Hidden at zero, and behind the Stop control's inline
-   * confirmation, since closing a tab takes its scrollback with it.
+   * closes on its own. Hidden at zero, and behind an inline confirmation,
+   * since closing a tab takes its scrollback with it.
    */
   private renderCloseTerminalsControl(close: CloseTerminalsView): HTMLElement | null {
     if (!close.offered) return null;

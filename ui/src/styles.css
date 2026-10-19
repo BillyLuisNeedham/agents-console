@@ -430,20 +430,17 @@ body {
   background: var(--border);
 }
 
-/* The Stop control and the stopped-server notice (issue #97). The control
-   keeps its confirmation on one row beside the other header tools; the
-   notice is a bar under the header, carrying the relaunch command. The
-   close-finished-terminals control (issue #139) is the same inline confirm,
-   so it wears the same shape. */
+/* The close-finished-terminals control (issue #139) keeps its inline
+   confirmation on one row beside the other header tools, and the
+   stopped-server notice (issue #97) is a bar under the header, carrying the
+   relaunch command. Stop itself lives in the Settings footer (ADR-0039). */
 
-.canvas-stop,
 .canvas-close-terminals {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.canvas-stop-prompt,
 .canvas-close-terminals-prompt {
   font-size: 11px;
   color: var(--interrupt);
@@ -2739,10 +2736,34 @@ textarea.conversations-field {
   flex-shrink: 0;
 }
 
+/* Stop (ADR-0039) holds the footer's left, Restart its right: the two ways
+   of ending this server sit apart, so a press meant for one never lands on
+   the other. A live pool's prompt names what keeps running, so it may
+   wrap rather than push Restart off the pane. */
+.settings-stop {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
+  min-width: 0;
+}
+
+.settings-stop-prompt {
+  font-size: 11px;
+  color: var(--interrupt);
+}
+
+.settings-stop-failure {
+  font-size: 11px;
+}
+
 .settings-restart {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .settings-restart-prompt {

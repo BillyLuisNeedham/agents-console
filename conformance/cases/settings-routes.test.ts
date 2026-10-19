@@ -551,17 +551,15 @@ async function running(server: CaseServer): Promise<void> {
 // engine/settings-routes.test.ts:457
 conformance(
   "server",
-  "POST /api/restart (#121) › is accepted before the pool has started, where a stop is refused",
+  "POST /api/restart (#121) › is accepted before the pool has finished",
   async (t) => {
     // The command line starts the pool as it binds, so a pool that is not
-    // done stands in for one not started: Stop refuses it, Restart does not.
+    // done stands in for one not started. (Stop is accepted here too since
+    // ADR-0039; server-lifecycle.test.ts asks it.)
     const { world } = heldWorld(t);
     const recorder = bootRecorder(world);
     const server = await t.start(world, recorder.start);
     await running(server);
-
-    const stop = await server.http.post("/api/stop");
-    expect(stop.status).toBe(409);
 
     const restart = await server.http.post("/api/restart");
     expect(restart.status).toBe(202);
