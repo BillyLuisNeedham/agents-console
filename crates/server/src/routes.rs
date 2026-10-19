@@ -478,7 +478,7 @@ pub fn plan_delete_request(server: &Server, slug: &str) -> Answer {
 }
 
 /// POST /api/resume: acceptance only (ADR-0004). The engine records the answer and the caller gets the
-/// snapshot after acceptance right away.
+/// snapshot its acceptance left right away, never a later tick's.
 pub async fn resume_request(server: &Server, body: Body) -> Answer {
     let refused = |err: String| Answer::refused(400, Field::Error, err);
     let body = match body {
@@ -553,14 +553,17 @@ pub async fn resume_request(server: &Server, body: Body) -> Answer {
             ));
         }
     }
-    if let Err(err) = engine.accept(ticket_id, note, action, attempt).await {
-        return Answer::refused(
-            engine_refusal_status(&err, 400),
-            Field::Error,
-            err.message(),
-        );
-    }
-    let snapshot = server.snapshot();
+    let accepted = match engine.accept(ticket_id, note, action, attempt).await {
+        Ok(accepted) => accepted,
+        Err(err) => {
+            return Answer::refused(
+                engine_refusal_status(&err, 400),
+                Field::Error,
+                err.message(),
+            );
+        }
+    };
+    let snapshot = accepted.map(|raw| server.snapshot_of(&raw));
     Answer::ok(202, &json!({ "snapshot": snapshot.as_deref() }))
 }
 
