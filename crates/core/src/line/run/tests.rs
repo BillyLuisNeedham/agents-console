@@ -1943,9 +1943,17 @@ fn with_a_merger_the_next_ticket_waits_for_every_copy_to_be_done_and_merged() {
         Vec::<String>::new(),
         "done is not merged"
     );
+    let merger = |run: &LineRun| run.view().nodes[4].clone();
+    assert_eq!(merger(&run).id, "build-merge");
+    assert_eq!(merger(&run).passes, 0, "nothing is folded yet");
     pool.agent("build-1.5");
     let after = tick(&mut run, &mut pool);
     assert_eq!(written(&after), ["after-1"]);
+    assert_eq!(
+        merger(&run).passes,
+        1,
+        "the Merger counts the pass it folded"
+    );
     let blocked: Vec<_> = [
         "build-1.1",
         "build-1.2",

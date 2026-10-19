@@ -1300,6 +1300,8 @@ impl LineRun {
         };
         match body {
             NodeBody::Merger(_) => {
+                // A Merger holds no pass: each folded pass it hands on counts as one of its own.
+                self.node_mut(node).passes += 1;
                 let handoff = Handoff {
                     from: Some(node.clone()),
                     ..handoff
