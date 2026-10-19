@@ -2,6 +2,7 @@
 //! the server asks of a running pool. Each method is one job on the actor (or a flow that sends jobs),
 //! and refuses with the TypeScript's message as an [`EngineError`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -15,15 +16,18 @@ use crate::actor::Engine;
 use crate::drive::{SHUTDOWN_SETTLE_WAIT_MS, Settle, next_settle};
 use crate::error::EngineError;
 use crate::pane_reads::PaneRead;
+use crate::snapshot::PoolSnapshot;
 
 impl Engine {
+    /// Resolves with the snapshot the acceptance job left: the tick the answer wakes may drain it before
+    /// the caller could read the latest one.
     pub async fn accept(
         &self,
         ticket_id: String,
         note: Option<String>,
         action: ResumeAction,
         attempt: Option<u32>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<Arc<PoolSnapshot>>, EngineError> {
         self.call(move |s| {
             crate::answers::submit_answer(
                 s,
@@ -33,7 +37,8 @@ impl Engine {
                 attempt.map(u64::from),
                 None,
                 None,
-            )
+            )?;
+            Ok(s.snapshots.back().cloned())
         })
         .await?
     }

@@ -26,8 +26,11 @@ export interface LiveNode {
   state: { tone: NodeTone; text: string };
   copies: LiveCopy[];
   queued: number;
-  /** "pass 2 · 2 running · 3 queued"; null with no live pass. */
-  summary: string | null;
+  /**
+   * The pass summary's wordings, longest first: "pass 2 · 2 running · 3 queued",
+   * then "2 running · 3 queued" for a card too narrow; null with no live pass.
+   */
+  summary: readonly string[] | null;
   /** The Gate's or Finish's hold, else the hold of a spent loop leaving this node. */
   hold: LiveCopy | null;
   parked: readonly string[];
@@ -148,14 +151,14 @@ function passesDone(f: NodeFacts): LiveNode["state"] {
   return n > 0 ? { tone: "done", text: `done · ${n} ${n === 1 ? "pass" : "passes"}` } : { tone: "idle", text: "not run" };
 }
 
-function summaryOf(f: NodeFacts): string | null {
+function summaryOf(f: NodeFacts): string[] | null {
   const { pass, queued } = f.view;
   if (pass === undefined) return null;
   const perItem = "copies" in f.plan && typeof f.plan.copies === "object";
-  if (!perItem && queued === 0) return `pass ${pass}`;
-  const parts = [`pass ${pass}`, `${f.active} running`];
-  if (queued > 0) parts.push(`${queued} queued`);
-  return parts.join(" · ");
+  if (!perItem && queued === 0) return [`pass ${pass}`];
+  const counts = [`${f.active} running`];
+  if (queued > 0) counts.push(`${queued} queued`);
+  return [[`pass ${pass}`, ...counts].join(" · "), counts.join(" · ")];
 }
 
 export function projectLine(

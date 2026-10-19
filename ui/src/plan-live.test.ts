@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import type { CopyTone, LiveCopy } from "./line-projection";
-import { copyRoom, copyRow } from "./plan-live";
+import { copyRoom, copyRow, fitSummary } from "./plan-live";
 
 const copy = (i: number, tone: CopyTone, selected = false): LiveCopy => ({
   id: `build-1.${i}`,
@@ -21,6 +21,22 @@ describe("copyRoom", () => {
     expect(copyRoom(null)).toBe(14);
     expect(copyRoom({ id: "implement-1" })).toBeLessThan(14);
     expect(copyRoom({ id: "implement-1" })).toBeGreaterThan(copyRoom({ id: "a-hold-id-too-long-to-show-whole-on-a-card" }));
+  });
+});
+
+describe("fitSummary", () => {
+  it("keeps the pass number while the whole summary fits", () => {
+    expect(fitSummary(["pass 2 · 2 running · 3 queued", "2 running · 3 queued"])).toBe("pass 2 · 2 running · 3 queued");
+  });
+
+  it("drops the pass number from a summary too long for the card", () => {
+    expect(fitSummary(["pass 1 · 31 running · 3 queued", "31 running · 3 queued"])).toBe("31 running · 3 queued");
+  });
+
+  it("falls back to the shortest wording when none fits", () => {
+    expect(fitSummary(["pass 12 · 1234567 running · 1234567 queued", "1234567 running · 1234567 queued"])).toBe(
+      "1234567 running · 1234567 queued",
+    );
   });
 });
 

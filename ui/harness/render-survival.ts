@@ -1961,7 +1961,7 @@ async function lineLayoutChecks(name: string): Promise<void> {
       return k.left < box.left - 1 || k.right > box.right + 1 || k.top < box.top - 1 || k.bottom > box.bottom + 1;
     });
     const clipped = [...el.querySelectorAll<HTMLElement>(".plan-node-state, .plan-live-summary")].filter(
-      (kid) => kid.scrollWidth > kid.clientWidth + 1,
+      (kid) => kid.scrollWidth > kid.clientWidth,
     );
     if (clipped.length) spilled.push(`${el.dataset.node} (${clipped.map((k) => `"${k.textContent}" cut`).join(", ")})`);
     else if (outsideKids.length || (body && body.scrollHeight > body.clientHeight + 1)) {
@@ -2093,6 +2093,12 @@ async function crowdedLineChecks(name: string): Promise<void> {
       ? null
       : `done pill "${pill?.textContent}", ${hidden.length} hidden, button "${build()?.querySelector(".plan-copies-more")?.textContent}"`,
     `${folded} done in the pill, ${hidden.length} behind +${hidden.length}`,
+  );
+  const summary = build()?.querySelector<HTMLElement>(".plan-live-summary");
+  push(
+    "a crowded card's pass summary is uncut",
+    !summary ? "no pass summary" : summary.scrollWidth > summary.clientWidth ? `"${summary.textContent}" cut: ${summary.scrollWidth} > ${summary.clientWidth}` : null,
+    `"${summary?.textContent}" fits in ${summary?.clientWidth}px`,
   );
   push(
     "the checkpointed copy past the old row's end is a dot",

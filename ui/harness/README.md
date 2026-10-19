@@ -64,11 +64,12 @@ refused edit's reason wraps inside the view, and that every edge label, here
 and in the Plans view, clears every card and every other label as drawn. It
 then pushes a crowded Line, a forked Plan whose `build` holds forty copies
 (done, running, pending and one checkpointed late in the list), and checks that
-the done copies fold into a count, the checkpointed copy is still a dot, every
-dot and pill stays inside its card's copy row, every copy the row hides opens
-by tapping `+N` again and again (the same pointer pair and click as a dot), and
-the fork's two `done` labels out of `tasks` are both drawn and clear. The
-previous snapshot is put back afterwards.
+the done copies fold into a count, the pass summary drops its pass number
+rather than be cut, the checkpointed copy is still a dot, every dot and pill
+stays inside its card's copy row, every copy the row hides opens by tapping
+`+N` again and again (the same pointer pair and click as a dot), and the
+fork's two `done` labels out of `tasks` are both drawn and clear. The previous
+snapshot is put back afterwards.
 One more presses End on a Line's Conversation pass whose End the fixture
 refuses with a long reason: the reason and End as closed must stay inside the
 card, and inside the Detail's End box once it opens, and an ordinary

@@ -923,6 +923,13 @@ export interface StewardStateResponse {
   mergeQueue: { ticketId: string; state: string }[];
   pendingSpawns: { id: string; parentId: string; title: string }[];
   heldSpawns: { id: string; parentId: string; title: string; reason: string }[];
+  /** The Line's Plan rev and parked verdicts, in a pool running a Line, for `plan <rev> <edits>`. */
+  line?: {
+    /** The Plan's rev, which an edit must name. */
+    rev: number;
+    /** Every node holding a verdict with no out edge, waiting to be linked onward. */
+    parked: { node: string; verdicts: string[] }[];
+  };
   /** The Spawn ledger, for the whole pool's state in one file. */
   ledger: string;
 }
