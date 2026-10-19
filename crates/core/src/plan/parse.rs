@@ -324,6 +324,13 @@ fn readable(err: &serde_json::Error, raw: &Value) -> String {
     if text.contains("missing field `of`") {
         return "a Merger needs `of`, the per-item Ticket node it folds".to_owned();
     }
+    if let Some(got @ Value::String(word)) = raw.get("checkpoint")
+        && text.contains(&format!("unknown variant `{word}`"))
+    {
+        return format!(
+            r#"`checkpoint` must be "operator" or "steward", not {got}: the engine never answers a checkpoint by itself"#
+        );
+    }
     SHAPES
         .iter()
         .find(|(name, ..)| text.contains(&format!("untagged enum {name}")))
@@ -1043,14 +1050,17 @@ impl<'a> Graph<'a> {
                 ));
             }
         }
+        // In a valid Plan `plain` is acyclic, so two loops contain each other only when they share
+        // both ends. Such a pair runs the same cycle side by side: neither is nested, or each
+        // traversal would reset the other and neither cap would ever be spent.
         let plain = self.closure(|j, link| link.routes && !is_loop[j]);
-        for (j, link) in self.links.iter().enumerate().filter(|(j, _)| is_loop[*j]) {
+        for (_, link) in self.links.iter().enumerate().filter(|(j, _)| is_loop[*j]) {
             let nested = self
                 .links
                 .iter()
                 .enumerate()
                 .filter(|(m, inner)| {
-                    *m != j
+                    (inner.from, inner.to) != (link.from, link.to)
                         && is_loop[*m]
                         && inner.capped
                         && plain[link.to][inner.to]

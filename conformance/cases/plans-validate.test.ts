@@ -217,6 +217,18 @@ for (const rule of RULES) {
   });
 }
 
+for (const word of ["rest", "continue"]) {
+  conformance("plans", `Plan validation › a checkpoint of "${word}" is reported on the node, naming the field: the engine never answers a checkpoint by itself`, async (t) => {
+    const { server, socket } = await plansPool(t);
+    const draft = plan([node.agent("build", { checkpoint: word } as never), node.finish()], [edge("build", "done", "finish")]);
+
+    const problems = await validateBoth(server, socket, draft);
+
+    expectProblem(problems, { at: atNode("build"), keyword: "`checkpoint`" });
+    expectProblem(problems, { at: atNode("build"), keyword: "never answers a checkpoint by itself" });
+  });
+}
+
 conformance("plans", "Plan validation › a Plan with three different problems reports all three in one answer", async (t) => {
   const { server, socket } = await plansPool(t);
   const draft = plan(

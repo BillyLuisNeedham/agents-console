@@ -3,7 +3,8 @@
  * the socket's `line.plan.edit` take typed edits made against the Plan's rev and answer the new
  * rev, which GET /api/line and line.json show. A stale rev, and an edit that would orphan live run
  * state, are refused with nothing changed. Linking a parked verdict hands it on, so the next tick
- * writes the downstream Ticket. The frozen copy changes and the Plan library does not.
+ * writes the downstream Ticket. An unlinked loop edge keeps its count, so a relink resumes it and
+ * never raises a hold id twice. The frozen copy changes and the Plan library does not.
  */
 
 import { expect } from "bun:test";
@@ -12,9 +13,10 @@ import { join } from "node:path";
 import type { LineFile, LinePlanEditResponse, PlanEditFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
+import { answer, statuses } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
 import { untilLaunched } from "./line-copies-support.ts";
-import { FAIL, begun, lineOf, lineWorld, reason } from "./line-support.ts";
+import { FAIL, atCheckpoint, begun, launches, lineOf, lineWorld, reason } from "./line-support.ts";
 import { edge, node, plan, planFile, plansDir } from "./plans-support.ts";
 
 /** build -> test (a Prove with no fail edge) -> finish. */
@@ -92,4 +94,31 @@ conformance("line", "linking a parked verdict hands it on, and the next tick wri
   await untilLaunched(world, ["agent-1"]);
   expect(readStateLine(world.pool, "agent-1.md").line).toContain("blocked-by=test-1");
   expect((await lineOf(server))?.nodes.find((n) => n.id === "test")?.parked).toEqual([]);
+});
+
+conformance("line", "unlinking and relinking a spent loop edge that a Resume bought past keeps its count, so its next spend raises a fresh hold", async (t) => {
+  const world = lineWorld(t);
+  for (const id of ["prove-1", "prove-2", "prove-3"]) world.stubs.script(id, FAIL);
+  const prove = world.stubs.hold("prove-4", FAIL);
+  const server = await t.start(world);
+  await begun(server);
+  await atCheckpoint(server, "prove-fail-implement-3");
+  await answer(server, { ticketId: "prove-fail-implement-3" });
+  await untilLaunched(world, ["prove-4"]);
+
+  const line = await lineOf(server);
+  const fail = line!.plan.edges.find((e) => e.from === "prove" && e.on === "fail")!;
+  const unlinked = await server.http.post("/api/line/plan", {
+    baseRev: line!.rev,
+    edits: [{ edit: "unlink", from: "prove", on: "fail", to: "implement" }],
+  });
+  expect(unlinked.status, unlinked.text).toBe(200);
+  const relinked = await server.http.post("/api/line/plan", { baseRev: line!.rev + 1, edits: [{ edit: "link", edge: fail }] });
+  expect(relinked.status, relinked.text).toBe(200);
+  expect((await lineOf(server))?.edges.find((e) => e.edge.on === "fail")).toMatchObject({ count: 3, max: 2, bought: 1 });
+
+  await prove.release();
+  const spent = await atCheckpoint(server, "prove-fail-implement-4");
+  expect(statuses(spent)).toMatchObject({ "prove-fail-implement-3": "done", "prove-fail-implement-4": "checkpoint" });
+  expect(launches(world)).not.toContain("implement-5");
 });

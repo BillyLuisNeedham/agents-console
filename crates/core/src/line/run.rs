@@ -70,7 +70,8 @@ pub struct LineRun {
     status: LineStatus,
     /// One entry per node ever handed anything.
     nodes: IndexMap<NodeId, NodeRun>,
-    /// One entry per loop edge ever traversed or held.
+    /// One entry per loop edge ever traversed or held, kept when an edit unlinks the edge: a relink
+    /// resumes its count, and its hold ids never repeat.
     edges: IndexMap<EdgeKey, EdgeRun>,
     /// Every done copy, in the order it settled: what a Decide pass reads.
     settled: Vec<TicketId>,
@@ -171,7 +172,8 @@ pub struct Handoff {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EdgeRun {
     count: u32,
-    /// Every traversal ever, never reset: a loop hold's id counts these.
+    /// Every traversal ever, and every hold closed in place of one, never reset: a loop hold's id
+    /// counts these, so no id is raised twice.
     traversals: u32,
     bought: u32,
     steward_used: bool,
@@ -714,9 +716,6 @@ impl LineRun {
         if edited.plan != self.plan {
             self.plan = edited.plan;
             self.rev += 1;
-            let plan = &self.plan;
-            self.edges
-                .retain(|key, _| plan.edges().iter().any(|e| e.key == *key));
             self.flow_parked();
         }
         Ok(edited.notes)
@@ -1445,6 +1444,7 @@ impl LineRun {
                     self.traverse(&key, handoff);
                 }
                 HoldAnswer::Closed => {
+                    edge.traversals += 1;
                     let handoff = Handoff {
                         from: Some(key.from.clone()),
                         verdict: Verdict::Closed,

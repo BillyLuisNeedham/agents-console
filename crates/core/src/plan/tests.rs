@@ -413,6 +413,28 @@ fn reads_a_bad_node_or_edge_as_one_problem_and_keeps_reading() {
 }
 
 #[test]
+fn refuses_a_checkpoint_the_engine_would_answer_by_itself() {
+    for word in ["rest", "continue"] {
+        let value = simple(
+            vec![with(node("agent", "b"), json!({"checkpoint": word}))],
+            vec![edge("a", "closed", "b")],
+        );
+        let found = problems(&value);
+        let on_b: Vec<_> = found.iter().filter(|p| p.at == at_node("b")).collect();
+        assert_eq!(on_b.len(), 1, "{found:#?}");
+        let message = &on_b[0].message;
+        for said in [
+            "`checkpoint`",
+            r#""operator" or "steward""#,
+            &format!(r#"not "{word}""#),
+            "never answers a checkpoint by itself",
+        ] {
+            assert!(message.contains(said), "{said:?} not in {message:?}");
+        }
+    }
+}
+
+#[test]
 fn refuses_a_file_with_a_bad_top_level() {
     assert_refused(&json!([]), at_plan(), "object");
     let value = json!({"horde": 2, "name": " ", "nodes": {}, "edges": [], "extra": 1});
@@ -437,6 +459,33 @@ fn derives_factory_todays_entries_and_nested_loops() {
     assert_eq!(plan.nested_loops(&round), std::slice::from_ref(&fail));
     assert_eq!(plan.nested_loops(&revise), [fail.clone(), round.clone()]);
     assert!(!plan.is_loop(&key("implement", Verdict::Done, "prove")));
+}
+
+#[test]
+fn two_loops_with_the_same_ends_are_not_nested_in_each_other() {
+    let value = file(
+        vec![
+            node("agent", "implement"),
+            node("prove", "prove"),
+            node("finish", "finish"),
+        ],
+        vec![
+            edge("implement", "done", "prove"),
+            edge("prove", "pass", "finish"),
+            capped("prove", "fail", "implement", 2),
+            capped("prove", "closed", "implement", 1),
+            edge("finish", "revise", "implement"),
+        ],
+    );
+    let plan = Plan::from_value(&value).unwrap();
+    let fail = key("prove", Verdict::Fail, "implement");
+    let closed = key("prove", Verdict::Closed, "implement");
+    assert_eq!(plan.nested_loops(&fail), []);
+    assert_eq!(plan.nested_loops(&closed), []);
+    assert_eq!(
+        plan.nested_loops(&key("finish", Verdict::Revise, "implement")),
+        [fail, closed]
+    );
 }
 
 #[test]

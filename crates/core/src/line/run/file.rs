@@ -250,7 +250,7 @@ impl LineRun {
                 })
                 .transpose()?;
             edges.insert(
-                read.edge(&edge.edge)?,
+                read.key(&edge.edge)?,
                 EdgeRun {
                     count: edge.count,
                     traversals: edge.traversals,
@@ -387,8 +387,12 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    fn id(raw: &str) -> Result<NodeId, String> {
+        NodeId::parse(raw).map_err(|e| format!("line.json: {e}"))
+    }
+
     fn node(&self, raw: &str) -> Result<NodeId, String> {
-        let id = NodeId::parse(raw).map_err(|e| format!("line.json: {e}"))?;
+        let id = Self::id(raw)?;
         self.plan
             .node(&id)
             .map(|_| id.clone())
@@ -399,12 +403,17 @@ impl Reader<'_> {
         Verdict::parse(raw).ok_or_else(|| format!("line.json: {raw} is not a verdict"))
     }
 
-    fn edge(&self, key: &LineEdgeKey) -> Result<EdgeKey, String> {
-        let edge = EdgeKey {
-            from: self.node(&key.from)?,
+    /// A loop edge's key, which an edit may have unlinked since, its ends with it.
+    fn key(&self, key: &LineEdgeKey) -> Result<EdgeKey, String> {
+        Ok(EdgeKey {
+            from: Self::id(&key.from)?,
             on: self.verdict(&key.on)?,
-            to: self.node(&key.to)?,
-        };
+            to: Self::id(&key.to)?,
+        })
+    }
+
+    fn edge(&self, key: &LineEdgeKey) -> Result<EdgeKey, String> {
+        let edge = self.key(key)?;
         if self.plan.edges().iter().any(|e| e.key == edge) {
             Ok(edge)
         } else {

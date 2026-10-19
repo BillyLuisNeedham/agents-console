@@ -457,6 +457,37 @@ fn prove_fails_twice_then_holds_and_each_resume_buys_exactly_one_pass() {
 }
 
 #[test]
+fn two_loops_with_the_same_ends_never_reset_each_other_and_both_caps_are_spent() {
+    let (mut run, mut pool) = work_run(plan(
+        json!([
+            {"kind": "agent", "id": "implement"},
+            {"kind": "prove", "id": "prove"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "implement", "on": "done", "to": "prove"},
+            {"from": "prove", "on": "pass", "to": "finish"},
+            {"from": "prove", "on": "fail", "to": "implement", "cap": {"max": 2}},
+            {"from": "prove", "on": "closed", "to": "implement", "cap": {"max": 1}}
+        ]),
+    ));
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-1"]);
+    let mut prove = |pool: &mut Pool, n: u32, verdict: Option<bool>| {
+        pool.agent(&format!("implement-{n}"));
+        assert_eq!(written(&tick(&mut run, pool)), [format!("prove-{n}")]);
+        match verdict {
+            Some(pass) => pool.prove(&format!("prove-{n}"), pass),
+            None => pool.close(&format!("prove-{n}")),
+        }
+        written(&tick(&mut run, pool))
+    };
+    assert_eq!(prove(&mut pool, 1, Some(false)), ["implement-2"]);
+    assert_eq!(prove(&mut pool, 2, Some(false)), ["implement-3"]);
+    assert_eq!(prove(&mut pool, 3, None), ["implement-4"]);
+    assert_eq!(prove(&mut pool, 4, Some(false)), ["prove-fail-implement-3"]);
+}
+
+#[test]
 fn closing_a_spent_loop_hands_prove_on_closed_to_decide() {
     let (mut run, mut pool) = started("none");
     for n in 1..=3 {
@@ -1431,6 +1462,68 @@ fn an_edge_holding_a_loop_hold_is_not_unlinked() {
         "the loop hold prove-fail-implement-3 waits on prove.fail -> implement: answer it before \
          the edge goes"
     );
+}
+
+#[test]
+fn an_unlinked_loop_edge_keeps_its_count_and_a_relink_raises_a_fresh_hold() {
+    let (mut run, mut pool) = started("none");
+    for n in 1..=3 {
+        pool.agent(&format!("implement-{n}"));
+        tick(&mut run, &mut pool);
+        pool.prove(&format!("prove-{n}"), false);
+        tick(&mut run, &mut pool);
+    }
+    pool.answer("prove-fail-implement-3", None, false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-4"]);
+    pool.agent("implement-4");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["prove-4"]);
+
+    let fail = edge("prove", Verdict::Fail, "implement");
+    let capped = run.plan().0.edges().iter().find(|e| e.key == fail).cloned();
+    let unlink = [PlanEdit::Unlink(fail)];
+    run.edit(Editor::Operator, rev(&run), &unlink).unwrap();
+    assert_eq!(LineRun::from_json(&run.to_json()).unwrap(), run);
+    let relink = [PlanEdit::Link(capped.unwrap())];
+    run.edit(Editor::Operator, rev(&run), &relink).unwrap();
+
+    pool.prove("prove-4", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-fail-implement-4"]
+    );
+}
+
+#[test]
+fn a_spent_loop_closed_once_raises_a_fresh_hold_when_it_is_spent_again() {
+    let (mut run, mut pool) = work_run(plan(
+        json!([
+            {"kind": "agent", "id": "a"},
+            {"kind": "agent", "id": "b"},
+            {"kind": "prove", "id": "prove"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "a", "on": "done", "to": "prove"},
+            {"from": "b", "on": "done", "to": "prove"},
+            {"from": "prove", "on": "pass", "to": "finish"},
+            {"from": "prove", "on": "fail", "to": "a", "cap": {"max": 1}}
+        ]),
+    ));
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["a-1", "b-1"]);
+    pool.agent("a-1");
+    pool.agent("b-1");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["prove-1"]);
+    pool.prove("prove-1", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["a-2", "prove-2"]);
+    pool.prove("prove-2", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["prove-fail-a-2"]);
+    pool.close("prove-fail-a-2");
+    tick(&mut run, &mut pool);
+
+    pool.agent("a-2");
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["prove-3"]);
+    pool.prove("prove-3", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["prove-fail-a-3"]);
 }
 
 #[test]

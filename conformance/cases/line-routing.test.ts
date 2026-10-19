@@ -3,7 +3,8 @@
  * Ticket node, writing its typed verdict in the Outcome, and the engine writes the next node's
  * Ticket under its `{node}-{pass}` id along the Plan's edges. The cases walk the pass path to the
  * Finish hold, a Prove fail round the capped loop, the spent loop's hold buying one traversal
- * across a restart, Decide's another-round up to its cap and the Finish's notes resetting it, the
+ * across a restart, two loops with the same ends leaving each other's count alone, Decide's
+ * another-round up to its cap and the Finish's notes resetting it, the
  * no-verdict checkpoint, and a spawn held inside the Line keeping the Finish waiting.
  */
 
@@ -30,6 +31,7 @@ import {
   passPath,
   verdict,
 } from "./line-support.ts";
+import { edge, node, plan } from "./plans-support.ts";
 
 /** The prompt a claude launch of `key` carried, `-p` first. */
 function promptOf(world: World, key: string): string {
@@ -153,6 +155,32 @@ conformance("line", "the third Prove fail raises the spent loop's hold, which su
   expect(issue(world, "implement-4")).toContain("## Notes\n\nThe work came back through a hold answered with these notes: act on them.\n\ntry the other port");
   expect(readStateLine(world.pool, "implement-4.md").line).toContain("blocked-by=prove-3,prove-fail-implement-3");
   expect(await loopOf(second, "prove", "fail")).toMatchObject({ count: 3, max: 2, bought: 1 });
+});
+
+conformance("line", "two capped loops with the same ends never reset each other: a closed Prove between fails still leaves the fail loop spent", async (t) => {
+  const world = lineWorld(t);
+  for (const id of ["prove-1", "prove-2", "prove-4"]) world.stubs.script(id, FAIL);
+  world.stubs.script("prove-3", { status: "checkpoint", brief: "the device is gone" });
+  const server = await t.start(world);
+  const twin = plan(
+    [node.agent("implement"), node.prove("prove"), node.finish()],
+    [
+      edge("implement", "done", "prove"),
+      edge("prove", "pass", "finish"),
+      edge("prove", "fail", "implement", { max: 2 }),
+      edge("prove", "closed", "implement", { max: 1 }),
+    ],
+  );
+  await begun(server, { plan: twin, work: "#1" });
+
+  await atCheckpoint(server, "prove-3");
+  await answer(server, { ticketId: "prove-3", action: "close" });
+  await atCheckpoint(server, "prove-fail-implement-3");
+  expect(launches(world)).toEqual([
+    "implement-1", "prove-1", "implement-2", "prove-2", "implement-3", "prove-3", "implement-4", "prove-4",
+  ]);
+  expect(await loopOf(server, "prove", "fail")).toMatchObject({ count: 2, max: 2, hold: "prove-fail-implement-3" });
+  expect(await loopOf(server, "prove", "closed")).toMatchObject({ count: 1, max: 1 });
 });
 
 conformance("line", "decide's another-round sends its fixes back to implement up to the loop's cap, then goes to the Finish halted, and notes on the Finish reset the cap", async (t) => {
