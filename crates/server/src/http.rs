@@ -617,15 +617,30 @@ async fn steward_route(
             }
         }
         "/api/steward/reassign" => {
-            if let Err(err) = engine.steward_check(conversation.clone()).await {
+            let tickets = match body.get("tickets") {
+                Some(Value::Array(items)) => Value::Array(items.clone()),
+                _ => json!([]),
+            };
+            let named: Vec<String> = tickets
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|ticket| {
+                    if ticket.is_null() {
+                        String::new()
+                    } else {
+                        js::string_of(ticket)
+                    }
+                })
+                .collect();
+            if let Err(err) = engine
+                .steward_check_reassign(conversation.clone(), named.clone())
+                .await
+            {
                 return engine_refused(err);
             }
             let Some(raw) = server.last_raw() else {
                 return steward_refusal(409, "reassign: pool not started");
-            };
-            let tickets = match body.get("tickets") {
-                Some(Value::Array(items)) => Value::Array(items.clone()),
-                _ => json!([]),
             };
             let fields = match body.get("fields") {
                 Some(Value::Object(fields)) => fields.clone(),
@@ -657,18 +672,6 @@ async fn steward_route(
                 };
                 return steward_refusal(status, err.message());
             }
-            let named: Vec<String> = tickets
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|ticket| {
-                    if ticket.is_null() {
-                        String::new()
-                    } else {
-                        js::string_of(ticket)
-                    }
-                })
-                .collect();
             if let Err(err) = engine
                 .steward_reassigned(conversation, named.clone(), fields)
                 .await

@@ -2,10 +2,11 @@
  * The Steward in a Line pool (ADR-0039), seen from outside the server: it is taught the Plan and
  * which of the Line's checkpoints and holds are its, it answers a Ticket's no-verdict checkpoint
  * and a spent `stewardExtra` loop's hold once until that loop resets, it is never told of the
- * Finish hold and its answer there is refused, it decides a Held spawn proposed from inside the
- * Line only while `steward.mayAdoptLineSpawns` is true, and it edits the Line's Plan only while the
- * Plan says `stewardEdits`, never widening what it may answer: it opens an `open: steward` gate and
- * is refused at an `open: operator` one.
+ * Finish hold or the Finish Ticket and its answer or reassign there is refused, nor of the Line once
+ * it has ended, it decides a Held spawn proposed from inside the Line only while
+ * `steward.mayAdoptLineSpawns` is true, and it edits the Line's Plan only while the Plan says
+ * `stewardEdits`, never widening what it may answer or touching the Finish: it opens an
+ * `open: steward` gate and is refused at an `open: operator` one.
  *
  * The Line runs in a terminal-backed pool: each Ticket launches the stand-in TUI as claude, and the
  * case plays its agent, writing the scripted Outcome once the prompt naming it is submitted.
@@ -42,13 +43,13 @@ const NO_FINDINGS = withVerdict({ findings: [] });
 const SHIP = withVerdict({ decide: "ship" });
 
 /** A terminal-backed pool holding a Line brief and its spec, with no Ticket until the Line begins. */
-async function lineStewardWorld(t: Case, config: Partial<PoolConfig> = {}): Promise<StewardWorld> {
+async function lineStewardWorld(t: Case, config: Partial<PoolConfig> = {}, finish = "none"): Promise<StewardWorld> {
   return stewardWorld(t, {
     tickets: [],
     config,
     repoFiles: {
       [SPEC]: "# The spec\n\nBuild the thing.\n",
-      [BRIEF]: JSON.stringify({ spec: SPEC, finish: "none" }),
+      [BRIEF]: JSON.stringify({ spec: SPEC, finish }),
     },
     beforeBoot: (world) => mkdirSync(join(world.pool, "conversations"), { recursive: true }),
   });
@@ -124,6 +125,51 @@ conformance(
     expect(atFinish.line?.status).toBe("finishing");
   },
   { timeoutMs: 120_000 },
+);
+
+conformance(
+  "steward",
+  "the Steward is never told of the Finish hold or the Finish Ticket, is refused answering or reassigning either, and is kept from the Line once it has ended",
+  async (t) => {
+    const sw = await lineStewardWorld(t, {}, "draft-pr");
+    driveOutcomes(sw.herdr, {
+      "implement-1": [done()],
+      "prove-1": [PASS],
+      "review-1": [NO_FINDINGS],
+      "decide-1": [SHIP],
+      "finish-1-act": [withVerdict(null), withVerdict({ url: "https://github.com/o/r/pull/7" })],
+    });
+    const server = await sw.start();
+    mkdirSync(join(sw.world.pool, "runs"), { recursive: true });
+    writeFileSync(join(sw.world.pool, "runs", "main-decide-1-report.html"), "<!doctype html><title>report</title>");
+    await begun(server);
+
+    await untilInterrupt(server, "finish-1", "checkpoint", 60_000);
+    const id = await enlistSteward(server);
+    const finishRefusal = (ticket: string) =>
+      refused(`${ticket} is the Line's Finish: approving the Line and its act are the operator's, never the Steward's`);
+    const reassign = (ticket: string) =>
+      post(server, "/api/steward/reassign", { conversation: id, tickets: [ticket], fields: { model: "big" } });
+    expect(await reassign("finish-1")).toEqual(finishRefusal("finish-1"));
+
+    expect((await server.http.post("/api/resume", { ticketId: "finish-1", note: "approved" })).status).toBe(202);
+    const acting = await untilInterrupt(server, "finish-1-act", "checkpoint", 60_000);
+    expect(acting.line).toMatchObject({ status: "acting", act: "finish-1-act" });
+    expect(
+      await post(server, "/api/steward/answer", { conversation: id, ticketId: "finish-1-act", action: "resume", note: "the url" }),
+    ).toEqual(finishRefusal("finish-1-act"));
+    expect(await reassign("finish-1-act")).toEqual(finishRefusal("finish-1-act"));
+    expect(readEvents(sw.world.pool, "finish-1-act").filter((e) => e.kind === "reassign-requested")).toEqual([]);
+
+    expect((await server.http.post("/api/resume", { ticketId: "finish-1-act", note: "record the url" })).status).toBe(202);
+    await untilSnapshot(server, (s) => s.line?.status === "done", "the Line done once finish-1-act merges", 60_000);
+    expect(await reassign("implement-1")).toEqual(refused("implement-1 is the Line's, and the Line has ended"));
+
+    // The idle Steward pane would have been told by now of what merged; it never hears of the Finish.
+    await Bun.sleep(3_000);
+    expect(stewardNotices(sw.herdr).filter((turn) => turn.includes("finish-1"))).toEqual([]);
+  },
+  { timeoutMs: 180_000 },
 );
 
 conformance(
@@ -272,6 +318,12 @@ conformance(
 
     expect(await edit(0, [{ edit: "setNode", node: node.gate("sign", "steward") }])).toEqual(
       refused("the Steward may not give itself powers the operator did not: the gate sign opening on steward"),
+    );
+    expect(await edit(0, [{ edit: "setNode", node: node.agent("draft", { spawns: "land" }) }])).toEqual(
+      refused("the Steward may not give itself powers the operator did not: draft's spawns on land"),
+    );
+    expect(await edit(0, [{ edit: "setNode", node: { ...node.finish(), act: "pr" } }])).toEqual(
+      refused("the Line's Finish, its act and its edges are the operator's, never the Steward's"),
     );
     expect(await rev()).toBe(0);
     expect(await edit(0, [{ edit: "move", id: "draft", x: 40, y: 400 }])).toEqual({

@@ -1767,6 +1767,75 @@ fn the_steward_edits_only_a_plan_that_lets_it_and_never_widens_its_own_powers() 
     );
 }
 
+#[test]
+fn the_steward_never_edits_the_finish_or_an_edge_from_or_to_it() {
+    let (mut run, _) = work_run(with_steward_edits(plan(
+        json!([
+            {"kind": "agent", "id": "draft"},
+            {"kind": "gate", "id": "approve", "open": "operator"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([
+            {"from": "draft", "on": "done", "to": "approve"},
+            {"from": "approve", "on": "open", "to": "finish"},
+            {"from": "approve", "on": "revise", "to": "draft"}
+        ]),
+    )));
+    let NodeBody::Finish(mut finish) = run.plan().0.node(&node("finish")).unwrap().body.clone()
+    else {
+        panic!()
+    };
+    finish.act = FinishAct::Pr;
+    let set_act = PlanEdit::SetNode {
+        id: node("finish"),
+        title: "finish".into(),
+        body: NodeBody::Finish(finish),
+    };
+    let revise = link("finish", Verdict::Revise, "draft");
+    for edits in [vec![set_act.clone()], vec![revise.clone()]] {
+        assert_eq!(
+            run.edit(Editor::Steward, 0, &edits)
+                .unwrap_err()
+                .to_string(),
+            "the Line's Finish, its act and its edges are the operator's, never the Steward's"
+        );
+    }
+    assert_eq!(rev(&run), 0);
+    assert!(
+        run.edit(Editor::Operator, 0, &[set_act, revise]).is_ok(),
+        "the operator may"
+    );
+}
+
+#[test]
+fn the_steward_may_not_land_a_nodes_spawns() {
+    let (mut run, _) = work_run(with_steward_edits(plan(
+        json!([
+            {"kind": "agent", "id": "draft"},
+            {"kind": "finish", "id": "finish"}
+        ]),
+        json!([{"from": "draft", "on": "done", "to": "finish"}]),
+    )));
+    let NodeBody::Ticket(mut draft) = run.plan().0.node(&node("draft")).unwrap().body.clone()
+    else {
+        panic!()
+    };
+    draft.spawns = SpawnPolicy::Land;
+    let land = [PlanEdit::SetNode {
+        id: node("draft"),
+        title: "draft".into(),
+        body: NodeBody::Ticket(draft),
+    }];
+    assert_eq!(
+        run.edit(Editor::Steward, 0, &land).unwrap_err().to_string(),
+        "the Steward may not give itself powers the operator did not: draft's spawns on land"
+    );
+    assert!(
+        run.edit(Editor::Operator, 0, &land).is_ok(),
+        "the operator may"
+    );
+}
+
 // -------------------------------------------------------------------------------------------------
 // Per-item copies and the Merger
 // -------------------------------------------------------------------------------------------------

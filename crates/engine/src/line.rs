@@ -459,13 +459,22 @@ pub fn steward_may_answer(session: &Session, ticket_id: &str) -> bool {
     run.node_of(&ticket).is_none() || run.steward_may_answer(&ticket)
 }
 
-/// Whether this Ticket is the Line's Finish hold or Finish Ticket: approving the Line is the
-/// operator's.
-pub fn is_finish(session: &Session, ticket_id: &str) -> bool {
-    session
-        .line
-        .as_ref()
-        .is_some_and(|run| run.node_of(&TicketId::new(ticket_id)) == Some(run.plan().0.finish()))
+/// Why the Steward is never told of this Ticket and never acts on it, when that is so: the Finish
+/// hold and the Finish Ticket are the operator's, and nothing of the Line's is the Steward's once the
+/// Line has ended (ADR-0039).
+pub fn steward_kept_from(session: &Session, ticket_id: &str) -> Option<String> {
+    let run = session.line.as_ref()?;
+    let node = run.node_of(&TicketId::new(ticket_id))?;
+    if node == run.plan().0.finish() {
+        Some(format!(
+            "{ticket_id} is the Line's Finish: approving the Line and its act are the operator's, \
+             never the Steward's"
+        ))
+    } else if line_ended(session) {
+        Some(format!("{ticket_id} is the Line's, and the Line has ended"))
+    } else {
+        None
+    }
 }
 
 /// Whether what this Ticket or Conversation proposes is held for the operator (ADR-0037): a Line

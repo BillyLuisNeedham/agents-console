@@ -217,6 +217,19 @@ impl Engine {
             .await?
     }
 
+    /// `steward.checkReassign`: refuses unless `conversation` is the live Steward and may reassign
+    /// every one of `tickets`.
+    pub async fn steward_check_reassign(
+        &self,
+        conversation: String,
+        tickets: Vec<String>,
+    ) -> Result<(), EngineError> {
+        self.call(move |s| {
+            crate::steward_actions::check_steward_reassign(s, &conversation, &tickets)
+        })
+        .await?
+    }
+
     /// `steward.answer`: answer on the operator's path, as the Steward's.
     pub async fn steward_answer(
         &self,

@@ -14,8 +14,8 @@ use ac_protocol::Outcome;
 use indexmap::IndexMap;
 
 use crate::plan::{
-    Assign, Cap, CheckpointPolicy, Copies, EdgeKey, FinishAct, FinishNode, Join, NodeBody, NodeId,
-    Opener, Plan, PlanEdit, TicketKind, Verdict, WhenSpent,
+    Assign, Cap, CheckpointPolicy, Copies, EdgeKey, FinishAct, FinishNode, Join, LoopCap, NodeBody,
+    NodeId, Opener, Plan, PlanEdit, SpawnPolicy, TicketKind, Verdict, WhenSpent,
 };
 use ac_protocol::wire::PlanProblem;
 
@@ -359,6 +359,8 @@ pub enum Refusal {
     Live(String),
     /// The Steward's edit would widen what the Steward may answer or do.
     StewardPower(Vec<String>),
+    /// The Steward's edit would change the Finish or an edge from or to it.
+    StewardFinish,
     LineEnded,
     FinishBlocked(Vec<Blocker>),
     NoRevise,
@@ -380,6 +382,9 @@ impl std::fmt::Display for Refusal {
                 f,
                 "the Steward may not give itself powers the operator did not: {}",
                 powers.join("; ")
+            ),
+            Refusal::StewardFinish => f.write_str(
+                "the Line's Finish, its act and its edges are the operator's, never the Steward's",
             ),
             Refusal::LineEnded => f.write_str("the Line has ended"),
             Refusal::FinishBlocked(blockers) => {
@@ -1620,6 +1625,9 @@ impl LineRun {
             ));
         }
         if by == Editor::Steward {
+            if finish_shape(&self.plan) != finish_shape(next) {
+                return Err(Refusal::StewardFinish);
+            }
             let had = steward_powers(&self.plan);
             let gained: Vec<String> = steward_powers(next)
                 .into_iter()
@@ -1803,28 +1811,62 @@ fn steward_powers(plan: &Plan) -> Vec<String> {
             NodeBody::Gate(gate) if gate.open == Opener::Steward => {
                 powers.push(format!("the gate {} opening on steward", node.id));
             }
-            NodeBody::Ticket(t) if t.checkpoint == CheckpointPolicy::Steward => {
-                powers.push(format!("{}'s checkpoints on steward", node.id));
+            NodeBody::Ticket(t) => {
+                if t.checkpoint == CheckpointPolicy::Steward {
+                    powers.push(format!("{}'s checkpoints on steward", node.id));
+                }
+                // Landing spawns takes them past the operator, as `mayAdoptLineSpawns` would.
+                if t.spawns == SpawnPolicy::Land {
+                    powers.push(format!("{}'s spawns on land", node.id));
+                }
             }
             _ => {}
         }
     }
-    // A loop leaving a Merger is its node's: placing or lifting the Merger moves the edge, not the
-    // power.
     for edge in plan.edges() {
         if edge.cap.as_ref().is_some_and(|cap| cap.steward_extra) {
-            let from = match plan.node(&edge.key.from).map(|n| &n.body) {
-                Some(NodeBody::Merger(merger)) => &merger.of,
-                _ => &edge.key.from,
-            };
             powers.push(format!(
-                "stewardExtra on {from}.{} -> {}",
+                "stewardExtra on {}.{} -> {}",
+                edge_owner(plan, &edge.key.from),
                 edge.key.on.as_str(),
                 edge.key.to
             ));
         }
     }
     powers
+}
+
+/// An edge leaving a Merger is its node's: placing or lifting the Merger moves the edge, not what it
+/// means.
+fn edge_owner<'a>(plan: &'a Plan, from: &'a NodeId) -> &'a NodeId {
+    match plan.node(from).map(|n| &n.body) {
+        Some(NodeBody::Merger(merger)) => &merger.of,
+        _ => from,
+    }
+}
+
+type FinishEdge<'a> = (&'a NodeId, Verdict, &'a NodeId, Option<&'a LoopCap>);
+
+/// The Finish's title and body, and every edge from or to it in some order: what a Steward edit may
+/// not change, since approving the Line and its act are the operator's.
+fn finish_shape(plan: &Plan) -> (&str, &NodeBody, Vec<FinishEdge<'_>>) {
+    let finish = plan.finish();
+    let node = plan.node(finish).expect("the Finish is a node");
+    let mut edges: Vec<FinishEdge<'_>> = plan
+        .edges()
+        .iter()
+        .filter(|e| e.key.from == *finish || e.key.to == *finish)
+        .map(|e| {
+            (
+                edge_owner(plan, &e.key.from),
+                e.key.on,
+                &e.key.to,
+                e.cap.as_ref(),
+            )
+        })
+        .collect();
+    edges.sort_by_key(|(from, on, to, _)| (from.as_str(), on.as_str(), to.as_str()));
+    (&node.title, &node.body, edges)
 }
 
 fn cap_allows(cap: Cap, live: usize) -> bool {

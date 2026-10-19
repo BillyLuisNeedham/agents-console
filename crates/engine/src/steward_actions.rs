@@ -176,8 +176,10 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
             .iter()
             .filter(|marker| {
                 session.state.tickets.get(&marker.id) == Some(&ac_protocol::TicketStatus::Done)
+                    && !marker.hold
                     && !held.contains(marker.id.as_str())
                     && ac_core::assignment::engine_ticket_build_id(&marker.id).is_none()
+                    && crate::line::steward_kept_from(session, &marker.id).is_none()
             })
             .map(|marker| marker.id.clone())
             .collect(),
@@ -195,8 +197,15 @@ pub fn steward_items_of(session: &Session) -> Vec<StewardItem> {
     } else {
         None
     };
-    let merge_queue = last
-        .map(|snapshot| snapshot.merge_queue.clone())
+    let merge_queue: Vec<_> = last
+        .map(|snapshot| {
+            snapshot
+                .merge_queue
+                .iter()
+                .filter(|entry| crate::line::steward_kept_from(session, &entry.ticket_id).is_none())
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     // The Steward hears only of the Line's Interrupts its Plan gives it (ADR-0039): never the Finish.
     let interrupts: Vec<Interrupt> = session
@@ -245,6 +254,23 @@ pub fn check_steward(session: &Session, conversation: &str) -> Result<(), Engine
     Ok(())
 }
 
+/// The check a Steward's reassign starts with, before its assign entries are written: none of the
+/// Tickets is one the Steward is kept from.
+pub fn check_steward_reassign(
+    session: &Session,
+    conversation: &str,
+    tickets: &[String],
+) -> Result<(), EngineError> {
+    check_steward(session, conversation)?;
+    match tickets
+        .iter()
+        .find_map(|ticket_id| crate::line::steward_kept_from(session, ticket_id))
+    {
+        Some(why) => Err(steward_refusal(why)),
+        None => Ok(()),
+    }
+}
+
 // The pending Interrupt a Steward action is about, refused when it is not the Steward's to touch:
 // review, persistence and a Conversation's own.
 fn steward_interrupt(
@@ -276,11 +302,8 @@ fn steward_interrupt(
         }
         _ => {}
     }
-    if crate::line::is_finish(session, ticket_id) {
-        return Err(steward_refusal(format!(
-            "{ticket_id} is the Line's Finish: approving the Line and its act are the operator's, \
-             never the Steward's"
-        )));
+    if let Some(why) = crate::line::steward_kept_from(session, ticket_id) {
+        return Err(steward_refusal(why));
     }
     if !crate::line::steward_may_answer(session, ticket_id) {
         return Err(steward_refusal(format!(
