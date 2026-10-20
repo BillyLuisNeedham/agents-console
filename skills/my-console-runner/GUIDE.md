@@ -14,6 +14,14 @@ To change the default harness or model for every pool, edit `~/.issue-runner`. T
 one pool, edit that pool's `console.json`. To change one ticket, edit its entry under `assign`. To
 have one ticket verified, set `verify: N` on its entry under `assign`.
 
+A model name belongs to one harness. If the merge resolver or an entry under `assign` uses a
+different harness from the default, give it a model of its own:
+`"resolver": { "harness": "claude", "model": "opus" }`. The skill asks you for this model. It does
+not copy the default model to a different harness. A resolver with no model of its own stops the
+server at start, and the error tells you what to write. A ticket with no model of its own waits for
+you in its card, and the other tickets continue. For a grader entry, its build ticket is the one
+that waits.
+
 ## How to start
 
 Point the skill at a pool: `/my-console-runner <path-to-pool>`. It checks the pool, asks
