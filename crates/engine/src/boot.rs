@@ -47,7 +47,8 @@ pub fn engine_reset_note() -> String {
 
 /// `startPool`: load the pool, build the session, rehydrate, start the actor and the drive. The first
 /// snapshot has been emitted when this returns. Fails as the TypeScript's start throws: an unloadable
-/// pool, a bad console.json, an Assignment that cannot resolve, a store that will not open.
+/// pool, a bad console.json, an Assignment or a resolver that cannot resolve, a store that will not
+/// open.
 pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     let pool_dir = canonical_dir(&options.pool_dir);
     let runs_dir = js::path_join(&[&pool_dir, "runs"]);
@@ -150,6 +151,13 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
     session.pane_survey_ms = options.pane_survey_ms;
     session.console_url = options.console_url.clone();
     session.line = ac_core::line::load_line(Path::new(&session.pool_dir))?;
+    // A resolver that cannot launch fails the boot, before any harness starts (issue #37).
+    crate::merges::check_resolvers(
+        &session.state.config,
+        &session.harnesses,
+        &session.machine_defaults,
+        session.line.as_ref(),
+    )?;
     seed_enlisted_work(&mut session)?;
     rehydrate(&mut session)?;
     crate::spawns::recover_truncated_spawns(&mut session)?;

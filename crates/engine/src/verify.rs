@@ -675,9 +675,9 @@ async fn run_graders(
         .zip(attempts.iter().copied())
         .filter(|(_, attempt)| !skip.contains(attempt))
         .collect();
-    let (build_assignment, mut pending) = engine
+    let (build_assignment, pending, unassigned) = engine
         .call(
-            move |s| -> anyhow::Result<(Assignment, Vec<PendingGrader>)> {
+            move |s| -> anyhow::Result<(Assignment, Vec<PendingGrader>, Vec<String>)> {
                 for (index, attempt) in &attempts_c {
                     write_grader_ticket(s, &build_c, *index, *attempt)?;
                 }
@@ -687,6 +687,7 @@ async fn run_graders(
                         anyhow::anyhow!("no assignment for ticket {}", build_c.id)
                     })?;
                 let mut pending = Vec::new();
+                let mut unassigned = Vec::new();
                 for (index, attempt) in &attempts_c {
                     let id = grader_id_for(&build_c.id, *index);
                     let marker = s
@@ -700,6 +701,21 @@ async fn run_graders(
                         &s.harnesses,
                     )?;
                     s.assignments.insert(marker.id.clone(), assignment.clone());
+                    // A grader with nothing to launch on is never launched: its build ticket waits on
+                    // a Config interrupt instead of the pool dying at the launch (ADR-0022, ADR-0044).
+                    if let Some(missing) = crate::drive::missing_field(Some(&assignment)) {
+                        unassigned.push(crate::drive::unassigned_body(
+                            s,
+                            &marker,
+                            missing,
+                            &format!(
+                                "answer resume on ticket {}: it runs a fresh verify round on what \
+                                 console.json says then.",
+                                build_c.id
+                            ),
+                        ));
+                        continue;
+                    }
                     pending.push(PendingGrader {
                         marker,
                         assignment,
@@ -707,10 +723,33 @@ async fn run_graders(
                         last_reason: String::new(),
                     });
                 }
-                Ok((build_assignment, pending))
+                Ok((build_assignment, pending, unassigned))
             },
         )
         .await??;
+    let grades = if pending.is_empty() {
+        HashMap::new()
+    } else {
+        run_pending_graders(engine, build, build_assignment, pending).await?
+    };
+    // Raised once the round's other graders have ended, as the exhaustion interrupt is, so a resume
+    // never races a grader still running.
+    if !unassigned.is_empty() && !engine.call(|s| s.children.stopping).await? {
+        let build_c = build.clone();
+        engine
+            .call(move |s| raise_grader_unassigned(s, &build_c, &unassigned))
+            .await?;
+    }
+    Ok(grades)
+}
+
+// The launchable graders of one round, re-spawned until each has graded or the bound is spent.
+async fn run_pending_graders(
+    engine: &Engine,
+    build: &TicketMarker,
+    build_assignment: Assignment,
+    mut pending: Vec<PendingGrader>,
+) -> anyhow::Result<HashMap<u64, Grade>> {
     let (build_c, round) = (build.clone(), pending.clone());
     let attempt_count = pending.len();
     engine
@@ -869,6 +908,22 @@ fn raise_grader_exhausted(
             build.id, g.marker.id, g.attempt
         )
     })));
+    emit_running(session);
+}
+
+/// A grader with no harness or model to launch on: a Config interrupt on the build ticket, which keeps
+/// the in-progress the fan-out gave it, so answering resume sends it through a fresh fan-out round
+/// that resolves its graders again, as the exhaustion interrupt's resume does.
+fn raise_grader_unassigned(session: &mut Session, build: &TicketMarker, bodies: &[String]) {
+    raise_interrupt(
+        session,
+        interrupt(&build.id, InterruptKind::Config, bodies.join("\n")),
+    );
+    session.log(format!(
+        "ticket {}: a grader has no Assignment to launch on; config interrupt raised for the build \
+         ticket",
+        build.id
+    ));
     emit_running(session);
 }
 
