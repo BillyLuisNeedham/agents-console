@@ -48,7 +48,12 @@ async function crashedAndHeld(t: Case) {
   await untilSnapshot(server, (snap) => ticketIn(snap, "01").liveAttempt === null, "01's attempt to end");
   await answerPrompt(herdr, "02", CHECKPOINT);
   await untilHeld(server, "02");
-  const listed = await untilSnapshot(server, (snap) => snap.finishedTerminals === 1, "01's tab counted");
+  // The drive's close is its own: a listing can count 01's tab before the pool reads quiescent.
+  const listed = await untilSnapshot(
+    server,
+    (snap) => snap.finishedTerminals === 1 && snap.phase === "quiescent",
+    "01's tab counted, the pool quiescent",
+  );
   return { world, herdr, server, listed, crashed: spawnedTerminal(world, "01"), held: ticketIn(listed, "02").heldPane! };
 }
 
