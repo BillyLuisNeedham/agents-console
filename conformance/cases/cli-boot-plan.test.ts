@@ -133,10 +133,31 @@ conformance("cli", "Boot --plan warns on stderr for a node whose skill its harne
   );
 
   expect(run.code, run.stderr).toBe(0);
+  const worktree = /^line: cut .* at (.+)$/m.exec(run.stdout)![1]!;
   expect(run.stderr).toContain(
-    `plan: node spec: skill addy-spec is not installed for claude (looked in ${join(claudeConfig, "skills", "addy-spec", "SKILL.md")}, ${join(claudeConfig, "commands", "addy-spec.md")})\n`,
+    `plan: node spec: skill addy-spec is not installed for claude (looked in ${join(claudeConfig, "skills", "addy-spec", "SKILL.md")}, ${join(claudeConfig, "commands", "addy-spec.md")}, ${join(worktree, ".claude", "skills", "addy-spec", "SKILL.md")}, ${join(worktree, ".claude", "commands", "addy-spec.md")})\n`,
   );
   expect(run.stdout).toContain('line: begun on the Plan zz-skilled ("Names a skill")\n');
+});
+
+conformance("cli", "Boot --plan does not warn on a skill the Line's checkout carries in its own .claude/skills", async (t) => {
+  const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
+  const repo = checkout(w);
+  w.write("repo/.claude/skills/repo-local/SKILL.md", "---\nname: repo-local\n---\n");
+  gitIn(w, repo, ["add", ".claude"]);
+  gitIn(w, repo, ["commit", "-q", "-m", "a skill of the repo's own"]);
+  const local = plan([node.agent("spec", { skill: "repo-local" }), node.finish()], [edge("spec", "done", "finish")], "Names a repo skill");
+  w.write("home/.agent-graphs/plans/zz-local.json", JSON.stringify(local));
+
+  const run = await w.run(
+    "boot",
+    ["--plan", "zz-local", "--brief", "pilots/186.brief.json", "--title", "Pilot 186", "--no-steward", "--no-open", "--port", "0"],
+    { cwd: repo },
+  );
+
+  expect(run.code, run.stderr).toBe(0);
+  expect(run.stderr).not.toContain("not installed");
+  expect(run.stdout).toContain('line: begun on the Plan zz-local ("Names a repo skill")\n');
 });
 
 conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it on the work, and the engine opens grill-1 with the issue in its first Turn", async (t) => {

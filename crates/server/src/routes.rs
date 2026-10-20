@@ -365,12 +365,13 @@ pub fn plan_validate_request(server: &Server, body: Body) -> Answer {
     }
 }
 
-// The pool's view of where skills install: this machine's directories, and the harness a node that
-// names none launches on, which is the pool's `defaults.harness` (a console.json that does not read has
+// The pool's view of where skills install: this machine's directories and the pool's checkout, and the
+// harness a node that names none launches on, which is the pool's `defaults.harness` (a console.json that does not read has
 // none).
 fn skill_check(server: &Server) -> SkillCheck {
     SkillCheck {
-        dirs: SkillDirs::from_env(&server.0.home, &server.0.parent_env),
+        dirs: SkillDirs::from_env(&server.0.home, &server.0.parent_env)
+            .in_checkout(&server.0.checkout),
         default_harness: read_config(server.pool_dir())
             .ok()
             .and_then(|config| default_harness(&config)),

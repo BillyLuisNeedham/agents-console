@@ -1454,6 +1454,21 @@ mod skill_warnings {
     }
 
     #[test]
+    fn a_skill_installed_only_under_the_checkout_does_not_warn() {
+        let home = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        install(checkout.path(), ".claude/skills/local/SKILL.md");
+        let nodes = || draft(vec![skill_node("n", "local", Some("claude"))]);
+        let with_checkout = SkillCheck {
+            dirs: SkillDirs::from_env(home.path().to_str().unwrap(), &[])
+                .in_checkout(checkout.path().to_str().unwrap()),
+            default_harness: None,
+        };
+        assert!(with_checkout.draft_warnings(&nodes()).is_empty());
+        assert_eq!(check(home.path(), None).draft_warnings(&nodes()).len(), 1);
+    }
+
+    #[test]
     fn a_chain_warns_on_the_missing_words_alone() {
         let home = tempfile::tempdir().unwrap();
         install(home.path(), ".claude/skills/a/SKILL.md");

@@ -1173,15 +1173,17 @@ fn report_console(url: &str, pool_dir: &str, args: &BootArgs, io: &mut dyn BootI
 }
 
 /// One stderr line per node whose skill its harness cannot find, against the `defaults.harness` the
-/// pool was just written with. Boot carries on: a warning never stops a Line.
+/// pool was just written with and the checkout the Line runs in. Boot carries on: a warning never
+/// stops a Line.
 fn warn_missing_skills(
     io: &mut dyn BootIo,
     home: &str,
+    checkout: &str,
     plan: &ac_core::plan::Plan,
     config: &Map<String, Value>,
 ) {
     let check = SkillCheck {
-        dirs: SkillDirs::from_env(home, &process_env()),
+        dirs: SkillDirs::from_env(home, &process_env()).in_checkout(checkout),
         default_harness: default_harness(&PoolConfig::from_map(config.clone())),
     };
     for warning in check.warnings(&plan.to_file()) {
@@ -1330,7 +1332,7 @@ fn run_line_boot(
     write_prose_files(&pool_dir, engine_dir, io, &detection, &merged)?;
     write_machine_defaults_once(io, home, &merged, engine_dir);
     refresh_agent_md(&pool_dir, engine_dir, io)?;
-    warn_missing_skills(io, home, &plan, &merged);
+    warn_missing_skills(io, home, &line.worktree, &plan, &merged);
 
     let Some(url) = start_pool_server(&pool_dir, engine_dir, args, io)? else {
         return Ok(1);

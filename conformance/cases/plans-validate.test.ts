@@ -338,6 +338,20 @@ conformance("plans", "Plan validation › a skill the harness cannot find is a w
   expect(warning!.message).toContain("claude");
   expect(warning!.message).toContain(join(world.claudeConfig, "skills", "addy-spec", "SKILL.md"));
   expect(warning!.message).toContain(join(world.claudeConfig, "commands", "addy-spec.md"));
+  expect(warning!.message).toContain(join(world.repo, ".claude", "skills", "addy-spec", "SKILL.md"));
+  expect(warning!.message).toContain(join(world.repo, ".claude", "commands", "addy-spec.md"));
+});
+
+conformance("plans", "Plan validation › a skill installed only under the pool's checkout, for the node's own harness, is not warned on", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  installSkillFile(join(world.repo, ".claude", "skills", "repo-local", "SKILL.md"));
+  installSkillFile(join(world.repo, ".claude", "commands", "repo-command.md"));
+  installSkillFile(join(world.repo, ".cursor", "skills", "cursor-local", "SKILL.md"));
+
+  expect((await validateBothAnswers(server, socket, skillPlan("repo-local"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("repo-command"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("cursor-local", "cursor"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("cursor-local"))).warnings).toHaveLength(1);
 });
 
 conformance("plans", "Plan validation › a skill installed as a directory with a SKILL.md, or as a command file, under CLAUDE_CONFIG_DIR is not warned on", async (t) => {

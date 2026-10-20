@@ -150,10 +150,12 @@ pub struct HarnessDescriptor {
 }
 
 /// The directories skills install under, as the caller read them from the environment: core never
-/// reads it. A variable that is unset or blank counts as unset.
+/// reads it. A variable that is unset or blank counts as unset. The pool's checkout, when the caller
+/// names one, is the project level the harness also loads skills from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDirs {
     pub home: String,
+    checkout: Option<String>,
     claude_config_dir: Option<String>,
     opencode_config_dir: Option<String>,
     xdg_config_home: Option<String>,
@@ -171,10 +173,25 @@ impl SkillDirs {
         };
         SkillDirs {
             home: home.to_owned(),
+            checkout: None,
             claude_config_dir: var("CLAUDE_CONFIG_DIR"),
             opencode_config_dir: var("OPENCODE_CONFIG_DIR"),
             xdg_config_home: var("XDG_CONFIG_HOME"),
         }
+    }
+
+    /// These directories plus the pool's checkout, whose own `.claude`, `.cursor` and `.opencode`
+    /// directories each harness loads project skills from.
+    pub fn in_checkout(mut self, checkout: &str) -> Self {
+        self.checkout = Some(checkout.to_owned());
+        self
+    }
+
+    // A directory under the checkout, when the caller named one.
+    fn project(&self, name: &str) -> Option<String> {
+        self.checkout
+            .as_deref()
+            .map(|checkout| js::path_join(&[checkout, name]))
     }
 
     // claude's config directory, which `CLAUDE_CONFIG_DIR` moves off `~/.claude`.
@@ -200,28 +217,44 @@ impl SkillDirs {
 /// The paths a harness would load the skill of this name from.
 pub type SkillPlaces = fn(&SkillDirs, &str) -> Vec<String>;
 
-// A skill directory or a command file under a config directory: where claude and cursor both look.
-fn skill_or_command(config: &str, name: &str) -> Vec<String> {
-    vec![
-        js::path_join(&[config, "skills", name, "SKILL.md"]),
-        js::path_join(&[config, "commands", &format!("{name}.md")]),
-    ]
+// A skill directory or a command file under each config directory: where claude and cursor both look.
+fn skill_or_command(configs: &[String], name: &str) -> Vec<String> {
+    configs
+        .iter()
+        .flat_map(|config| {
+            [
+                js::path_join(&[config, "skills", name, "SKILL.md"]),
+                js::path_join(&[config, "commands", &format!("{name}.md")]),
+            ]
+        })
+        .collect()
 }
 
 fn claude_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
-    skill_or_command(&dirs.claude(), name)
+    let configs: Vec<String> = [Some(dirs.claude()), dirs.project(".claude")]
+        .into_iter()
+        .flatten()
+        .collect();
+    skill_or_command(&configs, name)
 }
 
 fn cursor_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
-    skill_or_command(&js::path_join(&[&dirs.home, ".cursor"]), name)
+    let configs: Vec<String> = [
+        Some(js::path_join(&[&dirs.home, ".cursor"])),
+        dirs.project(".cursor"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    skill_or_command(&configs, name)
 }
 
 fn opencode_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
-    vec![js::path_join(&[
-        &dirs.opencode(),
-        "command",
-        &format!("{name}.md"),
-    ])]
+    [Some(dirs.opencode()), dirs.project(".opencode")]
+        .into_iter()
+        .flatten()
+        .map(|config| js::path_join(&[&config, "command", &format!("{name}.md")]))
+        .collect()
 }
 
 // The prompt text each mode hands the agent. claude expands a leading "/<driver> ..." as a slash
@@ -695,6 +728,29 @@ mod tests {
         assert_eq!(
             (CLAUDE.skill_places)(&blank, "x")[1],
             "/home/op/.claude/commands/x.md"
+        );
+    }
+
+    #[test]
+    fn each_harness_also_looks_under_the_checkouts_own_project_directory() {
+        let dirs = SkillDirs::from_env("/home/op", &[]).in_checkout("/work/repo");
+        assert_eq!(
+            (CLAUDE.skill_places)(&dirs, "x")[2..],
+            [
+                "/work/repo/.claude/skills/x/SKILL.md",
+                "/work/repo/.claude/commands/x.md"
+            ]
+        );
+        assert_eq!(
+            (CURSOR.skill_places)(&dirs, "x")[2..],
+            [
+                "/work/repo/.cursor/skills/x/SKILL.md",
+                "/work/repo/.cursor/commands/x.md"
+            ]
+        );
+        assert_eq!(
+            (OPENCODE.skill_places)(&dirs, "x")[1..],
+            ["/work/repo/.opencode/command/x.md"]
         );
     }
 
