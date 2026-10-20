@@ -1,8 +1,8 @@
 //! The harness table (spawn.ts): one descriptor per known harness carrying everything the two spawn
 //! paths need (the batch argv a headless spawn runs, the interactive argv a terminal-backed spawn hands
 //! its pane, the readiness, idle and echo patterns, the clear keys, the prompt shaping per mode, the log
-//! mode and which modes take an effort), the table a pool resolves a harness name against, and every
-//! string a harness gets on its command line.
+//! mode, which modes take an effort and where the harness finds a skill by name), the table a pool
+//! resolves a harness name against, and every string a harness gets on its command line.
 //!
 //! Named `harness` rather than `spawn` so it is not read as the Spawns (proposals) module.
 
@@ -142,6 +142,86 @@ pub struct HarnessDescriptor {
     pub prompt_shaping: PromptShapings,
     pub stream_mode: HarnessStreamMode,
     pub takes_effort: TakesEffort,
+    /// Every file or directory the harness resolves a skill (or slash command) of this name from; the
+    /// skill is installed when any one exists.
+    pub skill_places: SkillPlaces,
+    /// The skills and commands the harness ships with, which no file on disk installs.
+    pub built_in: &'static [&'static str],
+}
+
+/// The directories skills install under, as the caller read them from the environment: core never
+/// reads it. A variable that is unset or blank counts as unset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDirs {
+    pub home: String,
+    claude_config_dir: Option<String>,
+    opencode_config_dir: Option<String>,
+    xdg_config_home: Option<String>,
+}
+
+impl SkillDirs {
+    /// The directories for a home directory and the environment as name/value pairs.
+    pub fn from_env(home: &str, env: &[(String, String)]) -> Self {
+        let var = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| js::trim(value))
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        SkillDirs {
+            home: home.to_owned(),
+            claude_config_dir: var("CLAUDE_CONFIG_DIR"),
+            opencode_config_dir: var("OPENCODE_CONFIG_DIR"),
+            xdg_config_home: var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // claude's config directory, which `CLAUDE_CONFIG_DIR` moves off `~/.claude`.
+    fn claude(&self) -> String {
+        self.claude_config_dir
+            .clone()
+            .unwrap_or_else(|| js::path_join(&[&self.home, ".claude"]))
+    }
+
+    // opencode's config directory, resolved as scripts/link-skills.sh installs into it.
+    fn opencode(&self) -> String {
+        if let Some(dir) = &self.opencode_config_dir {
+            return dir.clone();
+        }
+        let config = self
+            .xdg_config_home
+            .clone()
+            .unwrap_or_else(|| js::path_join(&[&self.home, ".config"]));
+        js::path_join(&[&config, "opencode"])
+    }
+}
+
+/// The paths a harness would load the skill of this name from.
+pub type SkillPlaces = fn(&SkillDirs, &str) -> Vec<String>;
+
+// A skill directory or a command file under a config directory: where claude and cursor both look.
+fn skill_or_command(config: &str, name: &str) -> Vec<String> {
+    vec![
+        js::path_join(&[config, "skills", name, "SKILL.md"]),
+        js::path_join(&[config, "commands", &format!("{name}.md")]),
+    ]
+}
+
+fn claude_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
+    skill_or_command(&dirs.claude(), name)
+}
+
+fn cursor_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
+    skill_or_command(&js::path_join(&[&dirs.home, ".cursor"]), name)
+}
+
+fn opencode_skill_places(dirs: &SkillDirs, name: &str) -> Vec<String> {
+    vec![js::path_join(&[
+        &dirs.opencode(),
+        "command",
+        &format!("{name}.md"),
+    ])]
 }
 
 // The prompt text each mode hands the agent. claude expands a leading "/<driver> ..." as a slash
@@ -247,6 +327,24 @@ pub static CLAUDE: HarnessDescriptor = HarnessDescriptor {
         batch: true,
         interactive: true,
     },
+    skill_places: claude_skill_places,
+    // The bundled skills Claude Code lists with no file under its config directory; it adds more
+    // between versions, and one missing here only costs a needless warning.
+    built_in: &[
+        "claude-api",
+        "claude-in-chrome",
+        "fewer-permission-prompts",
+        "init",
+        "keybindings-help",
+        "loop",
+        "plugin-authoring",
+        "run",
+        "schedule",
+        "security-review",
+        "simplify",
+        "update-config",
+        "workflow-authoring",
+    ],
 };
 
 /// opencode: no slash command inside a run message, so the driver goes through --command and
@@ -271,6 +369,8 @@ pub static OPENCODE: HarnessDescriptor = HarnessDescriptor {
         batch: true,
         interactive: false,
     },
+    skill_places: opencode_skill_places,
+    built_in: &[],
 };
 
 /// cursor: run against the real Cursor Agent CLI (2026.09.02-c22c1a3).
@@ -293,6 +393,8 @@ pub static CURSOR: HarnessDescriptor = HarnessDescriptor {
         batch: false,
         interactive: false,
     },
+    skill_places: cursor_skill_places,
+    built_in: &[],
 };
 
 /// The known harnesses' descriptors, in the TypeScript record's order.
@@ -559,6 +661,58 @@ pub fn engine_env_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn claude_and_cursor_look_in_skills_and_commands_under_their_config_dir() {
+        let dirs = SkillDirs::from_env("/home/op", &[]);
+        assert_eq!(
+            (CLAUDE.skill_places)(&dirs, "x"),
+            [
+                "/home/op/.claude/skills/x/SKILL.md",
+                "/home/op/.claude/commands/x.md"
+            ]
+        );
+        assert_eq!(
+            (CURSOR.skill_places)(&dirs, "x"),
+            [
+                "/home/op/.cursor/skills/x/SKILL.md",
+                "/home/op/.cursor/commands/x.md"
+            ]
+        );
+        let moved = SkillDirs::from_env("/home/op", &env(&[("CLAUDE_CONFIG_DIR", " /srv/c ")]));
+        assert_eq!(
+            (CLAUDE.skill_places)(&moved, "x"),
+            ["/srv/c/skills/x/SKILL.md", "/srv/c/commands/x.md"]
+        );
+        let blank = SkillDirs::from_env("/home/op", &env(&[("CLAUDE_CONFIG_DIR", "  ")]));
+        assert_eq!(
+            (CLAUDE.skill_places)(&blank, "x")[1],
+            "/home/op/.claude/commands/x.md"
+        );
+    }
+
+    #[test]
+    fn opencode_resolves_its_directory_as_link_skills_does() {
+        let place = |pairs: &[(&str, &str)]| {
+            (OPENCODE.skill_places)(&SkillDirs::from_env("/home/op", &env(pairs)), "x")
+        };
+        assert_eq!(place(&[]), ["/home/op/.config/opencode/command/x.md"]);
+        assert_eq!(
+            place(&[("XDG_CONFIG_HOME", "/xdg")]),
+            ["/xdg/opencode/command/x.md"]
+        );
+        assert_eq!(
+            place(&[("XDG_CONFIG_HOME", "/xdg"), ("OPENCODE_CONFIG_DIR", "/oc")]),
+            ["/oc/command/x.md"]
+        );
+    }
 
     fn context() -> SpawnContext {
         SpawnContext {

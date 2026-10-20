@@ -6,7 +6,8 @@
  */
 
 import { expect } from "bun:test";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
   PlanDraftResponse,
   PlanEdgeFile,
@@ -15,6 +16,7 @@ import type {
   PlanNodeFile,
   PlanProblem,
   PlanProblemAt,
+  PlanValidateResponse,
 } from "../../protocol/wire.ts";
 import type { Case, CaseServer } from "../harness/case.ts";
 import type { SocketClient } from "../fixtures/socket-fixture.ts";
@@ -131,16 +133,31 @@ export function expectProblem(problems: PlanProblem[], expected: Expected): void
 
 /**
  * `plans.validate` over HTTP and on the socket, which must agree: the
- * problems of a draft, as both answered them.
+ * answer for a draft, problems and warnings, as both gave it.
  */
-export async function validateBoth(server: CaseServer, socket: SocketClient, draft: PlanFile): Promise<PlanProblem[]> {
+export async function validateBothAnswers(server: CaseServer, socket: SocketClient, draft: PlanFile): Promise<PlanValidateResponse> {
   const http = await server.http.post("/api/plans/validate", { plan: draft });
   expect(http.status, http.text).toBe(200);
   const reply = await socket.request("plans.validate", { plan: draft });
   if (!reply.ok) throw new Error(`plans.validate was refused: ${JSON.stringify(reply.refusal)}`);
-  const problems = http.json<{ problems: PlanProblem[] }>().problems;
-  expect(reply.result.problems).toEqual(problems);
-  return problems;
+  const answer = http.json<PlanValidateResponse>();
+  expect(reply.result).toEqual(answer);
+  return answer;
+}
+
+/** The problems of a draft, as both routes answered them. */
+export async function validateBoth(server: CaseServer, socket: SocketClient, draft: PlanFile): Promise<PlanProblem[]> {
+  return (await validateBothAnswers(server, socket, draft)).problems;
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/** An installed skill: a file at `path`, under whatever directory the harness reads. */
+export function installSkillFile(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "---\nname: installed\n---\n");
 }
 
 export async function editBoth(server: CaseServer, socket: SocketClient, draft: unknown, edits: PlanEditFile[]): Promise<PlanDraftResponse> {

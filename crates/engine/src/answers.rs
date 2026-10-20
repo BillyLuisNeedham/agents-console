@@ -386,6 +386,19 @@ pub fn process_answer(session: &mut Session, record: &QueuedAnswer) -> anyhow::R
         );
         return Ok(());
     }
+    // The attempt is still live, so the marker stays as it is; the dialog watch raises it again while
+    // the dialog holds the pane.
+    if pending.kind == InterruptKind::Dialog {
+        clear_interrupt(
+            session,
+            &pending,
+            format!(
+                "interrupt answered for {} (dialog): the dialog itself is answered in the pane",
+                record.ticket_id
+            ),
+        );
+        return Ok(());
+    }
     if matches!(
         pending.kind,
         InterruptKind::MergeConflict | InterruptKind::MergeApproval

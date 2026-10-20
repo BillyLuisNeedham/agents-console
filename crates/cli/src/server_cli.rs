@@ -22,7 +22,7 @@ use ac_io::own_exe::own_exe;
 use ac_protocol::PlanBootResponse;
 use ac_server::{LineBoot, LineBootRefusal, PoolServerOptions, Server};
 
-use crate::boot::home_dir;
+use crate::boot::{home_dir, process_env};
 use crate::detach::spawn_detached;
 
 /// Well past the children's TERM grace plus the drive's settle wait: a stop that has not finished by
@@ -286,16 +286,7 @@ pub fn run(args: Vec<String>) -> ! {
         on_restart_requested: Some(on_restart),
         on_line_boot_requested: Some(on_line_boot),
         machine_defaults_paths: default_machine_defaults_paths(&home),
-        parent_env: std::sync::Arc::new(
-            std::env::vars_os()
-                .map(|(k, v)| {
-                    (
-                        k.to_string_lossy().into_owned(),
-                        v.to_string_lossy().into_owned(),
-                    )
-                })
-                .collect(),
-        ),
+        parent_env: std::sync::Arc::new(process_env()),
         home: home.clone(),
         starter: None,
     };

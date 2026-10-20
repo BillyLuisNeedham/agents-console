@@ -340,6 +340,7 @@ const INTERRUPT_KINDS: InterruptKind[] = [
   "config",
   "crash",
   "deadlock",
+  "dialog",
   "merge-conflict",
   "merge-approval",
   "selection",
@@ -367,7 +368,7 @@ describe("interrupt forms", () => {
     );
   }
 
-  it("gives all seven kinds a renderable, answerable form", () => {
+  it("gives every kind a renderable, answerable form", () => {
     for (const row of rows()) {
       expect(row.interrupt.form.title.length).toBeGreaterThan(0);
       expect(row.interrupt.form.actions.length).toBeGreaterThan(0);
@@ -386,6 +387,7 @@ describe("interrupt forms", () => {
       config: ["resume"],
       crash: ["resume"],
       deadlock: ["resume", "close"],
+      dialog: ["resume"],
       "merge-conflict": ["resume", "close"],
       "merge-approval": ["approve", "reject"],
       selection: ["resume"],
@@ -402,6 +404,7 @@ describe("interrupt forms", () => {
       config: "pool config",
       crash: "harness crash",
       deadlock: "deadlock",
+      dialog: "claude dialog",
       "merge-conflict": "merge conflict",
       "merge-approval": "merge approval",
       selection: "human selection",

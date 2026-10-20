@@ -231,6 +231,17 @@ export const MANAGED_SETTINGS = [
   "",
 ].join("\n");
 
+/** claude's auto-mode setup dialog, which only the operator may answer, before its prompt or mid-run. */
+export const AUTO_MODE_DIALOG = [
+  "Teach auto mode about your environment?",
+  "Auto mode works better when it knows your environment. Takes about a minute.",
+  "❯ 1. Yes",
+  "  2. Not now",
+  "  3. Don't show again",
+  "Enter to confirm · Esc to cancel",
+  "",
+].join("\n");
+
 /** claude up and waiting, as 2.1.276 paints it. */
 export const CLAUDE_READY = "Claude Code v2.1.276\n❯ ";
 

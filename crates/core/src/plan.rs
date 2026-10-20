@@ -22,10 +22,12 @@ mod edit;
 pub mod library;
 mod parse;
 mod presets;
+mod skills;
 #[cfg(test)]
 mod tests;
 
 pub use presets::{PRESETS, Preset};
+pub use skills::SkillCheck;
 
 /// The `horde` tag this build reads and writes. Bumped when a rule breaks old files.
 pub const HORDE_VERSION: u32 = 1;
@@ -357,6 +359,19 @@ impl NodeBody {
         body.and_then(NodeBody::own_vocabulary).unwrap_or(&[])
     }
 
+    /// An operator or Steward Gate, or the Finish: an edge out of it closes a cycle as a loop edge
+    /// with no cap, since a person answers before it is crossed.
+    fn leaves_a_person(&self) -> bool {
+        matches!(
+            self,
+            NodeBody::Finish(_)
+                | NodeBody::Gate(GateNode {
+                    open: Opener::Operator | Opener::Steward,
+                    ..
+                })
+        )
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             NodeBody::Conversation(_) => "conversation",
@@ -507,6 +522,8 @@ impl Plan {
 pub struct Edited {
     pub plan: Plan,
     pub notes: Vec<String>,
+    /// Each edge a Merger move rekeyed, old key then new, in the order the edits moved them.
+    pub moved: Vec<(EdgeKey, EdgeKey)>,
 }
 
 /// A draft after edits: not a `Plan`, since it may be invalid, which is an editor's usual state.

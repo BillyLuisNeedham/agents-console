@@ -17,6 +17,7 @@ import { conformance } from "../harness/case.ts";
 import { spawnedPayloads, tuiStandIn, untilTicketStatus } from "../harness/herdr-tui.ts";
 import { readEvents, until } from "../harness/pool-files.ts";
 import {
+  AUTO_MODE_DIALOG,
   BYPASS_WARNING,
   CLAUDE_READY,
   interactiveArgv,
@@ -299,6 +300,26 @@ conformance("attempts", "claude's managed-settings dialog is never answered and 
   expect(crash.payload).toEqual({
     code: -3,
     reason: "TUI never became ready: the managed-settings trust dialog was on screen, which only the operator may answer",
+    logTail: logTailOf(log),
+    outcomeExists: false,
+  });
+  expect(keySends(herdr)).toEqual([]);
+  const spawned = readEvents(world.pool, "01").find((event) => event.kind === "spawned")!;
+  expect(Date.parse(crash.at) - Date.parse(spawned.at)).toBeLessThan(30_000);
+});
+
+conformance("attempts", "claude's auto-mode setup dialog is never answered and ends the launch at once, naming it", async (t) => {
+  const world = t.world({ tickets: [ticket("01", "Auto-mode dialog")], config: terminalConfig() });
+  tuiStandIn(world, "claude");
+  const herdr = await t.herdr(world, { rendered: AUTO_MODE_DIALOG });
+  await t.start(world, { herdr });
+
+  const crash = await untilEvent(world, "01", "crash");
+  const log = runsFile(world, "01.log");
+  expect(readFileSync(log, "utf8")).toBe(paneFrameLog(AUTO_MODE_DIALOG));
+  expect(crash.payload).toEqual({
+    code: -3,
+    reason: "TUI never became ready: the auto-mode setup dialog was on screen, which only the operator may answer",
     logTail: logTailOf(log),
     outcomeExists: false,
   });

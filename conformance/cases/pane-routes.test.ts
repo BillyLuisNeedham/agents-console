@@ -144,9 +144,9 @@ async function livePool(t: Parameters<Parameters<typeof conformance>[2]>[0]) {
   return { world, herdr, server, paneId, release: () => held.release("01") };
 }
 
-/** The route's own reads: the viewport ones (issue #122); the launch's reads are `recent`. */
-function peekReads(herdr: HerdrProcess) {
-  return bare(herdr.calls.filter((call) => call.method === "pane.read" && call.params.source === "visible"));
+/** The viewport reads (issue #122) from call `from` on: the route's, and the dialog watch's; the launch's reads are `recent`. */
+function peekReads(herdr: HerdrProcess, from = 0) {
+  return bare(herdr.calls.slice(from).filter((call) => call.method === "pane.read" && call.params.source === "visible"));
 }
 
 /** Calls as method and params, without the connection each arrived on. */
@@ -157,21 +157,25 @@ function bare(calls: HerdrCall[]): { method: string; params: Record<string, unkn
 // engine/server.test.ts:2712
 conformance(
   "herdr",
-  "terminal endpoints › peek translates the ticket id to its live pane and reads its viewport live: no engine loop watches a spawned attempt",
+  "terminal endpoints › peek translates the ticket id to its live pane and reads its viewport live, never a recorded read",
   async (t) => {
     const { herdr, server, paneId } = await livePool(t);
     await herdr.control("setPaneContent", paneId, "working\nstill working");
 
+    // The dialog watch reads this pane too, on its own cadence, so its reads may fall beside the peek's.
+    const from = herdr.calls.length;
     const peek = await server.http.get("/api/terminal/peek?ticket=01");
     expect(peek.status).toBe(200);
     expect(peek.json<object>()).toEqual({ ticket: "01", paneId, text: "working\nstill working" });
     await herdr.settle();
-    expect(peekReads(herdr)).toEqual([
-      {
+    const reads = peekReads(herdr, from);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).toEqual(
+      reads.map(() => ({
         method: "pane.read",
         params: { pane_id: paneId, source: "visible", format: "text", strip_ansi: true },
-      },
-    ]);
+      })),
+    );
   },
 );
 
@@ -235,6 +239,9 @@ conformance(
       (view) => view !== undefined && view.liveAttempt === null,
       { ms: 30_000, what: "01's attempt to end" },
     );
+    // The dialog watch read the pane while the attempt ran; it reads it no more.
+    await herdr.settle();
+    const from = herdr.calls.length;
 
     const peek = await server.http.get("/api/terminal/peek?ticket=01");
     expect(peek.status).toBe(404);
@@ -242,7 +249,7 @@ conformance(
     const focus = await server.http.post("/api/terminal/focus?ticket=01");
     expect(focus.status).toBe(404);
     await herdr.settle();
-    expect(peekReads(herdr)).toEqual([]);
+    expect(peekReads(herdr, from)).toEqual([]);
     expect(herdr.calls.filter((call) => call.method === "pane.focus")).toEqual([]);
   },
 );

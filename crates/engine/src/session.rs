@@ -240,6 +240,8 @@ pub struct Session {
     pub pool_checkout_writer_seq: u64,
     /// The pane survey (issue #139); `None` in a headless pool.
     pub pane_survey: Option<PaneSurvey>,
+    /// The dialog watch's timer; `None` in a headless pool.
+    pub dialog_watch: Option<tokio::task::JoinHandle<()>>,
     /// The tabs this pool's `spawned` events name, re-read with each survey listing.
     pub opened_tabs: Vec<OpenedTab>,
     /// Every pane and tab an enlisted owner's events name, re-read with each survey listing.
@@ -373,6 +375,7 @@ impl Session {
             pool_checkout_writers: IndexMap::new(),
             pool_checkout_writer_seq: 0,
             pane_survey: None,
+            dialog_watch: None,
             opened_tabs: Vec::new(),
             enlisted_terminals: EnlistedTerminals::default(),
             steward_used: IndexMap::new(),

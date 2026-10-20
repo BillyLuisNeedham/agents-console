@@ -108,6 +108,7 @@ function renderNode(model: InspectorModel, on: InspectorIntents, node: PlanNodeF
   const out: (HTMLElement | null)[] = [
     heading(`${KIND_LABEL[node.kind]} · ${id}`, null),
     problemList(drawn?.problems ?? []),
+    warningList(drawn?.warnings ?? []),
     text("title", "title", node.title),
   ];
   switch (node.kind) {
@@ -410,6 +411,11 @@ function heading(text: string, sub: string | null): HTMLElement {
 function problemList(problems: string[]): HTMLElement | null {
   if (!problems.length) return null;
   return h("div", { class: "plan-problems" }, ...problems.map((p) => h("div", { class: "plan-problem" }, p)));
+}
+
+function warningList(warnings: string[]): HTMLElement | null {
+  if (!warnings.length) return null;
+  return h("div", { class: "plan-warnings" }, ...warnings.map((w) => h("div", { class: "plan-warning" }, w)));
 }
 
 function textInput(

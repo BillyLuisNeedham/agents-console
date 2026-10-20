@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { PlanResponse, PlanSaveResponse, PlanSummary, PlansListResponse } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import type { HttpAnswer } from "../harness/http.ts";
-import { atEdge, edge, expectProblem, node, plan, planFile, plansDir, plansPool, smallPlan } from "./plans-support.ts";
+import { atEdge, atNode, edge, expectProblem, node, plan, planFile, plansDir, plansPool, smallPlan } from "./plans-support.ts";
 
 /** A refusal's reason: the plans routes say `reason`. */
 function reasonOf(answer: HttpAnswer): string {
@@ -118,6 +118,24 @@ conformance("plans", "GET /api/plans/<slug> answers a library file as it stands,
   const body = answer.json<PlanResponse>();
   expect([body.slug, body.preset, body.plan]).toEqual(["invalid", false, draft]);
   expectProblem(body.problems, { at: atEdge("build", "closed", "ghost"), keyword: "no node" });
+});
+
+conformance("plans", "GET /api/plans/<slug> carries a warning for a skill its node names that the harness cannot find, and none for a Plan without one", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  const named = plan([node.agent("spec", { skill: "addy-spec" }), node.finish()], [edge("spec", "done", "finish")], "Names a skill");
+  writeLibrary(plansDir(world), "names-a-skill", named);
+  writeLibrary(plansDir(world), "names-none", smallPlan());
+
+  const warned = (await server.http.get("/api/plans/names-a-skill")).json<PlanResponse>();
+  const plain = (await server.http.get("/api/plans/names-none")).json<PlanResponse>();
+  const onSocket = await socket.request("plans.get", { slug: "names-a-skill" });
+
+  expect(warned.problems).toEqual([]);
+  expect(warned.warnings).toHaveLength(1);
+  expect(warned.warnings![0]!.at).toEqual(atNode("spec"));
+  expect(warned.warnings![0]!.message).toContain("not installed");
+  expect(plain.warnings ?? []).toEqual([]);
+  expect(onSocket.ok && onSocket.result).toEqual(warned);
 });
 
 conformance("plans", "GET /api/plans/<slug> of a library file that is not JSON is refused as 422", async (t) => {

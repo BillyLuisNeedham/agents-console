@@ -12,9 +12,18 @@
  * rules listed under "The Plan". The words pinned are the keywords the core
  * was told to use, so a message may say more but never less. Where a rule's
  * problem could sit on either of two edges of a cycle, both are accepted.
+ *
+ * A node that names a skill its harness cannot find is a warning, not a
+ * problem: `warnings` beside `problems`, on the node, never keeping a Plan
+ * from being saved or run. Each harness looks in its own places under the
+ * world's fenced HOME and CLAUDE_CONFIG_DIR. Origin of the warning cases:
+ * the ticket "warn on a skill not installed for its harness"
+ * (conv-1-spawn-11-spawn-2), after a Preset's nodes ran /addy-spec with no
+ * addy-spec installed and claude answered "Unknown skill".
  */
 
 import { expect } from "bun:test";
+import { join } from "node:path";
 import type { PlanFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import {
@@ -23,12 +32,14 @@ import {
   atPlan,
   edge,
   expectProblem,
+  installSkillFile,
   node,
   plan,
   plansPool,
   richPlan,
   smallPlan,
   validateBoth,
+  validateBothAnswers,
   type Expected,
 } from "./plans-support.ts";
 
@@ -302,4 +313,95 @@ conformance("plans", "Plan validation › a body with no plan is refused as 400 
   const reply = await socket.request("plans.validate", {} as never);
   expect(reply.ok).toBe(false);
   if (!reply.ok) expect(reply.refusal).toEqual({ reason: http.json<{ reason: string }>().reason, status: 400 });
+});
+
+// ---------------------------------------------------------------------------
+// Skills the harness cannot find
+// ---------------------------------------------------------------------------
+
+/** A Plan whose one node names `skill`, on the pool's default harness (claude) unless `harness` says another. */
+function skillPlan(skill: string, harness?: string): PlanFile {
+  return plan([node.agent("spec", { skill, ...(harness ? { assign: { harness } } : {}) }), node.finish()], [edge("spec", "done", "finish")]);
+}
+
+conformance("plans", "Plan validation › a skill the harness cannot find is a warning on its node, naming the skill, the harness and where it looked, and no problem", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+
+  const answer = await validateBothAnswers(server, socket, skillPlan("addy-spec"));
+
+  expect(answer.problems).toEqual([]);
+  expect(answer.warnings).toHaveLength(1);
+  const [warning] = answer.warnings!;
+  expect(warning!.at).toEqual(atNode("spec"));
+  expect(warning!.message).toContain("not installed");
+  expect(warning!.message).toContain("addy-spec");
+  expect(warning!.message).toContain("claude");
+  expect(warning!.message).toContain(join(world.claudeConfig, "skills", "addy-spec", "SKILL.md"));
+  expect(warning!.message).toContain(join(world.claudeConfig, "commands", "addy-spec.md"));
+});
+
+conformance("plans", "Plan validation › a skill installed as a directory with a SKILL.md, or as a command file, under CLAUDE_CONFIG_DIR is not warned on", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  installSkillFile(join(world.claudeConfig, "skills", "from-dir", "SKILL.md"));
+  installSkillFile(join(world.claudeConfig, "commands", "from-command.md"));
+
+  expect((await validateBothAnswers(server, socket, skillPlan("from-dir"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("from-command"))).warnings ?? []).toEqual([]);
+});
+
+conformance("plans", "Plan validation › a claude skill installed under HOME's .claude is not what CLAUDE_CONFIG_DIR points claude at, so it is warned on", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  installSkillFile(join(world.home, ".claude", "skills", "elsewhere", "SKILL.md"));
+
+  const answer = await validateBothAnswers(server, socket, skillPlan("elsewhere"));
+
+  expect(answer.warnings).toHaveLength(1);
+});
+
+conformance("plans", "Plan validation › a chain of skills warns on the words that are not installed and on no other", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  installSkillFile(join(world.claudeConfig, "skills", "first", "SKILL.md"));
+
+  const answer = await validateBothAnswers(server, socket, skillPlan("first second"));
+
+  expect(answer.warnings).toHaveLength(1);
+  expect(answer.warnings![0]!.at).toEqual(atNode("spec"));
+  expect(answer.warnings![0]!.message).toContain("second");
+  expect(answer.warnings![0]!.message).not.toContain("first");
+});
+
+conformance("plans", "Plan validation › a cursor node looks in HOME's .cursor and not where claude does", async (t) => {
+  const { world, server, socket } = await plansPool(t);
+  installSkillFile(join(world.claudeConfig, "skills", "only-claude", "SKILL.md"));
+  installSkillFile(join(world.home, ".cursor", "skills", "only-cursor", "SKILL.md"));
+
+  const missing = await validateBothAnswers(server, socket, skillPlan("only-claude", "cursor"));
+  const installed = await validateBothAnswers(server, socket, skillPlan("only-cursor", "cursor"));
+
+  expect(missing.warnings).toHaveLength(1);
+  expect(missing.warnings![0]!.message).toContain("cursor");
+  expect(missing.warnings![0]!.message).toContain(join(world.home, ".cursor", "skills", "only-claude", "SKILL.md"));
+  expect(installed.warnings ?? []).toEqual([]);
+});
+
+conformance("plans", "Plan validation › a node on a harness the engine does not know is never warned on, nor a plugin-namespaced skill, nor one claude ships with", async (t) => {
+  const { server, socket } = await plansPool(t);
+
+  expect((await validateBothAnswers(server, socket, skillPlan("anything", "codex"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("plugin:anything"))).warnings ?? []).toEqual([]);
+  expect((await validateBothAnswers(server, socket, skillPlan("simplify claude-in-chrome"))).warnings ?? []).toEqual([]);
+});
+
+conformance("plans", "Plan validation › a draft with a problem elsewhere still carries the skill warning", async (t) => {
+  const { server, socket } = await plansPool(t);
+  const draft = plan(
+    [node.agent("spec", { skill: "addy-spec" }), node.finish()],
+    [edge("spec", "done", "finish"), edge("spec", "closed", "ghost")],
+  );
+
+  const answer = await validateBothAnswers(server, socket, draft);
+
+  expectProblem(answer.problems, { at: atEdge("spec", "closed", "ghost"), keyword: "no node" });
+  expect(answer.warnings).toHaveLength(1);
+  expect(answer.warnings![0]!.at).toEqual(atNode("spec"));
 });

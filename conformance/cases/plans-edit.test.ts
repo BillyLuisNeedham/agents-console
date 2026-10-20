@@ -2,7 +2,7 @@ import { expect } from "bun:test";
 import { existsSync } from "node:fs";
 import type { PlanDraftResponse, PlanFile, PlanNodeFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
-import { atNode, edge, editBoth, editRefusedBoth, node, plan, plansDir, plansPool, smallPlan, validateBoth } from "./plans-support.ts";
+import { atNode, edge, editBoth, editRefusedBoth, node, plan, plansDir, plansPool, smallPlan, validateBoth, validateBothAnswers } from "./plans-support.ts";
 
 function feeder(): PlanFile {
   return plan(
@@ -42,6 +42,17 @@ conformance("plans", "a node set per-item gains its Merger with a note, and set 
   expect(one.plan.nodes.map((n) => n.id)).toEqual(["tasks", "build", "finish"]);
   expect(edgeKeys(one)).toEqual(["tasks.done -> build", "build.done -> finish"]);
   expect(one.notes).toEqual(["`build` is one copy now: lifted `build-merge` and moved 1 edge back onto it"]);
+});
+
+conformance("plans", "a link that closes a cycle with no cap is made a loop capped at 2 that holds when spent, with a note, so the draft has no problem", async (t) => {
+  const { server, socket } = await plansPool(t);
+  const opened = await editBoth(server, socket, feeder(), []);
+
+  const looped = await editBoth(server, socket, opened.plan, [{ edit: "link", edge: edge("build", "closed", "tasks") }]);
+
+  expect(looped.plan.edges).toContainEqual(edge("build", "closed", "tasks", { max: 2, stewardExtra: false, whenSpent: "hold" }));
+  expect(looped.notes).toEqual(["`build.closed -> tasks` closes a cycle, so it is a loop capped at 2 passes that holds when spent"]);
+  expect(looped.problems).toEqual([]);
 });
 
 conformance("plans", "a link from a node with a Merger is made from the Merger, with a note", async (t) => {
@@ -156,4 +167,20 @@ conformance("plans", "plans.edit writes nothing to the Plan library", async (t) 
   await editRefusedBoth(server, socket, smallPlan(), [{ edit: "removeNode", id: "nope" }]);
 
   expect(existsSync(plansDir(world))).toBe(false);
+});
+
+conformance("plans", "a draft's warnings are the ones plans.validate gives it, and an edit that names a missing skill brings one", async (t) => {
+  const { server, socket } = await plansPool(t);
+  const opened = await editBoth(server, socket, smallPlan(), []);
+  expect(opened.warnings ?? []).toEqual([]);
+
+  const named = await editBoth(server, socket, opened.plan, [
+    { edit: "setNode", node: { ...nodeOf(opened, "build"), skill: "addy-spec" } as PlanNodeFile },
+  ]);
+
+  expect(named.problems).toEqual([]);
+  expect(named.warnings).toHaveLength(1);
+  expect(named.warnings![0]!.at).toEqual(atNode("build"));
+  expect(named.warnings![0]!.message).toContain("not installed");
+  expect(named.warnings).toEqual((await validateBothAnswers(server, socket, named.plan)).warnings);
 });

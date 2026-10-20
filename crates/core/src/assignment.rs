@@ -471,6 +471,16 @@ pub fn defaults_layer(config: &PoolConfig) -> AssignmentLayer {
     AssignmentLayer::of_object(config.get("defaults"))
 }
 
+/// The harness the pool defaults give a unit that names none: console.json `defaults.harness`, when
+/// it is a non-empty string.
+pub fn default_harness(config: &PoolConfig) -> Option<String> {
+    defaults_layer(config)
+        .harness
+        .text()
+        .filter(|harness| !harness.is_empty())
+        .map(str::to_owned)
+}
+
 /// A ticket's console.json `assign` entry as a request (empty when it has none): `config.assign?.[id]`,
 /// which on an array written by hand finds the element at a canonical index.
 pub fn assign_request(config: &PoolConfig, id: &str) -> AssignmentRequest {
@@ -1424,6 +1434,18 @@ mod tests {
             Value::Object(map) => PoolConfig::from_map(map),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn the_default_harness_is_the_pool_defaults_when_non_empty() {
+        let harness = |value: Value| default_harness(&config(value));
+        assert_eq!(
+            harness(json!({"defaults": {"harness": "cursor"}})),
+            Some("cursor".to_owned())
+        );
+        assert_eq!(harness(json!({"defaults": {"harness": ""}})), None);
+        assert_eq!(harness(json!({"defaults": {"model": "m"}})), None);
+        assert_eq!(harness(json!({})), None);
     }
 
     fn spawned(id: &str, parent: &str) -> MarkerFacts {

@@ -1691,6 +1691,112 @@ fn a_steward_extra_loop_that_moves_onto_a_merger_is_no_new_power() {
     assert_eq!(rev(&run), 1);
 }
 
+fn one_copy(run: &LineRun, id: &str) -> PlanEdit {
+    let NodeBody::Ticket(mut body) = run.plan().0.node(&node(id)).unwrap().body.clone() else {
+        panic!("{id} is a Ticket node")
+    };
+    body.copies = Copies::One;
+    PlanEdit::SetNode {
+        id: node(id),
+        title: id.into(),
+        body: NodeBody::Ticket(body),
+    }
+}
+
+/// Factory today with Prove failed `fails` times, each fail ticked.
+fn failed(fails: u32) -> (LineRun, Pool) {
+    let (mut run, mut pool) = started("none");
+    for n in 1..=fails {
+        pool.agent(&format!("implement-{n}"));
+        tick(&mut run, &mut pool);
+        pool.prove(&format!("prove-{n}"), false);
+        tick(&mut run, &mut pool);
+    }
+    (run, pool)
+}
+
+#[test]
+fn placing_a_merger_on_a_spent_loop_keeps_its_hold_and_its_count() {
+    let (mut run, mut pool) = failed(3);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    assert!(run.is_hold(&id("prove-fail-implement-3")));
+    assert!(
+        written(&tick(&mut run, &mut pool)).is_empty(),
+        "the hold is not raised again"
+    );
+
+    pool.answer("prove-fail-implement-3", None, true);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-4"]);
+    pool.agent("implement-4");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-4", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-merge-fail-implement-4"],
+        "the bought pass is the only one: the cap did not reset"
+    );
+}
+
+#[test]
+fn placing_a_merger_on_a_half_spent_loop_keeps_its_count() {
+    let (mut run, mut pool) = failed(1);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    pool.agent("implement-2");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-2", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-3"]);
+    pool.agent("implement-3");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-3", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-merge-fail-implement-3"]
+    );
+}
+
+#[test]
+fn lifting_a_merger_from_a_spent_loop_keeps_its_hold_and_never_repeats_a_hold_id() {
+    let (mut run, mut pool) = failed(3);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    run.edit(Editor::Operator, rev(&run), &[one_copy(&run, "prove")])
+        .unwrap();
+    assert!(run.is_hold(&id("prove-fail-implement-3")));
+    assert!(written(&tick(&mut run, &mut pool)).is_empty());
+
+    pool.answer("prove-fail-implement-3", None, true);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-4"]);
+    pool.agent("implement-4");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-4", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-fail-implement-4"]
+    );
+}
+
+#[test]
+fn lifting_a_merger_from_a_half_spent_loop_keeps_its_count() {
+    let (mut run, mut pool) = failed(1);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    run.edit(Editor::Operator, rev(&run), &[one_copy(&run, "prove")])
+        .unwrap();
+    pool.agent("implement-2");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-2", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-3"]);
+    pool.agent("implement-3");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-3", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-fail-implement-3"]
+    );
+}
+
 #[test]
 fn the_steward_edits_only_a_plan_that_lets_it_and_never_widens_its_own_powers() {
     let capped = || {

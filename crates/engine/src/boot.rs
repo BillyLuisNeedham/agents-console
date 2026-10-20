@@ -162,10 +162,12 @@ pub async fn start_pool(options: RunOptions) -> anyhow::Result<Engine> {
         .call(move |s| {
             // The pane survey (issue #139) only has panes to list in a terminal-backed pool. It lists
             // on its cadence and whenever the engine holds a pane, so a Held pane from before a
-            // restart is looked for at once (seedHeldPanes asks).
+            // restart is looked for at once (seedHeldPanes asks). The dialog watch, likewise, only
+            // has panes to read there.
             if crate::tickets::attempt_env_of(s, None).terminal_backed {
                 let interval = s.pane_survey_ms;
                 crate::pane_survey::create_pane_survey(s, interval);
+                crate::dialog_watch::start_dialog_watch(s);
             }
             crate::held::seed_held_panes(s);
             // Jev (ADR-0020): one boot line saying which path is live, then one line per fallback

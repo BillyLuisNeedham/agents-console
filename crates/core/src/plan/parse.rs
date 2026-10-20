@@ -936,18 +936,7 @@ impl<'a> Graph<'a> {
         });
         let candidates = links
             .iter()
-            .map(|link| {
-                link.routes
-                    && (link.capped
-                        || matches!(
-                            nodes[link.from].body,
-                            NodeBody::Finish(_)
-                                | NodeBody::Gate(GateNode {
-                                    open: Opener::Operator | Opener::Steward,
-                                    ..
-                                })
-                        ))
-            })
+            .map(|link| link.routes && (link.capped || nodes[link.from].body.leaves_a_person()))
             .collect();
         Graph {
             n: nodes.len(),

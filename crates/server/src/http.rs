@@ -261,11 +261,11 @@ async fn fetch(server: Server, request: Request) -> Response {
         }
         ("/api/plans/validate", &Method::POST) => {
             let body = read_body(body).await;
-            return http_of(routes::plan_validate_request(body));
+            return http_of(routes::plan_validate_request(&server, body));
         }
         ("/api/plans/edit", &Method::POST) => {
             let body = read_body(body).await;
-            return http_of(routes::plan_edit_request(body));
+            return http_of(routes::plan_edit_request(&server, body));
         }
         ("/api/plans/boot", &Method::POST) => {
             let body = read_body(body).await;
