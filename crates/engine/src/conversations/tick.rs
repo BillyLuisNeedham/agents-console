@@ -206,3 +206,36 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
         s.wake();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_spawn_held_on_arrival_wakes_the_drive_since_the_lines_finish_waits_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::create_dir_all(dir.path().join("issues")).unwrap();
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        // As mid-run: a wake rings the running drive rather than starting one.
+        session.driving = true;
+        session.pool_dir = dir.path().to_string_lossy().into_owned();
+        session.issues_dir = dir.path().join("issues").to_string_lossy().into_owned();
+        session.runs_dir = runs.to_string_lossy().into_owned();
+        session.spawn_proposals = ac_core::spawn_proposals::load_spawn_proposals(&runs).unwrap();
+        session.wakes.see_all();
+
+        let spawn = json!([{
+            "title": "Probe",
+            "body": "A body long enough to stand as a ticket.",
+            "overlaps": ["01"]
+        }]);
+        super::adopt_spawns(&mut session, "conv-1", Some(&spawn));
+
+        assert_eq!(session.spawn_proposals.held().len(), 1);
+        assert!(session.spawn_proposals.pending().is_empty());
+        assert!(session.wakes.any_unseen(), "a held arrival wakes the drive");
+    }
+}
