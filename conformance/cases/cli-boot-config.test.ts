@@ -7,10 +7,11 @@
  */
 
 import { expect } from "bun:test";
-import { existsSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { conformance } from "../harness/case.ts";
 import { cliWorld, DONE_TICKET, MACHINE, readJson } from "../harness/cli.ts";
+import { until } from "../harness/pool-files.ts";
 import { CHECKOUT } from "../harness/server.ts";
 
 const BOOT = ["--yes", "--no-open", "--port", "0"];
@@ -112,7 +113,8 @@ conformance("cli", "Boot lists the pool's context files and leaves the template'
 conformance("cli", "Boot takes the pool config over the Setup, and the Setup over machine defaults", async (t) => {
   const w = cliWorld(t, {
     machineDefaults: { harness: "opencode", model: "machine-model", drivers: "implement" },
-    setups: { s: { defaults: { harness: "cursor", model: "setup-model" }, resolver: "cursor" } },
+    // The resolver names its own model: the pool's claude defaults own none it could take (ADR-0044).
+    setups: { s: { defaults: { harness: "cursor", model: "setup-model" }, resolver: { harness: "cursor", model: "auto" } } },
   });
   const pool = w.dir("pool");
   w.write("pool/console.json", JSON.stringify({ defaults: { harness: "claude" } }));
@@ -120,7 +122,44 @@ conformance("cli", "Boot takes the pool config over the Setup, and the Setup ove
   expect(run.code).toBe(0);
   const config = readJson(join(pool, "console.json"));
   expect(config.defaults).toEqual({ harness: "claude", model: "setup-model", drivers: "implement" });
-  expect(config.resolver).toBe("cursor");
+  expect(config.resolver).toEqual({ harness: "cursor", model: "auto" });
+});
+
+conformance("cli", "Boot stops with the engine's refusal when the resolver is on another harness than the defaults with no model", async (t) => {
+  // Machine defaults on claude would own a model the resolver could take; these are cursor's too.
+  const w = cliWorld(t, { machineDefaults: { harness: "cursor", model: "auto" } });
+  const pool = w.dir("pool");
+  // A ready Ticket and harnesses that record every start, by the binary each runs (cursor's is
+  // `agent`): a boot that went on would launch 01 on cursor.
+  const calls = w.path("harness.calls");
+  for (const binary of ["claude", "agent"]) {
+    const script = w.write(`bin/${binary}`, `#!/bin/sh\necho ${binary} >> ${JSON.stringify(calls)}\nexit 0\n`);
+    chmodSync(script, 0o755);
+  }
+  const ticket = "<!-- state: id=01 blocked-by=none status=ready -->\n# 01\n";
+  const ticketFile = w.write("pool/issues/01.md", ticket);
+  w.write("pool/console.json", JSON.stringify({ defaults: { harness: "cursor", model: "auto" }, resolver: "claude" }));
+  const run = await w.run("boot", [pool, ...BOOT]);
+
+  expect(run.code).toBe(1);
+  const lines = run.stderr.trimEnd().split("\n");
+  expect(lines[0]).toBe("the engine refused or failed at boot; its message:");
+  expect(lines.at(-1)).toBe(
+    "pool config: resolver names harness 'claude' but no model: its model comes from defaults.model, " +
+      `which is for 'cursor'. Give resolver a model: { "harness": "claude", "model": "..." }`,
+  );
+  // Boot says the engine refused only once its server has exited, and a launch writes 01 in
+  // progress before its harness starts, so 01 as it was means nothing ever launched.
+  expect(readFileSync(ticketFile, "utf8")).toBe(ticket);
+  expect(existsSync(calls)).toBe(false);
+
+  // The same pool with the resolver given a model boots and launches 01 on the stub, so the checks
+  // above are the ones a boot that went on would fail.
+  w.write("pool/console.json", JSON.stringify({ defaults: { harness: "cursor", model: "auto" }, resolver: { harness: "claude", model: "opus" } }));
+  expect((await w.run("boot", [pool, ...BOOT])).code).toBe(0);
+  await until(() => (existsSync(calls) ? readFileSync(calls, "utf8") : ""), (text) => text.startsWith("agent\n"), {
+    what: "01 to launch on cursor's agent",
+  });
 });
 
 conformance("cli", "Boot carries effort field by field from the pool, the Setup and the machine", async (t) => {

@@ -508,8 +508,8 @@ pub enum Begin {
 
 /// `POST /api/line {plan, work | brief}`, sent once by Boot: the engine parses the Plan again (its
 /// boundary is the one that counts), refuses harness names the machine lacks (a node's or a
-/// Merger's resolver), freezes it in `line.json` and wakes. No Ticket is written here: the first tick
-/// projects them.
+/// Merger's resolver) and a Merger's resolver left no model (issue #37), freezes it in `line.json`
+/// and wakes. No Ticket is written here: the first tick projects them.
 pub fn begin_line(
     session: &mut Session,
     plan: &Value,
@@ -551,6 +551,9 @@ pub fn begin_line(
     let name = plan.meta().name.clone();
     let run = LineRun::start(plan, places, start)
         .map_err(|why| EngineError::refused(format!("the Line cannot begin: {why}")))?;
+    // The run's Plan is the one frozen, so its Mergers are checked there.
+    check_mergers(session, run.plan().0)
+        .map_err(|error| EngineError::refused(format!("the Line cannot begin: {error}")))?;
     save_line(Path::new(&session.pool_dir), &run).map_err(|error| {
         EngineError::refused(format!("line.json could not be written: {error}"))
     })?;
@@ -596,6 +599,7 @@ pub fn edit_plan(
     if let Some(problem) = unknown_harness(session, plan) {
         return Err(EngineError::LineRefusal(problem));
     }
+    check_mergers(session, plan).map_err(|error| EngineError::LineRefusal(error.to_string()))?;
     if rev != run.plan().1 {
         save_line(Path::new(&session.pool_dir), &next).map_err(|error| {
             EngineError::LineRefusal(format!("line.json could not be written: {error}"))
@@ -644,6 +648,17 @@ fn unknown_harness(session: &Session, plan: &Plan) -> Option<String> {
         };
         unknown_node_harness(session, &node.id, assign.harness.as_deref()?)
     })
+}
+
+// Every Merger's resolver in a Plan the Line is about to run must resolve (issue #37): one that would
+// fail at its first conflict is refused before it is frozen, as boot refuses it after.
+fn check_mergers(session: &Session, plan: &Plan) -> anyhow::Result<()> {
+    crate::merges::check_plan_resolvers(
+        &session.state.config,
+        &session.harnesses,
+        &session.machine_defaults,
+        plan,
+    )
 }
 
 fn unknown_node_harness(
@@ -805,6 +820,69 @@ mod tests {
             problem.starts_with("node m names unknown harness 'nonesuch'"),
             "{problem}"
         );
+    }
+
+    #[test]
+    fn a_mergers_resolver_left_no_model_is_refused_before_the_plan_is_frozen() {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        session.state.config = ac_core::config::PoolConfig::from_map(
+            json!({"defaults": {"harness": "cursor", "model": "auto"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let plan = |resolver: serde_json::Value| {
+            Plan::from_value(&json!({"horde": 1, "name": "p", "nodes": [
+                {"kind": "agent", "id": "build", "title": "B", "x": 0, "y": 0,
+                 "copies": {"perItem": 2}},
+                {"kind": "merger", "id": "m", "title": "M", "x": 0, "y": 0, "of": "build",
+                 "conflict": {"resolver": resolver}},
+                {"kind": "finish", "id": "finish", "title": "F", "x": 0, "y": 0}
+            ], "edges": [
+                {"from": "build", "on": "done", "to": "m"},
+                {"from": "m", "on": "done", "to": "finish"}
+            ]}))
+            .unwrap()
+        };
+        let error = super::check_mergers(&session, &plan(json!({"harness": "claude"})))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error
+                == "the Plan's Merger 'm' resolver names harness 'claude' but no model: its model \
+                    comes from defaults.model, which is for 'cursor'. Give the Merger's \
+                    conflict.resolver a model in the Plan, or set console.json resolver to { \
+                    \"harness\": \"claude\", \"model\": \"...\" } for it to inherit",
+            "{error}"
+        );
+        // A Merger's own model passed over: its harness came from the Machine defaults, so it needs
+        // one named.
+        let home = tempfile::tempdir().unwrap();
+        session.machine_defaults = ac_core::machine_defaults::default_machine_defaults_paths(
+            home.path().to_str().unwrap(),
+        );
+        ac_core::machine_defaults::write_machine_defaults(
+            &json!({"harness": "claude"}),
+            &session.machine_defaults.file,
+        )
+        .unwrap();
+        let error = super::check_mergers(&session, &plan(json!({"model": "sonnet"})))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.ends_with(
+                "its model comes from the Merger's model, which is for 'cursor'. Name the harness \
+                 its model is for on the Merger's conflict.resolver in the Plan"
+            ),
+            "{error}"
+        );
+        super::check_mergers(
+            &session,
+            &plan(json!({"harness": "claude", "model": "opus"})),
+        )
+        .unwrap();
+        super::check_mergers(&session, &plan(json!({"harness": "cursor"}))).unwrap();
     }
 
     #[test]

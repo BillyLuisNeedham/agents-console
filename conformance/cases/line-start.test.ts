@@ -3,15 +3,17 @@
  * slug or as a file, into line.json with the Line brief or the work it is given, writes no Ticket
  * itself, and the first tick writes the entry node's Ticket with its node and Assignment on the
  * state line. It refuses with the reason, writing nothing, a Plan that is invalid, a harness the
- * machine lacks (a node's, or a Merger's resolver), a missing or invalid brief, a pool that already
- * holds an id the Line would write, and a second Line.
+ * machine lacks (a node's, or a Merger's resolver), a Merger's resolver with no model of its own
+ * (ADR-0044, refused by a Plan edit too) or whose own model is for another harness than it runs on,
+ * a missing or invalid brief, a pool that already holds an id the Line would write, and a second
+ * Line.
  * A Conversation node anywhere in the Plan begins, and so does a per-item node with its Merger.
  *
  * The stubs on PATH play the Ticket nodes.
  */
 
 import { expect } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LineFile, PlanFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
@@ -265,7 +267,7 @@ function buildThenMerge(conflict?: unknown): PlanFile {
   } as PlanFile;
 }
 
-conformance("line", "a per-item node with a Merger begins, and a Merger whose resolver names a harness the machine lacks is refused naming it", async (t) => {
+conformance("line", "a per-item node with a Merger begins, and a Merger whose resolver names a harness the machine lacks, or one with no model of its own, is refused naming it, at Line start and by a Plan edit", async (t) => {
   const world = lineWorld(t, null);
   const hold = world.stubs.hold("build-1");
   const server = await t.start(world);
@@ -277,7 +279,18 @@ conformance("line", "a per-item node with a Merger begins, and a Merger whose re
   expect(existsSync(join(world.pool, "line.json"))).toBe(false);
   expect(existsSync(join(world.pool, "issues", "build-1.md"))).toBe(false);
 
-  const line = await begun(server, { plan: buildThenMerge({ resolver: { harness: "opencode" } }), work: "#1" });
+  // The defaults' model is claude's word, so an opencode Merger has none it may take (ADR-0044).
+  const modelless = await beginLine(server, { plan: buildThenMerge({ resolver: { harness: "opencode" } }), work: "#1" });
+  expect(modelless.status).toBe(409);
+  expect(reason(modelless)).toBe(
+    "the Line cannot begin: the Plan's Merger 'build-merge' resolver names harness 'opencode' but no model: its model " +
+      "comes from defaults.model, which is for 'claude'. Give the Merger's conflict.resolver a model in the Plan, " +
+      "or set console.json resolver to { \"harness\": \"opencode\", \"model\": \"...\" } for it to inherit",
+  );
+  expect(await lineOf(server)).toBeNull();
+  expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+
+  const line = await begun(server, { plan: buildThenMerge({ resolver: { harness: "opencode", model: "merger-model" } }), work: "#1" });
   expect(line.plan.nodes.find((n) => n.id === "build")).toMatchObject({ copies: { perItem: 2 } });
   expect(line.plan.nodes.find((n) => n.id === "build-merge")).toMatchObject({ kind: "merger", of: "build" });
   await until(
@@ -288,5 +301,38 @@ conformance("line", "a per-item node with a Merger begins, and a Merger whose re
   expect(readStateLine(world.pool, "build-1.md").line).toBe(
     "<!-- state: id=build-1 blocked-by=none status=in-progress node=build -->",
   );
+
+  // An edit that would leave the running Line's Merger no model is refused, the Plan as it was.
+  const frozen = readFileSync(join(world.pool, "line.json"), "utf8");
+  const merger = buildThenMerge({ resolver: { harness: "opencode" } }).nodes.find((n) => n.id === "build-merge")!;
+  const edited = await server.http.post("/api/line/plan", { baseRev: line.rev, edits: [{ edit: "setNode", node: merger }] });
+  expect(edited.status).toBe(409);
+  expect(reason(edited)).toBe(
+    "the Plan's Merger 'build-merge' resolver names harness 'opencode' but no model: its model comes from " +
+      "defaults.model, which is for 'claude'. Give the Merger's conflict.resolver a model in the Plan, or set " +
+      "console.json resolver to { \"harness\": \"opencode\", \"model\": \"...\" } for it to inherit",
+  );
+  expect(readFileSync(join(world.pool, "line.json"), "utf8")).toBe(frozen);
+  expect((await lineOf(server))?.rev).toBe(line.rev);
   await hold.release();
+});
+
+conformance("line", "a Merger whose own model is for another harness than the one it runs on is refused at Line start, naming the harness to give it", async (t) => {
+  // The resolver's harness comes from the Machine defaults, claude, while the Merger's model sits over cursor's defaults.
+  const world = lineWorld(t, null, {}, { defaults: { harness: "cursor" } });
+  mkdirSync(join(world.home, ".agent-graphs"), { recursive: true });
+  writeFileSync(join(world.home, ".agent-graphs", "defaults.json"), JSON.stringify({ harness: "claude" }));
+  const server = await t.start(world);
+
+  const passedOver = await beginLine(server, { plan: buildThenMerge({ resolver: { model: "sonnet" } }), work: "#1" });
+  expect(passedOver.status).toBe(409);
+  expect(reason(passedOver)).toBe(
+    "the Line cannot begin: the Plan's Merger 'build-merge' resolver takes harness 'claude' from the Machine defaults " +
+      "but no model: its model comes from the Merger's model, which is for 'cursor'. Name the harness its model is " +
+      "for on the Merger's conflict.resolver in the Plan",
+  );
+  expect(await lineOf(server)).toBeNull();
+  expect(existsSync(join(world.pool, "line.json"))).toBe(false);
+
+  await begun(server, { plan: buildThenMerge({ resolver: { harness: "cursor", model: "sonnet" } }), work: "#1" });
 });

@@ -192,6 +192,36 @@ conformance("config", "an edit with one assign entry naming an unknown harness i
   expect(reassigned(world.pool, "02")).toEqual([]);
 });
 
+conformance("config", "an edit that leaves a resolver on another harness with no model is rejected whole, and naming its model lands", async (t) => {
+  const onCursor = (model: string): PoolConfig["defaults"] => ({ harness: "cursor", model });
+  const world = t.world({
+    tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] }), ticket("03", { blockedBy: ["02"] })],
+    config: { defaults: onCursor("model-a") },
+  });
+  world.stubs.script("01", { waitFor: holdFile(world, "01") });
+  world.stubs.script("02", { waitFor: holdFile(world, "02") });
+  const server = await t.start(world);
+  await untilLaunched(world, "01");
+  writeConfig(world, { defaults: onCursor("model-b"), resolver: "claude" });
+  release(world, "01");
+  await untilLaunched(world, "02");
+  const rejected = await snapshotOf(server);
+
+  expect(logLines(rejected, "config reload rejected")).toEqual([
+    "config reload rejected: pool config: resolver names harness 'claude' but no model: its model comes from " +
+      `defaults.model, which is for 'cursor'. Give resolver a model: { "harness": "claude", "model": "..." }`,
+  ]);
+  expect(modelOf(world, "02")).toBe("model-a");
+  expect(reassigned(world.pool, "02")).toEqual([]);
+
+  writeConfig(world, { defaults: onCursor("model-b"), resolver: { harness: "claude", model: "opus" } });
+  release(world, "02");
+  const done = await approveReview(server);
+  expect(logLines(done, "config reload rejected")).toHaveLength(1);
+  expect(logLines(done, "config reloaded")).toEqual(["config reloaded: defaults, resolver"]);
+  expect(modelOf(world, "03")).toBe("model-b");
+});
+
 conformance("config", "port, terminal and selection never move under a live run, whatever console.json says", async (t) => {
   const world = t.world({
     tickets: [ticket("01"), ticket("02", { blockedBy: ["01"] })],
