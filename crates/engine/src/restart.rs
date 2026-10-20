@@ -28,7 +28,7 @@ use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_io::git::WorktreeInfo;
 use ac_io::herdr::{Herdr, PaneAgentState};
 use ac_protocol::{
-    InterruptKind, OutcomeStatus, RunPhase, TicketEvent, TicketEventKind, TicketStatus,
+    InterruptKind, OutcomeStatus, RunPhase, SpawnKind, TicketEvent, TicketEventKind, TicketStatus,
 };
 
 use crate::actor::Engine;
@@ -47,7 +47,8 @@ use crate::live_attempts::{self, LiveAttemptEntry};
 use crate::merges::chain_ticket_merge;
 use crate::session::{AdoptedAttempt, PoolUpdate, Session};
 use crate::snapshot::emit_snapshot;
-use crate::tickets::{CrashFacts, crash_interrupt_body};
+use crate::spawns::take_spawn_proposals;
+use crate::tickets::{CrashFacts, crash_interrupt_body, rejection_events};
 
 /// A headless attempt a previous engine process spawned and never saw exit, still alive.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,11 +1050,25 @@ pub fn record_adopted_exit(
         payload.insert("outcomeExists".into(), Value::Bool(outcome_exists));
         payload
     };
+    let ended_clean = outcome.filter(|_| crash_reason.is_none());
+    if let Some(valid) = ended_clean {
+        for (kind, payload) in rejection_events(valid) {
+            append_event(runs, &id, &event_now(attempt, kind, payload))?;
+        }
+    }
     append_event(
         runs,
         &id,
         &event_now(attempt, TicketEventKind::Exited, exit_payload(true, None)),
     )?;
+    // Taken after `exited`, as a launched attempt's are: a later boot never re-adopts an attempt with
+    // that event, so the proposals are taken once.
+    if let Some(proposals) = ended_clean
+        .and_then(|valid| valid.outcome.spawn.clone())
+        .filter(|proposals| !proposals.is_empty())
+    {
+        take_spawn_proposals(session, &id, proposals, SpawnKind::Ticket)?;
+    }
     if let Some(reason) = crash_reason {
         append_event(
             runs,

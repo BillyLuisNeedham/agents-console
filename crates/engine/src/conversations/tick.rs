@@ -170,6 +170,9 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     let validation = validate_spawn_proposals(raw);
     for rejection in &validation.rejections {
         let mut payload = serde_json::Map::new();
+        if let Some(title) = &rejection.title {
+            payload.insert("title".into(), json!(title));
+        }
         if let Some(index) = rejection.index {
             payload.insert("index".into(), json!(index));
         }

@@ -15,16 +15,18 @@
 
 import { Database } from "bun:sqlite";
 import { expect } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type CaseServer } from "../harness/case.ts";
 import { expectParsedEqual, expectSameBytes } from "../harness/equal.ts";
-import { readEvents, readTicketFile } from "../harness/pool-files.ts";
+import { CLAUDE_READY } from "../harness/herdr.ts";
+import { readEvents, readTicketFile, until } from "../harness/pool-files.ts";
 import type { TicketSeed, World } from "../harness/world.ts";
 import { conversationRecord, flagValue } from "./config-support.ts";
 import {
   CONFIG,
+  TERMINAL,
   approveReview,
   poolLog,
   restartCase,
@@ -323,6 +325,56 @@ restartCase("Held spawn ids survive a restart and a discarded one is never issue
   expect(eventsOf(world, "02", "spawn-held").map((e) => e.payload)).toEqual([
     { held: [{ id: "proposal-3", title: "C", reason: "per-attempt" }] },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// A re-adopted Attempt's spawns
+// ---------------------------------------------------------------------------
+
+restartCase("a re-adopted Attempt's Outcome spawns land once and a malformed one is logged by title", async (t) => {
+  const world = t.world({ tickets: [ticket("01")], config: TERMINAL });
+  const herdr = await t.herdr(world, { rendered: CLAUDE_READY, holdPane: true });
+  const held = world.stubs.hold("01", {
+    status: "done",
+    spawn: [proposal("Recovered"), { title: "Thin", body: "too short" }],
+  });
+  let released = false;
+  t.defer(async () => {
+    if (!released) await held.release(2_000).catch(() => {});
+  });
+  const first = await startLeg(t, world, 0, { herdr });
+  await until(() => world.stubs.calls().some((call) => call.key === "01"), (read) => read, {
+    what: "01's stub to read its prompt",
+    ms: 60_000,
+  });
+  await first.stop();
+
+  await held.release();
+  released = true;
+  await until(() => existsSync(join(world.pool, "runs", "01.exitcode")), (there) => there, { what: "runs/01.exitcode", ms: 30_000 });
+  await herdr.settle();
+  const second = await startLeg(t, world, 1, { herdr });
+  const landed = await quiet(second, "the re-adopted exit's spawn run to done", (s) => statusOf(s, "01-spawn-1") === "done");
+
+  expect(statusesOf(landed)).toMatchObject({ "01": "done", "01-spawn-1": "done" });
+  expect(eventsOf(world, "01", "spawn-rejected").map((e) => e.payload)).toEqual([
+    { title: "Thin", index: 1, reason: "proposal body is missing or thin (needs 20+ characters)" },
+  ]);
+  expect(eventsOf(world, "01", "spawn-adopted").map((e) => e.payload)).toEqual([
+    { adopted: ["01-spawn-1"], fromPending: ["proposal-1"] },
+  ]);
+  expectSameBytes(
+    readTicketFile(world.pool, "01-spawn-1.md"),
+    spawnedFile("01-spawn-1", "01", "Recovered", { status: "done" }),
+    "issues/01-spawn-1.md",
+  );
+  await second.stop();
+
+  const third = await startLeg(t, world, 2, { herdr });
+  await quiet(third, "the pool at rest after a second restart", () => true);
+  expect(hasTicket(world, "01-spawn-2.md")).toBe(false);
+  expect(eventsOf(world, "01", "spawn-adopted")).toHaveLength(1);
+  expect(eventsOf(world, "01", "spawn-rejected")).toHaveLength(1);
 });
 
 // ---------------------------------------------------------------------------
