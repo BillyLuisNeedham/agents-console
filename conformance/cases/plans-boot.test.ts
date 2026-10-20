@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import { cpSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { PlanBootResponse } from "../../protocol/wire.ts";
 import { bootRecorder, type BootRecorder } from "../harness/boot-recorder.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
@@ -16,12 +16,10 @@ async function bootPool(t: Case, spec: WorldSpec = {}): Promise<{ world: World; 
   return { world, server, recorder };
 }
 
-function bootLog(world: World): string {
-  return readFileSync(join(world.pool, "runs", "boot.log"), "utf8");
-}
-
-conformance("plans", "a Preset boots a Line with the Boot argv, from the main worktree, into the pool's boot log", async (t) => {
+conformance("plans", "a Preset boots a Line with the Boot argv, from the main worktree, into a log of its own beside the pool's boot log", async (t) => {
   const { world, server, recorder } = await bootPool(t);
+  const poolLog = join(world.pool, "runs", "boot.log");
+  writeFileSync(poolLog, "the pool's own boot\n");
 
   const answer = await server.http.post("/api/plans/boot", { slug: "addy-commands", work: " fix the flaky merge test " });
 
@@ -30,11 +28,13 @@ conformance("plans", "a Preset boots a Line with the Boot argv, from the main wo
   const argv = ["--plan", "addy-commands", "--work", "fix the flaky merge test", "--yes"];
   expect(started.argv).toEqual(argv);
   expect(started.cwd).toBe(realpathSync(world.repo));
-  expect(realpathSync(started.log)).toBe(realpathSync(join(world.pool, "runs", "boot.log")));
+  expect(dirname(realpathSync(started.log))).toBe(realpathSync(join(world.pool, "runs")));
+  expect(basename(started.log)).toMatch(/^plans-boot-addy-commands-\d+\.log$/);
   const [call, ...more] = await recorder.handOffs(1);
   expect(more).toEqual([]);
   expect(call).toEqual({ ran: "shim", argv, cwd: realpathSync(world.repo) });
-  expect(bootLog(world)).toContain(`boot recorder: ${argv.join(" ")}`);
+  expect(readFileSync(started.log, "utf8")).toContain(`boot recorder: ${argv.join(" ")}`);
+  expect(readFileSync(poolLog, "utf8")).toBe("the pool's own boot\n");
 });
 
 conformance("plans", "a Line booted from a Line's own worktree is cut from the repository's main worktree", async (t) => {

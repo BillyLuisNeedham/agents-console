@@ -1,6 +1,7 @@
 import type {
   ConversationView,
   EnrichedTicketState,
+  Interrupt,
   LineEdgeView,
   LineGraphView,
   LineNodeView,
@@ -9,8 +10,12 @@ import type {
 } from "../../protocol/wire.ts";
 import { edgeKeyText, edgeLabel } from "./plan-projection";
 
-/** A copy's status, joined from its Ticket (or Conversation); one not in the snapshot yet is pending. */
-export type CopyTone = "pending" | "running" | "checkpoint" | "done" | "closed";
+/**
+ * A copy's status, joined from its Ticket (or Conversation); one not in the
+ * snapshot yet is pending, and a pending or running one with an open
+ * Interrupt is interrupted, since it waits on the operator, not its agent.
+ */
+export type CopyTone = "pending" | "running" | "interrupted" | "checkpoint" | "done" | "closed";
 
 export interface LiveCopy {
   id: string;
@@ -65,6 +70,7 @@ const TICKET_TONE: Record<EnrichedTicketState["status"], CopyTone> = {
 };
 
 const isActive = (copy: LiveCopy): boolean => copy.tone === "pending" || copy.tone === "running";
+const waitsOnOperator = (copy: LiveCopy): boolean => copy.tone === "checkpoint" || copy.tone === "interrupted";
 
 type TicketStatuses = ReadonlyMap<string, EnrichedTicketState["status"]>;
 type Conversations = ReadonlyMap<string, Pick<ConversationView, "status" | "turn">>;
@@ -79,6 +85,7 @@ function conversationTone(c: Pick<ConversationView, "status" | "turn"> | undefin
 interface Join {
   tickets: TicketStatuses;
   conversations: Conversations;
+  interrupted: ReadonlySet<string>;
   selectedId: string | null;
 }
 
@@ -90,7 +97,8 @@ function copyOf(join: Join, id: string, conversation: boolean): LiveCopy {
     : status
       ? TICKET_TONE[status]
       : "pending";
-  return { id, card, tone, selected: card === join.selectedId };
+  const stuck = join.interrupted.has(id) && (tone === "pending" || tone === "running");
+  return { id, card, tone: stuck ? "interrupted" : tone, selected: card === join.selectedId };
 }
 
 interface NodeFacts {
@@ -119,7 +127,7 @@ const STATE_RULES: readonly StateRule[] = [
     if (f.hold) return { tone: "needs", text: "needs you" };
     return f.waitingFor.length > 0 ? { tone: "needs", text: `waiting for ${f.waitingFor.length}` } : null;
   },
-  (f) => (f.copies.some((c) => c.tone === "checkpoint") ? { tone: "needs", text: "needs you" } : null),
+  (f) => (f.copies.some(waitsOnOperator) ? { tone: "needs", text: "needs you" } : null),
   (f) => (f.hold ? { tone: "needs", text: "waiting on you" } : null),
   (f) =>
     f.plan.kind === "gate" && f.plan.join === "all" && f.view.arrived.length > 0
@@ -165,11 +173,13 @@ export function projectLine(
   line: LineGraphView,
   tickets: readonly Pick<EnrichedTicketState, "id" | "status">[],
   conversations: readonly Pick<ConversationView, "id" | "status" | "turn">[],
+  interrupts: readonly Pick<Interrupt, "ticketId">[],
   selectedId: string | null,
 ): LineLive {
   const join: Join = {
     tickets: new Map(tickets.map((t) => [t.id, t.status])),
     conversations: new Map(conversations.map((c) => [c.id, c])),
+    interrupted: new Set(interrupts.map((i) => i.ticketId)),
     selectedId,
   };
   const views = new Map(line.nodes.map((n) => [n.id, n]));

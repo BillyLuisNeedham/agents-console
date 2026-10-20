@@ -44,7 +44,7 @@ conformance("line", "five Items under perItem 2 start two copies, no third while
   await second.release();
 });
 
-conformance("line", "the next node's Ticket is written only once the fifth copy has merged, blocked by every copy", async (t) => {
+conformance("line", "the next node's Ticket is written only once the fifth copy has merged, blocked by every copy, and the Merger counts the pass it folded", async (t) => {
   const world = lineWorld(t, null);
   world.stubs.script("tasks-1", makingItems(pieces(5)));
   const last = world.stubs.hold("build-1.5");
@@ -69,6 +69,8 @@ conformance("line", "the next node's Ticket is written only once the fifth copy 
   });
   expect(hasIssue(world.pool, "check-1")).toBe(false);
   expect(launches(world)).not.toContain("check-1");
+  const merger = async () => (await lineOf(server))?.nodes.find((n) => n.id === "build-merge");
+  expect(await merger()).toMatchObject({ passes: 0 });
 
   await last.release();
   const done = await atCheckpoint(server, "finish-1");
@@ -78,6 +80,7 @@ conformance("line", "the next node's Ticket is written only once the fifth copy 
   );
   expect(statuses(done)["check-1"]).toBe("done");
   expect(launches(world).filter((key) => key === "check-1")).toHaveLength(1);
+  expect(await merger()).toMatchObject({ passes: 1 });
 });
 
 conformance("line", "a checkpointed copy keeps its slot, so under perItem 2 the rest wait on one slot until it is answered", async (t) => {

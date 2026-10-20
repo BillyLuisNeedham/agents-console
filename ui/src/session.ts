@@ -1056,7 +1056,13 @@ export class ConsoleSession {
       mergeQueueLine: this.view?.mergeQueueLine ?? null,
       spawnLine: this.view?.spawnLine ?? null,
       line: snapshot?.line
-        ? projectLine(snapshot.line, snapshot.state.tickets, snapshot.state.conversations, this.selectedId)
+        ? projectLine(
+            snapshot.line,
+            snapshot.state.tickets,
+            snapshot.state.conversations,
+            snapshot.state.interrupts,
+            this.selectedId,
+          )
         : null,
       heldSpawns: this.view?.heldSpawns ?? [],
       detail,

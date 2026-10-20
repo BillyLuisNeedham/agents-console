@@ -70,7 +70,7 @@ function graph(rev: number, plan: PlanFile = PLAN, parked = ["fail"]): LineGraph
   };
 }
 
-const at = (g: LineGraphView): LineLive => projectLine(g, [{ id: "build-1", status: "done" }], [], null);
+const at = (g: LineGraphView): LineLive => projectLine(g, [{ id: "build-1", status: "done" }], [], [], null);
 
 function setup(rev = 3) {
   const sent: { baseRev: number; edits: PlanEditFile[]; d: Deferred<LinePlanEditResponse> }[] = [];

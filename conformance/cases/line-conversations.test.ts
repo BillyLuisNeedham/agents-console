@@ -22,7 +22,7 @@ import type { HerdrProcess } from "../harness/herdr.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { snapshot } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
-import { BODY, proposeSpawns } from "./conversations-support.ts";
+import { BODY, proposeSpawns, startConversation } from "./conversations-support.ts";
 import { atCheckpoint, begun, interruptOn, lineOf, reason } from "./line-support.ts";
 import { edge, node, plan as planOf } from "./plans-support.ts";
 
@@ -138,7 +138,7 @@ conformance("line", "the engine opens grill-1 on the Conversation node's skill a
     '"pushBase": true (the Finish may push the Line base to origin, only to create it or fast-forward it, never forcing)',
   );
   expect(typed).toContain(
-    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on it.",
+    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186).",
   );
   expect((await lineOf(server))?.nodes.find((n) => n.id === "grill")).toMatchObject({ pass: 1, tickets: ["grill-1"] });
 
@@ -341,4 +341,34 @@ conformance("line", "a spawn a Line Conversation proposes is held for the operat
     "ticket grill-1: 1 proposal held for the operator: proposed inside the Line (ADR-0037): proposal-1",
   );
   expect(existsSync(join(world.pool, "runs", "grill-1.spawn.json"))).toBe(false);
+});
+
+conformance("line", "a spawn a Conversation holds once the Finish hold is written is what the Finish waits for, on GET /api/line and the snapshot, until it is discarded", async (t) => {
+  const world = grillWorld(t);
+  const { server } = await serve(t, world);
+  await opened(server);
+  expect((await end(server, { id: "grill-1", close: true })).status).toBe(202);
+  const atFinish = await atCheckpoint(server, "finish-1");
+  expect(atFinish.line).toMatchObject({ status: "finishing", waitingFor: [] });
+
+  const talk = await startConversation(server, { title: "Planner" });
+  await until(() => snapshot(server), (s) => viewOf(s, talk.id)?.paneId != null, { what: `${talk.id} to open` });
+  proposeSpawns(world, talk.id, [{ title: "Probe", body: BODY, overlaps: ["grill-1"] }]);
+  const held = await until(() => snapshot(server), (s) => s.heldSpawns.length > 0, { what: "the proposal to be held" });
+  expect(held.heldSpawns.map((h) => [h.id, h.parentId, h.reason])).toEqual([["proposal-1", talk.id, "overlaps"]]);
+  const waiting = await until(() => lineOf(server), (line) => (line?.waitingFor.length ?? 0) > 0, {
+    what: "GET /api/line to name the Held spawn",
+  });
+  expect(waiting).toMatchObject({ status: "finishing", waitingFor: ["the Held spawn proposal-1"] });
+  expect((await snapshot(server)).line?.waitingFor).toEqual(["the Held spawn proposal-1"]);
+  const refused = await server.http.post("/api/resume", { ticketId: "finish-1", note: "approved" });
+  expect(refused.status).toBe(409);
+  expect(refused.json<{ error: string }>().error).toBe("answer: the Finish is waiting for: the Held spawn proposal-1");
+
+  expect((await server.http.post("/api/spawns/held/discard", { id: "proposal-1" })).status).toBeLessThan(300);
+  const cleared = await until(() => lineOf(server), (line) => line?.waitingFor.length === 0, {
+    what: "GET /api/line to wait for nothing",
+  });
+  expect(cleared).toMatchObject({ status: "finishing", waitingFor: [] });
+  expect((await snapshot(server)).line?.waitingFor).toEqual([]);
 });
