@@ -186,23 +186,20 @@ fn adopt_spawns(s: &mut Session, parent_id: &str, raw: Option<&Value>) {
     if validation.proposals.is_empty() {
         return;
     }
-    let before = s.spawn_proposals.pending().len();
     // A take that fails (the proposals file would not write) throws in the TypeScript, ending this
     // step of the tick: nothing was taken, so nothing is pending to land.
-    if crate::spawns::take_spawn_proposals(
+    let Ok((pending, held)) = crate::spawns::take_spawn_proposals(
         s,
         parent_id,
         validation.proposals,
         SpawnKind::Conversation,
-    )
-    .is_err()
-    {
+    ) else {
         return;
-    }
-    let pending = s.spawn_proposals.pending().len() > before;
+    };
     let phase = s.current_phase();
     emit_snapshot(s, phase);
-    if pending {
+    // A Pending spawn lands at the next tick, and the Line's Finish waits on a Held one too.
+    if !pending.is_empty() || !held.is_empty() {
         s.wake();
     }
 }
