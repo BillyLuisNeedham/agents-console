@@ -332,7 +332,8 @@ conformance(
   async (t) => {
     const talk = await startTalk(t, { herdr: { rendered: OPENCODE_READY } });
     const { herdr, socket, server } = talk;
-    const paneId = await talkingOn(talk, "ctrl+p commands", { harness: "opencode" });
+    // The switch to opencode names its own model: the pool's claude defaults own none it could take (ADR-0044).
+    const paneId = await talkingOn(talk, "ctrl+p commands", { harness: "opencode", model: "m" });
 
     const fromFrame = socket.frames.length;
     await show(herdr, paneId, opencodeHome());

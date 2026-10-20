@@ -37,7 +37,7 @@ conformance(
   async (t) => {
     const world = t.world({
       tickets: [ticket("01"), ticket("02", { blockedBy: "01" })],
-      config: { ...CONFIG, assign: { "01": { harness: "opencode" } } },
+      config: { ...CONFIG, assign: { "01": { harness: "opencode", model: "m" } } },
     });
     withoutClaude(world);
     const held = world.stubs.hold("01");

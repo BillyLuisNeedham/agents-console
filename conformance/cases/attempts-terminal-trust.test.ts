@@ -229,7 +229,10 @@ conformance("attempts", "the seed follows CLAUDE_CONFIG_DIR as claude does, and 
 conformance("attempts", "another harness's worktree is never seeded, and neither is the operator's own checkout", async (t) => {
   const world = t.world({
     tickets: [ticket("01", "Claude"), ticket("02", "Opencode one"), ticket("03", "Opencode two")],
-    config: terminalConfig("claude", { assign: { "02": { harness: "opencode" }, "03": { harness: "opencode" } } }),
+    // Each switch to opencode names its own model: claude's never reaches it (ADR-0044).
+    config: terminalConfig("claude", {
+      assign: { "02": { harness: "opencode", model: "m" }, "03": { harness: "opencode", model: "m" } },
+    }),
   });
   writeConfig(claudeJson(world), OPERATOR_CONFIG);
   // One frame both harnesses' readiness patterns match.

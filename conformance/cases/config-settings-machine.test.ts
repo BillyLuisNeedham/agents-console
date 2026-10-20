@@ -53,15 +53,21 @@ conformance("config", "Machine defaults fall back to the legacy runner files, fi
 });
 
 // engine/machine-defaults.test.ts:34 machine defaults › lets the JSON file win over the legacy files, field by field
-conformance("config", "a saved Machine defaults file wins over the legacy files field by field", async (t) => {
+// ADR-0044 (issue #37): the legacy harness and model are one pair, so the legacy model fills in only
+// beside the legacy harness.
+conformance("config", "a saved Machine defaults file wins over the legacy files field by field, taking the legacy model only beside its harness", async (t) => {
   const { server } = await settledPool(t, ISSUE_RUNNER);
 
   const answer = await putMachine(server, { harness: "claude", drivers: "implement", terminal: "herdr" });
   expect(answer.status, answer.text).toBe(200);
 
   const { machine } = await settingsOf(server);
-  expect(machine.defaults).toEqual({ harness: "claude", model: "oc/flash", drivers: "implement", terminal: "herdr" });
+  expect(machine.defaults).toEqual({ harness: "claude", drivers: "implement", terminal: "herdr" });
   expect(machine.own).toEqual({ harness: "claude", drivers: "implement", terminal: "herdr" });
+
+  const paired = await putMachine(server, { harness: "opencode" });
+  expect(paired.status, paired.text).toBe(200);
+  expect(paired.json<SettingsResponse>().machine.defaults).toEqual({ harness: "opencode", model: "oc/flash" });
 });
 
 // engine/machine-defaults.test.ts:47 machine defaults › writes a whole file, dropping empty fields, and creates the directory

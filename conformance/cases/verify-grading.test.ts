@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { TicketEvent } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { expectSameBytes } from "../harness/equal.ts";
-import { readEvents, readStateLine, readTicketFile } from "../harness/pool-files.ts";
+import { readEvents, readStateLine, readTicketFile, until } from "../harness/pool-files.ts";
 import { answer, approveReview, settle, settleOn, statuses, ticketOf } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
 import {
@@ -25,6 +25,7 @@ import {
   ready,
   verifyConfig,
 } from "./verify-common.ts";
+import { untilSnapshot, writeConfig } from "./config-support.ts";
 
 type Grade = { score: unknown; verdict: unknown; reasons: unknown };
 
@@ -206,8 +207,8 @@ conformance("verify", "resolves a grader's harness and model through assign, ove
       defaults: { harness: "claude", model: "m" },
       assign: {
         "01": { verify: 2, harness: "claude", model: "build-model" },
-        // Harness only: the model still comes from the build Ticket.
-        "01-grader-2": { harness: "opencode" },
+        // A switch of harness names its own model: the build Ticket's is claude's (ADR-0044).
+        "01-grader-2": { harness: "opencode", model: "grader-model" },
       },
     },
   });
@@ -222,13 +223,57 @@ conformance("verify", "resolves a grader's harness and model through assign, ove
   expect(grader1!.harness).toBe("claude");
   expect(flagValue(grader1!.argv, "--model")).toBe("build-model");
   expect(grader2!.harness).toBe("opencode");
-  expect(flagValue(grader2!.argv, "--model")).toBe("build-model");
+  expect(flagValue(grader2!.argv, "--model")).toBe("grader-model");
   expect(readStateLine(world.pool, "01-grader-2.md").status).toBe("done");
   expect(gradedEvents(world, "01").find((e) => e.attempt === 2)?.payload).toEqual({
     score: 6,
     verdict: "pass",
     reasons: "ok",
   });
+});
+
+conformance("verify", "a grader that switches harness with no model of its own never launches, and its build ticket waits on a Config Interrupt naming the model it passed over", async (t) => {
+  const world = t.world({
+    tickets: [ready("01")],
+    config: {
+      defaults: { harness: "claude", model: "m" },
+      assign: {
+        "01": { verify: 2, harness: "claude", model: "build-model" },
+        "01-grader-2": { harness: "opencode" },
+      },
+    },
+  });
+  twoCandidates(world);
+  const server = await t.start(world);
+
+  // The pool stays up: the build ticket, not the grader nothing schedules, carries the Interrupt.
+  const waiting = await untilSnapshot(
+    server,
+    (s) => s.state.interrupts.some((i) => i.ticketId === "01" && i.kind === "config"),
+    "01's Config Interrupt",
+  );
+  expect(waiting.phase).not.toBe("dead");
+  expect(waiting.state.interrupts.find((i) => i.ticketId === "01")!.body).toBe(
+    "ticket 01-grader-2 has no model: it runs on 'opencode', and the inherited model 'build-model' belongs to " +
+      "another harness ('claude'), so it is passed over. Give it a model for 'opencode' in console.json, an " +
+      'assign entry for 01-grader-2: { "harness": "opencode", "model": "..." }, and answer resume on ticket 01: ' +
+      "it runs a fresh verify round on what console.json says then.",
+  );
+  expect(launchesOf(world, "01-grader-2")).toEqual([]);
+  expect(ticketOf(waiting, "01-grader-2").assignment).toEqual({ harness: "opencode", model: null, drivers: "implement" });
+
+  // Given a model and resumed, the build runs a fresh round whose grader launches on it.
+  writeConfig(world, {
+    defaults: { harness: "claude", model: "m" },
+    assign: {
+      "01": { verify: 2, harness: "claude", model: "build-model" },
+      "01-grader-2": { harness: "opencode", model: "grader-model" },
+    },
+  });
+  expect((await server.http.post("/api/resume", { ticketId: "01" })).status).toBe(202);
+  await until(() => launchesOf(world, "01-grader-2"), (calls) => calls.length > 0, { what: "01-grader-2 to launch" });
+  const [grader] = launchesOf(world, "01-grader-2");
+  expect([grader!.harness, flagValue(grader!.argv, "--model")]).toEqual(["opencode", "grader-model"]);
 });
 
 // engine.test.ts:1731
@@ -239,7 +284,7 @@ conformance("verify", "serves grader tickets the Assignment inherited from their
       defaults: { harness: "claude", model: "pool-default-model" },
       assign: {
         "01": { verify: 2, harness: "claude", model: "build-model", drivers: "implement code-review" },
-        "01-grader-2": { harness: "opencode" },
+        "01-grader-2": { harness: "opencode", model: "grader-model" },
       },
     },
   });
@@ -249,7 +294,8 @@ conformance("verify", "serves grader tickets the Assignment inherited from their
   const snap = await settleOn(server, "REVIEW", "review");
 
   // The graders inherit their build Ticket's model and drivers, not the
-  // pool defaults, whose model appears on no record.
+  // pool defaults, whose model appears on no record. One that switches
+  // harness names its own model and still inherits the drivers.
   expect(ticketOf(snap, "01").assignment).toEqual({ harness: "claude", model: "build-model", drivers: "implement code-review" });
   expect(ticketOf(snap, "01-grader-1").assignment).toEqual({
     harness: "claude",
@@ -258,7 +304,7 @@ conformance("verify", "serves grader tickets the Assignment inherited from their
   });
   expect(ticketOf(snap, "01-grader-2").assignment).toEqual({
     harness: "opencode",
-    model: "build-model",
+    model: "grader-model",
     drivers: "implement code-review",
   });
 });
