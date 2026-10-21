@@ -15,6 +15,8 @@
   --status-running: #d29922;
   --status-done: #3fb950;
   --interrupt: #f85149;
+  /* A finding that never blocks (a Plan node names a skill its harness lacks): amber, apart from the red of an error. */
+  --warning: var(--status-running);
   --accent-purple: #a371f7;
   /* The Steward (ADR-0030): its own hue, apart from the selection ring's
      accent and the outflow highlight's purple, so its mark never reads as
@@ -3882,6 +3884,15 @@ textarea.steward-orders {
   border-color: var(--interrupt);
 }
 
+.plan-node-warning {
+  border-color: var(--warning);
+}
+
+/* Both on one card: the error's red border wins, as its flag does. */
+.plan-node-problem.plan-node-warning {
+  border-color: var(--interrupt);
+}
+
 .plan-node-dragging {
   cursor: grabbing;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
@@ -3916,6 +3927,10 @@ textarea.steward-orders {
   font-size: 10px;
   color: var(--interrupt);
   white-space: nowrap;
+}
+
+.plan-node-flag-warning {
+  color: var(--warning);
 }
 
 .plan-node-body {
@@ -4378,6 +4393,18 @@ button.plan-dot::after {
 .plan-problem {
   font-size: 11px;
   color: var(--interrupt);
+  overflow-wrap: anywhere;
+}
+
+.plan-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-warning {
+  font-size: 11px;
+  color: var(--warning);
   overflow-wrap: anywhere;
 }
 

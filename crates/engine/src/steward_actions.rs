@@ -254,8 +254,8 @@ pub fn check_steward(session: &Session, conversation: &str) -> Result<(), Engine
     Ok(())
 }
 
-/// The check a Steward's reassign starts with, before its assign entries are written: none of the
-/// Tickets is one the Steward is kept from.
+/// The check a Steward's reassign starts with, before its assign entries are written: every Ticket is
+/// one whose Interrupts the Steward may answer.
 pub fn check_steward_reassign(
     session: &Session,
     conversation: &str,
@@ -264,15 +264,23 @@ pub fn check_steward_reassign(
     check_steward(session, conversation)?;
     match tickets
         .iter()
-        .find_map(|ticket_id| crate::line::steward_kept_from(session, ticket_id))
+        .find_map(|ticket_id| line_refusal(session, ticket_id))
     {
         Some(why) => Err(steward_refusal(why)),
         None => Ok(()),
     }
 }
 
+// Why the Line keeps this Ticket from the Steward, when it does (ADR-0040).
+fn line_refusal(session: &Session, ticket_id: &str) -> Option<String> {
+    crate::line::steward_kept_from(session, ticket_id).or_else(|| {
+        (!crate::line::steward_may_answer(session, ticket_id))
+            .then(|| format!("{ticket_id} is the Line's, and its Plan leaves it to the operator"))
+    })
+}
+
 // The pending Interrupt a Steward action is about, refused when it is not the Steward's to touch:
-// review, persistence and a Conversation's own.
+// review, persistence, a dialog and a Conversation's own.
 fn steward_interrupt(
     session: &Session,
     conversation: &str,
@@ -300,15 +308,15 @@ fn steward_interrupt(
                 "the persistence Interrupt is an engine store failure, never the Steward's",
             ));
         }
+        InterruptKind::Dialog => {
+            return Err(steward_refusal(
+                "the dialog Interrupt is answered in the Ticket's pane by the operator, never the Steward",
+            ));
+        }
         _ => {}
     }
-    if let Some(why) = crate::line::steward_kept_from(session, ticket_id) {
+    if let Some(why) = line_refusal(session, ticket_id) {
         return Err(steward_refusal(why));
-    }
-    if !crate::line::steward_may_answer(session, ticket_id) {
-        return Err(steward_refusal(format!(
-            "{ticket_id} is the Line's, and its Plan leaves it to the operator"
-        )));
     }
     if !steward_may_answer(
         &interrupt.ticket_id,
@@ -621,10 +629,14 @@ pub fn steward_state(
             &session.state.config,
         ),
         phase: session.current_phase().as_str().to_owned(),
+        // Like its Notices, the Steward's state never shows it the Finish (ADR-0040).
         interrupts: session
             .state
             .interrupts
             .iter()
+            .filter(|interrupt| {
+                crate::line::steward_kept_from(session, &interrupt.ticket_id).is_none()
+            })
             .map(|interrupt| {
                 let used = session
                     .steward_used
@@ -661,6 +673,9 @@ pub fn steward_state(
                 snapshot
                     .merge_queue
                     .iter()
+                    .filter(|entry| {
+                        crate::line::steward_kept_from(session, &entry.ticket_id).is_none()
+                    })
                     .map(|entry| StewardStateMerge {
                         ticket_id: entry.ticket_id.clone(),
                         state: entry.state.as_str().to_owned(),
@@ -961,6 +976,128 @@ mod tests {
         assert_eq!(
             refusal.message(),
             "steward: ticket 01's merge-approval takes approve or reject"
+        );
+    }
+
+    // A Line of build (checkpoint: operator), then test (checkpoint: steward), then the Finish, with
+    // conv-1 the Steward on duty.
+    fn steward_over_a_line(dir: &Path) -> Session {
+        use ac_core::conversation_record::{ConversationRecord, write_conversation};
+        use ac_core::line::run::{LinePlaces, LineRun, LineStart};
+        use ac_core::plan::Plan;
+        use ac_protocol::{ConversationRole, ConversationStatus};
+
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        let pool = dir.to_string_lossy().into_owned();
+        session.issues_dir = format!("{pool}/issues");
+        session.runs_dir = format!("{pool}/runs");
+        std::fs::create_dir_all(&session.issues_dir).unwrap();
+        std::fs::create_dir_all(&session.runs_dir).unwrap();
+        session.answers =
+            ac_core::queued_answers::QueuedAnswerStore::open(Path::new(&session.runs_dir));
+        session.pool_dir = pool;
+        let conversations = dir.join("conversations");
+        write_conversation(
+            &conversations,
+            &ConversationRecord {
+                id: "conv-1".into(),
+                file: conversations.join("conv-1.md"),
+                title: "Steward".into(),
+                opening: String::new(),
+                status: ConversationStatus::Live,
+                spawned_by: None,
+                harness: "claude".into(),
+                model: "m".into(),
+                effort: None,
+                drivers: String::new(),
+                enlisted: None,
+                role: Some(ConversationRole::Steward),
+                node: None,
+            },
+        )
+        .unwrap();
+        let plan = Plan::from_value(&json!({"horde": 1, "name": "build, test, finish", "nodes": [
+            {"kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0, "checkpoint": "operator"},
+            {"kind": "agent", "id": "test", "title": "Test", "x": 0, "y": 0, "checkpoint": "steward"},
+            {"kind": "finish", "id": "finish", "title": "Finish", "x": 0, "y": 0}
+        ], "edges": [
+            {"from": "build", "on": "done", "to": "test"},
+            {"from": "test", "on": "done", "to": "finish"}
+        ]}))
+        .unwrap();
+        session.line =
+            Some(LineRun::start(plan, LinePlaces::default(), LineStart::Work("w".into())).unwrap());
+        session
+    }
+
+    fn line_ticket_done(session: &mut Session, id: &str) {
+        use ac_core::pool::{load_pool_tickets, write_marker_status};
+        use ac_protocol::TicketStatus;
+
+        write_marker_status(
+            &Path::new(&session.issues_dir).join(format!("{id}.md")),
+            TicketStatus::Done,
+        )
+        .unwrap();
+        session.markers = load_pool_tickets(Path::new(&session.pool_dir), false).unwrap();
+        session
+            .state
+            .tickets
+            .insert(id.to_owned(), TicketStatus::Done);
+        crate::line::advance_line(session).unwrap();
+    }
+
+    fn reassign(session: &Session, ticket_id: &str) -> Result<(), EngineError> {
+        check_steward_reassign(session, "conv-1", &[ticket_id.to_owned()])
+    }
+
+    #[test]
+    fn refuses_a_steward_reassign_of_a_line_ticket_whose_plan_leaves_its_checkpoints_to_the_operator()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = steward_over_a_line(dir.path());
+        crate::line::advance_line(&mut session).unwrap();
+        assert_eq!(
+            reassign(&session, "build-1"),
+            Err(steward_refusal(
+                "build-1 is the Line's, and its Plan leaves it to the operator"
+            ))
+        );
+        line_ticket_done(&mut session, "build-1");
+        assert_eq!(reassign(&session, "test-1"), Ok(()));
+        assert_eq!(
+            check_steward_reassign(&session, "conv-1", &["test-1".into(), "build-1".into()]),
+            Err(steward_refusal(
+                "build-1 is the Line's, and its Plan leaves it to the operator"
+            ))
+        );
+    }
+
+    #[test]
+    fn the_stewards_state_never_lists_the_finish_hold_and_its_reassign_there_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = steward_over_a_line(dir.path());
+        crate::line::advance_line(&mut session).unwrap();
+        line_ticket_done(&mut session, "build-1");
+        line_ticket_done(&mut session, "test-1");
+        assert!(
+            session
+                .state
+                .interrupts
+                .iter()
+                .any(|i| i.ticket_id == "finish-1"),
+            "the Finish holds"
+        );
+        let state = steward_state(&session, "conv-1").unwrap();
+        assert!(state.interrupts.is_empty(), "{:?}", state.interrupts);
+        assert_eq!(state.line.map(|line| line.rev), Some(0));
+        assert_eq!(
+            reassign(&session, "finish-1"),
+            Err(steward_refusal(
+                "finish-1 is the Line's Finish: approving the Line and its act are the operator's, \
+                 never the Steward's"
+            ))
         );
     }
 }

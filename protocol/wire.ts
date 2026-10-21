@@ -301,6 +301,11 @@ export type InterruptKind =
   | "config"
   | "crash"
   | "deadlock"
+  /**
+   * A claude dialog holding a live Ticket's agent mid-run, which the engine never answers;
+   * the dialog watch clears it when the dialog leaves the pane or the attempt ends.
+   */
+  | "dialog"
   | "merge-conflict"
   | "merge-approval"
   | "persistence"
@@ -1339,6 +1344,11 @@ export interface PlanResponse {
   preset: boolean;
   plan: PlanFile;
   problems: PlanProblem[];
+  /**
+   * Advisory only, and left out when there are none: things the machine lacks (a skill a node
+   * names that its harness cannot find). They never stop a Save or a Boot.
+   */
+  warnings?: PlanProblem[];
 }
 
 /** POST /api/plans/validate's body: a draft Plan, checked whole. */
@@ -1349,6 +1359,11 @@ export interface PlanValidateRequest {
 /** Every problem with the draft, none when it is valid. */
 export interface PlanValidateResponse {
   problems: PlanProblem[];
+  /**
+   * Advisory only, and left out when there are none: things the machine lacks (a skill a node
+   * names that its harness cannot find). They never stop a Save or a Boot.
+   */
+  warnings?: PlanProblem[];
 }
 
 /** PUT /api/plans/<slug>: the body is `plan`; the socket form carries `slug` beside it. */
@@ -1417,6 +1432,11 @@ export interface PlanEditRequest {
 export interface PlanDraftResponse {
   plan: PlanFile;
   problems: PlanProblem[];
+  /**
+   * Advisory only, and left out when there are none: things the machine lacks (a skill a node
+   * names that its harness cannot find). They never stop a Save or a Boot.
+   */
+  warnings?: PlanProblem[];
   notes: string[];
   verdicts: PlanNodeVerdicts[];
 }

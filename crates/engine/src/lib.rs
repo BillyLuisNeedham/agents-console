@@ -17,6 +17,7 @@ pub mod claude_trust;
 pub mod config_reload;
 pub mod continued;
 pub mod conversations;
+pub mod dialog_watch;
 pub mod drive;
 #[cfg(test)]
 mod e2e_tests;

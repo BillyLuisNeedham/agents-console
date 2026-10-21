@@ -219,12 +219,16 @@ const REJECT: InterruptFormAction = { action: "reject", label: "reject", tone: "
 // ticket's work can become obsolete: a checkpoint, a merge conflict, and a
 // deadlock (a closed blocker's dependents among them).
 const CLOSE: InterruptFormAction = { action: "close", label: "close", tone: "danger" };
+// A dialog Interrupt is answered in the Ticket's pane; answering it here only
+// dismisses the notice, and the engine raises it again while the dialog is up.
+const DISMISS: InterruptFormAction = { action: "resume", label: "dismiss", tone: "primary" };
 
 const INTERRUPT_FORMS: Record<string, InterruptFormView> = {
   checkpoint: { title: "checkpoint", actions: [RESUME, CLOSE] },
   config: { title: "pool config", actions: [RESUME] },
   crash: { title: "harness crash", actions: [RESUME] },
   deadlock: { title: "deadlock", actions: [RESUME, CLOSE] },
+  dialog: { title: "claude dialog", actions: [DISMISS] },
   "merge-conflict": { title: "merge conflict", actions: [RESUME, CLOSE] },
   "merge-approval": { title: "merge approval", actions: [APPROVE, REJECT] },
   selection: {

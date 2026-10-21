@@ -97,8 +97,8 @@ pub fn still_working_reason(wait_ms: u64) -> String {
     )
 }
 
-/// A screen claude puts up before its prompt that holds the Launch until it is answered (issue #127),
-/// known by a line of its own body, never a button label. `accept` is the option the engine may
+/// A screen claude puts up that holds its agent until it is answered (issue #127), before its prompt
+/// or mid-run, known by a line of its own body, never a button label. `accept` is the option the engine may
 /// choose, or `None` for a dialog only the operator may answer. Read from Claude Code 2.1.276; when a
 /// build drifts, this table is the one place to re-read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub struct BlockingDialog {
 }
 
 /// claude's Blocking dialogs.
-pub const CLAUDE_BLOCKING_DIALOGS: [BlockingDialog; 3] = [
+pub const CLAUDE_BLOCKING_DIALOGS: [BlockingDialog; 4] = [
     BlockingDialog {
         name: "workspace trust dialog",
         heading: "Quick safety check",
@@ -125,7 +125,15 @@ pub const CLAUDE_BLOCKING_DIALOGS: [BlockingDialog; 3] = [
         heading: "Managed settings require approval",
         accept: None,
     },
+    BlockingDialog {
+        name: "auto-mode setup dialog",
+        heading: "Teach auto mode about your environment?",
+        accept: None,
+    },
 ];
+
+// The footer every claude dialog's select ends on.
+const DIALOG_FOOTER: &str = "Esc to cancel";
 
 // How many polls a dialog may stay on screen after it was answered before the wait gives up on it.
 const DIALOG_LINGER_POLLS: u32 = 4;
@@ -486,6 +494,17 @@ pub fn blocking_dialog_on(text: &str) -> Option<&'static BlockingDialog> {
     CLAUDE_BLOCKING_DIALOGS
         .iter()
         .find(|dialog| text.contains(dialog.heading))
+}
+
+/// The Blocking dialog holding a running agent's pane, if any: its heading is on the frame and the
+/// frame ends on the dialog's footer. A live dialog takes the prompt box's place at the bottom, while an
+/// agent's own output can print a heading above its prompt box, so the heading alone never counts.
+pub fn dialog_holding_pane(text: &str) -> Option<&'static BlockingDialog> {
+    let last_line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    if !last_line.contains(DIALOG_FOOTER) {
+        return None;
+    }
+    blocking_dialog_on(text)
 }
 
 // Answer a Blocking dialog by choosing the named option: settle so the dialog's controls render, move
@@ -995,6 +1014,61 @@ mod tests {
             Some("managed-settings trust dialog")
         );
         assert_eq!(blocking_dialog_on("Claude Code v2"), None);
+    }
+
+    const AUTO_MODE: &str = "\
+ Teach auto mode about your environment?
+
+ Auto mode works better when it knows your environment. Takes about a minute.
+
+ ❯ 1. Yes
+   2. Not now
+   3. Don't show again
+
+ Enter to confirm · Esc to cancel
+";
+
+    #[test]
+    fn the_auto_mode_dialog_holds_a_pane_that_ends_on_its_footer() {
+        assert_eq!(
+            dialog_holding_pane(AUTO_MODE).map(|d| d.name),
+            Some("auto-mode setup dialog")
+        );
+        let grepped = "\
+● Bash(grep -n dialog runs/conv-1-spawn-11.log)
+  ⎿ 412: Teach auto mode about your environment?
+       413: Enter to confirm · Esc to cancel
+
+╭──────────────────────────────────────╮
+│ >                                    │
+╰──────────────────────────────────────╯
+  ⏵⏵ auto mode on (shift+tab to cycle)
+";
+        assert_eq!(dialog_holding_pane(grepped), None);
+        assert_eq!(
+            dialog_holding_pane("Claude Code v2\n\nEnter to confirm · Esc to cancel"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_never_answers_the_auto_mode_dialog() {
+        let (_dir, exit_code) = scratch();
+        let p = pane(&[AUTO_MODE]).await;
+        let readiness = wait_for_readiness(
+            &p.fake.herdr(),
+            "p1",
+            "claude",
+            "Claude Code v",
+            &exit_code,
+            &fast(),
+        )
+        .await;
+        assert!(matches!(
+            readiness,
+            Readiness::Blocked { ref dialog, .. } if dialog == "auto-mode setup dialog"
+        ));
+        assert!(calls(&p.fake, "pane.send_input").is_empty());
     }
 
     fn argv() -> Vec<String> {

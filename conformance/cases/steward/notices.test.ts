@@ -22,6 +22,7 @@ import { expectSameBytes } from "../../harness/equal.ts";
 import type { HerdrCall, HerdrProcess } from "../../harness/herdr.ts";
 import { readEvents, until } from "../../harness/pool-files.ts";
 import type { TicketSeed, World } from "../../harness/world.ts";
+import { AUTO_MODE_DIALOG } from "../attempts-terminal-support.ts";
 import {
   BUSY,
   checkpoint,
@@ -315,6 +316,8 @@ const CHECKPOINT_ONE =
 // Why the Steward may neither answer nor leave Review, word for word.
 const FINAL_JUDGEMENT = "steward: the review Interrupt is the operator's final judgement, never the Steward's";
 
+const DIALOG_REFUSAL = "steward: the dialog Interrupt is answered in the Ticket's pane by the operator, never the Steward";
+
 conformance(
   "steward",
   "a Steward is told a checkpoint with the answers it has left and a merge approval whose budget it spent",
@@ -515,6 +518,53 @@ conformance(
       lock.exec("ROLLBACK");
       lock.close();
     }
+  },
+  { timeoutMs: 120_000 },
+);
+
+conformance(
+  "steward",
+  "a dialog holding a Ticket's pane is never told to the Steward, and the Steward is refused when it answers one",
+  async (t) => {
+    const sw = await stewardWorld(t, { tickets: [ticket("01", "One"), ticket("02", "Two")] });
+    // 01 stays at work in its live pane; 02 pauses, so a Notice proves the Steward is listening.
+    playAgents(sw.herdr, { "02": [checkpoint("ask me")] });
+    const server = await sw.start();
+    await untilPrompted(sw.herdr, "01");
+    await sw.herdr.control("setPaneContent", (await untilSpawned(sw.world.pool, "01")).pane_id, AUTO_MODE_DIALOG);
+    await untilSnapshot(
+      server,
+      (snap) => snap.state.interrupts.map((i) => `${i.ticketId} ${i.kind}`).sort().join(", ") === "01 dialog, 02 checkpoint",
+      "01's dialog Interrupt and 02's checkpoint",
+    );
+    const id = await enlistSteward(server);
+    await untilNotices(sw.herdr, 1);
+    await noFurtherNotices(sw.herdr, 1);
+    expectNotices(sw.herdr, [
+      "Pool news for the Steward:\n\n" +
+        "Ticket 02 (\"Two\") is waiting at a checkpoint Interrupt.\n" +
+        "Brief:\n" +
+        "ask me\n" +
+        "Answers: answer 02 resume [note], or keep-talking 02 <message> (its pane is still alive); " +
+        "or leave 02 <note> for the operator.\n" +
+        "Steward budget on 02: 5 of 5 answers left.",
+    ]);
+
+    const state = await server.http.get(`/api/steward/state?conversation=${id}`);
+    expect(
+      state.json<{ interrupts: { ticketId: string; kind: string; answerable: boolean }[] }>().interrupts.find(
+        (i) => i.ticketId === "01",
+      ),
+    ).toMatchObject({ kind: "dialog", answerable: false });
+    const answer = await server.http.post("/api/steward/answer", { conversation: id, ticketId: "01", action: "resume" });
+    expect({ status: answer.status, body: answer.json() }).toEqual({
+      status: 409,
+      body: { reason: DIALOG_REFUSAL },
+    });
+    // The dialog stays up, and nothing was recorded as answered or told on 01.
+    await noFurtherNotices(sw.herdr, 1);
+    expect((await snapshot(server)).state.interrupts.some((i) => i.ticketId === "01" && i.kind === "dialog")).toBe(true);
+    expect(readEvents(sw.world.pool, "01").filter((e) => e.kind === "answered" || e.kind === "notice")).toEqual([]);
   },
   { timeoutMs: 120_000 },
 );

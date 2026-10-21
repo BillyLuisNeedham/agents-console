@@ -24,13 +24,18 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use ac_core::assignment::default_harness;
+use ac_core::config::PoolConfig;
+use ac_core::harness::SkillDirs;
 use ac_core::js;
 use ac_core::machine_defaults::{
     default_machine_defaults_path, default_machine_defaults_paths, read_machine_defaults,
     write_machine_defaults,
 };
+use ac_core::plan::SkillCheck;
 use ac_core::pool_title::normalise_title;
 use ac_io::own_exe::own_exe;
+use ac_protocol::wire::PlanProblemAt;
 use serde_json::{Map, Value};
 
 use config::{
@@ -388,6 +393,18 @@ pub fn run(args: Vec<String>) -> i32 {
             1
         }
     }
+}
+
+/// The process environment as name/value pairs (`process.env`). Only the CLI reads it.
+pub(crate) fn process_env() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// The home directory as Node's `os.homedir()` reads it: `$HOME` when set, else the password
@@ -1155,6 +1172,27 @@ fn report_console(url: &str, pool_dir: &str, args: &BootArgs, io: &mut dyn BootI
     ));
 }
 
+/// One stderr line per node whose skill its harness cannot find, against the `defaults.harness` the
+/// pool was just written with and the checkout the Line runs in. Boot carries on: a warning never
+/// stops a Line.
+fn warn_missing_skills(
+    io: &mut dyn BootIo,
+    home: &str,
+    checkout: &str,
+    plan: &ac_core::plan::Plan,
+    config: &Map<String, Value>,
+) {
+    let check = SkillCheck {
+        dirs: SkillDirs::from_env(home, &process_env()).in_checkout(checkout),
+        default_harness: default_harness(&PoolConfig::from_map(config.clone())),
+    };
+    for warning in check.warnings(&plan.to_file()) {
+        if let PlanProblemAt::Node(node) = &warning.at {
+            io.warn(&format!("plan: node {}: {}", node.id, warning.message));
+        }
+    }
+}
+
 /// How long Boot waits for the Steward's start, which answers once its pane is up and its first Turn
 /// typed.
 const STEWARD_START_TIMEOUT_MS: u64 = 180_000;
@@ -1294,6 +1332,7 @@ fn run_line_boot(
     write_prose_files(&pool_dir, engine_dir, io, &detection, &merged)?;
     write_machine_defaults_once(io, home, &merged, engine_dir);
     refresh_agent_md(&pool_dir, engine_dir, io)?;
+    warn_missing_skills(io, home, &line.worktree, &plan, &merged);
 
     let Some(url) = start_pool_server(&pool_dir, engine_dir, args, io)? else {
         return Ok(1);

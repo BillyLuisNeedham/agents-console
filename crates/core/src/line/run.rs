@@ -717,9 +717,11 @@ impl LineRun {
             return Err(Refusal::StaleRev { now: self.rev });
         }
         let edited = self.plan.edit(edits).map_err(Refusal::Invalid)?;
-        self.check_edit(by, &edited.plan)?;
+        let edges = carried(&self.edges, &edited.moved);
+        self.check_edit(by, &edited.plan, &edges)?;
         if edited.plan != self.plan {
             self.plan = edited.plan;
+            self.edges = edges;
             self.rev += 1;
             self.flow_parked();
         }
@@ -1571,7 +1573,13 @@ impl LineRun {
     /// a Gate still collecting. A Merger is not placed or lifted under a live pass, which settling
     /// consults, nor removed while a handoff from it is on its way. The Steward may not widen its own
     /// powers.
-    fn check_edit(&self, by: Editor, next: &Plan) -> Result<(), Refusal> {
+    /// `edges` is the run's loop state already carried onto `next`'s keys.
+    fn check_edit(
+        &self,
+        by: Editor,
+        next: &Plan,
+        edges: &IndexMap<EdgeKey, EdgeRun>,
+    ) -> Result<(), Refusal> {
         let live = |why: String| Err(Refusal::Live(why));
         let dropped = |key: &EdgeKey| !next.edges().iter().any(|e| e.key == *key);
         for (id, run) in &self.nodes {
@@ -1608,7 +1616,7 @@ impl LineRun {
                 ));
             }
         }
-        for (key, edge) in &self.edges {
+        for (key, edge) in edges {
             if let Some((ticket, _)) = &edge.held
                 && dropped(key)
             {
@@ -1690,6 +1698,15 @@ impl LineRun {
             && n <= self.passes(finish)
         {
             return Some(Owner::Act(finish));
+        }
+        // A hold carried onto a Merger's edge keeps the id its old key gave it.
+        if let Some(key) = self
+            .edges
+            .iter()
+            .find(|(_, e)| e.held.as_ref().is_some_and(|(t, _)| t == ticket))
+            .map(|(k, _)| k)
+        {
+            return Some(Owner::LoopHold(key));
         }
         for key in self.edges.keys() {
             let prefix = format!("{}-{}-{}", key.from, key.on.as_str(), key.to);
@@ -1921,6 +1938,38 @@ pub fn plan_claims_id(plan: &Plan, id: &str) -> bool {
                     .map_or((rest, None), |(p, s)| (p, Some(s)));
                 digits(pass).is_some() && seq.is_none_or(|s| digits(s).is_some())
             })
+}
+
+/// The run's loop state with each edge a Merger move rekeyed carried under its new key, so placing
+/// or lifting a Merger neither resets a loop's count nor lets a hold id repeat. The old key keeps
+/// its traversals, so the hold ids it raised keep their owner.
+fn carried(
+    edges: &IndexMap<EdgeKey, EdgeRun>,
+    moved: &[(EdgeKey, EdgeKey)],
+) -> IndexMap<EdgeKey, EdgeRun> {
+    let mut edges = edges.clone();
+    for (was, now) in moved {
+        let Some(run) = edges.get_mut(was) else {
+            continue;
+        };
+        let traversals = run.traversals;
+        let run = std::mem::replace(
+            run,
+            EdgeRun {
+                traversals,
+                ..EdgeRun::default()
+            },
+        );
+        let before = edges.get(now).map_or(0, |e| e.traversals);
+        edges.insert(
+            now.clone(),
+            EdgeRun {
+                traversals: traversals.max(before),
+                ..run
+            },
+        );
+    }
+    edges
 }
 
 fn hold_event(ticket: &TicketId, facts: &dyn LineFacts) -> Option<LineEvent> {

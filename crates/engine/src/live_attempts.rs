@@ -100,6 +100,13 @@ impl LiveAttempts {
         self.live.keys().cloned().collect()
     }
 
+    /// Every live Attempt with its id, in the order they went live.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &LiveAttemptEntry)> {
+        self.live
+            .iter()
+            .flat_map(|(id, attempts)| attempts.values().map(move |entry| (id.as_str(), entry)))
+    }
+
     /// Every live Attempt's pane, not only each id's highest (issue #139): a verify fan-out's earlier
     /// candidates are live too, and a tab over any of them is in use, never a Finished terminal.
     pub fn panes(&self) -> IndexSet<String> {

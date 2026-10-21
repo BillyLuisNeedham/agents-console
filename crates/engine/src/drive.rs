@@ -682,6 +682,9 @@ fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()
         )?;
     }
     session.apply(result.update.clone());
+    if !session.live_attempts.is_live(&result.marker.id) {
+        crate::dialog_watch::clear_at_ending(session, &result.marker.id);
+    }
     let attempt = result.plan.attempt;
     if result.plan.verify {
         if let Some(group) = session.verify_groups.get_mut(&result.marker.id) {
