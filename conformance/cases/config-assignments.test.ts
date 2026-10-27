@@ -79,11 +79,13 @@ conformance("config", "a spawned Ticket takes its own entry over its parent, and
     model: "o3",
     drivers: "implement review",
   });
-  expect(ticketOf(snapshot, "01-spawn-2").assignment).toEqual({ harness: "claude", model: "o3", drivers: "fix" });
-  // The field the Conversation leaves empty falls through to the defaults.
+  // Its parent's model is opencode's, so a switch to claude takes the defaults' claude model instead.
+  expect(ticketOf(snapshot, "01-spawn-2").assignment).toEqual({ harness: "claude", model: "opus", drivers: "fix" });
+  // The model the Conversation leaves empty falls through only to a layer its harness owns: the
+  // defaults' is claude's, so the opencode spawn is left with none, as with no defaults at all.
   expect(ticketOf(snapshot, "conv-1-spawn-1").assignment).toEqual({
     harness: "opencode",
-    model: "opus",
+    model: null,
     drivers: "implement",
   });
   expect(ticketOf(bare, "conv-1-spawn-1").assignment).toEqual({ harness: "opencode", model: null, drivers: "implement" });
@@ -250,6 +252,41 @@ conformance("config", "an empty harness in an assign entry is not a load error: 
   expect(ticketOf(snapshot, "01").assignment).toEqual({ harness: null, model: null, drivers: "implement" });
   expect(snapshot.state.interrupts.find((i) => i.ticketId === "01")!.kind).toBe("config");
   expect(launchesOf(world, "01")).toEqual([]);
+});
+
+conformance("config", "an assign entry that switches harness takes no model or effort from the defaults' harness: with none of its own the Ticket waits on a Config Interrupt", async (t) => {
+  const world = t.world({
+    tickets: [ticket("01"), ticket("02")],
+    config: {
+      defaults: { harness: "cursor", model: "auto", effort: "high" },
+      assign: { "01": { harness: "claude" }, "02": { harness: "claude", model: "opus" } },
+    },
+  });
+  const server = await t.start(world);
+  const waiting = await untilSnapshot(
+    server,
+    (s) => s.state.interrupts.some((i) => i.ticketId === "01") && launchesOf(world, "02").length > 0,
+    "01's Interrupt and 02's launch",
+  );
+
+  const interrupt = waiting.state.interrupts.find((i) => i.ticketId === "01")!;
+  expect(interrupt.kind).toBe("config");
+  // It says why, and asks for a model on the entry: defaults.model is cursor's and cannot fix it.
+  expect(interrupt.body).toBe(
+    "ticket 01 has no model: it runs on 'claude', and console.json defaults.model 'auto' belongs to another " +
+      "harness ('cursor'), so it is passed over. Give it a model for 'claude' in console.json, an assign entry " +
+      "for 01: { \"harness\": \"claude\", \"model\": \"...\" }, and answer resume. The pool reloads " +
+      "console.json at the next Tick and schedules the ticket on what it finds.",
+  );
+  expect(launchesOf(world, "01")).toEqual([]);
+  expect(ticketOf(waiting, "01").assignment).toEqual({ harness: "claude", model: null, drivers: "implement" });
+  // Reassign's labels agree with what launches: a model passed over for another harness reads as unset.
+  expect(ticketOf(waiting, "01").reassign.sources).toMatchObject({ harness: "pinned", model: "unset", effort: "unset" });
+
+  const [launch] = launchesOf(world, "02");
+  expect([launch!.harness, flagValue(launch!.argv, "--model")]).toEqual(["claude", "opus"]);
+  expect(launch!.argv).not.toContain("--effort");
+  expect(ticketOf(waiting, "02").assignment).toEqual({ harness: "claude", model: "opus", drivers: "implement" });
 });
 
 conformance("config", "verify is honoured as a whole number of 1 or more, null is absent, and a grader's verify is never checked", async (t) => {
@@ -574,6 +611,54 @@ conformance("config", "a Conversation start is refused for no harness, then an u
   );
   expect(await reasonOf({ harness: "gemini" })).toBe(`conversation start: names unknown harness 'gemini'. ${KNOWN}`);
   expect(world.stubs.calls()).toEqual([]);
+});
+
+conformance("config", "a Conversation's start that switches harness with no model is refused, naming the defaults' model it passed over", async (t) => {
+  const world = t.world({ tickets: [doneTicket("01")], config: { terminal: "herdr", defaults: { harness: "cursor", model: "auto" } } });
+  const server = await t.start(world, { herdr: await t.herdr(world) });
+  const answer = await server.http.post("/api/conversations", { title: "Talk", assign: { harness: "claude" } });
+
+  expect(answer.status).toBe(409);
+  expect(answer.json<{ reason: string }>().reason).toBe(
+    "conversation start: no model resolved for harness 'claude': console.json defaults.model 'auto' belongs to " +
+      `another harness ('cursor'). Give the start a model of its own: assign { "harness": "claude", "model": "..." }`,
+  );
+  expect(world.stubs.calls()).toEqual([]);
+});
+
+// ADR-0044 (issue #37): a hand-written null is named in words, where it stops a Ticket's chain and
+// where it leaves a model owned by no harness.
+conformance("config", "a null model on a Ticket's own entry and a null harness over the defaults' model are each named as the cause", async (t) => {
+  const own = t.world({
+    tickets: [ticket("01")],
+    config: rawConfig({ defaults: { harness: "claude", model: "m" }, assign: { "01": { model: null } } }),
+  });
+  const waiting = await untilSnapshot(
+    await t.start(own),
+    (s) => s.state.interrupts.some((i) => i.ticketId === "01"),
+    "01's Interrupt",
+  );
+  const interrupt = waiting.state.interrupts.find((i) => i.ticketId === "01")!;
+  expect(interrupt.kind).toBe("config");
+  expect(interrupt.body).toBe(
+    "ticket 01 has no model: its assign entry in console.json sets model to null, which stops the chain before " +
+      "defaults.model. Remove the null or give it a model, and answer resume. The pool reloads console.json at " +
+      "the next Tick and schedules the ticket on what it finds.",
+  );
+  expect(launchesOf(own, "01")).toEqual([]);
+
+  const ownerless = t.world({
+    tickets: [doneTicket("01")],
+    config: rawConfig({ terminal: "herdr", defaults: { harness: null, model: "auto" } }),
+  });
+  const server = await t.start(ownerless, { herdr: await t.herdr(ownerless) });
+  const answer = await server.http.post("/api/conversations", { title: "Talk", assign: { harness: "claude" } });
+  expect(answer.status).toBe(409);
+  expect(answer.json<{ reason: string }>().reason).toBe(
+    "conversation start: no model resolved for harness 'claude': console.json defaults.model 'auto' belongs to " +
+      `no harness (its layer sets harness to null). Give the start a model of its own: assign { "harness": "claude", "model": "..." }`,
+  );
+  expect(ownerless.stubs.calls()).toEqual([]);
 });
 
 conformance("config", "the Steward entry is a Pool setting: replaced whole, its budget typed as text, its harness checked", async (t) => {

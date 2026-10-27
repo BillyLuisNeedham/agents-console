@@ -162,9 +162,10 @@ conformance("config", "with no defaults and no entry every field reads unset but
 
 // engine/reassign.test.ts:197 reassignViews: who may be reassigned › marks an effort not applied where the pool's launch mode cannot take it
 conformance("config", "an effort is marked not applied where the pool's launch mode cannot take it, its source unchanged", async (t) => {
+  // The effort 02 takes from the defaults is opencode's own, as the owner rule asks (ADR-0044).
   const config: PoolConfig = {
-    defaults: { harness: "claude", model: "m", effort: "high" },
-    assign: { "02": { harness: "opencode" } },
+    defaults: { harness: "opencode", model: "o3", effort: "high" },
+    assign: { "01": { harness: "claude", model: "m", effort: "high" } },
   };
   const tickets = [atCheckpoint("01"), atCheckpoint("02")];
   const headless = await restedSnapshot(await t.start(t.world({ tickets, config })));

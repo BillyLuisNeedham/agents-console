@@ -110,11 +110,12 @@ conformance("config", "a Reassign of a Conversation's spawn's spawn writes that 
   const server = await t.start(world);
   await restedSnapshot(server);
 
-  const answer = await putReassign(server, { tickets: [GRANDCHILD], fields: { harness: "opencode" } });
+  // A switch to opencode names its own model: the claude defaults own none it could take (ADR-0044).
+  const answer = await putReassign(server, { tickets: [GRANDCHILD], fields: { harness: "opencode", model: "o3" } });
   expect(answer.status, answer.text).toBe(200);
 
   expect(answer.json<ReassignResponse>().applied).toEqual([GRANDCHILD]);
-  expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, assign: { [GRANDCHILD]: { harness: "opencode" } } });
+  expect(readConsoleJson(world.pool)).toEqual({ ...DEFAULTS, assign: { [GRANDCHILD]: { harness: "opencode", model: "o3" } } });
 });
 
 // engine/reassign.test.ts:487 Reassign on a ticket spawned by a Conversation › applies a write beside a ticket the file already fails to resolve

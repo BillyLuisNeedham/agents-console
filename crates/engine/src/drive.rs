@@ -5,7 +5,9 @@ use futures::future::join_all;
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 
-use ac_core::assignment::{Assignment, engine_ticket_build_id};
+use ac_core::assignment::{
+    Assignment, LayerField, assign_request, engine_ticket_build_id, ticket_skipped_model,
+};
 use ac_core::events::{append_event, attempt_log_name, event_now, last_attempt, next_attempt};
 use ac_core::machine_defaults::read_machine_defaults;
 use ac_core::max_live::max_live_of;
@@ -268,14 +270,7 @@ impl PoolFacts for SessionFacts<'_> {
     }
 
     fn missing_assignment(&self, id: &str) -> Option<&'static str> {
-        let assignment = self.session.assignments.get(id);
-        if assignment.is_none_or(|a| a.harness.is_empty()) {
-            return Some("harness");
-        }
-        if assignment.is_none_or(|a| a.model.is_empty()) {
-            return Some("model");
-        }
-        None
+        missing_field(self.session.assignments.get(id))
     }
 
     fn branch_held_at(&mut self, marker: &TicketMarker) -> Option<String> {
@@ -335,6 +330,68 @@ fn held_branch_directory(session: &Session, marker: &TicketMarker) -> Option<Str
     Some(at)
 }
 
+/// The Assignment field a unit cannot launch without, when it lacks one: its harness, then its model.
+pub(crate) fn missing_field(assignment: Option<&Assignment>) -> Option<&'static str> {
+    if assignment.is_none_or(|a| a.harness.is_empty()) {
+        return Some("harness");
+    }
+    if assignment.is_none_or(|a| a.model.is_empty()) {
+        return Some("model");
+    }
+    None
+}
+
+/// A Config interrupt's words for a Ticket that lacks `missing`, ending in `then`, what answering it
+/// does. A model passed over for another harness (issue #37) says so and asks for one on the Ticket's
+/// own entry, since defaults.model cannot fix it.
+pub(crate) fn unassigned_body(
+    session: &Session,
+    marker: &TicketMarker,
+    missing: &str,
+    then: &str,
+) -> String {
+    let id = &marker.id;
+    let skipped = (missing == "model")
+        .then(|| ticket_skipped_model(marker, &session.assignments, &session.state.config))
+        .flatten();
+    match skipped {
+        Some(skipped) => {
+            let harness = session
+                .assignments
+                .get(id)
+                .map(|assignment| assignment.harness.clone())
+                .unwrap_or_default();
+            format!(
+                "ticket {id} has no model: it runs on '{harness}', and {} belongs to {}, so it is \
+                 passed over. Give it a model for '{harness}' in console.json, an assign entry for \
+                 {id}: {{ \"harness\": \"{harness}\", \"model\": \"...\" }}, and {then}",
+                skipped.named(),
+                skipped.belongs_to()
+            )
+        }
+        // A hand-written null on its own entry stops the chain, so defaults could never fill it.
+        None if own_null(session, id, missing) => format!(
+            "ticket {id} has no {missing}: its assign entry in console.json sets {missing} to null, \
+             which stops the chain before defaults.{missing}. Remove the null or give it a \
+             {missing}, and {then}"
+        ),
+        None => format!(
+            "ticket {id} has no {missing}: set one in console.json (an assign entry for {id}, or \
+             defaults.{missing}) and {then}"
+        ),
+    }
+}
+
+fn own_null(session: &Session, id: &str, missing: &str) -> bool {
+    let layer = assign_request(&session.state.config, id).layer;
+    let field = if missing == "harness" {
+        layer.harness
+    } else {
+        layer.model
+    };
+    field == LayerField::Null
+}
+
 fn checkpoint_unassigned(
     session: &mut Session,
     marker: &TicketMarker,
@@ -354,10 +411,12 @@ fn checkpoint_unassigned(
         m.status = TicketStatus::Checkpoint;
     }
     let id = &marker.id;
-    let body = format!(
-        "ticket {id} has no {missing}: set one in console.json (an assign entry for {id}, or \
-         defaults.{missing}) and answer resume. The pool reloads console.json at the next Tick and \
-         schedules the ticket on what it finds."
+    let body = unassigned_body(
+        session,
+        marker,
+        missing,
+        "answer resume. The pool reloads console.json at the next Tick and schedules the ticket on \
+         what it finds.",
     );
     land_checkpoint_brief(&marker.file, Some(&body))?;
     raise_interrupt(session, interrupt(id, InterruptKind::Config, body));
@@ -1196,6 +1255,33 @@ mod tests {
             git: true,
             ..Facts::default()
         }
+    }
+
+    #[test]
+    fn a_null_on_the_tickets_own_entry_is_named_instead_of_defaults() {
+        let (publisher, _) = tokio::sync::watch::channel(None);
+        let mut session = crate::testkit::bare_session(publisher);
+        let config = |assign: serde_json::Value| {
+            ac_core::config::PoolConfig::from_map(
+                serde_json::json!({"defaults": {"harness": "claude"}, "assign": {"01": assign}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+        };
+        session.state.config = config(serde_json::json!({"model": null}));
+        assert_eq!(
+            unassigned_body(&session, &marker("01", &[]), "model", "answer resume."),
+            "ticket 01 has no model: its assign entry in console.json sets model to null, which \
+             stops the chain before defaults.model. Remove the null or give it a model, and answer \
+             resume."
+        );
+        session.state.config = config(serde_json::json!({"effort": "low"}));
+        assert_eq!(
+            unassigned_body(&session, &marker("01", &[]), "model", "answer resume."),
+            "ticket 01 has no model: set one in console.json (an assign entry for 01, or \
+             defaults.model) and answer resume."
+        );
     }
 
     #[test]

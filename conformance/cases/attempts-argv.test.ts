@@ -348,7 +348,8 @@ function threeHarnessWorld(t: Case): World {
     tickets: ["01", "02", "03"].map((id) => ready(id)),
     config: {
       defaults: { harness: "claude", model: "m" },
-      assign: { "01": { harness: "claude" }, "02": { harness: "opencode" }, "03": { harness: "cursor" } },
+      // A switch of harness names its own model: claude's never reaches another harness (ADR-0044).
+      assign: { "01": { harness: "claude" }, "02": { harness: "opencode", model: "m" }, "03": { harness: "cursor", model: "m" } },
       terminal: "herdr",
     },
   });

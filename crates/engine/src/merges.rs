@@ -6,20 +6,24 @@ use futures::FutureExt;
 use regex::Regex;
 use serde_json::{Map, Value};
 
-use ac_core::assignment::engine_ticket_build_id;
+use ac_core::assignment::{engine_ticket_build_id, first_owned, owning_harnesses};
+use ac_core::config::PoolConfig;
 use ac_core::events::{
     append_event, attempt_log_name, attempt_outcome_name, event_now, last_attempt, next_attempt,
     read_events, ticket_seed_name,
 };
+use ac_core::harness::Harnesses;
 use ac_core::js;
-use ac_core::line::run::TicketId;
-use ac_core::machine_defaults::read_machine_defaults;
+use ac_core::line::run::{LineRun, LineStatus, TicketId};
+use ac_core::machine_defaults::{MachineDefaultsPaths, read_machine_defaults};
 use ac_core::merge_hold::MergeHoldProbe;
-use ac_core::plan::{Assign, Conflict};
+use ac_core::plan::{Assign, Conflict, MergerNode, NodeBody, NodeId, Plan};
 use ac_core::pool::{TicketMarker, write_marker_status};
 use ac_core::prompt::{ResolverPromptParts, build_resolver_prompt};
 use ac_io::git::{self, MergeFailure, MergeResult, WorktreeInfo};
-use ac_protocol::{Interrupt, InterruptKind, TicketEvent, TicketEventKind, TicketStatus};
+use ac_protocol::{
+    Interrupt, InterruptKind, MachineDefaults, TicketEvent, TicketEventKind, TicketStatus,
+};
 
 use crate::actor::Engine;
 use crate::attempt_run::{
@@ -836,11 +840,47 @@ fn non_empty(text: Option<String>) -> Option<String> {
     text.filter(|t| !t.is_empty())
 }
 
+// One resolver layer's harness, model and effort, each trimmed and an empty one read as unset.
+struct ResolverLayer {
+    harness: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl ResolverLayer {
+    fn of(harness: Option<String>, model: Option<String>, effort: Option<String>) -> Self {
+        let trim = |text: Option<String>| non_empty(text.map(|t| js::trim(&t).to_owned()));
+        ResolverLayer {
+            harness: trim(harness),
+            model: trim(model),
+            effort: trim(effort),
+        }
+    }
+}
+
+// The resolver's layers in order: the Merger's own, console.json's `resolver`, the pool defaults and
+// the Machine defaults, with the name a model skipped in each is reported by.
+const RESOLVER_SOURCES: [&str; 4] = [
+    "the Merger's model",
+    "resolver.model",
+    "defaults.model",
+    "the Machine defaults' model",
+];
+
 /// `resolveResolver`: console.json's resolver (a harness name, "none", or `{ harness, model, effort }`)
 /// over the pool defaults and the Machine defaults, with a Merger's own non-empty fields ahead of all
-/// of them. `None` takes the manual path; an explicit resolver naming an unknown harness fails.
-fn resolve_resolver(session: &Session, merger: &Assign) -> anyhow::Result<Option<ResolverSpec>> {
-    let config = &session.state.config;
+/// of them. The harness comes from the Merger, then the resolver, then the Machine defaults (never the
+/// pool defaults'); the model and effort only from a layer that harness owns, by the owner rule core
+/// resolution runs (ADR-0044), over these four layers. `None` takes the manual path. A resolver naming
+/// an unknown harness fails, and so does one with a harness whose only model was passed over for
+/// belonging to another harness, naming the resolver and the fix.
+fn resolve_resolver(
+    config: &PoolConfig,
+    harnesses: &Harnesses,
+    machine: &MachineDefaults,
+    merger: &Assign,
+    subject: Subject,
+) -> anyhow::Result<Option<ResolverSpec>> {
     let (harness, model, effort) = match config.resolver() {
         Some(Value::Object(_)) => {
             let spec = config.resolver();
@@ -853,47 +893,221 @@ fn resolve_resolver(session: &Session, merger: &Assign) -> anyhow::Result<Option
         Some(Value::String(name)) => (Some(name.clone()), None, None),
         _ => (None, None, None),
     };
-    let ahead = |own: &Option<String>, config: Option<String>| {
-        own.clone().filter(|t| !js::trim(t).is_empty()).or(config)
-    };
-    let (harness, model, effort) = (
-        ahead(&merger.harness, harness),
-        ahead(&merger.model, model),
-        ahead(&merger.effort, effort),
-    );
-    let explicit = harness.as_deref().map(|h| js::trim(h).to_owned());
+    let explicit = merger
+        .harness
+        .clone()
+        .filter(|t| !js::trim(t).is_empty())
+        .or(harness.clone())
+        .map(|h| js::trim(&h).to_owned());
     if matches!(explicit.as_deref(), Some("" | "none")) {
         return Ok(None);
     }
     let defaults = config.get("defaults");
-    let mut harness = explicit.clone();
-    let mut model = non_empty(model.map(|m| js::trim(&m).to_owned()))
-        .or_else(|| non_empty(text_field(defaults, "model")));
-    let mut effort = non_empty(effort.map(|e| js::trim(&e).to_owned()))
-        .or_else(|| non_empty(text_field(defaults, "effort").map(|e| js::trim(&e).to_owned())));
-    if harness.is_none() || model.is_none() || effort.is_none() {
-        let machine = read_machine_defaults(&session.machine_defaults);
-        harness = harness.or(non_empty(machine.harness));
-        model = model.or(non_empty(machine.model));
-        effort = effort.or(non_empty(machine.effort));
-    }
-    let (Some(harness), Some(model)) = (harness, model) else {
+    let layers = [
+        ResolverLayer::of(
+            merger.harness.clone(),
+            merger.model.clone(),
+            merger.effort.clone(),
+        ),
+        ResolverLayer::of(harness, model, effort),
+        ResolverLayer::of(
+            text_field(defaults, "harness"),
+            text_field(defaults, "model"),
+            text_field(defaults, "effort"),
+        ),
+        ResolverLayer::of(
+            machine.harness.clone(),
+            machine.model.clone(),
+            machine.effort.clone(),
+        ),
+    ];
+    let owners = owning_harnesses(layers.each_ref().map(|layer| layer.harness.as_deref()));
+    let Some(harness) = explicit.clone().or(layers[3].harness.clone()) else {
         return Ok(None);
     };
-    if !session.harnesses.contains(&harness) {
-        if let Some(explicit) = explicit {
+    if let Some(explicit) = &explicit
+        && !harnesses.contains(explicit)
+    {
+        anyhow::bail!(
+            "{}{} names unknown harness '{explicit}'. Known: {}",
+            subject.place(),
+            subject.name(),
+            harnesses.known()
+        );
+    }
+    // The Machine defaults naming a harness this machine lacks leave no usable one.
+    if !harnesses.contains(&harness) {
+        return Ok(None);
+    }
+    let field = |pick: fn(&ResolverLayer) -> Option<&String>| {
+        let values = layers.each_ref().map(pick);
+        let owned = first_owned(values.map(|value| value.is_some()), owners, &harness);
+        (
+            owned.index.and_then(|index| values[index].cloned()),
+            owned.skipped,
+        )
+    };
+    let (model, skipped) = field(|layer| layer.model.as_ref());
+    let (effort, _) = field(|layer| layer.effort.as_ref());
+    let Some(model) = model else {
+        if let Some(skipped) = skipped {
             anyhow::bail!(
-                "pool config: resolver names unknown harness '{explicit}'. Known: {}",
-                session.harnesses.known()
+                "{}",
+                no_owned_model(subject, explicit.is_some(), &harness, skipped, owners)
             );
         }
         return Ok(None);
-    }
+    };
     Ok(Some(ResolverSpec {
         harness,
         model,
         effort,
     }))
+}
+
+/// Whose resolver a config error is about, which says where the operator fixes it.
+#[derive(Debug, Clone, Copy)]
+enum Subject<'a> {
+    /// The pool's own `resolver` in console.json.
+    Pool,
+    /// A Merger of the Plan the Line runs: at boot, a reload or its conflict, mended in line.json
+    /// while the pool is down.
+    Frozen(&'a NodeId),
+    /// A Merger of a Plan the Line is about to begin on or take as an edit, mended in that Plan.
+    Draft(&'a NodeId),
+}
+
+impl Subject<'_> {
+    fn name(self) -> String {
+        match self {
+            Subject::Pool => "resolver".to_owned(),
+            Subject::Frozen(id) => format!("Merger '{id}' resolver"),
+            Subject::Draft(id) => format!("the Plan's Merger '{id}' resolver"),
+        }
+    }
+
+    // The draft Plan is not the pool config yet, so its errors read without that prefix.
+    fn place(self) -> &'static str {
+        match self {
+            Subject::Pool | Subject::Frozen(_) => "pool config: ",
+            Subject::Draft(_) => "",
+        }
+    }
+}
+
+// The config error for a resolver with a harness the owner rule left no model, naming where its
+// harness came from, the model that was passed over, and a fix the operator can reach: a Merger
+// lives in the Plan, which is line.json while a failed boot has no Plan editor to offer. A Merger's
+// own model passed over means its harness came from elsewhere, so the fix is to name the harness that
+// model is for.
+fn no_owned_model(
+    subject: Subject,
+    explicit: bool,
+    harness: &str,
+    skipped: usize,
+    owners: [Option<&str>; 4],
+) -> String {
+    let name = subject.name();
+    let named = if explicit {
+        format!("names harness '{harness}'")
+    } else {
+        format!("takes harness '{harness}' from the Machine defaults")
+    };
+    let object = format!("{{ \"harness\": \"{harness}\", \"model\": \"...\" }}");
+    let plan = match subject {
+        Subject::Frozen(_) => "the Plan (line.json while the pool is down)",
+        _ => "the Plan",
+    };
+    let fix = match (subject, explicit) {
+        (Subject::Frozen(_) | Subject::Draft(_), _) if skipped == 0 => {
+            format!("Name the harness its model is for on the Merger's conflict.resolver in {plan}")
+        }
+        (Subject::Frozen(_) | Subject::Draft(_), _) => format!(
+            "Give the Merger's conflict.resolver a model in {plan}, or set console.json resolver \
+             to {object} for it to inherit"
+        ),
+        (Subject::Pool, true) => format!("Give {name} a model: {object}"),
+        (Subject::Pool, false) => format!(
+            "Give {name} a model: {object}, or set \"resolver\": \"none\" for the manual path"
+        ),
+    };
+    format!(
+        "{}{name} {named} but no model: its model comes from {}, which is for '{}'. {fix}",
+        subject.place(),
+        RESOLVER_SOURCES[skipped],
+        owners[skipped].unwrap_or("")
+    )
+}
+
+/// Every resolver the pool can launch, resolved before anything launches (boot) and before a Config
+/// reload lands: the pool's own `resolver` and each Merger's in the Line's Plan, while the Line can
+/// still merge. A resolver that would fail at conflict time fails here instead (issue #37).
+pub fn check_resolvers(
+    config: &PoolConfig,
+    harnesses: &Harnesses,
+    machine_defaults: &MachineDefaultsPaths,
+    line: Option<&LineRun>,
+) -> anyhow::Result<()> {
+    let machine = &read_machine_defaults(machine_defaults);
+    resolve_resolver(
+        config,
+        harnesses,
+        machine,
+        &Assign::default(),
+        Subject::Pool,
+    )?;
+    let merging =
+        line.filter(|line| !matches!(line.status(), LineStatus::Done | LineStatus::Closed));
+    if let Some(line) = merging {
+        mergers_resolve(config, harnesses, machine, line.plan().0, frozen)?;
+    }
+    Ok(())
+}
+
+/// Each Merger's resolver in `plan`, as `check_resolvers` checks it: run on a Plan before the Line
+/// begins on it and before an edit replaces the live one, so a Plan the engine accepts never fails at
+/// its first conflict.
+pub fn check_plan_resolvers(
+    config: &PoolConfig,
+    harnesses: &Harnesses,
+    machine_defaults: &MachineDefaultsPaths,
+    plan: &Plan,
+) -> anyhow::Result<()> {
+    mergers_resolve(
+        config,
+        harnesses,
+        &read_machine_defaults(machine_defaults),
+        plan,
+        draft,
+    )
+}
+
+// The two Merger subjects as functions, which a node's borrow can be lent to.
+fn frozen(id: &NodeId) -> Subject<'_> {
+    Subject::Frozen(id)
+}
+
+fn draft(id: &NodeId) -> Subject<'_> {
+    Subject::Draft(id)
+}
+
+fn mergers_resolve(
+    config: &PoolConfig,
+    harnesses: &Harnesses,
+    machine: &MachineDefaults,
+    plan: &Plan,
+    subject: fn(&NodeId) -> Subject,
+) -> anyhow::Result<()> {
+    for node in plan.nodes() {
+        if let NodeBody::Merger(MergerNode {
+            conflict: Conflict::Resolver(assign),
+            ..
+        }) = &node.body
+        {
+            resolve_resolver(config, harnesses, machine, assign, subject(&node.id))?;
+        }
+    }
+    Ok(())
 }
 
 /// What a conflicting merge does for one Ticket.
@@ -910,16 +1124,24 @@ pub enum ConflictPolicy {
 /// restart: its node's Merger when it has one, else the pool's own resolver.
 pub fn conflict_policy(session: &Session, ticket: &str) -> anyhow::Result<ConflictPolicy> {
     let merger = session.line.as_ref().and_then(|line| {
+        let (plan, _) = line.plan();
         let node = line.node_of(&TicketId::new(ticket))?;
-        line.plan().0.conflict_for(node)
+        Some((plan.merger_of(node)?, plan.conflict_for(node)?))
     });
     let own = Assign::default();
-    let assign = match merger {
-        Some(Conflict::Wait) => return Ok(ConflictPolicy::Wait),
-        Some(Conflict::Resolver(assign)) => assign,
-        None => &own,
+    let (subject, assign) = match merger {
+        Some((_, Conflict::Wait)) => return Ok(ConflictPolicy::Wait),
+        Some((id, Conflict::Resolver(assign))) => (Subject::Frozen(id), assign),
+        None => (Subject::Pool, &own),
     };
-    Ok(match resolve_resolver(session, assign)? {
+    let resolved = resolve_resolver(
+        &session.state.config,
+        &session.harnesses,
+        &read_machine_defaults(&session.machine_defaults),
+        assign,
+        subject,
+    )?;
+    Ok(match resolved {
         Some(resolver) => ConflictPolicy::Resolve(resolver),
         None => ConflictPolicy::NoResolver,
     })
@@ -1010,7 +1232,23 @@ async fn route_merge_conflict(
                     return Ok(Route::Done);
                 }
                 let worktree = ticket_worktree(s, &marker, None);
-                let resolver = match conflict_policy(s, &marker.id)? {
+                // A resolver that stopped resolving after the checks (the Machine defaults changed by a
+                // Settings save or by hand, which no reload checks) takes the manual path with the
+                // reason, so the conflict still interrupts.
+                let policy = match conflict_policy(s, &marker.id) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        let manual = manual_merge_interrupt(
+                            s,
+                            &marker,
+                            &result,
+                            &format!("no resolver could launch: {error}"),
+                        );
+                        raise_interrupt(s, manual);
+                        return Ok(Route::Done);
+                    }
+                };
+                let resolver = match policy {
                     ConflictPolicy::Wait => {
                         let conflict = merge_conflict_interrupt(s, &marker, &result);
                         raise_interrupt(s, conflict);
@@ -1262,18 +1500,24 @@ mod tests {
     // A pool whose Line has opened `build` with two Items, so `build-1.1` and `build-1.2` are the
     // Line's Tickets, under the given Merger conflict setting.
     fn pool_with_line(conflict: Option<Value>, resolver: Value) -> Session {
+        pool_with_defaults(
+            conflict,
+            resolver,
+            serde_json::json!({"harness": "claude", "model": "sonnet"}),
+        )
+    }
+
+    // The same pool under the given console.json `defaults`; a `null` resolver leaves the key out.
+    fn pool_with_defaults(conflict: Option<Value>, resolver: Value, defaults: Value) -> Session {
         use ac_core::line::run::{LineBrief, LinePlaces, LineRun, LineStart};
         let (publisher, _) = tokio::sync::watch::channel(None);
         let mut session = crate::testkit::bare_session(publisher);
-        session.state.config = ac_core::config::PoolConfig::from_map(
-            serde_json::json!({
-                "resolver": resolver,
-                "defaults": {"harness": "claude", "model": "sonnet"}
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        );
+        let mut config = serde_json::json!({ "defaults": defaults });
+        if !resolver.is_null() {
+            config["resolver"] = resolver;
+        }
+        session.state.config =
+            ac_core::config::PoolConfig::from_map(config.as_object().unwrap().clone());
         let mut nodes = vec![
             serde_json::json!({"kind": "agent", "id": "build", "title": "Build", "x": 0, "y": 0,
                 "copies": {"perItem": 2}}),
@@ -1337,7 +1581,8 @@ mod tests {
         );
         assert_eq!(
             conflict_policy(&session, "build-1.1").unwrap(),
-            resolver("opencode", "gpt-5", Some("low"))
+            // The pool resolver's low is claude's word, so the opencode Merger takes no effort (#37).
+            resolver("opencode", "gpt-5", None)
         );
         let session = pool_with_line(merger(serde_json::json!({"effort": "high"})), pool);
         assert_eq!(
@@ -1374,6 +1619,312 @@ mod tests {
             conflict_policy(&none, "build-1.1").unwrap(),
             ConflictPolicy::NoResolver
         );
+    }
+
+    fn cursor_defaults() -> Value {
+        serde_json::json!({"harness": "cursor", "model": "auto", "effort": "max"})
+    }
+
+    #[test]
+    fn a_resolver_on_another_harness_than_the_defaults_with_no_model_is_a_config_error() {
+        let session = pool_with_defaults(None, Value::from("claude"), cursor_defaults());
+        assert_eq!(
+            conflict_policy(&session, "build-1.1")
+                .unwrap_err()
+                .to_string(),
+            "pool config: resolver names harness 'claude' but no model: its model comes from \
+             defaults.model, which is for 'cursor'. Give resolver a model: \
+             { \"harness\": \"claude\", \"model\": \"...\" }"
+        );
+        let object = pool_with_defaults(
+            None,
+            serde_json::json!({"harness": "claude"}),
+            cursor_defaults(),
+        );
+        assert!(conflict_policy(&object, "build-1.1").is_err());
+        assert!(
+            check_resolvers(
+                &object.state.config,
+                &object.harnesses,
+                &object.machine_defaults,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_resolver_given_its_own_model_takes_no_effort_from_another_harness() {
+        let session = pool_with_defaults(
+            None,
+            serde_json::json!({"harness": "claude", "model": "opus"}),
+            cursor_defaults(),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("claude", "opus", None)
+        );
+        assert!(
+            check_resolvers(
+                &session.state.config,
+                &session.harnesses,
+                &session.machine_defaults,
+                session.line.as_ref()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_resolver_on_the_defaults_harness_still_inherits_their_model_and_effort() {
+        let session = pool_with_defaults(None, Value::from("cursor"), cursor_defaults());
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("cursor", "auto", Some("max"))
+        );
+    }
+
+    #[test]
+    fn none_and_no_resolver_keep_the_manual_path() {
+        let none = pool_with_defaults(None, Value::from("none"), cursor_defaults());
+        assert_eq!(
+            conflict_policy(&none, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
+        );
+        let absent = pool_with_defaults(None, Value::Null, cursor_defaults());
+        assert_eq!(
+            conflict_policy(&absent, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
+        );
+        for session in [none, absent] {
+            assert!(
+                check_resolvers(
+                    &session.state.config,
+                    &session.harnesses,
+                    &session.machine_defaults,
+                    session.line.as_ref()
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn a_mergers_own_harness_with_no_model_follows_the_owner_rule() {
+        let merger = |assign: Value| Some(serde_json::json!({"resolver": assign}));
+        let session = pool_with_defaults(
+            merger(serde_json::json!({"harness": "claude"})),
+            Value::from("cursor"),
+            cursor_defaults(),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1")
+                .unwrap_err()
+                .to_string(),
+            "pool config: Merger 'build-merge' resolver names harness 'claude' but no model: its \
+             model comes from defaults.model, which is for 'cursor'. Give the Merger's \
+             conflict.resolver a model in the Plan (line.json while the pool is down), or set \
+             console.json resolver to { \"harness\": \"claude\", \"model\": \"...\" } for it to \
+             inherit"
+        );
+        let error = check_resolvers(
+            &session.state.config,
+            &session.harnesses,
+            &session.machine_defaults,
+            session.line.as_ref(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Merger 'build-merge'"), "{error}");
+        // A model on the pool's own resolver belongs to its harness, not to the Merger's.
+        let entry_model = pool_with_defaults(
+            merger(serde_json::json!({"harness": "claude"})),
+            serde_json::json!({"harness": "cursor", "model": "auto"}),
+            cursor_defaults(),
+        );
+        assert!(
+            conflict_policy(&entry_model, "build-1.1")
+                .unwrap_err()
+                .to_string()
+                .contains("its model comes from resolver.model, which is for 'cursor'")
+        );
+        let with_model = pool_with_defaults(
+            merger(serde_json::json!({"harness": "claude", "model": "opus"})),
+            Value::from("cursor"),
+            cursor_defaults(),
+        );
+        assert_eq!(
+            conflict_policy(&with_model, "build-1.1").unwrap(),
+            resolver("claude", "opus", None)
+        );
+        // A Merger that sets only a model pairs it with the harness it resolves to.
+        let model_only = pool_with_defaults(
+            merger(serde_json::json!({"model": "opus"})),
+            Value::from("claude"),
+            cursor_defaults(),
+        );
+        assert_eq!(
+            conflict_policy(&model_only, "build-1.1").unwrap(),
+            resolver("claude", "opus", None)
+        );
+    }
+
+    #[test]
+    fn the_machine_defaults_model_belongs_to_the_machine_defaults_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("defaults.json");
+        let mut session = pool_with_defaults(
+            None,
+            Value::from("claude"),
+            serde_json::json!({"harness": "cursor"}),
+        );
+        session.machine_defaults.file = js::path_text(&file);
+        std::fs::write(&file, r#"{"harness": "cursor", "model": "auto"}"#).unwrap();
+        assert_eq!(
+            conflict_policy(&session, "build-1.1")
+                .unwrap_err()
+                .to_string(),
+            "pool config: resolver names harness 'claude' but no model: its model comes from the \
+             Machine defaults' model, which is for 'cursor'. Give resolver a model: \
+             { \"harness\": \"claude\", \"model\": \"...\" }"
+        );
+        std::fs::write(&file, r#"{"harness": "claude", "model": "opus"}"#).unwrap();
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("claude", "opus", None)
+        );
+        // With no resolver named, the Machine defaults' harness resolves and the pool defaults'
+        // model, which another harness owns, is passed over for the machine's own.
+        let mut absent = pool_with_defaults(None, Value::Null, cursor_defaults());
+        absent.machine_defaults.file = js::path_text(&file);
+        assert_eq!(
+            conflict_policy(&absent, "build-1.1").unwrap(),
+            resolver("claude", "opus", None)
+        );
+    }
+
+    fn check(session: &Session) -> anyhow::Result<()> {
+        check_resolvers(
+            &session.state.config,
+            &session.harnesses,
+            &session.machine_defaults,
+            session.line.as_ref(),
+        )
+    }
+
+    // A session whose Machine defaults file holds `machine`.
+    fn with_machine(mut session: Session, dir: &tempfile::TempDir, machine: Value) -> Session {
+        let file = dir.path().join("defaults.json");
+        std::fs::write(&file, machine.to_string()).unwrap();
+        session.machine_defaults.file = js::path_text(&file);
+        session
+    }
+
+    #[test]
+    fn a_resolver_entry_with_no_harness_is_owned_by_the_pool_defaults_harness() {
+        // The entry's auto is cursor's word: the pool defaults' harness owns a layer that names none,
+        // as core resolution has it, so a claude Merger never launches on it.
+        let session = pool_with_defaults(
+            Some(serde_json::json!({"resolver": {"harness": "claude"}})),
+            serde_json::json!({"model": "auto"}),
+            serde_json::json!({"harness": "cursor", "model": "auto"}),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1")
+                .unwrap_err()
+                .to_string(),
+            "pool config: Merger 'build-merge' resolver names harness 'claude' but no model: its \
+             model comes from resolver.model, which is for 'cursor'. Give the Merger's \
+             conflict.resolver a model in the Plan (line.json while the pool is down), or set \
+             console.json resolver to { \"harness\": \"claude\", \"model\": \"...\" } for it to \
+             inherit"
+        );
+        // With the pool defaults on claude, the entry's sonnet is claude's, whatever the Machine
+        // defaults name.
+        let dir = tempfile::tempdir().unwrap();
+        let session = with_machine(
+            pool_with_defaults(
+                Some(serde_json::json!({"resolver": {"harness": "claude"}})),
+                serde_json::json!({"model": "sonnet"}),
+                serde_json::json!({"harness": "claude", "model": "opus"}),
+            ),
+            &dir,
+            serde_json::json!({"harness": "cursor"}),
+        );
+        assert_eq!(
+            conflict_policy(&session, "build-1.1").unwrap(),
+            resolver("claude", "sonnet", None)
+        );
+    }
+
+    #[test]
+    fn a_resolver_whose_harness_comes_from_the_machine_defaults_fails_with_no_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = with_machine(
+            pool_with_defaults(None, Value::Null, cursor_defaults()),
+            &dir,
+            serde_json::json!({"harness": "claude"}),
+        );
+        let error = "pool config: resolver takes harness 'claude' from the Machine defaults but no \
+                     model: its model comes from defaults.model, which is for 'cursor'. Give \
+                     resolver a model: { \"harness\": \"claude\", \"model\": \"...\" }, or set \
+                     \"resolver\": \"none\" for the manual path";
+        assert_eq!(
+            conflict_policy(&session, "build-1.1")
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+        assert_eq!(check(&session).unwrap_err().to_string(), error);
+        // The Machine defaults with nothing to skip, or naming a harness this machine lacks, still
+        // leave the manual path.
+        let bare = with_machine(
+            pool_with_defaults(None, Value::Null, serde_json::json!({"harness": "cursor"})),
+            &dir,
+            serde_json::json!({"harness": "claude"}),
+        );
+        assert_eq!(
+            conflict_policy(&bare, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
+        );
+        let unknown = with_machine(
+            pool_with_defaults(None, Value::Null, cursor_defaults()),
+            &dir,
+            serde_json::json!({"harness": "nonesuch"}),
+        );
+        assert_eq!(
+            conflict_policy(&unknown, "build-1.1").unwrap(),
+            ConflictPolicy::NoResolver
+        );
+    }
+
+    #[test]
+    fn a_finished_line_no_longer_has_its_mergers_checked() {
+        let mut session = pool_with_defaults(
+            Some(serde_json::json!({"resolver": {"harness": "claude"}})),
+            Value::from("cursor"),
+            cursor_defaults(),
+        );
+        assert!(check(&session).is_err());
+        let plan = session.line.as_ref().unwrap().plan().0.clone();
+        let error = check_plan_resolvers(
+            &session.state.config,
+            &session.harnesses,
+            &session.machine_defaults,
+            &plan,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("Merger 'build-merge'"),
+            "{error}"
+        );
+        for status in ["done", "closed"] {
+            let mut run: Value =
+                serde_json::from_str(&session.line.as_ref().unwrap().to_json()).unwrap();
+            run["run"]["status"] = Value::from(status);
+            session.line = Some(LineRun::from_json(&run.to_string()).unwrap());
+            check(&session).unwrap();
+        }
     }
 
     #[test]

@@ -4,8 +4,10 @@
  * whole pass has merged, and a merge conflict on a copy is decided by the Merger's `conflict`
  * policy when it happens: `wait` raises the plain merge-conflict Interrupt and runs no resolver, so
  * the pass holds; a resolver runs on the Merger's harness, model and effort, each field it leaves
- * empty falling through to console.json's resolver. Line start refuses a Merger whose resolver
- * names a harness the machine lacks.
+ * empty falling through to console.json's resolver, a model or effort only from a layer the
+ * Merger's harness owns (ADR-0044). Line start refuses a Merger whose resolver names a harness the
+ * machine lacks. While the Line runs, a Merger the owner rule leaves no model stops the pool at load
+ * and rejects a reload whole; a done or closed Line merges no more, so its Mergers stop neither.
  *
  * Every conflict here has copies 1 and 2 commit different text to shared.txt in their worktrees,
  * held until the case lets 1 merge first.
@@ -14,14 +16,15 @@
 import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EnrichedSnapshot, PoolConfig } from "../../protocol/wire.ts";
+import type { EnrichedSnapshot, LineFile, PoolConfig } from "../../protocol/wire.ts";
 import { conformance, type Case, type CaseServer } from "../harness/case.ts";
 import { gitIn, gitOk, resume, ticketWorktree, untilState } from "../harness/git-pool.ts";
 import { readEvents, readStateLine, until } from "../harness/pool-files.ts";
 import { snapshot, statuses } from "../harness/pool-run.ts";
 import type { World } from "../harness/world.ts";
 import { MOMENT_MS, hasIssue, copiesPlan, makingItems, pieces, untilLaunched, type CopiesPlan } from "./line-copies-support.ts";
-import { atCheckpoint, begun, issue, launches, lineWorld } from "./line-support.ts";
+import { atCheckpoint, begun, issue, launches, lineOf, lineWorld } from "./line-support.ts";
+import { logLines, refusedAtLoad, snapshotOf, untilSnapshot, writeConfig } from "./config-support.ts";
 
 const raisedOn = (id: string, kind: string) => (snap: EnrichedSnapshot) =>
   snap.state.interrupts.some((i) => i.ticketId === id && i.kind === kind);
@@ -120,11 +123,11 @@ conformance("line", "conflict wait raises the plain merge-conflict Interrupt on 
   expect(readFileSync(join(world.repo, "shared.txt"), "utf8")).toBe("by-hand\n");
 });
 
-conformance("line", "a Merger's resolver runs on its own harness and model, an empty field falling through to console.json's resolver", async (t) => {
+conformance("line", "a Merger's resolver runs on its own harness and model, an empty field falling through to console.json's resolver on that harness", async (t) => {
   const { world, server } = await conflicting(
     t,
     { conflict: { resolver: { harness: "opencode", model: "merger-model" } } },
-    { defaults: { harness: "claude", model: "m" }, resolver: { harness: "claude", model: "console-model", effort: "low" } },
+    { defaults: { harness: "claude", model: "m", effort: "high" }, resolver: { harness: "opencode", model: "console-model", effort: "low" } },
   );
   world.stubs.script("build-1.2.resolver", resolving("kept the Merger's lines"));
 
@@ -138,6 +141,7 @@ conformance("line", "a Merger's resolver runs on its own harness and model, an e
   expect(resolver.harness).toBe("opencode");
   const flag = (name: string) => resolver.argv[resolver.argv.indexOf(name) + 1];
   expect(flag("--model")).toBe("merger-model");
+  // The defaults' effort is claude's; the resolver entry's is opencode's, so it is the one that falls through.
   expect(flag("--variant")).toBe("low");
   expect(resolver.cwd).toBe(ticketWorktree(world.repo, "build-1.2").path);
   expect(hasIssue(world.pool, "check-1")).toBe(false);
@@ -147,6 +151,22 @@ conformance("line", "a Merger's resolver runs on its own harness and model, an e
   expect(gitIn(world.repo, ["show", "main:shared.txt"])).toBe("resolved-by-merger\n");
   expect(readStateLine(world.pool, "check-1.md").blockedBy).toEqual(["build-1.1", "build-1.2"]);
   expect(issue(world, "check-1")).toContain("# check-1: check, pass 1");
+});
+
+conformance("line", "a Merger's resolver takes no effort from console.json's resolver on another harness", async (t) => {
+  const { world, server } = await conflicting(
+    t,
+    { conflict: { resolver: { harness: "opencode", model: "merger-model" } } },
+    { defaults: { harness: "claude", model: "m", effort: "high" }, resolver: { harness: "claude", model: "console-model", effort: "low" } },
+  );
+  world.stubs.script("build-1.2.resolver", resolving("kept the Merger's lines"));
+
+  await untilState(server, raisedOn("build-1.2", "merge-approval"), { what: "build-1.2's merge-approval" });
+  const resolver = world.stubs.calls().find((call) => call.key === "build-1.2.resolver")!;
+  expect(resolver.harness).toBe("opencode");
+  expect(resolver.argv[resolver.argv.indexOf("--model") + 1]).toBe("merger-model");
+  // Both low and high are claude's words, so the opencode resolver launches with no effort at all.
+  expect(resolver.argv).not.toContain("--variant");
 });
 
 conformance("line", "a Merger left on its default resolver runs the pool's resolver", async (t) => {
@@ -161,4 +181,82 @@ conformance("line", "a Merger left on its default resolver runs the pool's resol
   const resolver = world.stubs.calls().find((call) => call.key === "build-1.2.resolver")!;
   expect(resolver.harness).toBe("opencode");
   expect(resolver.argv[resolver.argv.indexOf("--model") + 1]).toBe("console-model");
+});
+
+/**
+ * The boot and reload refusal of a Merger the owner rule leaves no model: it names harness opencode
+ * over the pool's claude defaults, with no console.json resolver to lend it a model.
+ */
+const MERGER_NO_MODEL =
+  "pool config: Merger 'build-merge' resolver names harness 'opencode' but no model: its model comes from " +
+  "defaults.model, which is for 'claude'. Give the Merger's conflict.resolver a model in the Plan (line.json while " +
+  'the pool is down), or set console.json resolver to { "harness": "opencode", "model": "..." } for it to inherit';
+
+/** line.json's bytes, rewritten whole by `edit` when given. */
+function lineFile(world: World, edit?: (line: LineFile) => void): string {
+  const path = join(world.pool, "line.json");
+  if (edit) {
+    const line = JSON.parse(readFileSync(path, "utf8")) as LineFile;
+    edit(line);
+    writeFileSync(path, JSON.stringify(line, null, 2));
+  }
+  return readFileSync(path, "utf8");
+}
+
+conformance("line", "a running Line's Merger left no model by a hand edit of line.json stops the pool at load, and a done or closed Line's never does", async (t) => {
+  const world = lineWorld(t, null, {}, { defaults: { harness: "claude", model: "m" } });
+  // Held, so the Line is still running when the server stops, which ends the launch.
+  world.stubs.hold("tasks-1");
+  const first = await t.start(world);
+  await begun(first, { plan: copiesPlan({ cap: 2, merger: { conflict: { resolver: { harness: "opencode", model: "merger-model" } } } }), work: "#1" });
+  await untilLaunched(world, ["tasks-1"]);
+  await first.stop();
+
+  const running = lineFile(world, (line) => {
+    const merger = line.plan.nodes.find((n) => n.id === "build-merge")!;
+    Object.assign(merger, { conflict: { resolver: { harness: "opencode" } } });
+  });
+  const refused = await refusedAtLoad(world);
+  expect(refused.code).not.toBe(0);
+  expect(refused.output).toContain(MERGER_NO_MODEL);
+  expect(lineFile(world)).toBe(running);
+
+  // Neither Line merges again, so the same Merger is no reason to refuse a boot or a reload.
+  for (const status of ["done", "closed"] as const) {
+    lineFile(world, (line) => {
+      line.run.status = status;
+    });
+    const server = await t.start(world);
+    expect((await lineOf(server))?.status).toBe(status);
+    // The pool log outlives a stop, so this boot's reload is the line after the ones already there.
+    const before = logLines(await snapshotOf(server), "config reloaded").length;
+    const saved = await server.http.put("/api/settings/pool", { config: { defaults: { harness: "claude", model: `${status}-model` } } });
+    expect(saved.status, saved.text).toBe(200);
+    const reloaded = await untilSnapshot(server, (s) => logLines(s, "config reloaded").length > before, "the reload's log line");
+    expect(logLines(reloaded, "config reloaded").slice(before)).toEqual(["config reloaded: defaults"]);
+    expect(logLines(reloaded, "config reload rejected")).toEqual([]);
+    await server.stop();
+  }
+});
+
+conformance("line", "a console.json edit that would leave a running Line's Merger no model is rejected whole at reload, naming the Merger", async (t) => {
+  // The Merger names opencode and borrows its model from console.json's opencode resolver.
+  const world = lineWorld(t, null, {}, {
+    defaults: { harness: "claude", model: "m" },
+    resolver: { harness: "opencode", model: "console-model" },
+  });
+  const hold = world.stubs.hold("tasks-1");
+  const server = await t.start(world);
+  await begun(server, { plan: copiesPlan({ cap: 2, merger: { conflict: { resolver: { harness: "opencode" } } } }), work: "#1" });
+  await untilLaunched(world, ["tasks-1"]);
+
+  writeConfig(world, { defaults: { harness: "claude", model: "m2" } });
+  await hold.release();
+  const rejected = await untilSnapshot(
+    server,
+    (s) => logLines(s, "config reload rejected").length > 0,
+    "the reload's rejection",
+  );
+  expect(logLines(rejected, "config reload rejected")).toEqual([`config reload rejected: ${MERGER_NO_MODEL}`]);
+  expect(logLines(rejected, "config reloaded")).toEqual([]);
 });

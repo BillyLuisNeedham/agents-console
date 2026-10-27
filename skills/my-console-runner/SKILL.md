@@ -106,6 +106,35 @@ Every harness named in the config must be on PATH. The script warns when one is 
 fails fast on an unknown harness at run start, so getting this right means the first ticket
 does not stop for it.
 
+## Give every harness switch a model of its own
+
+A model name and an effort word belong to one harness (ADR-0044). A layer of the config that names
+a harness takes its model and effort only from layers set for that same harness, never from
+`defaults` when `defaults.harness` is a different one. Copying a model across harnesses is never
+right, so the human has to name one.
+
+Read `console.json` after the script writes it, and ask the human for a model, all at once, for:
+
+- **the resolver**, when its harness differs from `defaults.harness` and it has no model of its
+  own (a Machine defaults model counts only when the Machine defaults name that same harness).
+  The script asks only for the resolver's harness and writes the string form,
+  `"resolver": "claude"`. Rewrite it as the object form with the model the human gives:
+  `"resolver": { "harness": "claude", "model": "opus" }`. Add `"effort"` only if they name one.
+  Left alone, the engine refuses to boot and names the resolver and this same fix. Relay that
+  message if you see it, make this edit, then run step 1 again with `--yes`: nothing launched, so
+  the pool needs a fresh boot to start.
+- **each entry under `assign`** whose `harness` differs from `defaults.harness` and that sets no
+  `model`. Add the model the human gives to that entry. Left alone, that Ticket launches nothing:
+  it waits on a Config interrupt naming the missing model, and the rest of the pool runs on. For a
+  grader entry such as `01-grader-2`, its build Ticket `01` is the one that waits. If the Ticket
+  is already waiting when you make the edit, tell the human to answer that interrupt with resume
+  in the Console. The next Tick reloads `console.json` and launches the Ticket on the
+  model; without the resume it keeps waiting.
+
+A resolver or entry on the same harness as `defaults` inherits the defaults' model as before, and
+the string form stays right for it. Never guess a model for the human, and never copy
+`defaults.model` onto another harness.
+
 ## How a Console run works
 
 One server process per pool. A rolling scheduler runs it in Ticks (ADR-0041). A Tick runs whenever

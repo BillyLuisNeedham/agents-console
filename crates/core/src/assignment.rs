@@ -4,8 +4,10 @@
 //! head-to-head) and a Conversation each supply their own layers, and the resolver applies them field by
 //! field in one order: the request (pinned), a spawned Ticket's own requested Assignment (requested),
 //! what the unit inherits from its parent or build ticket (inherited), then the pool defaults (default).
-//! A named harness must be in the harness table; whether an empty harness or model is an error is the
-//! caller's call. Effort layers exactly like model but is never an error.
+//! A model or effort comes only from a layer its resolved harness owns, the Owning harness (issue #37,
+//! ADR-0044): a layer set for another harness is passed over and the search goes on down. A named
+//! harness must be in the harness table; whether an empty harness or model is an error is the caller's
+//! call. Effort layers exactly like model but is never an error.
 //!
 //! The pool-wide pass (`resolve_pool_assignments`, `resolve_unseen_assignments`) resolves every marker
 //! of the pool against a config and the harness table, as pure functions.
@@ -191,7 +193,8 @@ pub struct ResolveAssignmentParams<'a> {
     /// What the unit inherits when the request is silent: the parent Ticket or Conversation of a
     /// spawned unit, the build ticket of a judge, a Steward's entry.
     pub inherited: Option<&'a AssignmentLayer>,
-    /// The pool defaults, applied last, field by field.
+    /// The pool defaults, applied last: field by field, a model or effort only when the resolved
+    /// harness owns it.
     pub defaults: Option<&'a AssignmentLayer>,
     /// Strict resolution refuses an empty harness or model; lenient resolution returns them empty so
     /// the misconfiguration renders instead of failing pool load.
@@ -222,6 +225,114 @@ fn source_of(values: [&LayerField; 4]) -> AssignmentSource {
     first_set_index(values).map_or(AssignmentSource::Unset, |index| LAYERS[index])
 }
 
+/// The Owning harness of each layer in a chain, nearest first (ADR-0044, CONTEXT.md): the harness the
+/// layer sets, else the nearest lower layer's. Each entry of `harness` is what one layer sets, `None`
+/// when it sets nothing and `Some("")` for a hand-written null, which owns as nothing. An owner of
+/// `None` (no layer at or below sets a harness) pairs with whichever harness resolves. The resolver
+/// runs the same rule over its own four layers.
+pub fn owning_harnesses<const N: usize>(harness: [Option<&str>; N]) -> [Option<&str>; N] {
+    std::array::from_fn(|index| harness[index..].iter().find_map(|owner| *owner))
+}
+
+/// Where a model or effort lands under the owner rule (issue #37).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owned {
+    /// The first layer that sets the field and that the resolved harness owns.
+    pub index: Option<usize>,
+    /// When no such layer exists, the first layer that set the field and was passed over for another
+    /// harness: what an error names as the cause.
+    pub skipped: Option<usize>,
+}
+
+/// The owner rule over one field: `set` says which layers set it, `owners` is `owning_harnesses` of
+/// the same chain, and `harness` is the harness that resolved.
+pub fn first_owned<const N: usize>(
+    set: [bool; N],
+    owners: [Option<&str>; N],
+    harness: &str,
+) -> Owned {
+    let mut skipped = None;
+    for (index, set) in set.into_iter().enumerate() {
+        if !set {
+            continue;
+        }
+        if owners[index].is_some_and(|owner| owner != harness) {
+            skipped = skipped.or(Some(index));
+            continue;
+        }
+        return Owned {
+            index: Some(index),
+            skipped: None,
+        };
+    }
+    Owned {
+        index: None,
+        skipped,
+    }
+}
+
+// The Owning harness of each of the four layers.
+fn owners_of(harness: [&LayerField; 4]) -> [Option<&str>; 4] {
+    owning_harnesses(harness.map(|value| value.is_set().then(|| value.text().unwrap_or(""))))
+}
+
+fn owned_in(values: [&LayerField; 4], owners: [Option<&str>; 4], harness: &str) -> Owned {
+    first_owned(values.map(LayerField::is_set), owners, harness)
+}
+
+/// A model the owner rule passed over, leaving the unit none (issue #37): the model, the layer that
+/// set it and the harness that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedModel {
+    pub model: String,
+    pub source: AssignmentSource,
+    pub owner: String,
+}
+
+impl SkippedModel {
+    /// How a message names the skipped model: "console.json defaults.model 'auto'", "the inherited
+    /// model 'o3'".
+    pub fn named(&self) -> String {
+        let model = &self.model;
+        match self.source {
+            AssignmentSource::Default => format!("console.json defaults.model '{model}'"),
+            source => format!("the {} model '{model}'", source.as_str()),
+        }
+    }
+
+    /// Whose the skipped model is, for "{named} belongs to ...": "another harness ('cursor')", or no
+    /// harness at all when its layer's harness was a hand-written null.
+    pub fn belongs_to(&self) -> String {
+        match self.owner.as_str() {
+            "" => "no harness (its layer sets harness to null)".to_owned(),
+            owner => format!("another harness ('{owner}')"),
+        }
+    }
+}
+
+// The model the owner rule skipped over these layers, when it left none: never when an owned layer
+// set the model, a hand-written null included.
+fn skipped_model(layers: [Option<&AssignmentLayer>; 4]) -> Option<SkippedModel> {
+    let harness = field_of(layers, |layer| &layer.harness);
+    let owners = owners_of(harness);
+    let index = owned_in(
+        field_of(layers, |layer| &layer.model),
+        owners,
+        harness_of(harness),
+    )
+    .skipped?;
+    Some(SkippedModel {
+        model: layers[index]?.model.text()?.to_owned(),
+        source: LAYERS[index],
+        owner: owners[index].unwrap_or("").to_owned(),
+    })
+}
+
+// The resolved harness: the first layer that sets one, a null reading as nothing.
+fn harness_of(values: [&LayerField; 4]) -> &str {
+    first_set(values).and_then(LayerField::text).unwrap_or("")
+}
+
 // One field across the four layers, in order.
 fn field_of(
     layers: [Option<&AssignmentLayer>; 4],
@@ -234,7 +345,7 @@ fn field_of(
 /// Which layer supplied each field of the Assignment `resolve_assignment` would return for the same
 /// layers, so the Console can say "pinned" or "inherited" beside a value (Reassign, issue #126). The
 /// drivers never resolve to nothing (the engine falls back to `implement`), so drivers no layer sets
-/// read as "default".
+/// read as "default". A model or effort skipped for belonging to another harness reads as unset.
 pub fn resolve_assignment_sources(
     request: Option<&AssignmentLayer>,
     requested: Option<&AssignmentLayer>,
@@ -242,11 +353,18 @@ pub fn resolve_assignment_sources(
     defaults: Option<&AssignmentLayer>,
 ) -> AssignmentSources {
     let layers = [request, requested, inherited, defaults];
+    let harness = field_of(layers, |layer| &layer.harness);
+    let owners = owners_of(harness);
+    let owned_source = |pick: fn(&AssignmentLayer) -> &LayerField| {
+        owned_in(field_of(layers, pick), owners, harness_of(harness))
+            .index
+            .map_or(AssignmentSource::Unset, |index| LAYERS[index])
+    };
     let drivers = source_of(field_of(layers, |layer| &layer.drivers));
     AssignmentSources {
-        harness: source_of(field_of(layers, |layer| &layer.harness)),
-        model: source_of(field_of(layers, |layer| &layer.model)),
-        effort: source_of(field_of(layers, |layer| &layer.effort)),
+        harness: source_of(harness),
+        model: owned_source(|layer| &layer.model),
+        effort: owned_source(|layer| &layer.effort),
         drivers: if drivers == AssignmentSource::Unset {
             AssignmentSource::Default
         } else {
@@ -257,7 +375,8 @@ pub fn resolve_assignment_sources(
 
 /// Resolve one unit's Assignment from its layers. The errors are the TypeScript's, verbatim: a strict
 /// caller with no harness, then an unknown harness, then a strict caller with no model, then a verify
-/// that is not an integer of 1 or more.
+/// that is not an integer of 1 or more. The model and effort come only from layers the resolved harness
+/// owns (issue #37), and a strict caller's missing model names the one skipped for another harness.
 pub fn resolve_assignment(params: ResolveAssignmentParams<'_>) -> Result<Assignment, ConfigError> {
     let request = params.request.map(|request| &request.layer);
     let layers = [request, params.requested, params.inherited, params.defaults];
@@ -265,9 +384,17 @@ pub fn resolve_assignment(params: ResolveAssignmentParams<'_>) -> Result<Assignm
         first_set(field_of(layers, pick)).and_then(LayerField::text)
     };
     let subject = params.subject;
-    let harness = resolved(|layer| &layer.harness).unwrap_or("").to_owned();
-    let model = resolved(|layer| &layer.model).unwrap_or("").to_owned();
-    let effort = resolved(|layer| &layer.effort)
+    let harness_field = field_of(layers, |layer| &layer.harness);
+    let owners = owners_of(harness_field);
+    let harness = harness_of(harness_field).to_owned();
+    let owned = |pick: fn(&AssignmentLayer) -> &LayerField| {
+        let values = field_of(layers, pick);
+        owned_in(values, owners, &harness)
+            .index
+            .and_then(|index| values[index].text())
+    };
+    let model = owned(|layer| &layer.model).unwrap_or("").to_owned();
+    let effort = owned(|layer| &layer.effort)
         .map(js::trim)
         .filter(|effort| !effort.is_empty())
         .map(str::to_owned);
@@ -284,6 +411,16 @@ pub fn resolve_assignment(params: ResolveAssignmentParams<'_>) -> Result<Assignm
         return Err(ConfigError(format!(
             "{subject} names unknown harness '{harness}'. Known: {}",
             params.harnesses.known()
+        )));
+    }
+    if params.strict
+        && model.is_empty()
+        && let Some(skipped) = skipped_model(layers)
+    {
+        return Err(ConfigError(format!(
+            "{subject} no model resolved for harness '{harness}': {} belongs to {}. Give the start a model of its own: assign {{ \"harness\": \"{harness}\", \"model\": \"...\" }}",
+            skipped.named(),
+            skipped.belongs_to()
         )));
     }
     if params.strict && model.is_empty() {
@@ -579,6 +716,43 @@ pub fn resolve_spawned_ticket_assignment(
         verify: true,
         harnesses,
     })
+}
+
+/// The model the owner rule passed over for a ticket the pass resolved with none (issue #37), from the
+/// layers its resolution took, so its Config interrupt can say why. `None` when nothing was skipped:
+/// the ticket simply had no model to take.
+pub fn ticket_skipped_model<M: AssignmentMarker>(
+    marker: &M,
+    assignments: &Assignments,
+    config: &PoolConfig,
+) -> Option<SkippedModel> {
+    let id = marker.id();
+    let request = assign_request(config, id);
+    let requested = marker.spawn_assign().map(AssignmentLayer::from);
+    let defaults = defaults_layer(config);
+    let build = engine_ticket_build_id(id).and_then(|build| assignments.get(build));
+    let parent = marker
+        .spawned_by()
+        .and_then(|parent| assignments.get(parent));
+    let (request, requested, inherited) = match (build, parent) {
+        (Some(build), _) => (
+            engine_ticket_request(&request).layer,
+            None,
+            Some(AssignmentLayer::from(build)),
+        ),
+        (None, Some(parent)) => (
+            request.layer,
+            requested,
+            Some(AssignmentLayer::from(parent)),
+        ),
+        (None, None) => (request.layer, requested, None),
+    };
+    skipped_model([
+        Some(&request),
+        requested.as_ref(),
+        inherited.as_ref(),
+        Some(&defaults),
+    ])
 }
 
 /// Every ticket's Assignment as a config resolves it, the layer each field came from, and why each
@@ -1029,7 +1203,8 @@ mod tests {
             call(Caller::Spawned)
                 .request(json!({ "harness": "claude", "drivers": "fix" }))
                 .ok(),
-            assignment(json!({ "harness": "claude", "model": "o3", "drivers": "fix" }))
+            // The parent's o3 is codex's word, so a switch to claude takes no model from it (#37).
+            assignment(json!({ "harness": "claude", "model": "", "drivers": "fix" }))
         );
         let no_model =
             layer(json!({ "harness": "codex", "model": "", "drivers": "implement review" }));
@@ -1038,8 +1213,17 @@ mod tests {
                 .inherited(Some(no_model.clone()))
                 .defaults(Some(defaults()))
                 .ok(),
+            assignment(json!({ "harness": "codex", "model": "", "drivers": "implement review" }))
+        );
+        let claude_parent =
+            layer(json!({ "harness": "claude", "model": "", "drivers": "implement review" }));
+        assert_eq!(
+            call(Caller::Spawned)
+                .inherited(Some(claude_parent))
+                .defaults(Some(defaults()))
+                .ok(),
             assignment(
-                json!({ "harness": "codex", "model": "opus", "drivers": "implement review" })
+                json!({ "harness": "claude", "model": "opus", "drivers": "implement review" })
             )
         );
         assert_eq!(
@@ -1124,12 +1308,10 @@ mod tests {
                 ..parent_assignment()
             }
         );
+        // The defaults' high is claude's word, so the codex parent takes no effort from it (#37).
         assert_eq!(
             call(Caller::Spawned).defaults(Some(with_effort)).ok(),
-            Assignment {
-                effort: Some("high".into()),
-                ..parent_assignment()
-            }
+            parent_assignment()
         );
         assert_eq!(
             call(Caller::Grader)
@@ -1345,6 +1527,315 @@ mod tests {
             Some(&defaults()),
         );
         assert_eq!(sources.harness, AssignmentSource::Pinned);
+    }
+
+    // Issue #37: a model (and an effort) belongs to the harness that owns its layer.
+    struct OwnerCase {
+        request: Value,
+        requested: Option<Value>,
+        inherited: Option<Value>,
+        defaults: Value,
+        harness: &'static str,
+        model: &'static str,
+        effort: Option<&'static str>,
+        model_from: AssignmentSource,
+        effort_from: AssignmentSource,
+    }
+
+    fn owned(request: Value, defaults: Value) -> OwnerCase {
+        OwnerCase {
+            request,
+            requested: None,
+            inherited: None,
+            defaults,
+            harness: "",
+            model: "",
+            effort: None,
+            model_from: AssignmentSource::Unset,
+            effort_from: AssignmentSource::Unset,
+        }
+    }
+
+    impl OwnerCase {
+        fn requested(mut self, value: Value) -> Self {
+            self.requested = Some(value);
+            self
+        }
+
+        fn inherited(mut self, value: Value) -> Self {
+            self.inherited = Some(value);
+            self
+        }
+
+        fn resolves(mut self, harness: &'static str, model: &'static str) -> Self {
+            self.harness = harness;
+            self.model = model;
+            self
+        }
+
+        fn effort(mut self, effort: &'static str) -> Self {
+            self.effort = Some(effort);
+            self
+        }
+
+        // The layers Reassign names beside the model and the effort.
+        fn from(mut self, model: AssignmentSource, effort: AssignmentSource) -> Self {
+            self.model_from = model;
+            self.effort_from = effort;
+            self
+        }
+    }
+
+    #[test]
+    fn a_harness_takes_model_and_effort_only_from_layers_it_owns() {
+        use AssignmentSource::{Default, Inherited, Pinned, Unset};
+        let cases = [
+            // Defaults on another harness: the switch takes no model from them.
+            owned(
+                json!({ "harness": "claude" }),
+                json!({ "harness": "codex", "model": "auto" }),
+            )
+            .resolves("claude", ""),
+            // Same harness: unchanged.
+            owned(
+                json!({ "harness": "claude" }),
+                json!({ "harness": "claude", "model": "opus" }),
+            )
+            .resolves("claude", "opus")
+            .from(Default, Unset),
+            owned(
+                json!({ "model": "sonnet" }),
+                json!({ "harness": "claude", "model": "opus" }),
+            )
+            .resolves("claude", "sonnet")
+            .from(Pinned, Unset),
+            // A model above a harness switch pairs with the harness below it.
+            owned(
+                json!({ "model": "opus" }),
+                json!({ "harness": "codex", "model": "auto" }),
+            )
+            .requested(json!({ "harness": "claude" }))
+            .resolves("claude", "opus")
+            .from(Pinned, Unset),
+            // A skipped layer lets the search continue down to a layer the harness owns.
+            owned(
+                json!({ "harness": "claude" }),
+                json!({ "harness": "claude", "model": "opus" }),
+            )
+            .inherited(json!({ "harness": "codex", "model": "o3" }))
+            .resolves("claude", "opus")
+            .from(Default, Unset),
+            // Ownership chains through a middle layer that sets no harness: its o3 is codex's.
+            owned(
+                json!({ "harness": "claude" }),
+                json!({ "harness": "codex" }),
+            )
+            .inherited(json!({ "model": "o3" }))
+            .resolves("claude", ""),
+            // Effort follows the same rule.
+            owned(
+                json!({ "harness": "claude" }),
+                json!({ "harness": "codex", "model": "auto", "effort": "high" }),
+            )
+            .resolves("claude", ""),
+            owned(
+                json!({ "harness": "claude", "model": "opus" }),
+                json!({ "harness": "claude", "effort": "high" }),
+            )
+            .resolves("claude", "opus")
+            .effort("high")
+            .from(Pinned, Default),
+            // A skipped effort lets the search continue down to a layer the harness owns.
+            owned(
+                json!({ "harness": "claude", "model": "opus" }),
+                json!({ "harness": "claude", "effort": "low" }),
+            )
+            .inherited(json!({ "harness": "codex", "effort": "high" }))
+            .resolves("claude", "opus")
+            .effort("low")
+            .from(Pinned, Default),
+            // The defaults layer (the Machine defaults' too) is owned by its own harness; with none, by
+            // whichever harness resolves, as before.
+            owned(json!({ "harness": "claude" }), json!({ "model": "opus" }))
+                .resolves("claude", "opus")
+                .from(Default, Unset),
+            owned(json!({ "harness": "claude" }), json!({ "model": "opus" }))
+                .inherited(json!({ "model": "o3" }))
+                .resolves("claude", "o3")
+                .from(Inherited, Unset),
+            // A null in an owned layer still stops the chain.
+            owned(
+                json!({ "model": null }),
+                json!({ "harness": "claude", "model": "opus" }),
+            )
+            .resolves("claude", "")
+            .from(Pinned, Unset),
+            owned(
+                json!({ "harness": "claude", "effort": null }),
+                json!({ "harness": "claude", "model": "opus", "effort": "high" }),
+            )
+            .resolves("claude", "opus")
+            .from(Default, Pinned),
+            // A null harness resolves to none, which owns no model: the defaults' opus is claude's.
+            owned(
+                json!({ "harness": null }),
+                json!({ "harness": "claude", "model": "opus", "effort": "high" }),
+            )
+            .resolves("", ""),
+        ];
+        let harnesses = harnesses();
+        for case in cases {
+            let request = request(case.request.clone());
+            let requested = case.requested.clone().map(layer);
+            let inherited = case.inherited.clone().map(layer);
+            let defaults = layer(case.defaults.clone());
+            let resolved = resolve_assignment(ResolveAssignmentParams {
+                subject: "pool config: ticket 01",
+                request: Some(&request),
+                requested: requested.as_ref(),
+                inherited: inherited.as_ref(),
+                defaults: Some(&defaults),
+                strict: false,
+                verify: false,
+                harnesses: &harnesses,
+            })
+            .unwrap();
+            let what = format!(
+                "request {} requested {:?} inherited {:?} defaults {}",
+                case.request, case.requested, case.inherited, case.defaults
+            );
+            assert_eq!(resolved.harness, case.harness, "{what}");
+            assert_eq!(resolved.model, case.model, "{what}");
+            assert_eq!(resolved.effort.as_deref(), case.effort, "{what}");
+            // The sources name the layer each resolved value came from, and a value skipped for
+            // another harness reads as unset, so Reassign's labels agree with what launches.
+            let sources = resolve_assignment_sources(
+                Some(&request.layer),
+                requested.as_ref(),
+                inherited.as_ref(),
+                Some(&defaults),
+            );
+            assert_eq!(sources.model, case.model_from, "{what}");
+            assert_eq!(sources.effort, case.effort_from, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_model_skipped_for_another_harness_reads_as_unset_not_inherited() {
+        let sources = resolve_assignment_sources(
+            Some(&layer(json!({ "harness": "claude" }))),
+            None,
+            Some(&layer(
+                json!({ "harness": "codex", "model": "o3", "effort": "low" }),
+            )),
+            Some(&layer(json!({ "harness": "codex", "model": "auto" }))),
+        );
+        assert_eq!(
+            sources,
+            AssignmentSources {
+                harness: AssignmentSource::Pinned,
+                model: AssignmentSource::Unset,
+                effort: AssignmentSource::Unset,
+                drivers: AssignmentSource::Default,
+            }
+        );
+    }
+
+    #[test]
+    fn strict_no_model_names_the_harness_the_skipped_model_belongs_to() {
+        assert_eq!(
+            call(Caller::Conversation)
+                .request(json!({ "harness": "claude" }))
+                .defaults(Some(layer(json!({ "harness": "codex", "model": "auto" }))))
+                .err(),
+            "conversation start: no model resolved for harness 'claude': the inherited model 'o3' belongs to another harness ('codex'). Give the start a model of its own: assign { \"harness\": \"claude\", \"model\": \"...\" }"
+        );
+        assert_eq!(
+            call(Caller::Conversation)
+                .request(json!({ "harness": "claude" }))
+                .inherited(None)
+                .defaults(Some(layer(json!({ "harness": "codex", "model": "auto" }))))
+                .err(),
+            "conversation start: no model resolved for harness 'claude': console.json defaults.model 'auto' belongs to another harness ('codex'). Give the start a model of its own: assign { \"harness\": \"claude\", \"model\": \"...\" }"
+        );
+        // A null harness on the defaults owns their model as nothing, which is said in words.
+        assert_eq!(
+            call(Caller::Conversation)
+                .request(json!({ "harness": "claude" }))
+                .inherited(None)
+                .defaults(Some(layer(json!({ "harness": null, "model": "auto" }))))
+                .err(),
+            "conversation start: no model resolved for harness 'claude': console.json defaults.model 'auto' belongs to no harness (its layer sets harness to null). Give the start a model of its own: assign { \"harness\": \"claude\", \"model\": \"...\" }"
+        );
+        // A hand-written null in a layer claude owns stopped the chain, so o3 is not the cause.
+        assert_eq!(
+            call(Caller::Conversation)
+                .request(json!({ "harness": "claude" }))
+                .defaults(Some(layer(json!({ "harness": "claude", "model": null }))))
+                .err(),
+            "conversation start: no model resolved (set assign.model, inherit from the parent Conversation, or console.json defaults.model)"
+        );
+    }
+
+    #[test]
+    fn a_tickets_skipped_model_is_found_from_the_layers_its_resolution_took() {
+        let skipped = |model: &str, source, owner: &str| SkippedModel {
+            model: model.into(),
+            source,
+            owner: owner.into(),
+        };
+        let cursor = json!({ "harness": "cursor", "model": "auto" });
+        let pool =
+            config(json!({ "defaults": cursor, "assign": { "01": { "harness": "claude" } } }));
+        let none = Assignments::new();
+        let found = ticket_skipped_model(&MarkerFacts::new("01"), &none, &pool);
+        assert_eq!(
+            found,
+            Some(skipped("auto", AssignmentSource::Default, "cursor"))
+        );
+        assert_eq!(found.unwrap().named(), "console.json defaults.model 'auto'");
+        // A Line Ticket's node Assignment is its requested layer.
+        let node = MarkerFacts {
+            spawn_assign: Some(SpawnAssignRequest {
+                harness: Some("claude".into()),
+                model: None,
+                effort: None,
+                drivers: None,
+            }),
+            ..MarkerFacts::new("build-1")
+        };
+        assert_eq!(
+            ticket_skipped_model(&node, &none, &pool),
+            Some(skipped("auto", AssignmentSource::Default, "cursor"))
+        );
+        // A spawned ticket that switches harness passes over its parent's model.
+        let parents = Assignments::from_iter([(
+            "01".to_owned(),
+            assignment(json!({ "harness": "cursor", "model": "auto", "drivers": "implement" })),
+        )]);
+        let child = config(
+            json!({ "defaults": cursor, "assign": { "01-spawn-1": { "harness": "claude" } } }),
+        );
+        let found = ticket_skipped_model(&spawned("01-spawn-1", "01"), &parents, &child);
+        assert_eq!(
+            found,
+            Some(skipped("auto", AssignmentSource::Inherited, "cursor"))
+        );
+        assert_eq!(found.unwrap().named(), "the inherited model 'auto'");
+        // A grader inherits its build ticket's Assignment the same way.
+        let grader = config(
+            json!({ "defaults": cursor, "assign": { "01-grader-1": { "harness": "claude" } } }),
+        );
+        assert_eq!(
+            ticket_skipped_model(&MarkerFacts::new("01-grader-1"), &parents, &grader),
+            Some(skipped("auto", AssignmentSource::Inherited, "cursor"))
+        );
+        // Nothing skipped: the ticket had no model to take at all.
+        let bare = config(json!({ "defaults": { "harness": "claude" } }));
+        assert_eq!(
+            ticket_skipped_model(&MarkerFacts::new("01"), &none, &bare),
+            None
+        );
     }
 
     // assignment.test.ts: assignmentViewOf

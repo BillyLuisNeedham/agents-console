@@ -6,7 +6,8 @@
 //!
 //! Two older files carried slices of this before: `~/.issue-runner` (`harness=..` / `model=..`) and
 //! `~/.console-runner` (`engine=<path>`). Both stay readable as a fallback, so a machine that never
-//! wrote the new file behaves as before; a field present in the new file always wins, field by field.
+//! wrote the new file behaves as before; a field present in the new file always wins, field by field,
+//! and the legacy harness and model fill only beside each other (ADR-0044).
 //!
 //! Every path is computed from a home directory the caller passes in: only the CLI reads the
 //! environment.
@@ -59,21 +60,38 @@ pub fn default_machine_defaults_paths(home: &str) -> MachineDefaultsPaths {
 
 /// The defaults in force: the JSON file's fields, with each missing field filled from the legacy file
 /// that used to hold it. An unreadable or malformed JSON file counts as absent rather than failing the
-/// caller: the defaults are a convenience, never a gate.
+/// caller: the defaults are a convenience, never a gate. `~/.issue-runner`'s harness and model are one
+/// pair (ADR-0044): one fills a field only when the JSON file's other field is empty or the same as the
+/// legacy file's, so the merge never pairs a model with a harness it was not written for.
 pub fn read_machine_defaults(paths: &MachineDefaultsPaths) -> MachineDefaults {
     let mut merged = read_machine_defaults_file(&paths.file);
     let runner = read_key_value_file(&paths.issue_runner);
     let console = read_key_value_file(&paths.console_runner);
-    let fill = |field: &mut Option<String>, source: &HashMap<String, String>, key: &str| {
+    let given = |source: &HashMap<String, String>, key: &str| {
+        source.get(key).filter(|value| !value.is_empty()).cloned()
+    };
+    let fill = |field: &mut Option<String>, value: Option<String>| {
         if field.as_deref().unwrap_or("").is_empty()
-            && let Some(value) = source.get(key).filter(|value| !value.is_empty())
+            && let Some(value) = value
         {
-            *field = Some(value.clone());
+            *field = Some(value);
         }
     };
-    fill(&mut merged.harness, &runner, "harness");
-    fill(&mut merged.model, &runner, "model");
-    fill(&mut merged.engine, &console, "engine");
+    let (harness, model) = (given(&runner, "harness"), given(&runner, "model"));
+    let pairs = |own: &Option<String>, legacy: &Option<String>| {
+        legacy.is_none() || own.as_deref().unwrap_or("").is_empty() || own == legacy
+    };
+    let (harness_pairs, model_pairs) = (
+        pairs(&merged.model, &model),
+        pairs(&merged.harness, &harness),
+    );
+    if harness_pairs {
+        fill(&mut merged.harness, harness);
+    }
+    if model_pairs {
+        fill(&mut merged.model, model);
+    }
+    fill(&mut merged.engine, given(&console, "engine"));
     merged
 }
 
@@ -312,11 +330,49 @@ mod tests {
             &paths.file,
         )
         .unwrap();
+        // The legacy model is opencode's, so a file naming claude takes nothing of the pair.
         assert_eq!(
             read_machine_defaults(&paths),
-            defaults(
-                json!({ "harness": "claude", "model": "oc/flash", "drivers": "implement", "terminal": "herdr" })
-            )
+            defaults(json!({ "harness": "claude", "drivers": "implement", "terminal": "herdr" }))
+        );
+    }
+
+    // ADR-0044: the legacy file's harness and model are one pair, so the fallback never puts one of
+    // them beside the other harness's or model's field from the JSON file.
+    #[test]
+    fn takes_the_legacy_model_or_harness_only_beside_its_own_pair() {
+        let merged = |own: Value, legacy: &str| {
+            let h = home();
+            let paths = paths(&h);
+            std::fs::write(h.path().join(".issue-runner"), legacy).unwrap();
+            write_machine_defaults(&own, &paths.file).unwrap();
+            read_machine_defaults(&paths)
+        };
+        let pair = "harness=cursor\nmodel=auto\n";
+        assert_eq!(
+            merged(json!({ "harness": "claude" }), pair),
+            defaults(json!({ "harness": "claude" }))
+        );
+        assert_eq!(
+            merged(json!({ "model": "opus" }), pair),
+            defaults(json!({ "model": "opus" }))
+        );
+        assert_eq!(
+            merged(json!({ "harness": "cursor" }), pair),
+            defaults(json!({ "harness": "cursor", "model": "auto" }))
+        );
+        assert_eq!(
+            merged(json!({ "model": "auto" }), pair),
+            defaults(json!({ "harness": "cursor", "model": "auto" }))
+        );
+        // A legacy file naming one field pairs it with nothing, so it fills that field as before.
+        assert_eq!(
+            merged(json!({ "harness": "claude" }), "model=opus\n"),
+            defaults(json!({ "harness": "claude", "model": "opus" }))
+        );
+        assert_eq!(
+            merged(json!({ "model": "opus" }), "harness=claude\n"),
+            defaults(json!({ "harness": "claude", "model": "opus" }))
         );
     }
 

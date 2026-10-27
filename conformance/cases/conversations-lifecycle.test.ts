@@ -1275,14 +1275,15 @@ conformance("conversations", "a Ticket a Conversation proposes launches on the p
   const { server } = await startTerminal(t, world);
   await startConversation(server, { title: "Planner" });
 
-  writeSpawnJson(world, "conv-1", [{ title: "On claude", body: BODY, assign: { harness: "claude", effort: "max" } }]);
+  // The switch to claude names its own model: the Conversation's is opencode's (ADR-0044).
+  writeSpawnJson(world, "conv-1", [{ title: "On claude", body: BODY, assign: { harness: "claude", model: "m", effort: "max" } }]);
 
   const marker = await until(
     () => readMarkers(world.pool)["conv-1-spawn-1"],
     (found) => found !== undefined,
     { ms: 15_000, what: "conv-1-spawn-1" },
   );
-  const assign = encodeURIComponent(JSON.stringify({ harness: "claude", effort: "max" }));
+  const assign = encodeURIComponent(JSON.stringify({ harness: "claude", model: "m", effort: "max" }));
   expect(marker!.line.endsWith(` spawned-by=conv-1 spawn-assign=${assign} -->`)).toBe(true);
   const launch = await until(
     () => world.stubs.calls().find((call) => call.harness === "claude"),
