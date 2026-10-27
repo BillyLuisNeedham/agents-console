@@ -55,6 +55,7 @@ interface Editing {
   opened: number;
   doc: PlanFile;
   problems: PlanProblem[];
+  warnings: PlanProblem[];
   verdicts: Map<string, string[]>;
   notes: string[];
   readOnly: boolean;
@@ -198,7 +199,7 @@ export class PlansStore {
       return;
     }
     if (generation !== this.openGeneration) return;
-    await this.begin(slug, got.preset ? "preset" : "library", got.plan, got.problems, generation);
+    await this.begin(slug, got.preset ? "preset" : "library", got.plan, got.problems, got.warnings ?? [], generation);
   }
 
   /**
@@ -215,12 +216,19 @@ export class PlansStore {
     this.state = { phase: "opening", slug };
     this.onChange();
     if (closed) void this.readList();
-    void this.begin(slug, "line", plan, [], generation).then(() => {
+    void this.begin(slug, "line", plan, [], [], generation).then(() => {
       if (generation === this.openGeneration) this.armSaveAs();
     });
   }
 
-  private async begin(slug: string, origin: Origin, plan: PlanFile, problems: PlanProblem[], generation: number): Promise<void> {
+  private async begin(
+    slug: string,
+    origin: Origin,
+    plan: PlanFile,
+    problems: PlanProblem[],
+    warnings: PlanProblem[],
+    generation: number,
+  ): Promise<void> {
     const { reply, refusal } = await this.probeDraft(plan);
     if (generation !== this.openGeneration) return;
     const doc = reply?.plan ?? plan;
@@ -231,6 +239,7 @@ export class PlansStore {
       opened: generation,
       doc,
       problems: reply?.problems ?? problems,
+      warnings: reply ? (reply.warnings ?? []) : warnings,
       verdicts: new Map((reply?.verdicts ?? []).map((v) => [v.id, v.verdicts])),
       notes: [],
       readOnly: reply === null,
@@ -331,6 +340,7 @@ export class PlansStore {
         if (generation !== this.openGeneration) return;
         e.doc = reply.plan;
         e.problems = reply.problems;
+        e.warnings = reply.warnings ?? [];
         e.verdicts = new Map(reply.verdicts.map((v) => [v.id, v.verdicts]));
         e.notes = reply.notes;
         if (batch.some((c) => c.kind === "edit" && c.edit.edit === "addNode")) {
@@ -781,7 +791,7 @@ export class PlansStore {
 
   private renderEditor(e: Editing): HTMLElement[] {
     const moved = e.edits.drops();
-    const drawing = projectPlan({ plan: e.doc, problems: e.problems, verdicts: e.verdicts, places: moved });
+    const drawing = projectPlan({ plan: e.doc, problems: e.problems, warnings: e.warnings, verdicts: e.verdicts, places: moved });
     const banner =
       drawing.planProblems.length || e.notes.length || e.refusal
         ? h(
@@ -803,6 +813,7 @@ export class PlansStore {
         fitKey: String(e.opened),
         plan: e.doc,
         problems: e.problems,
+        warnings: e.warnings,
         verdicts: e.verdicts,
         pendingDrops: moved,
         selection: e.selection,
@@ -820,6 +831,7 @@ export class PlansStore {
             "Core cannot edit this file as it stands without losing what is written in it. Fix it by hand, or delete it.",
           ),
           h("div", { class: "plan-problems" }, ...e.problems.map((p) => h("div", { class: "plan-problem" }, p.message))),
+          h("div", { class: "plan-warnings" }, ...e.warnings.map((w) => h("div", { class: "plan-warning" }, w.message))),
         )
       : renderInspector(
           {

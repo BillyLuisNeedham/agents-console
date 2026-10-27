@@ -131,12 +131,12 @@ conformance("line", "POST /api/line freezes Factory today with the brief in line
   await hold.release();
 });
 
-conformance("line", "a Plan file whose entry is a Ticket node begins on the work, which the entry Ticket's body carries", async (t) => {
+conformance("line", "a Plan file whose entry is a Ticket node begins on the work, which the entry Ticket's body carries as the issue to read", async (t) => {
   const world = lineWorld(t, null);
   const hold = world.stubs.hold("build-1");
   const server = await t.start(world);
 
-  const line = await begun(server, { plan: buildThenFinish({ note: "one small step" }), work: "issue #186" });
+  const line = await begun(server, { plan: buildThenFinish({ note: "one small step" }), work: "37" });
   expect(line.plan.name).toBe("Build then finish");
   await until(
     () => readStateLine(world.pool, "build-1.md").line,
@@ -147,7 +147,7 @@ conformance("line", "a Plan file whose entry is a Ticket node begins on the work
     "<!-- state: id=build-1 blocked-by=none status=in-progress node=build -->",
   );
   const file = issue(world, "build-1");
-  expect(file).toContain("## The Line's work\n\nissue #186");
+  expect(file).toContain("## The Line's work\n\nThe piece of work for this Line is issue #37. Read it (gh issue view 37).");
   expect(file).toContain("## Note for this node\n\none small step");
   expect(file).not.toContain("## The spec");
   await hold.release();
@@ -233,7 +233,7 @@ conformance("line", "a Conversation node after the start of a Plan begins, and a
     ],
   } as PlanFile;
 
-  await begun(server, { plan, work: "issue #186" });
+  await begun(server, { plan, work: "37" });
   // A headless pool cannot give the pass a pane: it is recorded crashed with why, and the Line goes on.
   const snap = await atCheckpoint(server, "finish-1");
   expect(snap.state.log).toContain(

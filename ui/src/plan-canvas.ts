@@ -41,6 +41,7 @@ export interface PlanCanvasModel {
   fitKey: string;
   plan: PlanFile;
   problems: readonly PlanProblem[];
+  warnings?: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
   pendingDrops: ReadonlyMap<string, Point>;
   selection: PlanSelection;
@@ -64,6 +65,8 @@ type Gesture =
   | { kind: "pan"; start: Point; startView: Point; tap: PlanSelection; moved: boolean }
   | { kind: "node"; id: string; start: Point; startAt: Point; at: Point; moved: boolean }
   | { kind: "link"; from: string; on: string; start: Point; end: Point; over: string | null; moved: boolean };
+
+const counted = (n: number, noun: string) => `${n} ${noun}${n > 1 ? "s" : ""}`;
 
 export class PlanCanvas {
   private view: ViewTransform = { ...VIEW_ORIGIN, zoom: 1 };
@@ -166,7 +169,14 @@ export class PlanCanvas {
     const g = this.gesture;
     const places = g.kind === "node" && g.moved ? new Map(model.pendingDrops).set(g.id, g.at) : model.pendingDrops;
     const edgeLabels = model.live && new Map([...model.live.edges].map(([key, edge]) => [key, edge.label]));
-    this.drawing = projectPlan({ plan: model.plan, problems: model.problems, verdicts: model.verdicts, places, edgeLabels });
+    this.drawing = projectPlan({
+      plan: model.plan,
+      problems: model.problems,
+      warnings: model.warnings,
+      verdicts: model.verdicts,
+      places,
+      edgeLabels,
+    });
     return this.drawing;
   }
 
@@ -182,6 +192,7 @@ export class PlanCanvas {
       (live ? ` plan-node-live plan-live-${live.state.tone}` : "") +
       (selected ? " plan-node-selected" : "") +
       (drawn.problems.length ? " plan-node-problem" : "") +
+      (drawn.warnings.length ? " plan-node-warning" : "") +
       (g.kind === "node" && g.moved && g.id === node.id ? " plan-node-dragging" : "") +
       (g.kind === "link" && g.over === node.id ? " plan-node-drop" : "");
     return h(
@@ -191,7 +202,7 @@ export class PlanCanvas {
         key: `plan-node:${node.id}`,
         "data-node": node.id,
         style: `left:${at.x}px;top:${at.y}px;width:${CARD_W}px;height:${CARD_H}px`,
-        title: drawn.problems.length ? drawn.problems.join("\n") : null,
+        title: [...drawn.problems, ...drawn.warnings].join("\n") || null,
       },
       h(
         "div",
@@ -200,8 +211,10 @@ export class PlanCanvas {
         live
           ? liveState(live)
           : drawn.problems.length
-            ? h("span", { class: "plan-node-flag" }, `${drawn.problems.length} problem${drawn.problems.length > 1 ? "s" : ""}`)
-            : null,
+            ? h("span", { class: "plan-node-flag" }, counted(drawn.problems.length, "problem"))
+            : drawn.warnings.length
+              ? h("span", { class: "plan-node-flag plan-node-flag-warning" }, counted(drawn.warnings.length, "warning"))
+              : null,
       ),
       live
         ? liveBody(drawn, live)

@@ -17,7 +17,7 @@ import { conformance } from "../harness/case.ts";
 import { cliWorld, type CliWorld } from "../harness/cli.ts";
 import { startHerdr } from "../harness/herdr.ts";
 import { until } from "../harness/pool-files.ts";
-import { smallPlan } from "./plans-support.ts";
+import { edge, node, plan, smallPlan } from "./plans-support.ts";
 
 const MACHINE = { harness: "claude", model: "m", drivers: "implement" };
 const SPEC = "# A Continued attempt's checkpoint drops its spawns (issue #186)\n\nThe spec.\n";
@@ -115,6 +115,51 @@ conformance("cli", "Boot --plan --brief cuts the Line from the current branch in
   expect(gitIn(w, repo, ["branch", "--show-current"])).toBe("feature/x");
 });
 
+conformance("cli", "Boot --plan warns on stderr for a node whose skill its harness cannot find, naming the node, and carries on to begin the Line", async (t) => {
+  const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
+  const repo = checkout(w);
+  const skilled = plan(
+    [node.agent("spec", { skill: "addy-spec" }), node.finish()],
+    [edge("spec", "done", "finish")],
+    "Names a skill",
+  );
+  w.write("home/.agent-graphs/plans/zz-skilled.json", JSON.stringify(skilled));
+  const claudeConfig = w.env().CLAUDE_CONFIG_DIR!;
+
+  const run = await w.run(
+    "boot",
+    ["--plan", "zz-skilled", "--brief", "pilots/186.brief.json", "--title", "Pilot 186", "--no-steward", "--no-open", "--port", "0"],
+    { cwd: repo },
+  );
+
+  expect(run.code, run.stderr).toBe(0);
+  const worktree = /^line: cut .* at (.+)$/m.exec(run.stdout)![1]!;
+  expect(run.stderr).toContain(
+    `plan: node spec: skill addy-spec is not installed for claude (looked in ${join(claudeConfig, "skills", "addy-spec", "SKILL.md")}, ${join(claudeConfig, "commands", "addy-spec.md")}, ${join(worktree, ".claude", "skills", "addy-spec", "SKILL.md")}, ${join(worktree, ".claude", "commands", "addy-spec.md")})\n`,
+  );
+  expect(run.stdout).toContain('line: begun on the Plan zz-skilled ("Names a skill")\n');
+});
+
+conformance("cli", "Boot --plan does not warn on a skill the Line's checkout carries in its own .claude/skills", async (t) => {
+  const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
+  const repo = checkout(w);
+  w.write("repo/.claude/skills/repo-local/SKILL.md", "---\nname: repo-local\n---\n");
+  gitIn(w, repo, ["add", ".claude"]);
+  gitIn(w, repo, ["commit", "-q", "-m", "a skill of the repo's own"]);
+  const local = plan([node.agent("spec", { skill: "repo-local" }), node.finish()], [edge("spec", "done", "finish")], "Names a repo skill");
+  w.write("home/.agent-graphs/plans/zz-local.json", JSON.stringify(local));
+
+  const run = await w.run(
+    "boot",
+    ["--plan", "zz-local", "--brief", "pilots/186.brief.json", "--title", "Pilot 186", "--no-steward", "--no-open", "--port", "0"],
+    { cwd: repo },
+  );
+
+  expect(run.code, run.stderr).toBe(0);
+  expect(run.stderr).not.toContain("not installed");
+  expect(run.stdout).toContain('line: begun on the Plan zz-local ("Names a repo skill")\n');
+});
+
 conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it on the work, and the engine opens grill-1 with the issue in its first Turn", async (t) => {
   const w = cliWorld(t, { harnesses: ["claude"], machineDefaults: MACHINE });
   const repo = checkout(w);
@@ -167,8 +212,8 @@ conformance("cli", "Boot --plan asks for the work, cuts the Line and begins it o
   const first = typed.find((text) => text.includes("(`grill-1`)"))!;
   expect(first).toStartWith("You are the Grill Conversation (`grill-1`) of this pool's Line (ADR-0040)");
   expect(first).toContain(
-    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186) and grill me on " +
-      `it.\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,
+    "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue view 186)." +
+      `\n\nThis Line was cut from \`feature/x\` at \`${base.slice(0, 7)}\`.`,
   );
   expect(first).toContain("write the spec at `docs/specs/186.md` and the Line brief at `docs/specs/186.grill-1.brief.json`");
 });

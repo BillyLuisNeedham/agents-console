@@ -875,6 +875,104 @@ fn a_link_from_a_node_with_a_merger_is_made_from_the_merger() {
 }
 
 #[test]
+fn a_link_that_closes_a_bare_cycle_is_a_loop_capped_at_two() {
+    let back = key("review", Verdict::Findings, "tasks");
+    let edited = editable()
+        .edit(&[PlanEdit::Link(Edge {
+            key: back.clone(),
+            cap: None,
+        })])
+        .unwrap();
+    let made = edited.plan.edges().iter().find(|e| e.key == back).unwrap();
+    assert_eq!(
+        made.cap,
+        Some(LoopCap {
+            max: NonZeroU32::new(2).unwrap(),
+            steward_extra: false,
+            when_spent: WhenSpent::Hold,
+        })
+    );
+    assert!(edited.plan.is_loop(&back));
+    assert_eq!(
+        edited.notes,
+        [
+            "`review.findings -> tasks` closes a cycle, so it is a loop capped at 2 passes that holds when spent"
+        ]
+    );
+
+    let drafted = Plan::edit_draft(
+        &file_value(&editable().to_file()),
+        &[PlanEdit::Link(Edge {
+            key: back,
+            cap: None,
+        })],
+    )
+    .unwrap();
+    assert_eq!(drafted.problems, []);
+    assert_eq!(drafted.notes, edited.notes);
+}
+
+#[test]
+fn a_link_keeps_its_own_cap_and_caps_no_cycle_that_holds_a_loop_edge() {
+    let mut gated = editable()
+        .edit(&[
+            add(PlanNodeKind::Gate),
+            PlanEdit::Link(Edge {
+                key: key("review", Verdict::Clean, "gate"),
+                cap: None,
+            }),
+        ])
+        .unwrap();
+    assert_eq!(gated.notes, Vec::<String>::new());
+    let through_gate = key("gate", Verdict::Open, "build");
+    gated = gated
+        .plan
+        .edit(&[
+            PlanEdit::Link(Edge {
+                key: key("gate", Verdict::Open, "finish"),
+                cap: None,
+            }),
+            PlanEdit::Link(Edge {
+                key: through_gate.clone(),
+                cap: None,
+            }),
+        ])
+        .unwrap();
+    assert_eq!(gated.notes, Vec::<String>::new());
+    let made = gated
+        .plan
+        .edges()
+        .iter()
+        .find(|e| e.key == through_gate)
+        .unwrap();
+    assert_eq!(made.cap, None);
+
+    let own = LoopCap {
+        max: NonZeroU32::new(4).unwrap(),
+        steward_extra: true,
+        when_spent: WhenSpent::Hold,
+    };
+    let back = key("review", Verdict::Findings, "tasks");
+    let edited = editable()
+        .edit(&[PlanEdit::Link(Edge {
+            key: back.clone(),
+            cap: Some(own.clone()),
+        })])
+        .unwrap();
+    assert_eq!(edited.notes, Vec::<String>::new());
+    assert_eq!(
+        edited
+            .plan
+            .edges()
+            .iter()
+            .find(|e| e.key == back)
+            .unwrap()
+            .cap,
+        Some(own)
+    );
+}
+
+#[test]
 fn plain_edits_change_only_what_they_name() {
     let plan = editable();
     let findings = key("review", Verdict::Findings, "build");
@@ -1290,5 +1388,153 @@ mod library_files {
         let refused = library::get(&home, "broken").unwrap_err();
         assert_eq!(refused, LibraryError::Unreadable("broken".to_owned()));
         assert!(refused.to_string().contains("is not JSON"));
+    }
+}
+
+mod skill_warnings {
+    use super::*;
+    use crate::harness::SkillDirs;
+
+    fn skill_node(raw: &str, skill: &str, harness: Option<&str>) -> Value {
+        let mut node = with(node("agent", raw), json!({"skill": skill}));
+        if let Some(harness) = harness {
+            node["assign"] = json!({"harness": harness});
+        }
+        node
+    }
+
+    fn check(home: &std::path::Path, default_harness: Option<&str>) -> SkillCheck {
+        SkillCheck {
+            dirs: SkillDirs::from_env(home.to_str().unwrap(), &[]),
+            default_harness: default_harness.map(str::to_owned),
+        }
+    }
+
+    fn install(home: &std::path::Path, relative: &str) {
+        let path = home.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+
+    fn draft(nodes: Vec<Value>) -> Value {
+        file(nodes, vec![])
+    }
+
+    #[test]
+    fn a_missing_skill_warns_on_its_node_naming_the_skill_the_harness_and_the_places() {
+        let home = tempfile::tempdir().unwrap();
+        let warnings = check(home.path(), None).draft_warnings(&draft(vec![skill_node(
+            "spec",
+            "addy-spec",
+            Some("claude"),
+        )]));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].at, at_node("spec"));
+        let message = &warnings[0].message;
+        assert!(message.contains("skill addy-spec is not installed for claude"));
+        let root = home.path().display();
+        assert!(message.contains(&format!("{root}/.claude/skills/addy-spec/SKILL.md")));
+        assert!(message.contains(&format!("{root}/.claude/commands/addy-spec.md")));
+    }
+
+    #[test]
+    fn an_installed_skill_or_command_does_not_warn() {
+        let home = tempfile::tempdir().unwrap();
+        install(home.path(), ".claude/skills/a/SKILL.md");
+        install(home.path(), ".claude/commands/b.md");
+        let nodes = vec![
+            skill_node("one", "a", Some("claude")),
+            skill_node("two", "b", Some("claude")),
+        ];
+        assert!(
+            check(home.path(), None)
+                .draft_warnings(&draft(nodes))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_skill_installed_only_under_the_checkout_does_not_warn() {
+        let home = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        install(checkout.path(), ".claude/skills/local/SKILL.md");
+        let nodes = || draft(vec![skill_node("n", "local", Some("claude"))]);
+        let with_checkout = SkillCheck {
+            dirs: SkillDirs::from_env(home.path().to_str().unwrap(), &[])
+                .in_checkout(checkout.path().to_str().unwrap()),
+            default_harness: None,
+        };
+        assert!(with_checkout.draft_warnings(&nodes()).is_empty());
+        assert_eq!(check(home.path(), None).draft_warnings(&nodes()).len(), 1);
+    }
+
+    #[test]
+    fn a_chain_warns_on_the_missing_words_alone() {
+        let home = tempfile::tempdir().unwrap();
+        install(home.path(), ".claude/skills/a/SKILL.md");
+        let warnings = check(home.path(), None).draft_warnings(&draft(vec![skill_node(
+            "chain",
+            "a  b",
+            Some("claude"),
+        )]));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("skill b is not installed"));
+    }
+
+    #[test]
+    fn a_node_without_a_harness_uses_the_default_and_skips_when_there_is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let nodes = || draft(vec![skill_node("n", "x", None)]);
+        assert!(check(home.path(), None).draft_warnings(&nodes()).is_empty());
+        let warnings = check(home.path(), Some("cursor")).draft_warnings(&nodes());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("not installed for cursor"));
+        assert!(warnings[0].message.contains("/.cursor/skills/x/SKILL.md"));
+    }
+
+    #[test]
+    fn a_harness_with_no_descriptor_a_namespaced_skill_and_a_built_in_one_never_warn() {
+        let home = tempfile::tempdir().unwrap();
+        let nodes = vec![
+            skill_node("one", "x", Some("codex")),
+            skill_node("two", "plugin:x", Some("claude")),
+            skill_node("three", "simplify", Some("claude")),
+        ];
+        assert!(
+            check(home.path(), None)
+                .draft_warnings(&draft(nodes))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_node_kind_with_a_skill_is_checked_and_the_rest_are_not() {
+        let home = tempfile::tempdir().unwrap();
+        let mut nodes = vec![with(node("conversation", "talk"), json!({"skill": "s"}))];
+        for kind in ["prove", "review", "decide"] {
+            nodes.push(with(node(kind, kind), json!({"skill": "s"})));
+        }
+        nodes.push(gate("gate", "operator"));
+        let warnings = check(home.path(), Some("claude")).draft_warnings(&draft(nodes));
+        let at: Vec<_> = warnings.into_iter().map(|w| w.at).collect();
+        assert_eq!(
+            at,
+            [
+                at_node("talk"),
+                at_node("prove"),
+                at_node("review"),
+                at_node("decide")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_draft_that_is_not_a_plan_file_has_no_warnings() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            check(home.path(), Some("claude"))
+                .draft_warnings(&json!({"nodes": 3}))
+                .is_empty()
+        );
     }
 }

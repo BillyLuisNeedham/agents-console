@@ -28,10 +28,11 @@ pub const ITEM_TITLE_MAX: usize = 200;
 pub const ITEM_BODY_MAX: usize = 16 * 1024;
 
 /// One spawn or item entry the schema rejected: where it sat in the array (absent when the key itself
-/// is malformed) and why.
+/// is malformed), the title a spawn entry gave, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
     pub index: Option<usize>,
+    pub title: Option<String>,
     pub reason: String,
 }
 
@@ -60,6 +61,7 @@ pub struct ValidOutcome {
 fn reject(rejections: &mut Vec<Rejection>, index: usize, reason: impl Into<String>) {
     rejections.push(Rejection {
         index: Some(index),
+        title: None,
         reason: reason.into(),
     });
 }
@@ -87,6 +89,7 @@ pub fn validate_spawn_proposals(raw: Option<&Value>) -> SpawnValidation {
     let Some(entries) = raw.as_array() else {
         out.rejections.push(Rejection {
             index: None,
+            title: None,
             reason: "spawn is not an array".into(),
         });
         return out;
@@ -94,7 +97,15 @@ pub fn validate_spawn_proposals(raw: Option<&Value>) -> SpawnValidation {
     for (index, entry) in entries.iter().enumerate() {
         match validate_one(entry) {
             Ok(proposal) => out.proposals.push(proposal),
-            Err(reason) => reject(&mut out.rejections, index, reason),
+            Err(reason) => out.rejections.push(Rejection {
+                index: Some(index),
+                title: entry
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|title| !js::trim(title).is_empty())
+                    .map(str::to_owned),
+                reason,
+            }),
         }
     }
     out
@@ -201,6 +212,7 @@ pub fn validate_items(raw: Option<&Value>) -> ItemValidation {
     let Some(entries) = raw.as_array() else {
         out.rejections.push(Rejection {
             index: None,
+            title: None,
             reason: "items is not an array".into(),
         });
         return out;
@@ -326,11 +338,27 @@ mod tests {
             valid.spawn_rejections,
             vec![Rejection {
                 index: None,
+                title: None,
                 reason: "spawn is not an array".into()
             }]
         );
         let valid = validate_outcome(&json!({"status": "done", "summary": "s"})).unwrap();
         assert_eq!(valid.outcome.spawn, None);
+    }
+
+    #[test]
+    fn a_rejected_entry_keeps_the_title_it_gave() {
+        let checked = validate_spawn_proposals(Some(&json!([
+            {"title": "Thin", "body": "too short"},
+            {"title": " ", "body": BODY},
+            {"body": BODY, "kind": "epic"},
+        ])));
+        let titles: Vec<Option<&str>> = checked
+            .rejections
+            .iter()
+            .map(|r| r.title.as_deref())
+            .collect();
+        assert_eq!(titles, vec![Some("Thin"), None, None]);
     }
 
     #[test]
@@ -415,6 +443,7 @@ mod tests {
             valid.item_rejections,
             vec![Rejection {
                 index: None,
+                title: None,
                 reason: "items is not an array".into()
             }]
         );

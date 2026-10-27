@@ -110,9 +110,10 @@ pub fn check_steward_config(raw: Option<&Value>) -> Result<(), ConfigError> {
 // a stalled Merge queue head.
 // ---------------------------------------------------------------------------
 
-/// The Interrupt kinds the Steward never answers: the operator's final judgement, and an engine store
-/// failure.
-pub const STEWARD_EXCLUDED_KINDS: [&str; 2] = ["review", "persistence"];
+/// The Interrupt kinds the Steward never answers: the operator's final judgement, an engine store
+/// failure, and a dialog holding a Ticket's pane, which is answered in the pane and raised again while
+/// it stands, so an answer here would only spend the Ticket's Steward budget.
+pub const STEWARD_EXCLUDED_KINDS: [&str; 3] = ["review", "persistence", "dialog"];
 
 /// The Interrupt kinds a Steward may Close while the pool allows it: never a deadlock (ADR-0030).
 pub const STEWARD_CLOSE_KINDS: [&str; 2] = ["checkpoint", "merge-conflict"];
@@ -180,8 +181,8 @@ pub struct StewardPoolView<'a> {
     pub review: Option<StewardReview>,
 }
 
-/// A pending Interrupt the Steward may answer at all: a Ticket's, not review or persistence, not a
-/// Conversation's.
+/// A pending Interrupt the Steward may answer at all: a Ticket's, not review, persistence or dialog,
+/// not a Conversation's.
 pub fn steward_may_answer(ticket_id: &str, kind: &str, conversations: &HashSet<String>) -> bool {
     !STEWARD_EXCLUDED_KINDS.contains(&kind) && !conversations.contains(ticket_id)
 }
@@ -596,6 +597,7 @@ mod tests {
             "merge-approval" => ac_protocol::InterruptKind::MergeApproval,
             "config" => ac_protocol::InterruptKind::Config,
             "deadlock" => ac_protocol::InterruptKind::Deadlock,
+            "dialog" => ac_protocol::InterruptKind::Dialog,
             other => panic!("no kind {other}"),
         };
         Interrupt {
@@ -668,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn tells_every_pending_ticket_interrupt_but_review_persistence_a_conversations_a_queued_one_and_a_left_one()
+    fn tells_every_pending_ticket_interrupt_but_review_persistence_dialog_a_conversations_a_queued_one_and_a_left_one()
      {
         let mut v = view();
         v.interrupts = vec![
@@ -679,6 +681,7 @@ mod tests {
             interrupt("02", "crash", "crashed"),
             interrupt("03", "merge-approval", "staged"),
             interrupt("04", "config", "no model"),
+            interrupt("05", "dialog", "auto-mode setup dialog"),
         ];
         v.conversations.insert("conv-1".into());
         v.queued.insert("02".into());

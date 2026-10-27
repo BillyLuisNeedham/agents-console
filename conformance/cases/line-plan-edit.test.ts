@@ -4,13 +4,15 @@
  * rev, which GET /api/line and line.json show. A stale rev, and an edit that would orphan live run
  * state, are refused with nothing changed. Linking a parked verdict hands it on, so the next tick
  * writes the downstream Ticket. An unlinked loop edge keeps its count, so a relink resumes it and
- * never raises a hold id twice. The frozen copy changes and the Plan library does not.
+ * never raises a hold id twice. Placing a Merger moves a spent loop edge onto it with its count
+ * and its hold, so the cap never resets for free. The frozen copy changes and the Plan library
+ * does not.
  */
 
 import { expect } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LineFile, LinePlanEditResponse, PlanEditFile } from "../../protocol/wire.ts";
+import type { LineFile, LinePlanEditResponse, PlanEditFile, PlanNodeFile } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { readStateLine, until } from "../harness/pool-files.ts";
 import { answer, statuses } from "../harness/pool-run.ts";
@@ -72,6 +74,8 @@ conformance("line", "an edit bumps the Plan's rev in GET /api/line and line.json
 conformance("line", "linking a parked verdict hands it on, and the next tick writes the downstream Ticket blocked by the one that parked it", async (t) => {
   const world = lineWorld(t);
   world.stubs.script("test-1", FAIL);
+  // Held, so agent-1 cannot finish and merge in place, which steps its Ticket file aside, while the case reads it.
+  const agent = world.stubs.hold("agent-1");
   const server = await t.start(world);
   await begun(server, { plan: TESTED, work: "#1" });
   const parked = await until(
@@ -94,6 +98,7 @@ conformance("line", "linking a parked verdict hands it on, and the next tick wri
   await untilLaunched(world, ["agent-1"]);
   expect(readStateLine(world.pool, "agent-1.md").line).toContain("blocked-by=test-1");
   expect((await lineOf(server))?.nodes.find((n) => n.id === "test")?.parked).toEqual([]);
+  await agent.release();
 });
 
 conformance("line", "unlinking and relinking a spent loop edge that a Resume bought past keeps its count, so its next spend raises a fresh hold", async (t) => {
@@ -120,5 +125,64 @@ conformance("line", "unlinking and relinking a spent loop edge that a Resume bou
   await prove.release();
   const spent = await atCheckpoint(server, "prove-fail-implement-4");
   expect(statuses(spent)).toMatchObject({ "prove-fail-implement-3": "done", "prove-fail-implement-4": "checkpoint" });
+  expect(launches(world)).not.toContain("implement-5");
+});
+
+conformance("line", "a Link that closes a cycle with no cap lands as a loop capped at 2 that holds when spent, says so in its notes, and hands the parked verdict back round it", async (t) => {
+  const world = lineWorld(t);
+  world.stubs.script("test-1", FAIL);
+  const build = world.stubs.hold("build-2");
+  const server = await t.start(world);
+  await begun(server, { plan: TESTED, work: "#1" });
+  await until(
+    () => lineOf(server),
+    (line) => line?.nodes.find((n) => n.id === "test")?.parked.includes("fail") ?? false,
+    { what: "test's fail to park", ms: 30_000 },
+  );
+
+  const linked = await server.http.post("/api/line/plan", { baseRev: 0, edits: [{ edit: "link", edge: edge("test", "fail", "build") }] });
+  expect(linked.status, linked.text).toBe(200);
+  expect(linked.json<LinePlanEditResponse>()).toEqual({
+    rev: 1,
+    notes: ["`test.fail -> build` closes a cycle, so it is a loop capped at 2 passes that holds when spent"],
+  });
+  const loop = { from: "test", on: "fail", to: "build", cap: { max: 2, stewardExtra: false, whenSpent: "hold" } };
+  expect((JSON.parse(lineFile(world)) as LineFile).plan.edges).toContainEqual(loop);
+  await untilLaunched(world, ["build-2"]);
+  expect((await lineOf(server))?.edges.find((e) => e.edge.on === "fail")).toMatchObject({ max: 2 });
+  await build.release();
+});
+
+conformance("line", "placing a Merger on a spent loop's node moves the loop onto it with its count and its hold, so only a Resume buys another pass", async (t) => {
+  const world = lineWorld(t);
+  for (const id of ["prove-1", "prove-2", "prove-3", "prove-4"]) world.stubs.script(id, FAIL);
+  const server = await t.start(world);
+  await begun(server);
+  await atCheckpoint(server, "prove-fail-implement-3");
+
+  const line = await lineOf(server);
+  const prove = line!.plan.nodes.find((n) => n.id === "prove")!;
+  const placed = await server.http.post("/api/line/plan", {
+    baseRev: line!.rev,
+    edits: [{ edit: "setNode", node: { ...prove, copies: { perItem: "all" } } as PlanNodeFile }],
+  });
+  expect(placed.status, placed.text).toBe(200);
+  const loop = (await lineOf(server))?.edges.find((e) => e.edge.on === "fail");
+  expect(loop).toMatchObject({
+    edge: { from: "prove-merge", on: "fail", to: "implement" },
+    count: 2,
+    max: 2,
+    bought: 0,
+    hold: "prove-fail-implement-3",
+  });
+  expect(launches(world)).not.toContain("implement-4");
+
+  await answer(server, { ticketId: "prove-fail-implement-3" });
+  const spent = await atCheckpoint(server, "prove-merge-fail-implement-4");
+  expect(statuses(spent)).toMatchObject({
+    "prove-fail-implement-3": "done",
+    "prove-merge-fail-implement-4": "checkpoint",
+  });
+  expect(launches(world)).toContain("implement-4");
   expect(launches(world)).not.toContain("implement-5");
 });

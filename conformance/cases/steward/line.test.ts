@@ -3,7 +3,7 @@
  * which of the Line's checkpoints and holds are its, it answers a Ticket's no-verdict checkpoint
  * and a spent `stewardExtra` loop's hold once until that loop resets, it is never told of the
  * Finish hold or the Finish Ticket and its answer or reassign there is refused, nor of the Line once
- * it has ended, it decides a Held spawn proposed from inside the Line only while
+ * it has ended, it may reassign only a Line Ticket whose Interrupts it may answer, it decides a Held spawn proposed from inside the Line only while
  * `steward.mayAdoptLineSpawns` is true, and it edits the Line's Plan only while the Plan says
  * `stewardEdits`, never widening what it may answer or touching the Finish: it opens an
  * `open: steward` gate and is refused at an `open: operator` one.
@@ -62,6 +62,14 @@ async function post(server: CaseServer, path: string, body: unknown): Promise<{ 
 
 const refused = (why: string) => ({ status: 409, body: { reason: `steward: ${why}` } });
 
+/** Every id the Steward's state names that is the Finish's: its hold or its act Ticket. */
+async function finishIdsInState(server: CaseServer, id: string): Promise<string[]> {
+  const state = (await server.http.get(`/api/steward/state?conversation=${id}`)).json<StewardStateResponse>();
+  return [...state.interrupts.map((i) => i.ticketId), ...state.mergeQueue.map((m) => m.ticketId)].filter((ticket) =>
+    ticket.startsWith("finish-"),
+  );
+}
+
 conformance(
   "steward",
   "in a Line pool the Steward answers a no-verdict checkpoint but is never told of the Finish hold and is refused there",
@@ -113,10 +121,7 @@ conformance(
     ).toEqual(
       refused("finish-1 is the Line's Finish: approving the Line and its act are the operator's, never the Steward's"),
     );
-    const state = await server.http.get(`/api/steward/state?conversation=${id}`);
-    expect(state.json<{ interrupts: { ticketId: string; answerable: boolean }[] }>().interrupts).toMatchObject([
-      { ticketId: "finish-1", answerable: false },
-    ]);
+    expect(await finishIdsInState(server, id)).toEqual([]);
 
     // The idle Steward pane would have been told by now; it never is, and nothing is logged on finish-1.
     await Bun.sleep(3_000);
@@ -151,6 +156,7 @@ conformance(
     const reassign = (ticket: string) =>
       post(server, "/api/steward/reassign", { conversation: id, tickets: [ticket], fields: { model: "big" } });
     expect(await reassign("finish-1")).toEqual(finishRefusal("finish-1"));
+    expect(await finishIdsInState(server, id)).toEqual([]);
 
     expect((await server.http.post("/api/resume", { ticketId: "finish-1", note: "approved" })).status).toBe(202);
     const acting = await untilInterrupt(server, "finish-1-act", "checkpoint", 60_000);
@@ -159,6 +165,7 @@ conformance(
       await post(server, "/api/steward/answer", { conversation: id, ticketId: "finish-1-act", action: "resume", note: "the url" }),
     ).toEqual(finishRefusal("finish-1-act"));
     expect(await reassign("finish-1-act")).toEqual(finishRefusal("finish-1-act"));
+    expect(await finishIdsInState(server, id)).toEqual([]);
     expect(readEvents(sw.world.pool, "finish-1-act").filter((e) => e.kind === "reassign-requested")).toEqual([]);
 
     expect((await server.http.post("/api/resume", { ticketId: "finish-1-act", note: "record the url" })).status).toBe(202);
@@ -294,14 +301,19 @@ conformance(
 
 conformance(
   "steward",
-  "the Steward edits the Line's Plan only while it says stewardEdits and never widens its own powers, opening a steward gate but refused at an operator one",
+  "the Steward edits the Line's Plan only while it says stewardEdits and never widens its own powers, opening a steward gate but refused at an operator one and at reassigning a checkpoint: operator node's Ticket",
   async (t) => {
     const sw = await lineStewardWorld(t);
     driveOutcomes(sw.herdr, { "draft-1": [done()] });
     const server = await sw.start();
     const gated = {
       ...plan(
-        [node.agent("draft"), node.gate("approve", "steward"), node.gate("sign", "operator"), node.finish()],
+        [
+          node.agent("draft", { checkpoint: "operator" }),
+          node.gate("approve", "steward"),
+          node.gate("sign", "operator"),
+          node.finish(),
+        ],
         [edge("draft", "done", "approve"), edge("approve", "open", "sign"), edge("sign", "open", "finish")],
         "Gated",
       ),
@@ -310,6 +322,10 @@ conformance(
     await begun(server, { plan: gated, work: "#1" });
     await untilInterrupt(server, "approve-1", "checkpoint", 60_000);
     const id = await enlistSteward(server);
+    expect(
+      await post(server, "/api/steward/reassign", { conversation: id, tickets: ["draft-1"], fields: { model: "big" } }),
+    ).toEqual(refused("draft-1 is the Line's, and its Plan leaves it to the operator"));
+    expect(readEvents(sw.world.pool, "draft-1").filter((e) => e.kind === "reassign-requested")).toEqual([]);
     expect(turnsInto(sw.herdr, STEWARD_PANE).join("\n")).toContain(
       "This Plan lets you edit it with plan <rev> <edits>: rev is the one state prints on its Line Plan line",
     );
@@ -322,7 +338,7 @@ conformance(
     expect(await edit(0, [{ edit: "setNode", node: node.gate("sign", "steward") }])).toEqual(
       refused("the Steward may not give itself powers the operator did not: the gate sign opening on steward"),
     );
-    expect(await edit(0, [{ edit: "setNode", node: node.agent("draft", { spawns: "land" }) }])).toEqual(
+    expect(await edit(0, [{ edit: "setNode", node: node.agent("draft", { checkpoint: "operator", spawns: "land" }) }])).toEqual(
       refused("the Steward may not give itself powers the operator did not: draft's spawns on land"),
     );
     expect(await edit(0, [{ edit: "setNode", node: { ...node.finish(), act: "pr" } }])).toEqual(

@@ -15,13 +15,14 @@ use serde_json::Value;
 use ac_core::fleet::default_registry_path;
 use ac_core::js;
 use ac_core::machine_defaults::default_machine_defaults_paths;
+use ac_core::stat_cache::now_ms;
 use ac_io::git::git_line;
 use ac_io::herdr::default_socket_path;
 use ac_io::own_exe::own_exe;
 use ac_protocol::PlanBootResponse;
 use ac_server::{LineBoot, LineBootRefusal, PoolServerOptions, Server};
 
-use crate::boot::home_dir;
+use crate::boot::{home_dir, process_env};
 use crate::detach::spawn_detached;
 
 /// Well past the children's TERM grace plus the drive's settle wait: a stop that has not finished by
@@ -72,7 +73,7 @@ impl StopAndExit {
 /// to the pool's boot log, on the port the route promised the tab, passed as a pin even when nothing
 /// pinned it. Port 0 is any free port, never a pin, so it is never passed on.
 fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
-    let (_, log) = open_boot_log(Path::new(pool_dir))?;
+    let (_, log) = open_runs_log(Path::new(pool_dir), "boot.log")?;
     let here = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Boot may run in another directory, so a pool named relative to this one is named in full.
     let pool = if Path::new(pool_dir).is_relative() {
@@ -98,10 +99,10 @@ fn hand_off_to_boot(pool_dir: &str, port: &Value) -> Result<(), String> {
     spawn_boot(&boot_command(&exe, args, here), log)
 }
 
-fn open_boot_log(pool_dir: &Path) -> Result<(PathBuf, File), String> {
+fn open_runs_log(pool_dir: &Path, name: &str) -> Result<(PathBuf, File), String> {
     let runs = pool_dir.join("runs");
     js::mkdir_all(&runs).map_err(|err| err.to_string())?;
-    let path = runs.join("boot.log");
+    let path = runs.join(name);
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -128,6 +129,12 @@ fn line_boot_args(boot: &LineBoot) -> Vec<String> {
         .to_vec()
 }
 
+/// A Line Boot's own log in the pool's runs: never `boot.log`, which the pool's own Boot and Restart
+/// write.
+fn line_boot_log_name(boot: &LineBoot, at_ms: i64) -> String {
+    format!("plans-boot-{}-{at_ms}.log", boot.plan)
+}
+
 fn main_worktree(pool_dir: &Path) -> Option<PathBuf> {
     let listed = git_line(pool_dir, ["worktree", "list", "--porcelain"])?;
     let main = PathBuf::from(listed.lines().next()?.strip_prefix("worktree ")?);
@@ -146,7 +153,8 @@ fn hand_off_line_boot(
         ))
     })?;
     let argv = line_boot_args(boot);
-    let (log_path, log) = open_boot_log(&pool).map_err(LineBootRefusal::Launch)?;
+    let (log_path, log) = open_runs_log(&pool, &line_boot_log_name(boot, now_ms()))
+        .map_err(LineBootRefusal::Launch)?;
     let exe = own_exe().map_err(|err| LineBootRefusal::Launch(format!("{err}")))?;
     let command = BootCommand {
         cwd: project.clone(),
@@ -278,16 +286,7 @@ pub fn run(args: Vec<String>) -> ! {
         on_restart_requested: Some(on_restart),
         on_line_boot_requested: Some(on_line_boot),
         machine_defaults_paths: default_machine_defaults_paths(&home),
-        parent_env: std::sync::Arc::new(
-            std::env::vars_os()
-                .map(|(k, v)| {
-                    (
-                        k.to_string_lossy().into_owned(),
-                        v.to_string_lossy().into_owned(),
-                    )
-                })
-                .collect(),
-        ),
+        parent_env: std::sync::Arc::new(process_env()),
         home: home.clone(),
         starter: None,
     };
@@ -409,6 +408,18 @@ mod tests {
                 "fix the flaky test",
                 "--yes"
             ]
+        );
+    }
+
+    #[test]
+    fn a_console_started_line_logs_to_a_file_of_its_own_named_for_its_plan_and_start() {
+        let boot = LineBoot {
+            plan: "addy-commands".to_owned(),
+            work: "37".to_owned(),
+        };
+        assert_eq!(
+            line_boot_log_name(&boot, 1_760_000_000_000),
+            "plans-boot-addy-commands-1760000000000.log"
         );
     }
 

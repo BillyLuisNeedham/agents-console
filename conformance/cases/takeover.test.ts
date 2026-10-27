@@ -109,7 +109,9 @@ takeover<StubHold>("restart", "a terminal-backed Attempt live in its pane is re-
       leg,
       (snapshot) => {
         const ticket = ticketIn(snapshot, "01");
-        const adopted = leg.index === 0 || interrupts(snapshot).includes("01:checkpoint");
+        // A taken-over leg's boot shows the re-adoption before its drive settles on it.
+        const adopted =
+          leg.index === 0 || (interrupts(snapshot).includes("01:checkpoint") && snapshot.phase === "quiescent");
         return ticket.status === "in-progress" && ticket.liveAttempt !== null && adopted;
       },
       leg.index === 0 ? "01's Attempt live in its pane" : "01's Attempt re-adopted from its pane",
@@ -434,8 +436,10 @@ takeover<StubHold>("restart", "a live Conversation is re-adopted from its pane b
       (snapshot) => {
         const conversation = conversationIn(snapshot);
         // The Turn state has read the pane at least once, so what it shows
-        // is the pane's, not a fresh launch's empty line.
+        // is the pane's, not a fresh launch's empty line, and the drive has
+        // settled, which a taken-over leg's boot does after the re-adoption.
         return (
+          snapshot.phase === "quiescent" &&
           conversation.status === "live" &&
           conversation.paneId !== null &&
           conversation.turn.lastLine === "Claude Code v9.9.9" &&

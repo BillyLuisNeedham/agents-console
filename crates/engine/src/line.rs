@@ -899,6 +899,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_pending_spawn_the_tick_holds_is_what_the_finish_waits_for_once_the_tick_is_over() {
+        use ac_core::line::run::{Blocker, LineStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = line_pool(dir.path());
+        session.spawn_proposals =
+            ac_core::spawn_proposals::load_spawn_proposals(std::path::Path::new(&session.runs_dir))
+                .unwrap();
+        super::advance_line(&mut session).unwrap();
+        set_status(&mut session, "build-1", TicketStatus::Done);
+        super::advance_line(&mut session).unwrap();
+        let waiting = |session: &Session| match session.line.as_ref().unwrap().status() {
+            LineStatus::Finishing { waiting_for } => waiting_for.clone(),
+            other => panic!("the Line is {other:?}, not at its Finish"),
+        };
+        assert_eq!(waiting(&session), []);
+
+        // Valid when proposed, and refused when the tick lands it: 02 has left the pool.
+        let mut waited_on = session.marker("build-1").unwrap().clone();
+        waited_on.id = "02".into();
+        waited_on.node = None;
+        session.markers.push(waited_on);
+        let proposal = serde_json::from_value(json!({
+            "title": "Waits on 02",
+            "body": "A body long enough to stand as a ticket.",
+            "blockedBy": ["02"]
+        }))
+        .unwrap();
+        crate::spawns::take_spawn_proposals(
+            &mut session,
+            "conv-1",
+            vec![proposal],
+            ac_protocol::SpawnKind::Conversation,
+        )
+        .unwrap();
+        session.markers.retain(|marker| marker.id != "02");
+
+        let snapshots = session.publisher.subscribe();
+        let engine =
+            crate::actor::Engine::spawn(session, snapshots, |s, engine| s.engine = Some(engine));
+        let after = engine
+            .call(move |s| {
+                crate::drive::tick(s).unwrap();
+                waiting(s)
+            })
+            .await
+            .unwrap();
+        assert_eq!(after, [Blocker::HeldSpawn("proposal-1".into())]);
+    }
+
     #[test]
     fn a_conversation_pass_reads_as_its_merged_brief_else_as_its_record() {
         use ac_core::conversation_record::ConversationRecord;

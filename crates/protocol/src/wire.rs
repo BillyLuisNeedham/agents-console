@@ -327,6 +327,9 @@ wire_enum! {
         Config = "config",
         Crash = "crash",
         Deadlock = "deadlock",
+        /// A claude dialog holding a live Ticket's agent mid-run, which the engine never answers;
+        /// the dialog watch clears it when the dialog leaves the pane or the attempt ends.
+        Dialog = "dialog",
         MergeConflict = "merge-conflict",
         MergeApproval = "merge-approval",
         Persistence = "persistence",
@@ -2296,6 +2299,10 @@ wire_struct! {
         pub preset: bool,
         pub plan: Unchecked<PlanFile>,
         pub problems: Vec<PlanProblem>,
+        /// Advisory only, and left out when there are none: things the machine lacks (a skill a node
+        /// names that its harness cannot find). They never stop a Save or a Boot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub warnings: Vec<PlanProblem>,
     }
 }
 
@@ -2310,6 +2317,10 @@ wire_struct! {
     /// Every problem with the draft, none when it is valid.
     pub struct PlanValidateResponse {
         pub problems: Vec<PlanProblem>,
+        /// Advisory only, and left out when there are none: things the machine lacks (a skill a node
+        /// names that its harness cannot find). They never stop a Save or a Boot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub warnings: Vec<PlanProblem>,
     }
 }
 
@@ -2460,6 +2471,10 @@ wire_struct! {
     pub struct PlanDraftResponse {
         pub plan: PlanFile,
         pub problems: Vec<PlanProblem>,
+        /// Advisory only, and left out when there are none: things the machine lacks (a skill a node
+        /// names that its harness cannot find). They never stop a Save or a Boot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub warnings: Vec<PlanProblem>,
         pub notes: Vec<String>,
         pub verdicts: Vec<PlanNodeVerdicts>,
     }

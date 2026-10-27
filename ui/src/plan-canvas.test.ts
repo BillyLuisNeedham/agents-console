@@ -76,6 +76,33 @@ describe("PlanCanvas", () => {
     expect(t.root.querySelectorAll(".plan-node")).toHaveLength(2);
   });
 
+  it("flags a node with warnings and no problems amber, with the messages as its tooltip", () => {
+    const t = setup();
+    t.model.warnings = [{ at: { kind: "node", id: "build" }, message: "skill tdd is not installed for claude" }];
+    t.draw();
+    const card = t.root.querySelector('.plan-node[data-node="build"]')!;
+    expect(card.classList.contains("plan-node-warning")).toBe(true);
+    expect(card.classList.contains("plan-node-problem")).toBe(false);
+    expect(card.getAttribute("title")).toBe("skill tdd is not installed for claude");
+    expect(card.querySelector(".plan-node-flag")?.textContent).toBe("1 warning");
+    const other = t.root.querySelector('.plan-node[data-node="finish"]')!;
+    expect(other.classList.contains("plan-node-warning")).toBe(false);
+    expect(other.querySelector(".plan-node-flag")).toBeNull();
+  });
+
+  it("gives the one flag to the problems when a node has both", () => {
+    const t = setup();
+    t.model.problems = [{ at: { kind: "node", id: "build" }, message: "no skill" }];
+    t.model.warnings = [{ at: { kind: "node", id: "build" }, message: "skill tdd is not installed for claude" }];
+    t.draw();
+    const card = t.root.querySelector('.plan-node[data-node="build"]')!;
+    expect(card.classList.contains("plan-node-problem")).toBe(true);
+    expect(card.classList.contains("plan-node-warning")).toBe(true);
+    expect(card.querySelectorAll(".plan-node-flag")).toHaveLength(1);
+    expect(card.querySelector(".plan-node-flag")?.textContent).toBe("1 problem");
+    expect(card.getAttribute("title")).toBe("no skill\nskill tdd is not installed for claude");
+  });
+
   it("links a verdict port dragged onto a card, and sends nothing for a drop on blank", () => {
     const t = setup();
     const port = t.root.querySelector('.plan-port[data-on="closed"]')!;

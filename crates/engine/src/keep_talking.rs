@@ -710,22 +710,7 @@ fn end_continued_attempt(
             },
         },
     };
-    if let Ok(valid) = &read
-        && decision.crash_reason.is_none()
-    {
-        for (kind, payload) in rejection_events(valid) {
-            append_event(runs(session), ticket_id, &event_now(attempt, kind, payload))?;
-        }
-    }
-
     if !work.numbered || decision.crash_reason.is_some() || read.is_err() {
-        if !work.numbered
-            && decision.crash_reason.is_none()
-            && let Ok(valid) = &read
-            && let Some(proposals) = valid.outcome.spawn.as_ref().filter(|p| !p.is_empty())
-        {
-            take_spawn_proposals(session, ticket_id, proposals.clone(), SpawnKind::Ticket)?;
-        }
         return record_adopted_exit(
             session,
             &marker,
@@ -742,6 +727,9 @@ fn end_continued_attempt(
     let Ok(valid) = read else {
         return Ok(());
     };
+    for (kind, payload) in rejection_events(&valid) {
+        append_event(runs(session), ticket_id, &event_now(attempt, kind, payload))?;
+    }
     let outcome = valid.outcome;
     let mut exited = Map::new();
     exited.insert("code".into(), Value::from(0));
@@ -1374,13 +1362,13 @@ mod tests {
         assert_eq!(
             events.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
             [
-                TicketEventKind::SpawnPending,
                 TicketEventKind::Exited,
+                TicketEventKind::SpawnPending,
                 TicketEventKind::Checkpoint
             ]
         );
-        assert_eq!(events[0].1["pending"][0]["title"], "Follow-up");
-        assert_eq!(events[1].1["status"], "checkpoint");
+        assert_eq!(events[0].1["status"], "checkpoint");
+        assert_eq!(events[1].1["pending"][0]["title"], "Follow-up");
         let pending = s.spawn_proposals.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].parent_id, "01");
@@ -1395,11 +1383,21 @@ mod tests {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let outcome = format!(
-            r#"{{"status": "done", "summary": "s", "commitSha": null, "spawn": {PROPOSAL}}}"#
-        );
-        let mut s = continuing_with_spawns(dir.path(), &outcome);
+        let outcome = r#"{"status": "done", "summary": "s", "commitSha": null, "spawn": [
+            {"title": "Follow-up", "body": "A body long enough to stand as a ticket."},
+            {"title": "Thin", "body": "too short"}]}"#;
+        let mut s = continuing_with_spawns(dir.path(), outcome);
         end_continued_attempt(&mut s, "01", 2, ContinuedEnding::Outcome).unwrap();
+        let rejected: Vec<_> = attempt_two(&s)
+            .into_iter()
+            .filter(|(kind, _)| *kind == TicketEventKind::SpawnRejected)
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(
+            rejected,
+            [serde_json::json!({"title": "Thin", "index": 1,
+                "reason": "proposal body is missing or thin (needs 20+ characters)"})]
+        );
         let pending = s.spawn_proposals.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].parent_id, "01");

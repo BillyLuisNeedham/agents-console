@@ -45,6 +45,7 @@ export interface DrawnNode {
   at: Point;
   ports: DrawnPort[];
   problems: string[];
+  warnings: string[];
   lines: string[];
   chips: string[];
 }
@@ -91,6 +92,8 @@ export interface PlanDrawing {
 export interface PlanProjectionInput {
   plan: PlanFile;
   problems: readonly PlanProblem[];
+  /** Non-blocking findings about a node: drawn on it, never counted against Save or Boot. */
+  warnings?: readonly PlanProblem[];
   verdicts: ReadonlyMap<string, readonly string[]>;
   places: ReadonlyMap<string, Point>;
   /** A label for an edge, by its key text, where the static one would mislead (the live Line's counts). */
@@ -98,8 +101,9 @@ export interface PlanProjectionInput {
 }
 
 export function projectPlan(input: PlanProjectionInput): PlanDrawing {
-  const { plan, problems, verdicts, places, edgeLabels } = input;
+  const { plan, problems, warnings = [], verdicts, places, edgeLabels } = input;
   const nodeProblems = new Map<string, string[]>();
+  const nodeWarnings = new Map<string, string[]>();
   const edgeProblems = new Map<string, string[]>();
   const planProblems: string[] = [];
   const ids = new Set(plan.nodes.map((node) => node.id));
@@ -112,6 +116,9 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
     else if (at.kind === "edge" && drawnEdges.has(edgeKeyText(at)))
       push(edgeProblems, edgeKeyText(at), problem.message);
     else planProblems.push(problem.message);
+  }
+  for (const warning of warnings) {
+    if (warning.at.kind === "node" && ids.has(warning.at.id)) push(nodeWarnings, warning.at.id, warning.message);
   }
 
   const nodes = plan.nodes.map((node): DrawnNode => {
@@ -130,7 +137,14 @@ export function projectPlan(input: PlanProjectionInput): PlanDrawing {
         at: { x: at.x + mid * CARD_W, y: at.y + CARD_H },
       };
     });
-    return { node, at, ports, problems: nodeProblems.get(node.id) ?? [], ...cardText(node) };
+    return {
+      node,
+      at,
+      ports,
+      problems: nodeProblems.get(node.id) ?? [],
+      warnings: nodeWarnings.get(node.id) ?? [],
+      ...cardText(node),
+    };
   });
 
   const byId = new Map(nodes.map((n) => [n.node.id, n]));

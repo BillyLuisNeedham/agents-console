@@ -497,8 +497,10 @@ const TICK_STEPS: [fn(&mut Session) -> anyhow::Result<()>; 6] = [
     crate::config_reload::reload_config,
     crate::answers::drain_answers,
     crate::interrupts::reconcile_deadlocks,
-    crate::line::advance_line,
+    // After the spawns land, are held or are refused: the Finish reads what it waits for from them,
+    // and a drive that closes on this tick would never read them again.
     crate::spawns::adopt_spawn_proposals,
+    crate::line::advance_line,
     start_owed_grading,
 ];
 
@@ -680,6 +682,9 @@ fn record_exit(session: &mut Session, result: TicketResult) -> anyhow::Result<()
         )?;
     }
     session.apply(result.update.clone());
+    if !session.live_attempts.is_live(&result.marker.id) {
+        crate::dialog_watch::clear_at_ending(session, &result.marker.id);
+    }
     let attempt = result.plan.attempt;
     if result.plan.verify {
         if let Some(group) = session.verify_groups.get_mut(&result.marker.id) {

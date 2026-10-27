@@ -34,6 +34,7 @@ import type {
   PlanDraftResponse,
   PlanEditFile,
   PlanFile,
+  PlanProblem,
 } from "../../protocol/wire.ts";
 import type { SessionSocket } from "../src/session";
 
@@ -444,6 +445,9 @@ const FACTORY_TODAY: PlanFile = {
 };
 
 const planEdits: PlanEditFile[][] = [];
+/** What plans.get and plans.edit answer in `warnings`; left out of the answer when empty, as core does. */
+let planWarnings: PlanProblem[] = [];
+const warningsOf = () => (planWarnings.length ? { warnings: planWarnings } : {});
 let heldEdits: (() => void)[] | null = null;
 
 function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftResponse> {
@@ -462,6 +466,7 @@ function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftRespo
   const reply: PlanDraftResponse = {
     plan: doc,
     problems: [],
+    ...warningsOf(),
     notes: [],
     verdicts: doc.nodes.map((n) => ({ id: n.id, verdicts: PLAN_VERDICTS[n.kind] ?? [] })),
   };
@@ -475,12 +480,14 @@ function fakeEdit(plan: PlanFile, edits: PlanEditFile[]): Promise<PlanDraftRespo
 /** Every `line.plan.edit` the Line view sent; core applies each at the next rev unless `lineRefusal` is set. */
 const lineEdits: LinePlanEditRequest[] = [];
 let lineRefusal: string | null = null;
+/** The notes core answers the next edits with, as it does when it caps a Link that closes a cycle. */
+let lineNotes: string[] = [];
 const LINE_REFUSAL =
   "implement has 3 live copies: their work must end before the node is removed (pool/harness/implement-1, pool/harness/implement-2, pool/harness/implement-3)";
 
 function fakeLineEdit(baseRev: number, edits: PlanEditFile[]): Promise<LinePlanEditResponse> {
   lineEdits.push({ baseRev, edits });
-  return lineRefusal ? Promise.reject(new Error(lineRefusal)) : Promise.resolve({ rev: baseRev + 1, notes: [] });
+  return lineRefusal ? Promise.reject(new Error(lineRefusal)) : Promise.resolve({ rev: baseRev + 1, notes: lineNotes });
 }
 
 const root = document.getElementById("app") as HTMLElement;
@@ -568,7 +575,7 @@ const view = new ConsoleView({
         },
       ],
     }),
-  onGetPlan: (slug) => Promise.resolve({ slug, preset: true, plan: FACTORY_TODAY, problems: [] }),
+  onGetPlan: (slug) => Promise.resolve({ slug, preset: true, plan: FACTORY_TODAY, problems: [], ...warningsOf() }),
   onEditPlan: fakeEdit,
   onSavePlan: (slug, plan) => Promise.resolve({ slug, plan }),
   onDeletePlan: () => Promise.resolve(),
@@ -1653,6 +1660,89 @@ async function plansChecks(): Promise<void> {
   );
 }
 
+const SKILL_WARNING =
+  "skill tdd is not installed for claude (looked in /home/harness/.claude/skills/tdd/SKILL.md, /home/harness/.claude/commands/tdd.md)";
+
+async function plansWarningChecks(): Promise<void> {
+  const name = "plans view warnings";
+  stage = name;
+  const push = (assertion: string, failure: string | null, ok: string) =>
+    report.push({ scenario: name, assertion, pass: failure === null, detail: failure ?? ok });
+
+  q<HTMLButtonElement>(".plans-pane .plans-close")?.click();
+  await settleAll();
+  q<HTMLButtonElement>(".plans-pane .plans-discard")?.click();
+  await settleAll();
+  planWarnings = [{ at: { kind: "node", id: "implement" }, message: SKILL_WARNING }];
+  await openFactoryToday();
+
+  const card = planCard("implement");
+  const flag = card?.querySelector(".plan-node-flag")?.textContent ?? null;
+  const probe = document.createElement("span");
+  probe.style.color = "var(--interrupt)";
+  root.append(probe);
+  const errorRed = getComputedStyle(probe).color;
+  probe.remove();
+  push(
+    "a node with a warning is marked and flagged, not drawn as an error",
+    !card
+      ? "no implement card"
+      : !card.classList.contains("plan-node-warning") || card.classList.contains("plan-node-problem")
+        ? `classes ${card.className}`
+        : flag !== "1 warning"
+          ? `flag reads ${JSON.stringify(flag)}`
+          : getComputedStyle(card).borderTopColor === errorRed
+            ? `border is the error red ${errorRed}`
+            : null,
+    `plan-node-warning, flag "1 warning", border ${card ? getComputedStyle(card).borderTopColor : ""} apart from the error red ${errorRed}`,
+  );
+  push(
+    "only the named node carries the warning",
+    root.querySelectorAll(".plans-pane .plan-node-warning").length === 1 ? null : `${root.querySelectorAll(".plans-pane .plan-node-warning").length} cards marked`,
+    "one card marked",
+  );
+
+  const head = card?.querySelector(".plan-node-head");
+  const viewport = q<HTMLElement>(".plans-pane .plan-viewport");
+  if (head && viewport) {
+    const p = middle(head);
+    pointer("pointerdown", head, p.x, p.y);
+    pointer("pointerup", viewport, p.x, p.y);
+    await settleAll();
+  }
+  const shown = q(".plans-pane .plan-inspector .plan-warnings .plan-warning")?.textContent ?? null;
+  push(
+    "the inspector lists the selected node's warning",
+    shown === SKILL_WARNING && !q(".plans-pane .plan-inspector .plan-problems") ? null : `inspector reads ${JSON.stringify(shown)}`,
+    "the message under the node's heading, no problem list",
+  );
+
+  const boot = q<HTMLButtonElement>(".plans-pane .plans-boot");
+  push(
+    "a clean Plan with a warning can still be booted",
+    boot && !boot.disabled ? null : `Boot ${boot ? "disabled" : "missing"}`,
+    "Boot a Line is enabled",
+  );
+
+  const prove = planCard("prove")?.querySelector(".plan-node-head");
+  if (prove && viewport) {
+    const r = prove.getBoundingClientRect();
+    pointer("pointerdown", prove, r.left + 20, r.top + 10);
+    pointer("pointermove", viewport, r.left + 80, r.top + 30);
+    pointer("pointerup", viewport, r.left + 80, r.top + 30);
+    await settleAll();
+  }
+  const saveAs = q<HTMLButtonElement>(".plans-pane .plans-save-as");
+  push(
+    "an edited draft with a warning and no problem can be saved",
+    saveAs && !saveAs.disabled && planCard("implement")?.querySelector(".plan-node-flag")?.textContent === "1 warning"
+      ? null
+      : `Save as ${saveAs ? (saveAs.disabled ? "disabled" : "enabled") : "missing"}, flag ${planCard("implement")?.querySelector(".plan-node-flag")?.textContent}`,
+    "Save as is enabled after an edit, the flag still on implement",
+  );
+  planWarnings = [];
+}
+
 const lineCard = (id: string) => q<HTMLElement>(`.line-pane .plan-node[data-node="${id}"]`);
 const lineDot = (id: string) => q<HTMLElement>(`.line-pane .plan-dot[data-card="ticket:${id}"]`);
 const lineEdge = (key: string) => q<SVGGElement>(`.line-pane .plan-edges [data-key="edge:${key}"]`);
@@ -1680,6 +1770,18 @@ function lineMovedOn(snap: EnrichedSnapshot): EnrichedSnapshot {
         ...snap.state.tickets.map((t) => (t.id === "implement-2" ? { ...t, status: "done" as const, liveAttempt: null } : t)),
         ticket("implement-4", { status: "in-progress", liveAttempt: agentAttempt(1, null) }),
       ],
+    },
+  };
+}
+
+/** The same pass once a copy's pane never got its prompt: the engine raised a crash Interrupt for it. */
+function lineCopyStuck(snap: EnrichedSnapshot, ticketId: string): EnrichedSnapshot {
+  return {
+    ...snap,
+    seq: snap.seq + 1,
+    state: {
+      ...snap.state,
+      interrupts: [...snap.state.interrupts, { ticketId, kind: "crash", body: "prompt never landed" }],
     },
   };
 }
@@ -1781,6 +1883,27 @@ async function lineChecks(): Promise<void> {
     'implement-2 turned done in the same node, implement-4 appeared, 2 queued, "2 running · 2 queued", pan held',
   );
 
+  stage = `${name}: stuck copy`;
+  session.setSnapshot(lineCopyStuck(next, "implement-4"));
+  render();
+  await settle();
+  const stuck = lineDot("implement-4");
+  const stuckColour = stuck ? getComputedStyle(stuck).backgroundColor : null;
+  const runningColour = getComputedStyle(lineDot("implement-3")!).backgroundColor;
+  const stuckText = lineCard("implement")?.querySelector(".plan-node-state")?.textContent;
+  push(
+    "a running copy whose Ticket has an open Interrupt draws as waiting on the operator",
+    stuck !== fresh
+      ? "the stuck copy's dot was replaced"
+      : !stuck?.classList.contains("plan-dot-interrupted") || stuckColour === runningColour || stuckText !== "needs you"
+        ? `dot ${stuck?.className} in ${stuckColour} beside running ${runningColour}, state "${stuckText}"`
+        : null,
+    `implement-4 turned interrupted in the same node, ${stuckColour} not running ${runningColour}, "needs you"`,
+  );
+  session.setSnapshot(next);
+  render();
+  await settle();
+
   stage = `${name}: copy click-through`;
   const target = lineDot("implement-3");
   if (!target) {
@@ -1827,6 +1950,38 @@ function lineLinked(snap: EnrichedSnapshot): EnrichedSnapshot {
       rev: line.rev + 1,
       plan: { ...line.plan, edges: [...line.plan.edges, { from: "review", on: "findings", to: "decide" }] },
       nodes: line.nodes.map((n) => (n.id === "review" ? { ...n, parked: [] } : n)),
+    },
+  };
+}
+
+/** The linked Line once Decide's another-round parks: no edge takes it yet. */
+function lineRoundParked(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  return {
+    ...snap,
+    seq: 502,
+    line: {
+      ...line,
+      nodes: line.nodes.map((n) => (n.id === "decide" ? { ...n, verdicts: ["ship", "another-round"], parked: ["another-round"] } : n)),
+    },
+  };
+}
+
+const LOOP_NOTE = "`decide.another-round -> implement` closes a cycle, so it is a loop capped at 2 passes that holds when spent";
+
+/** The Line once core took the loop-back Link and capped it at 2: the next rev, the loop drawn with its count. */
+function lineLooped(snap: EnrichedSnapshot): EnrichedSnapshot {
+  const line = snap.line!;
+  const round = { from: "decide", on: "another-round", to: "implement" };
+  return {
+    ...snap,
+    seq: 503,
+    line: {
+      ...line,
+      rev: line.rev + 1,
+      plan: { ...line.plan, edges: [...line.plan.edges, { ...round, cap: { max: 2, stewardExtra: false, whenSpent: "hold" } }] },
+      nodes: line.nodes.map((n) => (n.id === "decide" ? { ...n, parked: [] } : n)),
+      edges: [...line.edges, { edge: round, count: 0, max: 2, bought: 0 }],
     },
   };
 }
@@ -1911,7 +2066,8 @@ async function lineEditChecks(): Promise<void> {
     lineEdge("review.findings>decide") ? "drawn before the snapshot" : null,
     "not drawn from the reply alone",
   );
-  session.setSnapshot(lineLinked(shown));
+  const linked = lineLinked(shown);
+  session.setSnapshot(linked);
   await settleAll();
   const after = q('.line-pane .plan-port[data-node="review"][data-on="findings"]')?.textContent;
   push(
@@ -1920,8 +2076,57 @@ async function lineEditChecks(): Promise<void> {
     "review.findings>decide drawn, the port reads findings",
   );
 
+  stage = `${name}: loop`;
+  await lineLoopChecks(push, linked);
   stage = `${name}: refusal`;
   await lineRefusalChecks(push);
+}
+
+/** A parked verdict dragged back onto an ancestor: one plain Link goes, and the loop core capped is drawn with its cap. */
+async function lineLoopChecks(
+  push: (assertion: string, failure: string | null, ok: string) => void,
+  linked: EnrichedSnapshot,
+): Promise<void> {
+  const parked = lineRoundParked(linked);
+  session.setSnapshot(parked);
+  await settleAll();
+  const rev = parked.line!.rev;
+  const viewport = q<HTMLElement>(".line-pane .plan-viewport");
+  const port = q<HTMLElement>('.line-pane .plan-port[data-node="decide"][data-on="another-round"]');
+  const implement = lineCard("implement");
+  if (!viewport || !port || !implement) {
+    push("a parked verdict dragged back onto an ancestor lands a capped loop", `viewport ${!!viewport}, parked port ${!!port}, implement ${!!implement}`, "");
+    return;
+  }
+  const from = middle(port);
+  const to = middle(implement);
+  const before = lineEdits.length;
+  lineNotes = [LOOP_NOTE];
+  pointer("pointerdown", port, from.x, from.y);
+  pointer("pointermove", viewport, (from.x + to.x) / 2, (from.y + to.y) / 2);
+  pointer("pointermove", viewport, to.x, to.y);
+  pointer("pointerup", viewport, to.x, to.y);
+  await settleAll();
+  lineNotes = [];
+  const sent = lineEdits.slice(before);
+  const want: LinePlanEditRequest[] = [{ baseRev: rev, edits: [{ edit: "link", edge: { from: "decide", on: "another-round", to: "implement" } }] }];
+  push(
+    "a parked verdict dragged back onto an ancestor sends one plain Link, leaving the cap to core",
+    JSON.stringify(sent) === JSON.stringify(want) ? null : `sent ${JSON.stringify(sent)}`,
+    `one Link decide.another-round → implement at rev ${rev}`,
+  );
+  const note = q(".line-pane .line-note")?.textContent;
+  push("core's note on the loop it capped stands in the Line view", note === LOOP_NOTE ? null : `note reads "${note}"`, LOOP_NOTE);
+  session.setSnapshot(lineLooped(parked));
+  await settleAll();
+  const label = lineEdge("decide.another-round>implement")?.querySelector(".plan-edge-label")?.textContent ?? null;
+  push(
+    "the snapshot at the next rev draws the loop with its cap of 2 on the edge label",
+    label?.includes("another-round · 0/2") ? null : `label reads "${label}"`,
+    `label reads "${label}"`,
+  );
+  q<HTMLButtonElement>(".line-dismiss")?.click();
+  await settleAll();
 }
 
 /**
@@ -2267,6 +2472,7 @@ async function main(): Promise<void> {
   await closeSelectedChecks();
   await settingsTyping();
   await plansChecks();
+  await plansWarningChecks();
   await lineChecks();
   await lineEditChecks();
   await lineConversationChecks();

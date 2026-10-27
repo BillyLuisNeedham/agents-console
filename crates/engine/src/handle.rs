@@ -100,6 +100,7 @@ impl Engine {
                 crate::enlisted::dispose(s);
                 crate::keep_talking::release_continued_attempts(s);
                 crate::pane_survey::stop_pane_survey(s);
+                crate::dialog_watch::stop_dialog_watch(s);
                 crate::persist::close_store(s);
                 // The farewell: one `stopped` snapshot carrying the final state (issue #97).
                 crate::snapshot::emit_snapshot(s, RunPhase::Stopped);

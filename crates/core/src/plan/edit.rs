@@ -9,6 +9,7 @@ pub(super) fn apply(plan: &Plan, edits: &[PlanEdit]) -> Result<Edited, Vec<PlanP
         nodes,
         edges,
         notes,
+        moved,
         mut problems,
     } = Editing::from_plan(plan).run(edits);
     let checked = validate(Draft {
@@ -19,7 +20,7 @@ pub(super) fn apply(plan: &Plan, edits: &[PlanEdit]) -> Result<Edited, Vec<PlanP
         whole: true,
     });
     match checked {
-        Ok(plan) if problems.is_empty() => Ok(Edited { plan, notes }),
+        Ok(plan) if problems.is_empty() => Ok(Edited { plan, notes, moved }),
         Ok(_) => Err(problems),
         Err(more) => {
             problems.extend(more);
@@ -35,6 +36,7 @@ pub(super) fn draft(value: &Value, edits: &[PlanEdit]) -> Result<DraftEdited, Ve
         edges,
         notes,
         problems,
+        ..
     } = Editing::from_draft(read_lossless(value)?).run(edits);
     if !problems.is_empty() {
         return Err(problems);
@@ -57,8 +59,12 @@ struct Editing {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     notes: Vec<String>,
+    moved: Vec<(EdgeKey, EdgeKey)>,
     problems: Vec<PlanProblem>,
 }
+
+/// The cap a Link gets when it closes a cycle with no loop edge and names no cap of its own.
+const LOOP_CAP: u32 = 2;
 
 fn edges_word(n: usize) -> String {
     if n == 1 {
@@ -83,6 +89,7 @@ impl Editing {
             nodes: draft.nodes,
             edges: draft.edges,
             notes: Vec::new(),
+            moved: Vec::new(),
             problems: Vec::new(),
         }
     }
@@ -162,6 +169,18 @@ impl Editing {
                     ));
                     edge.key.from = merger;
                 }
+                if edge.cap.is_none() && self.closes_bare_cycle(&edge.key) {
+                    let EdgeKey { from, on, to } = &edge.key;
+                    self.notes.push(format!(
+                        "`{from}.{} -> {to}` closes a cycle, so it is a loop capped at {LOOP_CAP} passes that holds when spent",
+                        on.as_str()
+                    ));
+                    edge.cap = Some(LoopCap {
+                        max: NonZeroU32::new(LOOP_CAP).expect("the default cap is not 0"),
+                        steward_extra: false,
+                        when_spent: WhenSpent::Hold,
+                    });
+                }
                 self.edges.push(edge);
             }
             PlanEdit::Unlink(key) => match self.edge(key) {
@@ -195,6 +214,40 @@ impl Editing {
             .iter()
             .find(|n| matches!(&n.body, NodeBody::Merger(merger) if &merger.of == id))
             .map(|n| n.id.clone())
+    }
+
+    /// Whether `key` would close a cycle that holds no loop edge: its `to` already reaches its
+    /// `from` over edges that route, none capped and none leaving an operator or Steward Gate or
+    /// the Finish, and it leaves no such node itself.
+    fn closes_bare_cycle(&self, key: &EdgeKey) -> bool {
+        let find = |id: &NodeId| self.nodes.iter().find(|node| &node.id == id);
+        let bare = |from: &NodeId, on: Verdict| {
+            find(from).is_some_and(|node| {
+                node.body.vocabulary(find).contains(&on) && !node.body.leaves_a_person()
+            })
+        };
+        if !bare(&key.from, key.on) {
+            return false;
+        }
+        let mut seen = vec![&key.to];
+        let mut stack = vec![&key.to];
+        while let Some(at) = stack.pop() {
+            if at == &key.from {
+                return true;
+            }
+            for edge in &self.edges {
+                let next = &edge.key.to;
+                if &edge.key.from == at
+                    && edge.cap.is_none()
+                    && bare(at, edge.key.on)
+                    && !seen.contains(&next)
+                {
+                    seen.push(next);
+                    stack.push(next);
+                }
+            }
+        }
+        false
     }
 
     fn node_problem(&mut self, id: &NodeId, message: String) {
@@ -255,7 +308,9 @@ impl Editing {
         let mut moved = 0;
         for edge in &mut self.edges {
             if &edge.key.from == id && &edge.key.to != merger {
+                let was = edge.key.clone();
                 edge.key.from = merger.clone();
+                self.moved.push((was, edge.key.clone()));
                 moved += 1;
                 if !verdicts.contains(&edge.key.on) {
                     verdicts.push(edge.key.on);
@@ -296,7 +351,9 @@ impl Editing {
         let mut moved = 0;
         for edge in &mut self.edges {
             if &edge.key.from == merger {
+                let was = edge.key.clone();
                 edge.key.from = of.clone();
+                self.moved.push((was, edge.key.clone()));
                 moved += 1;
             }
         }

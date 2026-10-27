@@ -831,6 +831,17 @@ fn gated(open: &str) -> Plan {
 }
 
 #[test]
+fn an_entry_ticket_reads_an_issue_number_as_the_issue_a_conversation_reads() {
+    let mut run =
+        LineRun::start(gated("operator"), places(), LineStart::Work("37".into())).unwrap();
+    let first = tick(&mut run, &mut Pool::default());
+    assert!(ticket(&first, "draft-1").body.contains(
+        "## The Line's work\n\nThe piece of work for this Line is issue #37. Read it (gh issue \
+         view 37)."
+    ));
+}
+
+#[test]
 fn an_operator_gate_holds_and_its_answers_open_revise_or_close() {
     let (mut run, mut pool) = work_run(gated("operator"));
     let first = tick(&mut run, &mut pool);
@@ -1117,7 +1128,7 @@ fn work_on_a_plan_with_an_entry_conversation_opens_its_first_pass() {
     );
     assert!(grill.opening.contains(
         "## The Line's work\n\nThe piece of work for this Line is issue #186. Read it (gh issue \
-         view 186) and grill me on it.\n\nThis Line was cut from `main` at `abc123`."
+         view 186).\n\nThis Line was cut from `main` at `abc123`."
     ));
     assert_eq!(run.live_conversation(&node("grill")), Some(&id("grill-1")));
     assert_eq!(
@@ -1680,6 +1691,112 @@ fn a_steward_extra_loop_that_moves_onto_a_merger_is_no_new_power() {
     assert_eq!(rev(&run), 1);
 }
 
+fn one_copy(run: &LineRun, id: &str) -> PlanEdit {
+    let NodeBody::Ticket(mut body) = run.plan().0.node(&node(id)).unwrap().body.clone() else {
+        panic!("{id} is a Ticket node")
+    };
+    body.copies = Copies::One;
+    PlanEdit::SetNode {
+        id: node(id),
+        title: id.into(),
+        body: NodeBody::Ticket(body),
+    }
+}
+
+/// Factory today with Prove failed `fails` times, each fail ticked.
+fn failed(fails: u32) -> (LineRun, Pool) {
+    let (mut run, mut pool) = started("none");
+    for n in 1..=fails {
+        pool.agent(&format!("implement-{n}"));
+        tick(&mut run, &mut pool);
+        pool.prove(&format!("prove-{n}"), false);
+        tick(&mut run, &mut pool);
+    }
+    (run, pool)
+}
+
+#[test]
+fn placing_a_merger_on_a_spent_loop_keeps_its_hold_and_its_count() {
+    let (mut run, mut pool) = failed(3);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    assert!(run.is_hold(&id("prove-fail-implement-3")));
+    assert!(
+        written(&tick(&mut run, &mut pool)).is_empty(),
+        "the hold is not raised again"
+    );
+
+    pool.answer("prove-fail-implement-3", None, true);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-4"]);
+    pool.agent("implement-4");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-4", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-merge-fail-implement-4"],
+        "the bought pass is the only one: the cap did not reset"
+    );
+}
+
+#[test]
+fn placing_a_merger_on_a_half_spent_loop_keeps_its_count() {
+    let (mut run, mut pool) = failed(1);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    pool.agent("implement-2");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-2", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-3"]);
+    pool.agent("implement-3");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-3", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-merge-fail-implement-3"]
+    );
+}
+
+#[test]
+fn lifting_a_merger_from_a_spent_loop_keeps_its_hold_and_never_repeats_a_hold_id() {
+    let (mut run, mut pool) = failed(3);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    run.edit(Editor::Operator, rev(&run), &[one_copy(&run, "prove")])
+        .unwrap();
+    assert!(run.is_hold(&id("prove-fail-implement-3")));
+    assert!(written(&tick(&mut run, &mut pool)).is_empty());
+
+    pool.answer("prove-fail-implement-3", None, true);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-4"]);
+    pool.agent("implement-4");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-4", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-fail-implement-4"]
+    );
+}
+
+#[test]
+fn lifting_a_merger_from_a_half_spent_loop_keeps_its_count() {
+    let (mut run, mut pool) = failed(1);
+    run.edit(Editor::Operator, rev(&run), &[per_item(&run, "prove")])
+        .unwrap();
+    run.edit(Editor::Operator, rev(&run), &[one_copy(&run, "prove")])
+        .unwrap();
+    pool.agent("implement-2");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-2", false);
+    assert_eq!(written(&tick(&mut run, &mut pool)), ["implement-3"]);
+    pool.agent("implement-3");
+    tick(&mut run, &mut pool);
+    pool.prove("prove-3", false);
+    assert_eq!(
+        written(&tick(&mut run, &mut pool)),
+        ["prove-fail-implement-3"]
+    );
+}
+
 #[test]
 fn the_steward_edits_only_a_plan_that_lets_it_and_never_widens_its_own_powers() {
     let capped = || {
@@ -1932,9 +2049,17 @@ fn with_a_merger_the_next_ticket_waits_for_every_copy_to_be_done_and_merged() {
         Vec::<String>::new(),
         "done is not merged"
     );
+    let merger = |run: &LineRun| run.view().nodes[4].clone();
+    assert_eq!(merger(&run).id, "build-merge");
+    assert_eq!(merger(&run).passes, 0, "nothing is folded yet");
     pool.agent("build-1.5");
     let after = tick(&mut run, &mut pool);
     assert_eq!(written(&after), ["after-1"]);
+    assert_eq!(
+        merger(&run).passes,
+        1,
+        "the Merger counts the pass it folded"
+    );
     let blocked: Vec<_> = [
         "build-1.1",
         "build-1.2",

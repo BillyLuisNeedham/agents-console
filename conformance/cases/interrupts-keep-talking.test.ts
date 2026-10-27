@@ -348,8 +348,8 @@ conformance(
         .filter((e) => e.attempt === 2 && e.kind !== "spawned" && e.kind !== "spawn-adopted")
         .map((e) => [e.kind, e.payload]),
       [
-        ["spawn-pending", { pending: [{ id: "proposal-1", title: "Follow-up" }] }],
         ["exited", { code: 0, status: "checkpoint", logTail: [], outcomeExists: true }],
+        ["spawn-pending", { pending: [{ id: "proposal-1", title: "Follow-up" }] }],
         ["checkpoint", {}],
       ],
       "attempt 2's events",

@@ -1,9 +1,10 @@
 /**
  * Peek and the pane read register (issue #122), seen from outside the server
  * (ADR-0036): GET /api/terminal/peek answers from the engine's own last read
- * of a pane one of its loops watches (an enlisted attempt's, a
- * Conversation's), and reads herdr live, of the viewport only, for a pane no
- * loop watches (a spawned attempt's, a Held pane). Rows of the `herdr` area
+ * of a pane one of its Turn loops watches (an enlisted attempt's, a
+ * Conversation's), and reads herdr live, of the viewport only, for any other
+ * pane (a spawned attempt's, which only the dialog watch also reads, and a
+ * Held pane). Rows of the `herdr` area
  * in the Rust port inventory (docs/research/rust-port/test-inventory.md,
  * ticket C15), the area's gap on Peek, and two `enlist` rows on the reads an
  * enlisted attempt makes.
@@ -186,7 +187,7 @@ conformance(
 // gap: engine/server.ts:2246 and engine/herdr.ts:359 (Peek of a pane no Turn loop watches)
 conformance(
   "herdr",
-  "peek reads a pane no loop watches live, of the viewport only, and a blank one is empty text",
+  "peek reads a spawned attempt's pane and a Held pane live, of the viewport only, and a blank one is empty text",
   async (t) => {
     const { world } = terminalWorld(t, { tickets: [readyTicket("01", "Blank")] });
     const herdr = await fakeHerdr(t, world);
@@ -200,7 +201,10 @@ conformance(
     expect(live.status).toBe(200);
     expect(live.json<object>()).toEqual({ ticket: "01", paneId: typed.paneId, text: "" });
     await herdr.settle();
-    expect(readsOf(herdr, typed.paneId, from)).toEqual([viewportRead(typed.paneId)]);
+    // The dialog watch reads a live claude pane too, on its own cadence, so its reads may fall beside the peek's.
+    const reads = readsOf(herdr, typed.paneId, from);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).toEqual(reads.map(() => viewportRead(typed.paneId)));
 
     // The same pane held at a checkpoint: no loop watches a Held pane either.
     writeFileSync(typed.outcomePath, JSON.stringify(CHECKPOINT));

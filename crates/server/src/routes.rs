@@ -8,11 +8,13 @@ use std::collections::HashSet;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use ac_core::assignment::default_harness;
 use ac_core::config::read_config;
+use ac_core::harness::SkillDirs;
 use ac_core::js;
 use ac_core::machine_defaults::write_machine_defaults;
 use ac_core::plan::library::{self, LibraryError};
-use ac_core::plan::{Plan, PlanEdit};
+use ac_core::plan::{Plan, PlanEdit, SkillCheck};
 use ac_core::pool_settings::{relaunch_port, write_pool_settings};
 use ac_engine::EngineError;
 use ac_engine::enlist::list_enlist_panes;
@@ -23,8 +25,7 @@ use ac_protocol::{
     EnlistConversationWireRequest, EnlistRequest, EnlistStewardWireRequest, EnlistTicketRequest,
     LinePlanEditRequest, LineResponse, LogAttemptInfo, POOL_LOG_WINDOW, PlanBootRequest,
     PlanDraftResponse, PlanEditRequest, PlanNodeVerdicts, PlanResponse, PlanSaveResponse,
-    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction,
-    StartConversationRequest,
+    PlanValidateResponse, PlansListResponse, RequestKind, ResumeAction, StartConversationRequest,
 };
 
 use crate::reads::{self, LogRange, POOL_LOG_MAX_LINES};
@@ -330,39 +331,57 @@ pub fn plans_list_request(server: &Server) -> Answer {
     Answer::ok(200, &PlansListResponse { plans })
 }
 
-/// GET /api/plans/<slug>: the Plan's file as it stands, with what is wrong with it.
+/// GET /api/plans/<slug>: the Plan's file as it stands, with what is wrong with it and what the
+/// machine lacks for it.
 pub fn plan_get_request(server: &Server, slug: &str) -> Answer {
     match library::get(&server.0.home, slug) {
-        Ok(stored) => Answer::ok(
-            200,
-            &PlanResponse {
-                slug: stored.slug,
-                preset: stored.preset,
-                plan: Unchecked::new(stored.file),
-                problems: stored.problems,
-            },
-        ),
+        Ok(stored) => {
+            let warnings = skill_check(server).draft_warnings(&stored.file);
+            Answer::ok(
+                200,
+                &PlanResponse {
+                    slug: stored.slug,
+                    preset: stored.preset,
+                    plan: Unchecked::new(stored.file),
+                    problems: stored.problems,
+                    warnings,
+                },
+            )
+        }
         Err(err) => library_refusal(err),
     }
 }
 
 /// POST /api/plans/validate: a draft Plan, checked whole.
-pub fn plan_validate_request(body: Body) -> Answer {
+pub fn plan_validate_request(server: &Server, body: Body) -> Answer {
     let checked = body.and_then(|body| {
         field_of(&body, "plan")
-            .map(Plan::check)
+            .map(|plan| (Plan::check(plan), skill_check(server).draft_warnings(plan)))
             .ok_or_else(|| "plan is required".to_owned())
     });
     match checked {
-        Ok(problems) => Answer::ok(200, &PlanValidateResponse { problems }),
+        Ok((problems, warnings)) => Answer::ok(200, &PlanValidateResponse { problems, warnings }),
         Err(err) => Answer::refused(400, Field::Reason, err),
+    }
+}
+
+// The pool's view of where skills install: this machine's directories and the pool's checkout, and the
+// harness a node that names none launches on, which is the pool's `defaults.harness` (a console.json that does not read has
+// none).
+fn skill_check(server: &Server) -> SkillCheck {
+    SkillCheck {
+        dirs: SkillDirs::from_env(&server.0.home, &server.0.parent_env)
+            .in_checkout(&server.0.checkout),
+        default_harness: read_config(server.pool_dir())
+            .ok()
+            .and_then(|config| default_harness(&config)),
     }
 }
 
 /// POST /api/plans/edit: typed edits on a draft, answered with the draft they make. Writes nothing. A
 /// body that is not `{plan, edits}`, an edit that cannot be read or misses, or a draft the edits
 /// would drop or rewrite is refused whole.
-pub fn plan_edit_request(body: Body) -> Answer {
+pub fn plan_edit_request(server: &Server, body: Body) -> Answer {
     let refused = |reason: String| Answer::refused(400, Field::Reason, reason);
     let request: PlanEditRequest = match plans_request(body) {
         Ok(request) => request,
@@ -371,22 +390,26 @@ pub fn plan_edit_request(body: Body) -> Answer {
     let edited = PlanEdit::read_all(&request.edits)
         .and_then(|edits| Plan::edit_draft(&request.plan.value, &edits));
     match edited {
-        Ok(edited) => Answer::ok(
-            200,
-            &PlanDraftResponse {
-                plan: edited.file,
-                problems: edited.problems,
-                notes: edited.notes,
-                verdicts: edited
-                    .verdicts
-                    .into_iter()
-                    .map(|(id, verdicts)| PlanNodeVerdicts {
-                        id,
-                        verdicts: verdicts.iter().map(|v| v.as_str().to_owned()).collect(),
-                    })
-                    .collect(),
-            },
-        ),
+        Ok(edited) => {
+            let warnings = skill_check(server).warnings(&edited.file);
+            Answer::ok(
+                200,
+                &PlanDraftResponse {
+                    plan: edited.file,
+                    problems: edited.problems,
+                    warnings,
+                    notes: edited.notes,
+                    verdicts: edited
+                        .verdicts
+                        .into_iter()
+                        .map(|(id, verdicts)| PlanNodeVerdicts {
+                            id,
+                            verdicts: verdicts.iter().map(|v| v.as_str().to_owned()).collect(),
+                        })
+                        .collect(),
+                },
+            )
+        }
         Err(problems) => {
             let messages: Vec<_> = problems.into_iter().map(|p| p.message).collect();
             refused(format!(
@@ -1147,7 +1170,7 @@ pub async fn socket_request(
         RequestKind::PanesList => panes_request(server).await,
         RequestKind::PlansList => plans_list_request(server),
         RequestKind::PlansGet => plan_get_request(server, &field("slug")),
-        RequestKind::PlansValidate => plan_validate_request(body()),
+        RequestKind::PlansValidate => plan_validate_request(server, body()),
         RequestKind::PlansSave => plan_save_request(
             server,
             &field("slug"),
@@ -1157,7 +1180,7 @@ pub async fn socket_request(
                 .ok_or_else(|| "plan is required".to_owned()),
         ),
         RequestKind::PlansDelete => plan_delete_request(server, &field("slug")),
-        RequestKind::PlansEdit => plan_edit_request(body()),
+        RequestKind::PlansEdit => plan_edit_request(server, body()),
         RequestKind::PlansBoot => plan_boot_request(server, body()).await,
         RequestKind::LinePlanEdit => line_plan_edit_request(server, body()).await,
         RequestKind::LogRead => {

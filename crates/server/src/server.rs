@@ -174,6 +174,8 @@ pub(crate) struct Inner {
 /// The server, shared by every task that serves it.
 pub(crate) struct Shared {
     pub pool_dir: String,
+    /// The checkout the pool runs in, where the harnesses load project skills from.
+    pub checkout: String,
     pub runs_dir: PathBuf,
     pub issues_dir: PathBuf,
     pub pool_name: String,
@@ -346,6 +348,7 @@ impl Server {
         let ticket_ids = meta.iter().map(|m| m.id.clone()).collect();
         let conversation_ids = conversations.into_iter().map(|c| c.id).collect();
         let shared = Arc::new(Shared {
+            checkout: ac_io::git::repo_root_of(&pool_dir),
             runs_dir: std::path::Path::new(&pool_dir).join("runs"),
             issues_dir: std::path::Path::new(&pool_dir).join("issues"),
             pool_name,

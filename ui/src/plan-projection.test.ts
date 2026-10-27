@@ -83,6 +83,25 @@ describe("projectPlan", () => {
     expect(drawing.planProblems).toEqual(["names no node", "unknown node", "no name"]);
   });
 
+  it("puts each warning on its node, apart from the problems, and drops one that names no node", () => {
+    const drawing = projectPlan({
+      plan,
+      problems: [{ at: { kind: "node", id: "prove" }, message: "unreachable" }],
+      warnings: [
+        { at: { kind: "node", id: "build" }, message: "skill tdd is not installed for claude" },
+        { at: { kind: "node", id: "build" }, message: "skill spec is not installed for claude" },
+        { at: { kind: "node", id: "gone" }, message: "names no node" },
+      ],
+      verdicts,
+      places: new Map(),
+    });
+    const build = drawing.nodes.find((n) => n.node.id === "build")!;
+    expect(build.warnings).toEqual(["skill tdd is not installed for claude", "skill spec is not installed for claude"]);
+    expect(build.problems).toEqual([]);
+    expect(drawing.nodes.find((n) => n.node.id === "prove")!.warnings).toEqual([]);
+    expect(drawing.planProblems).toEqual([]);
+  });
+
   it("draws a held place over the document's, and routes its edges from there", () => {
     const moved = draw([], new Map([["prove", { x: 400, y: 300 }]]));
     expect(moved.nodes.find((n) => n.node.id === "prove")!.at).toEqual({ x: 400, y: 300 });

@@ -342,6 +342,54 @@ describe("PlansStore: problems and notes", () => {
   });
 });
 
+describe("PlansStore: warnings", () => {
+  const warn = (id: string): PlanProblem => ({ at: { kind: "node", id }, message: `skill tdd is not installed for claude (${id})` });
+
+  it("shows a warning from the opening answer on its node and in the inspector, and keeps Save and Boot on", async () => {
+    const t = setup();
+    await t.opened("mine", DOC, { warnings: [warn("build")] });
+    const build = t.$('.plan-node[data-node="build"]')!;
+    expect(build.classList.contains("plan-node-warning")).toBe(true);
+    expect(build.classList.contains("plan-node-problem")).toBe(false);
+    expect(build.querySelector(".plan-node-flag")?.textContent).toBe("1 warning");
+    expect(t.$('.plan-node[data-node="prove"]')!.classList.contains("plan-node-warning")).toBe(false);
+    t.store.select({ kind: "node", id: "build" });
+    expect(t.$(".plan-inspector .plan-warnings .plan-warning")?.textContent).toBe("skill tdd is not installed for claude (build)");
+    expect(t.$(".plan-inspector .plan-problems")).toBeNull();
+    expect(t.$<HTMLButtonElement>(".plans-boot")!.disabled).toBe(false);
+    t.store.move("build", { x: 99, y: 60 });
+    const moved = { ...DOC, nodes: DOC.nodes.map((n) => (n.id === "build" ? { ...n, x: 99 } : n)) };
+    t.edits[1]!.d.resolve(reply(moved, { warnings: [warn("build")] }));
+    await tick();
+    expect(t.$<HTMLButtonElement>(".plans-save")!.disabled).toBe(false);
+  });
+
+  it("takes the warnings from each edit's answer, so a fixed node loses its flag", async () => {
+    const t = setup();
+    await t.opened("mine", DOC, { warnings: [warn("build")] });
+    t.store.move("build", { x: 99, y: 60 });
+    t.edits[1]!.d.resolve(reply(DOC));
+    await tick();
+    expect(t.$('.plan-node[data-node="build"]')!.classList.contains("plan-node-warning")).toBe(false);
+    expect(t.$(".plan-node-flag")).toBeNull();
+  });
+
+  it("falls back to the library read's warnings on a Plan core cannot edit", async () => {
+    const t = setup();
+    void t.store.open();
+    t.lists[0]!.resolve({ plans: LIST });
+    await tick();
+    t.store.openPlan("broken");
+    await tick();
+    t.gets[0]!.d.resolve({ slug: "broken", preset: false, plan: DOC, problems: [], warnings: [warn("build")] });
+    await tick();
+    t.edits[0]!.d.reject(new Error("`build` has a field core does not read: colour"));
+    await tick();
+    expect(t.$('.plan-node[data-node="build"]')!.classList.contains("plan-node-warning")).toBe(true);
+    expect(t.$(".plan-inspector .plan-warning")?.textContent).toContain("is not installed");
+  });
+});
+
 describe("PlansStore: the inspector", () => {
   it("holds a title's typed text while it is out, then commits it as one setNode", async () => {
     const t = setup();

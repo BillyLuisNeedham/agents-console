@@ -372,6 +372,9 @@ pub(crate) fn rejection_events(valid: &ValidOutcome) -> Vec<(TicketEventKind, Ma
         .chain(items)
         .map(|(kind, rejection)| {
             let mut payload = Map::new();
+            if let Some(title) = &rejection.title {
+                payload.insert("title".into(), Value::String(title.clone()));
+            }
             payload.insert("reason".into(), Value::String(rejection.reason.clone()));
             if let Some(index) = rejection.index {
                 payload.insert("index".into(), Value::from(index));

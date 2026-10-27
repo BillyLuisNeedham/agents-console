@@ -70,7 +70,7 @@ function graph(rev: number, plan: PlanFile = PLAN, parked = ["fail"]): LineGraph
   };
 }
 
-const at = (g: LineGraphView): LineLive => projectLine(g, [{ id: "build-1", status: "done" }], [], null);
+const at = (g: LineGraphView): LineLive => projectLine(g, [{ id: "build-1", status: "done" }], [], [], null);
 
 function setup(rev = 3) {
   const sent: { baseRev: number; edits: PlanEditFile[]; d: Deferred<LinePlanEditResponse> }[] = [];
@@ -127,6 +127,18 @@ describe("LinePane: edits on a running Line", () => {
     t.push(at(graph(4, { ...PLAN, edges: [...PLAN.edges, { from: "test", on: "fail", to: "build" }] }, [])));
     expect(t.$('[data-key="edge:test.fail>build"]')).not.toBeNull();
     expect(t.$('.plan-port[data-node="test"][data-on="fail"]')?.textContent).toBe("fail");
+  });
+
+  it("lands a loop-back link as core caps it: its note stands in the view and the edge label carries the cap", async () => {
+    const t = setup(3);
+    t.pane.change({ kind: "edit", edit: LINK });
+    const note = "`test.fail -> build` closes a cycle, so it is a loop capped at 2 passes that holds when spent";
+    t.sent[0]!.d.resolve({ rev: 4, notes: [note] });
+    await tick();
+    expect(t.$(".line-pane .line-note")?.textContent).toBe(note);
+    const capped = { from: "test", on: "fail", to: "build", cap: { max: 2, stewardExtra: false, whenSpent: "hold" as const } };
+    t.push(at(graph(4, { ...PLAN, edges: [...PLAN.edges, capped] }, [])));
+    expect(t.$('[data-key="edge:test.fail>build"] .plan-edge-label')?.textContent).toContain("fail · 2");
   });
 
   it("holds what queues while a batch is out until the snapshot reaches the rev core applied it at, then sends it from that Plan", async () => {

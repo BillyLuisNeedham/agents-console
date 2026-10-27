@@ -11,7 +11,7 @@
  */
 
 import { expect } from "bun:test";
-import type { PlanEdgeFile, PlanFile, PlanResponse, PlanSummary, PlansListResponse } from "../../protocol/wire.ts";
+import type { PlanEdgeFile, PlanFile, PlanResponse, PlanSummary, PlanValidateResponse, PlansListResponse } from "../../protocol/wire.ts";
 import { conformance } from "../harness/case.ts";
 import { plansPool } from "./plans-support.ts";
 
@@ -69,7 +69,7 @@ conformance("plans", "every Preset's file validates with no problems", async (t)
     expect([body.slug, body.preset, body.plan.author, body.plan.source, body.problems]).toEqual([slug, true, author, source, []]);
 
     const checked = await server.http.post("/api/plans/validate", { plan: body.plan });
-    expect([slug, checked.status, checked.json()]).toEqual([slug, 200, { problems: [] }]);
+    expect([slug, checked.status, checked.json<PlanValidateResponse>().problems]).toEqual([slug, 200, []]);
   }
 });
 

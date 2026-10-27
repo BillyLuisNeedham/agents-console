@@ -1,8 +1,8 @@
 /**
  * The Spawn proposal schema in Outcomes, and the reserved '-spawn-'
  * namespace at pool start (ADR-0010, ADR-0036): what an attempt's Outcome
- * may propose, the reason each malformed proposal is rejected with, and
- * which hand-written Ticket files refuse to boot. An Outcome's `items`
+ * may propose, the reason each malformed proposal is rejected with beside
+ * the title it gave, and which hand-written Ticket files refuse to boot. An Outcome's `items`
  * (ADR-0041) are checked the same way: each entry outside the bounds is
  * dropped with an `item-rejected` event naming its index and why, and the
  * attempt still ends done.
@@ -41,6 +41,12 @@ function ids(n: number): string[] {
 /** The payloads of a Ticket's spawn-rejected events, in order. */
 function rejections(world: World, id: string): unknown[] {
   return eventsOf(world, id, "spawn-rejected").map((event) => event.payload);
+}
+
+/** The title a rejected spawn entry's event carries: the entry's own, when it gave one. */
+function titleOf(entry: unknown): { title?: string } {
+  const title = (entry as { title?: unknown } | null)?.title;
+  return typeof title === "string" && title.trim() !== "" ? { title } : {};
 }
 
 /** The payloads of a Ticket's item-rejected events, in order. */
@@ -140,7 +146,9 @@ conformance("spawns", "rejects a malformed spawn entry per proposal with a clear
   const { world, snap } = await onePerShape(t, shapes.map((shape) => shape.entry));
 
   ids(shapes.length).forEach((id, i) => {
-    expect(rejections(world, id), `Ticket ${id}'s rejection`).toEqual([{ index: 0, reason: shapes[i]!.reason }]);
+    expect(rejections(world, id), `Ticket ${id}'s rejection`).toEqual([
+      { ...titleOf(shapes[i]!.entry), index: 0, reason: shapes[i]!.reason },
+    ]);
     expect(snap.state.outcomes[id]?.spawn, `Ticket ${id}'s kept proposals`).toEqual([]);
   });
 });
@@ -169,7 +177,7 @@ conformance("spawns", "keeps a proposal's blocks, named or all, and rejects any 
       expect(schema, `Ticket ${id}'s schema rejections`).toEqual([]);
     } else {
       expect(snap.state.outcomes[id]?.spawn, `Ticket ${id}'s kept proposals`).toEqual([]);
-      expect(schema, `Ticket ${id}'s rejection`).toEqual([{ index: 0, reason }]);
+      expect(schema, `Ticket ${id}'s rejection`).toEqual([{ title: "T", index: 0, reason }]);
     }
   });
 });
@@ -182,7 +190,7 @@ conformance("spawns", "keeps the well-formed entries around a malformed one, nam
   const snap = await runAndApprove(server);
 
   expect(snap.state.outcomes["01"]?.spawn).toEqual([good, good]);
-  expect(rejections(world, "01")).toEqual([{ index: 1, reason: THIN }]);
+  expect(rejections(world, "01")).toEqual([{ title: "Thin", index: 1, reason: THIN }]);
 });
 
 conformance("spawns", "passes an outcome with no spawn key byte-for-byte as today", async (t) => {
@@ -255,7 +263,7 @@ conformance("spawns", "rejects a proposal whose kind is neither ticket nor conve
   const snap = await runAndApprove(server);
 
   expect(rejections(world, "01")).toEqual([
-    { index: 0, reason: "proposal's kind must be \"ticket\" or \"conversation\", got 'epic'" },
+    { title: "Epic", index: 0, reason: "proposal's kind must be \"ticket\" or \"conversation\", got 'epic'" },
   ]);
   expect(snap.state.outcomes["01"]?.spawn).toEqual([]);
   expect(hasTicket(world, "01-spawn-1.md")).toBe(false);
@@ -270,8 +278,8 @@ conformance("spawns", "rejects a proposal whose assign is not an object or carri
   const snap = await runAndApprove(server);
 
   expect(rejections(world, "01")).toEqual([
-    { index: 0, reason: "proposal's assign is not an object" },
-    { index: 1, reason: "proposal's assign.model is not a string" },
+    { title: "Fast", index: 0, reason: "proposal's assign is not an object" },
+    { title: "Numbered", index: 1, reason: "proposal's assign.model is not a string" },
   ]);
   expect(snap.state.outcomes["01"]?.spawn).toEqual([]);
   expect(hasTicket(world, "01-spawn-1.md")).toBe(false);
@@ -490,7 +498,7 @@ conformance("spawns", "records item-rejected after spawn-rejected and before exi
   const kinds = eventKinds(world, "01");
   const at = kinds.indexOf("spawn-rejected");
   expect(kinds.slice(at, at + 3)).toEqual(["spawn-rejected", "item-rejected", "exited"]);
-  expect(rejections(world, "01")).toEqual([{ index: 0, reason: THIN }]);
+  expect(rejections(world, "01")).toEqual([{ title: "Thin", index: 0, reason: THIN }]);
   expect(itemRejections(world, "01")).toEqual([{ index: 1, reason: "item has no body string" }]);
   expect(snap.state.outcomes["01"]?.spawn).toEqual([]);
   expect(snap.state.outcomes["01"]?.items).toEqual([GOOD_ITEM]);
